@@ -22,6 +22,12 @@ type LoginOptions struct {
 	// CallbackPort overrides the local OAuth callback port when set (>0).
 	CallbackPort int
 
+	// ProxyURL is an optional proxy URL applied ONLY to this OAuth login session.
+	// It overrides cfg.ProxyURL during the login handshake and is persisted on the
+	// resulting auth file so future refresh/inference for that credential reuse it.
+	// Empty falls back to cfg.ProxyURL (current behaviour).
+	ProxyURL string
+
 	// Prompt allows the caller to provide interactive input when needed.
 	Prompt func(prompt string) (string, error)
 }
@@ -50,6 +56,7 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 		CallbackPort: options.CallbackPort,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
+		ProxyURL:     options.ProxyURL,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)

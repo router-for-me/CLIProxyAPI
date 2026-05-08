@@ -20,6 +20,7 @@ var statisticsEnabled atomic.Bool
 func init() {
 	statisticsEnabled.Store(true)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
+	coreusage.RegisterPlugin(GetAPIKeyUsagePlugin())
 }
 
 // LoggerPlugin collects in-memory request statistics for usage analysis.

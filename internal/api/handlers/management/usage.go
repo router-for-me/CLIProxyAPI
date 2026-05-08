@@ -77,3 +77,23 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		"failed_requests": snapshot.FailureCount,
 	})
 }
+
+// GetAPIKeyUsage returns the per-(provider, baseURL, apiKey) usage view
+// consumed by the management UI's "AI Providers" page. The shape is:
+//
+//	{
+//	  "<provider>": {
+//	    "<baseURL>|<apiKey>": {
+//	      "success": int,
+//	      "failed":  int,
+//	      "recent_requests": [{"time": RFC3339, "success": int, "failed": int}, ...]
+//	    }
+//	  }
+//	}
+//
+// Provider keys are lowercased; baseURL is empty when the auth has no
+// per-key upstream override (matches the frontend's sp("", apiKey)).
+func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
+	plugin := usage.GetAPIKeyUsagePlugin()
+	c.JSON(http.StatusOK, plugin.Snapshot())
+}

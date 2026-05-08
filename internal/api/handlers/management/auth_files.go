@@ -480,6 +480,16 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						fileData["note"] = trimmed
 					}
 				}
+				if pv := gjson.GetBytes(data, "prefix"); pv.Exists() && pv.Type == gjson.String {
+					if trimmed := strings.TrimSpace(pv.String()); trimmed != "" {
+						fileData["prefix"] = trimmed
+					}
+				}
+				if pv := gjson.GetBytes(data, "proxy_url"); pv.Exists() && pv.Type == gjson.String {
+					if trimmed := strings.TrimSpace(pv.String()); trimmed != "" {
+						fileData["proxy_url"] = trimmed
+					}
+				}
 			}
 
 			files = append(files, fileData)
@@ -594,10 +604,52 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
-	// For ollama providers, fetch and display cloud usage/balance from ollama.com/settings.
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "ollama") {
-		if cookies := ollamaCookiesFromAuth(auth); cookies != "" {
-			if balance := helps.GetOllamaBalance(cookies); balance != nil {
+	// Expose prefix and per-auth proxy URL so the management UI can pre-fill
+	// the editor with the values that PatchAuthFileFields previously wrote.
+	// Mirrors how API-key list endpoints already surface the per-key proxy.
+	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
+		entry["prefix"] = prefix
+	} else if auth.Metadata != nil {
+		if rawPrefix, ok := auth.Metadata["prefix"].(string); ok {
+			if trimmed := strings.TrimSpace(rawPrefix); trimmed != "" {
+				entry["prefix"] = trimmed
+			}
+		}
+	}
+	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+		entry["proxy_url"] = proxyURL
+	} else if auth.Metadata != nil {
+		if rawProxy, ok := auth.Metadata["proxy_url"].(string); ok {
+			if trimmed := strings.TrimSpace(rawProxy); trimmed != "" {
+				entry["proxy_url"] = trimmed
+			}
+		}
+	}
+	// Surface the openai-compatibility sub-provider key, the user-facing
+	// compat name, the upstream baseURL and the api-key used by this auth.
+	// The frontend needs all four to (a) recognize ollama/deepseek auths
+	// registered through openai-compatibility, and (b) match auths against
+	// the GET /api-key-usage response (keyed by provider + "<baseURL>|<apiKey>").
+	if v := strings.TrimSpace(authAttribute(auth, "provider_key")); v != "" {
+		entry["provider_key"] = v
+	}
+	if v := strings.TrimSpace(authAttribute(auth, "compat_name")); v != "" {
+		entry["compat_name"] = v
+	}
+	if v := strings.TrimSpace(authAttribute(auth, "base_url")); v != "" {
+		entry["base_url"] = v
+	}
+	if v := strings.TrimSpace(authAttribute(auth, "api_key")); v != "" {
+		entry["api_key"] = v
+	}
+	// For ollama providers, fetch and display cloud usage/balance.
+	// Tries Bearer (API key / OAuth token) first, then session cookies.
+	// Accepts entries registered both as native "ollama" and via
+	// openai-compatibility (provider_key / compat_name == "ollama").
+	if matchesCompatProvider(auth, "ollama") {
+		creds := ollamaCredentialsFromAuth(auth)
+		if creds.HasAny() {
+			if balance := helps.GetOllamaBalanceWithCreds(creds, h.cfg, auth); balance != nil {
 				b := gin.H{}
 				b["session_usage_pct"] = balance.SessionUsagePct
 				b["weekly_usage_pct"] = balance.WeeklyUsagePct
@@ -610,12 +662,114 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 				if balance.Plan != "" {
 					b["plan"] = balance.Plan
 				}
+				if balance.Source != "" {
+					b["source"] = balance.Source
+				}
 				b["fetched_at"] = balance.FetchedAt
 				entry["balance"] = b
 			}
 		}
 	}
+	// For deepseek providers, fetch wallet balance and monthly cost from
+	// platform.deepseek.com/api/v0/users/get_user_summary.
+	// Accepts entries registered both as native "deepseek" and via
+	// openai-compatibility (provider_key / compat_name == "deepseek").
+	if matchesCompatProvider(auth, "deepseek") {
+		creds := deepseekCredentialsFromAuth(auth)
+		if creds.HasAny() {
+			if balance := helps.GetDeepSeekBalanceWithCreds(creds, h.cfg, auth); balance != nil {
+				entry["balance"] = deepseekBalanceToGin(balance)
+			}
+		}
+	}
+	// For xiaomi providers (platform.xiaomimimo.com), fetch token-plan usage
+	// using the per-key Cookie header carried via auth.Attributes["header:Cookie"].
+	// Cookie is per api-key (each user/account has its own session), so the
+	// credential is sourced from per-key headers, not from provider-level Headers.
+	if matchesCompatProvider(auth, "xiaomi") {
+		creds := xiaomiCredentialsFromAuth(auth)
+		if creds.HasAny() {
+			if balance := helps.GetXiaomiBalanceWithCreds(creds, h.cfg, auth); balance != nil {
+				entry["balance"] = xiaomiBalanceToGin(balance)
+			}
+		}
+	}
+	// For anyrouter providers (anyrouter.top), fetch user/self snapshot using
+	// per-key Cookie + new-api-user. Both must be configured under the same
+	// api-key entry's headers since they are tied to a single browser session.
+	if matchesCompatProvider(auth, "anyrouter") {
+		creds := anyrouterCredentialsFromAuth(auth)
+		if creds.HasAny() {
+			if balance := helps.GetAnyrouterBalanceWithCreds(creds, h.cfg, auth); balance != nil {
+				entry["balance"] = anyrouterBalanceToGin(balance)
+			}
+		}
+	}
 	return entry
+}
+
+// matchesCompatProvider reports whether the auth entry targets the named
+// sub-provider. It accepts the entry both when auth.Provider equals name
+// directly (legacy/native ollama or deepseek registrations) and when the
+// entry is registered through openai-compatibility — in which case the
+// real sub-provider is exposed via Attributes["provider_key"] (synthesizer
+// canonical key) or Attributes["compat_name"] (display name from the
+// openai-compatibility config block).
+//
+// This is what unblocks balance fetching for entries that the user adds
+// under openai-compatibility (the typical case for ollama and deepseek):
+// auth.Provider is "openai-compatibility" there, not "ollama"/"deepseek".
+func matchesCompatProvider(auth *coreauth.Auth, name string) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), name) {
+		return true
+	}
+	if auth.Attributes != nil {
+		if strings.EqualFold(strings.TrimSpace(auth.Attributes["provider_key"]), name) {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(auth.Attributes["compat_name"]), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// ollamaCredentialsFromAuth assembles every credential that can be used to
+// query the ollama account usage endpoint. Both fields are populated when
+// available so the fetcher can fall through if one path fails.
+//
+// Sources, in priority order for the API key:
+//  1. Attributes["api_key"]      — synthesizer-populated for openai-compatibility
+//  2. Metadata["access_token"]   — populated by the custom-oauth flow
+//  3. Metadata["api_key"]        — uploaded auth files / ad-hoc entries
+func ollamaCredentialsFromAuth(auth *coreauth.Auth) helps.OllamaCredentials {
+	creds := helps.OllamaCredentials{Cookies: ollamaCookiesFromAuth(auth)}
+	if auth == nil {
+		return creds
+	}
+	if auth.Attributes != nil {
+		if k := strings.TrimSpace(auth.Attributes["api_key"]); k != "" {
+			creds.APIKey = k
+		}
+	}
+	if creds.APIKey == "" && auth.Metadata != nil {
+		if tok, ok := auth.Metadata["access_token"].(string); ok {
+			if t := strings.TrimSpace(tok); t != "" {
+				creds.APIKey = t
+			}
+		}
+		if creds.APIKey == "" {
+			if k, ok := auth.Metadata["api_key"].(string); ok {
+				if t := strings.TrimSpace(k); t != "" {
+					creds.APIKey = t
+				}
+			}
+		}
+	}
+	return creds
 }
 
 // ollamaCookiesFromAuth extracts ollama session cookies from auth metadata and attributes.
@@ -705,34 +859,489 @@ func (h *Handler) RefreshOllamaBalance(c *gin.Context) {
 		return
 	}
 
-	// Only allow refresh for ollama providers
-	if !strings.EqualFold(strings.TrimSpace(targetAuth.Provider), "ollama") {
+	// Only allow refresh for ollama providers (native or openai-compatibility).
+	if !matchesCompatProvider(targetAuth, "ollama") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "balance refresh is only supported for ollama providers"})
 		return
 	}
 
-	cookies := ollamaCookiesFromAuth(targetAuth)
-	if cookies == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no ollama session cookies found; add 'ollama_cookies' or 'aid' + '__Secure-session' to auth metadata"})
+	creds := ollamaCredentialsFromAuth(targetAuth)
+	if !creds.HasAny() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no ollama credentials available; configure an api-key in openai-compatibility, run the ollama OAuth login, or add 'ollama_cookies' / 'aid' + '__Secure-session' to auth metadata"})
 		return
 	}
 
-	balance, err := helps.RefreshOllamaBalance(cookies)
+	balance, err := helps.RefreshOllamaBalanceWithCreds(creds, h.cfg, targetAuth)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch ollama balance: %v", err)})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"balance": gin.H{
+	resp := gin.H{
+		"session_usage_pct": balance.SessionUsagePct,
+		"weekly_usage_pct":  balance.WeeklyUsagePct,
+		"session_resets_at": balance.SessionResetsAt,
+		"weekly_resets_at":  balance.WeeklyResetsAt,
+		"plan":              balance.Plan,
+		"fetched_at":        balance.FetchedAt,
+	}
+	if balance.Source != "" {
+		resp["source"] = balance.Source
+	}
+	c.JSON(http.StatusOK, gin.H{"balance": resp})
+}
+
+// deepseekCredentialsFromAuth assembles credentials usable to call
+// platform.deepseek.com/api/v0/users/get_user_summary.
+//
+// The balance Bearer is intentionally separate from the inference api_key:
+// users mint a dedicated platform Bearer token from platform.deepseek.com and
+// configure it as `balance-token` on the openai-compatibility api-key entry,
+// or `balance_token` / `deepseek_session_token` in auth metadata.
+//
+// Sources, in priority order for the Bearer token:
+//  1. Attributes["balance_token"]                — synthesizer-populated from openai-compatibility `balance-token`
+//  2. Attributes["deepseek_session_token"]       — explicit override
+//  3. Metadata["balance_token"] / Metadata["deepseek_session_token"]
+//
+// Cookies (optional — used as a fallback when the platform requires WAF cookies):
+//  1. Attributes["deepseek_cookies"] / Attributes["header:Cookie"]
+//  2. Metadata["deepseek_cookies"]
+func deepseekCredentialsFromAuth(auth *coreauth.Auth) helps.DeepSeekCredentials {
+	creds := helps.DeepSeekCredentials{}
+	if auth == nil {
+		return creds
+	}
+	if auth.Attributes != nil {
+		if k := strings.TrimSpace(auth.Attributes["balance_token"]); k != "" {
+			creds.APIKey = k
+		}
+		if creds.APIKey == "" {
+			if k := strings.TrimSpace(auth.Attributes["deepseek_session_token"]); k != "" {
+				creds.APIKey = k
+			}
+		}
+		if cookies := strings.TrimSpace(auth.Attributes["deepseek_cookies"]); cookies != "" {
+			creds.Cookies = cookies
+		}
+		if creds.Cookies == "" {
+			if cookies := strings.TrimSpace(auth.Attributes["header:Cookie"]); cookies != "" {
+				creds.Cookies = cookies
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		if creds.APIKey == "" {
+			if k, ok := auth.Metadata["balance_token"].(string); ok {
+				if t := strings.TrimSpace(k); t != "" {
+					creds.APIKey = t
+				}
+			}
+		}
+		if creds.APIKey == "" {
+			if k, ok := auth.Metadata["deepseek_session_token"].(string); ok {
+				if t := strings.TrimSpace(k); t != "" {
+					creds.APIKey = t
+				}
+			}
+		}
+		if creds.Cookies == "" {
+			if cookies, ok := auth.Metadata["deepseek_cookies"].(string); ok {
+				if t := strings.TrimSpace(cookies); t != "" {
+					creds.Cookies = t
+				}
+			}
+		}
+	}
+	return creds
+}
+
+// deepseekBalanceToGin renders a DeepSeekBalance as a JSON-friendly map.
+func deepseekBalanceToGin(balance *helps.DeepSeekBalance) gin.H {
+	if balance == nil {
+		return nil
+	}
+	b := gin.H{
+		"balance":      balance.Balance,
+		"monthly_cost": balance.MonthlyCost,
+		"fetched_at":   balance.FetchedAt,
+	}
+	if balance.Currency != "" {
+		b["currency"] = balance.Currency
+	}
+	if balance.TokenEstimation > 0 {
+		b["token_estimation"] = balance.TokenEstimation
+	}
+	if balance.BonusBalance > 0 {
+		b["bonus_balance"] = balance.BonusBalance
+	}
+	if balance.BonusTokenEstimation > 0 {
+		b["bonus_token_estimation"] = balance.BonusTokenEstimation
+	}
+	if balance.TotalAvailableTokens > 0 {
+		b["total_available_tokens"] = balance.TotalAvailableTokens
+	}
+	if balance.MonthlyTokenUsage > 0 {
+		b["monthly_token_usage"] = balance.MonthlyTokenUsage
+	}
+	if balance.CurrentToken > 0 {
+		b["current_token"] = balance.CurrentToken
+	}
+	if balance.Source != "" {
+		b["source"] = balance.Source
+	}
+	return b
+}
+
+// xiaomiCredentialsFromAuth assembles credentials usable to call
+// platform.xiaomimimo.com/api/v1/tokenPlan/usage.
+//
+// xiaomi MiMo's session cookie is bound to a single account, so the cookie
+// must be supplied per api-key (under that entry's `headers.Cookie`). The
+// synthesizer flattens it to auth.Attributes["header:Cookie"].
+//
+// Sources, in priority order:
+//  1. Attributes["xiaomi_cookies"]   — explicit override
+//  2. Attributes["header:Cookie"]    — synthesizer-populated from per-key headers
+//  3. Metadata["xiaomi_cookies"]     — uploaded auth files / ad-hoc entries
+func xiaomiCredentialsFromAuth(auth *coreauth.Auth) helps.XiaomiCredentials {
+	creds := helps.XiaomiCredentials{}
+	if auth == nil {
+		return creds
+	}
+	if auth.Attributes != nil {
+		if cookies := strings.TrimSpace(auth.Attributes["xiaomi_cookies"]); cookies != "" {
+			creds.Cookies = cookies
+		}
+		if creds.Cookies == "" {
+			if cookies := strings.TrimSpace(auth.Attributes["header:Cookie"]); cookies != "" {
+				creds.Cookies = cookies
+			}
+		}
+	}
+	if creds.Cookies == "" && auth.Metadata != nil {
+		if cookies, ok := auth.Metadata["xiaomi_cookies"].(string); ok {
+			if t := strings.TrimSpace(cookies); t != "" {
+				creds.Cookies = t
+			}
+		}
+	}
+	return creds
+}
+
+// xiaomiBalanceToGin renders a XiaomiBalance as a JSON-friendly map.
+func xiaomiBalanceToGin(balance *helps.XiaomiBalance) gin.H {
+	if balance == nil {
+		return nil
+	}
+	b := gin.H{
+		"month_used":         balance.MonthUsed,
+		"month_limit":        balance.MonthLimit,
+		"month_percent":      balance.MonthPercent,
+		"plan_used":          balance.PlanUsed,
+		"plan_limit":         balance.PlanLimit,
+		"plan_percent":       balance.PlanPercent,
+		"compensation_used":  balance.CompensationUsed,
+		"compensation_limit": balance.CompensationLimit,
+		"fetched_at":         balance.FetchedAt,
+	}
+	if balance.Source != "" {
+		b["source"] = balance.Source
+	}
+	return b
+}
+
+// anyrouterCredentialsFromAuth assembles cookie + new-api-user credentials for
+// anyrouter.top/api/user/self. Both values are tied to a single browser session
+// so they belong on a per-key entry's headers (Cookie + new-api-user).
+//
+// Sources, in priority order:
+//  1. Attributes["header:Cookie"] / Attributes["header:new-api-user"]
+//     (synthesizer-populated from per-key headers)
+//  2. Attributes["anyrouter_cookies"] / Attributes["anyrouter_new_api_user"]
+//     (explicit overrides)
+//  3. Metadata["anyrouter_cookies"] / Metadata["anyrouter_new_api_user"]
+func anyrouterCredentialsFromAuth(auth *coreauth.Auth) helps.AnyrouterCredentials {
+	creds := helps.AnyrouterCredentials{}
+	if auth == nil {
+		return creds
+	}
+	if auth.Attributes != nil {
+		if cookies := strings.TrimSpace(auth.Attributes["anyrouter_cookies"]); cookies != "" {
+			creds.Cookies = cookies
+		}
+		if creds.Cookies == "" {
+			if cookies := strings.TrimSpace(auth.Attributes["header:Cookie"]); cookies != "" {
+				creds.Cookies = cookies
+			}
+		}
+		if user := strings.TrimSpace(auth.Attributes["anyrouter_new_api_user"]); user != "" {
+			creds.NewAPIUser = user
+		}
+		if creds.NewAPIUser == "" {
+			// Header lookup is case-insensitive in HTTP; the synthesizer stores keys
+			// verbatim, so try a few common spellings users might type in YAML.
+			for _, key := range []string{"header:new-api-user", "header:New-Api-User", "header:NEW-API-USER"} {
+				if v := strings.TrimSpace(auth.Attributes[key]); v != "" {
+					creds.NewAPIUser = v
+					break
+				}
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		if creds.Cookies == "" {
+			if cookies, ok := auth.Metadata["anyrouter_cookies"].(string); ok {
+				if t := strings.TrimSpace(cookies); t != "" {
+					creds.Cookies = t
+				}
+			}
+		}
+		if creds.NewAPIUser == "" {
+			switch v := auth.Metadata["anyrouter_new_api_user"].(type) {
+			case string:
+				if t := strings.TrimSpace(v); t != "" {
+					creds.NewAPIUser = t
+				}
+			case float64:
+				if v != 0 {
+					creds.NewAPIUser = strconv.FormatInt(int64(v), 10)
+				}
+			case int:
+				if v != 0 {
+					creds.NewAPIUser = strconv.Itoa(v)
+				}
+			case int64:
+				if v != 0 {
+					creds.NewAPIUser = strconv.FormatInt(v, 10)
+				}
+			}
+		}
+	}
+	return creds
+}
+
+// anyrouterBalanceToGin renders an AnyrouterBalance as a JSON-friendly map.
+func anyrouterBalanceToGin(balance *helps.AnyrouterBalance) gin.H {
+	if balance == nil {
+		return nil
+	}
+	b := gin.H{
+		"user_id":           balance.UserID,
+		"username":          balance.Username,
+		"display_name":      balance.DisplayName,
+		"group":             balance.Group,
+		"quota":             balance.Quota,
+		"used_quota":        balance.UsedQuota,
+		"request_count":     balance.RequestCount,
+		"aff_code":          balance.AffCode,
+		"aff_count":         balance.AffCount,
+		"aff_quota":         balance.AffQuota,
+		"aff_history_quota": balance.AffHistoryQuota,
+		"fetched_at":        balance.FetchedAt,
+	}
+	if balance.Source != "" {
+		b["source"] = balance.Source
+	}
+	return b
+}
+
+// RefreshDeepSeekBalance handles a POST request to refresh the deepseek balance for a specific auth entry.
+// It invalidates the cache and fetches fresh data from platform.deepseek.com.
+func (h *Handler) RefreshDeepSeekBalance(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	var targetAuth *coreauth.Auth
+	if auth, ok := h.authManager.GetByID(name); ok {
+		targetAuth = auth
+	} else {
+		auths := h.authManager.List()
+		for _, auth := range auths {
+			if auth.FileName == name {
+				targetAuth = auth
+				break
+			}
+		}
+	}
+
+	if targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+
+	if !matchesCompatProvider(targetAuth, "deepseek") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "balance refresh is only supported for deepseek providers"})
+		return
+	}
+
+	creds := deepseekCredentialsFromAuth(targetAuth)
+	if !creds.HasAny() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no deepseek balance credentials available; set 'balance-token' on the openai-compatibility api-key entry, or add 'balance_token' / 'deepseek_session_token' / 'deepseek_cookies' to auth metadata"})
+		return
+	}
+
+	balance, err := helps.RefreshDeepSeekBalanceWithCreds(creds, h.cfg, targetAuth)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch deepseek balance: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"balance": deepseekBalanceToGin(balance)})
+}
+
+// RefreshOpenAICompatBalance refreshes ollama/deepseek balance using
+// credentials supplied in the request body, without going through the auth
+// manager. Frontends that already hold the openai-compatibility entry's
+// credentials can call this directly instead of resolving an auth-file name.
+func (h *Handler) RefreshOpenAICompatBalance(c *gin.Context) {
+	var req struct {
+		Provider     string `json:"provider"`
+		BaseURL      string `json:"base_url"`
+		APIKey       string `json:"api_key"`
+		Cookie       string `json:"cookie"`
+		BalanceToken string `json:"balance_token"`
+		NewAPIUser   string `json:"new_api_user"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	// Apply the per-API-key proxy_url configured on the matching openai-compatibility
+	// entry, so balance lookups go through the same proxy as inference traffic. Falls
+	// through to cfg.ProxyURL inside NewProxyAwareHTTPClient when no entry matches.
+	proxyAuth := &coreauth.Auth{
+		ProxyURL: findOpenAICompatBalanceProxyURL(
+			h.cfg,
+			provider,
+			req.BaseURL,
+			req.APIKey,
+			req.Cookie,
+			req.BalanceToken,
+			req.NewAPIUser,
+		),
+	}
+	switch provider {
+	case "ollama":
+		creds := helps.OllamaCredentials{
+			APIKey:  strings.TrimSpace(req.APIKey),
+			Cookies: strings.TrimSpace(req.Cookie),
+		}
+		if !creds.HasAny() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no ollama credentials provided; pass 'api_key' and/or 'cookie'"})
+			return
+		}
+		balance, err := helps.RefreshOllamaBalanceWithCreds(creds, h.cfg, proxyAuth)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch ollama balance: %v", err)})
+			return
+		}
+		resp := gin.H{
 			"session_usage_pct": balance.SessionUsagePct,
 			"weekly_usage_pct":  balance.WeeklyUsagePct,
 			"session_resets_at": balance.SessionResetsAt,
 			"weekly_resets_at":  balance.WeeklyResetsAt,
 			"plan":              balance.Plan,
 			"fetched_at":        balance.FetchedAt,
-		},
-	})
+		}
+		if balance.Source != "" {
+			resp["source"] = balance.Source
+		}
+		c.JSON(http.StatusOK, gin.H{"balance": resp})
+
+	case "deepseek":
+		creds := helps.DeepSeekCredentials{
+			APIKey:  strings.TrimSpace(req.BalanceToken),
+			Cookies: strings.TrimSpace(req.Cookie),
+		}
+		if !creds.HasAny() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no deepseek balance credentials provided; pass 'balance_token' (Bearer minted at platform.deepseek.com) and/or 'cookie'"})
+			return
+		}
+		balance, err := helps.RefreshDeepSeekBalanceWithCreds(creds, h.cfg, proxyAuth)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch deepseek balance: %v", err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"balance": deepseekBalanceToGin(balance)})
+
+	case "xiaomi":
+		creds := helps.XiaomiCredentials{
+			Cookies: strings.TrimSpace(req.Cookie),
+		}
+		if !creds.HasAny() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no xiaomi credentials provided; pass 'cookie' (browser session cookies for platform.xiaomimimo.com)"})
+			return
+		}
+		balance, err := helps.RefreshXiaomiBalanceWithCreds(creds, h.cfg, proxyAuth)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch xiaomi balance: %v", err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"balance": gin.H{
+			"month_used":         balance.MonthUsed,
+			"month_limit":        balance.MonthLimit,
+			"month_percent":      balance.MonthPercent,
+			"plan_used":          balance.PlanUsed,
+			"plan_limit":         balance.PlanLimit,
+			"plan_percent":       balance.PlanPercent,
+			"compensation_used":  balance.CompensationUsed,
+			"compensation_limit": balance.CompensationLimit,
+			"source":             balance.Source,
+			"fetched_at":         balance.FetchedAt,
+		}})
+
+	case "anyrouter":
+		creds := helps.AnyrouterCredentials{
+			Cookies:    strings.TrimSpace(req.Cookie),
+			NewAPIUser: strings.TrimSpace(req.NewAPIUser),
+		}
+		if !creds.HasAny() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no anyrouter credentials provided; pass both 'cookie' (session cookies) and 'new_api_user' (numeric user id from anyrouter.top)"})
+			return
+		}
+		balance, err := helps.RefreshAnyrouterBalanceWithCreds(creds, h.cfg, proxyAuth)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch anyrouter balance: %v", err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"balance": gin.H{
+			"user_id":           balance.UserID,
+			"username":          balance.Username,
+			"display_name":      balance.DisplayName,
+			"group":             balance.Group,
+			"quota":             balance.Quota,
+			"used_quota":        balance.UsedQuota,
+			"request_count":     balance.RequestCount,
+			"aff_code":          balance.AffCode,
+			"aff_count":         balance.AffCount,
+			"aff_quota":         balance.AffQuota,
+			"aff_history_quota": balance.AffHistoryQuota,
+			"source":            balance.Source,
+			"fetched_at":        balance.FetchedAt,
+		}})
+
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported provider: must be 'ollama', 'deepseek', 'xiaomi', or 'anyrouter'"})
+	}
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -1819,6 +2428,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+
 	fmt.Println("Initializing Claude authentication...")
 
 	// Generate PKCE codes
@@ -1837,8 +2451,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	// Initialize Claude auth service (route handshake through optional per-login proxy)
+	anthropicAuth := claude.NewClaudeAuth(withLoginProxy(h.cfg, loginProxy))
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -1940,6 +2554,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
 			Metadata: map[string]any{"email": tokenStorage.Email},
+			ProxyURL: loginProxy,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -1963,7 +2578,13 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
-	proxyHTTPClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
+
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+	effectiveCfg := withLoginProxy(h.cfg, loginProxy)
+	proxyHTTPClient := util.SetProxy(&effectiveCfg.SDKConfig, &http.Client{})
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
 
 	// Optional project ID from query
@@ -2203,6 +2824,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			FileName: fileName,
 			Storage:  &ts,
 			Metadata: recordMetadata,
+			ProxyURL: loginProxy,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -2223,6 +2845,11 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+
 	fmt.Println("Initializing Codex authentication...")
 
 	// Generate PKCE codes
@@ -2241,8 +2868,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	// Initialize Codex auth service
-	openaiAuth := codex.NewCodexAuth(h.cfg)
+	// Initialize Codex auth service (route handshake through optional per-login proxy)
+	openaiAuth := codex.NewCodexAuth(withLoginProxy(h.cfg, loginProxy))
 
 	isWebUI := isWebUIRequest(c)
 	redirectURI := codex.RedirectURIForPort(codex.DefaultCallbackPort)
@@ -2356,6 +2983,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
 			},
+			ProxyURL: loginProxy,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -2378,6 +3006,11 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 func (h *Handler) RequestGitLabToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
 
 	fmt.Println("Initializing GitLab Duo authentication...")
 
@@ -2410,7 +3043,7 @@ func (h *Handler) RequestGitLabToken(c *gin.Context) {
 	}
 
 	redirectURI := gitlabauth.RedirectURL(gitlabauth.DefaultCallbackPort)
-	authClient := gitlabauth.NewAuthClient(h.cfg)
+	authClient := gitlabauth.NewAuthClient(withLoginProxy(h.cfg, loginProxy))
 	authURL, err := authClient.GenerateAuthURL(baseURL, clientID, redirectURI, state, pkceCodes)
 	if err != nil {
 		log.Errorf("Failed to generate GitLab authorization URL: %v", err)
@@ -2514,6 +3147,7 @@ func (h *Handler) RequestGitLabToken(c *gin.Context) {
 			FileName: fileName,
 			Label:    identifier,
 			Metadata: metadata,
+			ProxyURL: loginProxy,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -2538,9 +3172,15 @@ func (h *Handler) RequestGitLabPATToken(c *gin.Context) {
 		BaseURL             string `json:"base_url"`
 		PersonalAccessToken string `json:"personal_access_token"`
 		Token               string `json:"token"`
+		ProxyURL            string `json:"proxy_url"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+		return
+	}
+
+	loginProxy, okProxy := validateLoginProxyURL(c, payload.ProxyURL)
+	if !okProxy {
 		return
 	}
 
@@ -2557,7 +3197,7 @@ func (h *Handler) RequestGitLabPATToken(c *gin.Context) {
 		return
 	}
 
-	authClient := gitlabauth.NewAuthClient(h.cfg)
+	authClient := gitlabauth.NewAuthClient(withLoginProxy(h.cfg, loginProxy))
 
 	user, err := authClient.GetCurrentUser(ctx, baseURL, pat)
 	if err != nil {
@@ -2601,6 +3241,7 @@ func (h *Handler) RequestGitLabPATToken(c *gin.Context) {
 		FileName: fileName,
 		Label:    identifier + " (PAT)",
 		Metadata: metadata,
+		ProxyURL: loginProxy,
 	}
 
 	savedPath, err := h.saveTokenRecord(ctx, record)
@@ -2633,9 +3274,14 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuth(h.cfg, nil)
+	authSvc := antigravity.NewAntigravityAuth(withLoginProxy(h.cfg, loginProxy), nil)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -2774,6 +3420,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			FileName: fileName,
 			Label:    label,
 			Metadata: metadata,
+			ProxyURL: loginProxy,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -2798,11 +3445,16 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+
 	fmt.Println("Initializing Kimi authentication...")
 
 	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
 	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(h.cfg)
+	kimiAuth := kimi.NewKimiAuth(withLoginProxy(h.cfg, loginProxy))
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
@@ -2854,6 +3506,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 			Label:    "Kimi User",
 			Storage:  tokenStorage,
 			Metadata: metadata,
+			ProxyURL: loginProxy,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -2875,10 +3528,15 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+
 	fmt.Println("Initializing iFlow authentication...")
 
 	state := fmt.Sprintf("ifl-%d", time.Now().UnixNano())
-	authSvc := iflowauth.NewIFlowAuth(h.cfg)
+	authSvc := iflowauth.NewIFlowAuth(withLoginProxy(h.cfg, loginProxy))
 	authURL, redirectURI := authSvc.AuthorizationURL(state, iflowauth.CallbackPort)
 
 	RegisterOAuthSession(state, "iflow")
@@ -2964,6 +3622,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			Storage:    tokenStorage,
 			Metadata:   map[string]any{"email": identifier, "api_key": tokenStorage.APIKey},
 			Attributes: map[string]string{"api_key": tokenStorage.APIKey},
+			ProxyURL:   loginProxy,
 		}
 
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -2988,12 +3647,17 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	ctx := context.Background()
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+
 	fmt.Println("Initializing GitHub Copilot authentication...")
 
 	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
 
 	// Initialize Copilot auth service
-	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
+	deviceClient := copilot.NewDeviceFlowClient(withLoginProxy(h.cfg, loginProxy))
 
 	// Initiate device flow
 	deviceCode, err := deviceClient.RequestDeviceCode(ctx)
@@ -3057,6 +3721,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: metadata,
+			ProxyURL: loginProxy,
 		}
 
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -3100,10 +3765,16 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	ctx := context.Background()
 
 	var payload struct {
-		Cookie string `json:"cookie"`
+		Cookie   string `json:"cookie"`
+		ProxyURL string `json:"proxy_url"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
+		return
+	}
+
+	loginProxy, okProxy := validateLoginProxyURL(c, payload.ProxyURL)
+	if !okProxy {
 		return
 	}
 
@@ -3131,7 +3802,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		return
 	}
 
-	authSvc := iflowauth.NewIFlowAuth(h.cfg)
+	authSvc := iflowauth.NewIFlowAuth(withLoginProxy(h.cfg, loginProxy))
 	tokenData, errAuth := authSvc.AuthenticateWithCookie(ctx, cookieValue)
 	if errAuth != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": errAuth.Error()})
@@ -3173,6 +3844,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		Attributes: map[string]string{
 			"api_key": tokenStorage.APIKey,
 		},
+		ProxyURL: loginProxy,
 	}
 
 	savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -3638,6 +4310,12 @@ const kiroCallbackPort = 9876
 func (h *Handler) RequestKiroToken(c *gin.Context) {
 	ctx := context.Background()
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+	effectiveCfg := withLoginProxy(h.cfg, loginProxy)
+
 	// Get the login method from query parameter (default: aws for device code flow)
 	method := strings.ToLower(strings.TrimSpace(c.Query("method")))
 	if method == "" {
@@ -3654,7 +4332,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 
 		// AWS Builder ID uses device code flow (no callback needed)
 		go func() {
-			ssoClient := kiroauth.NewSSOOIDCClient(h.cfg)
+			ssoClient := kiroauth.NewSSOOIDCClient(effectiveCfg)
 
 			// Step 1: Register client
 			fmt.Println("Registering client...")
@@ -3735,6 +4413,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 							"email":         email,
 							"last_refresh":  now.Format(time.RFC3339),
 						},
+						ProxyURL: loginProxy,
 					}
 
 					savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -3790,7 +4469,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 				defer stopCallbackForwarderInstance(kiroCallbackPort, forwarder)
 			}
 
-			socialClient := kiroauth.NewSocialAuthClient(h.cfg)
+			socialClient := kiroauth.NewSocialAuthClient(effectiveCfg)
 
 			// Generate PKCE codes
 			codeVerifier, codeChallenge, errPKCE := generateKiroPKCE()
@@ -3889,6 +4568,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 							"email":         email,
 							"last_refresh":  now.Format(time.RFC3339),
 						},
+						ProxyURL: loginProxy,
 					}
 
 					savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -3932,6 +4612,11 @@ func generateKiroPKCE() (verifier, challenge string, err error) {
 
 func (h *Handler) RequestKiloToken(c *gin.Context) {
 	ctx := context.Background()
+
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
 
 	fmt.Println("Initializing Kilo authentication...")
 
@@ -3992,6 +4677,7 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 				"organization_id": orgID,
 				"model":           defaults.Model,
 			},
+			ProxyURL: loginProxy,
 		}
 
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -4022,6 +4708,11 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 func (h *Handler) RequestCursorToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
 
 	label := strings.TrimSpace(c.Query("label"))
 	log.Infof("Initializing Cursor authentication (label=%q)...", label)
@@ -4076,6 +4767,7 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 			FileName: fileName,
 			Label:    displayLabel,
 			Metadata: metadata,
+			ProxyURL: loginProxy,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {

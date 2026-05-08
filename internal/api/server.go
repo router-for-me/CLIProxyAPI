@@ -365,10 +365,27 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
 	}
 
-	// Create HTTP server
+	// Create HTTP server with timeout configuration
+	st := cfg.ServerTimeout
+	readHeaderTimeout := 10 * time.Second
+	if st.ReadHeaderTimeout > 0 {
+		readHeaderTimeout = time.Duration(st.ReadHeaderTimeout) * time.Second
+	}
+	idleTimeout := 120 * time.Second
+	if st.IdleTimeout > 0 {
+		idleTimeout = time.Duration(st.IdleTimeout) * time.Second
+	}
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: engine,
+		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:           engine,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+	if st.ReadTimeout > 0 {
+		s.server.ReadTimeout = time.Duration(st.ReadTimeout) * time.Second
+	}
+	if st.WriteTimeout > 0 {
+		s.server.WriteTimeout = time.Duration(st.WriteTimeout) * time.Second
 	}
 
 	return s
@@ -510,6 +527,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -650,6 +668,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/auth-files/ollama-balance/refresh", s.mgmt.RefreshOllamaBalance)
+		mgmt.POST("/auth-files/deepseek-balance/refresh", s.mgmt.RefreshDeepSeekBalance)
+		mgmt.POST("/openai-compat/balance/refresh", s.mgmt.RefreshOpenAICompatBalance)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
@@ -37,6 +38,7 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	var ts gemini.GeminiTokenStorage
 	if opts.ProjectID != "" {
@@ -69,5 +71,6 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		FileName: fileName,
 		Storage:  &ts,
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }

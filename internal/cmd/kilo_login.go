@@ -38,6 +38,7 @@ func DoKiloLogin(cfg *config.Config, options *LoginOptions) {
 		CallbackPort: options.CallbackPort,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
+		ProxyURL:     options.ProxyURL,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "kilo", cfg, authOpts)

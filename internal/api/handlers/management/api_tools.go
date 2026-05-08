@@ -848,6 +848,96 @@ func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, 
 	return ""
 }
 
+// findOpenAICompatBalanceProxyURL returns the proxy_url configured on the
+// openai-compatibility API key entry that matches the balance refresh request,
+// or "" if no entry can be located.
+//
+// Matching narrows by compat.Name (provider) and compat.BaseURL, then within
+// each entry by whichever credential the request carries — api_key (ollama),
+// balance_token (deepseek), header:Cookie or header:new-api-user
+// (xiaomi/anyrouter, with per-key headers taking precedence over compat-level
+// headers, mirroring the synthesizer).
+//
+// "Match if any non-empty credential matches" is intentional: the request
+// surfaces a subset of credentials per provider (e.g. anyrouter has no
+// api_key), and credentials are unique enough across entries that a single
+// match is sufficient.
+func findOpenAICompatBalanceProxyURL(cfg *config.Config, provider, baseURL, apiKey, cookie, balanceToken, newAPIUser string) string {
+	if cfg == nil {
+		return ""
+	}
+	provider = strings.TrimSpace(provider)
+	baseURL = strings.TrimSpace(baseURL)
+	apiKey = strings.TrimSpace(apiKey)
+	cookie = strings.TrimSpace(cookie)
+	balanceToken = strings.TrimSpace(balanceToken)
+	newAPIUser = strings.TrimSpace(newAPIUser)
+	if provider == "" {
+		return ""
+	}
+	if apiKey == "" && cookie == "" && balanceToken == "" && newAPIUser == "" {
+		return ""
+	}
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(compat.Name), provider) {
+			continue
+		}
+		if baseURL != "" && !strings.EqualFold(strings.TrimSpace(compat.BaseURL), baseURL) {
+			continue
+		}
+		compatCookie := lookupHeaderValue(compat.Headers, "Cookie")
+		compatNewUser := lookupHeaderValue(compat.Headers, "new-api-user")
+		for j := range compat.APIKeyEntries {
+			entry := &compat.APIKeyEntries[j]
+			entryCookie := lookupHeaderValue(entry.Headers, "Cookie")
+			if entryCookie == "" {
+				entryCookie = compatCookie
+			}
+			entryNewUser := lookupHeaderValue(entry.Headers, "new-api-user")
+			if entryNewUser == "" {
+				entryNewUser = compatNewUser
+			}
+			if openAICompatEntryMatchesBalanceCreds(entry, entryCookie, entryNewUser, apiKey, cookie, balanceToken, newAPIUser) {
+				return strings.TrimSpace(entry.ProxyURL)
+			}
+		}
+	}
+	return ""
+}
+
+func openAICompatEntryMatchesBalanceCreds(entry *config.OpenAICompatibilityAPIKey, entryCookie, entryNewUser, apiKey, cookie, balanceToken, newAPIUser string) bool {
+	if apiKey != "" && strings.TrimSpace(entry.APIKey) == apiKey {
+		return true
+	}
+	if balanceToken != "" && strings.TrimSpace(entry.BalanceToken) == balanceToken {
+		return true
+	}
+	if cookie != "" && entryCookie != "" && entryCookie == cookie {
+		return true
+	}
+	if newAPIUser != "" && entryNewUser != "" && entryNewUser == newAPIUser {
+		return true
+	}
+	return false
+}
+
+func lookupHeaderValue(headers map[string]string, key string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	target := strings.TrimSpace(key)
+	for k, v := range headers {
+		if strings.EqualFold(strings.TrimSpace(k), target) {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 func buildProxyTransport(proxyStr string) *http.Transport {
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
 	if errBuild != nil {

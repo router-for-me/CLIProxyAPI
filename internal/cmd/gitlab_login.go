@@ -25,7 +25,8 @@ func DoGitLabLogin(cfg *config.Config, options *LoginOptions) {
 		Metadata: map[string]string{
 			"login_mode": "oauth",
 		},
-		Prompt: promptFn,
+		Prompt:   promptFn,
+		ProxyURL: options.ProxyURL,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "gitlab", cfg, authOpts)
@@ -54,7 +55,8 @@ func DoGitLabTokenLogin(cfg *config.Config, options *LoginOptions) {
 		Metadata: map[string]string{
 			"login_mode": "pat",
 		},
-		Prompt: promptFn,
+		Prompt:   promptFn,
+		ProxyURL: options.ProxyURL,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "gitlab", cfg, authOpts)

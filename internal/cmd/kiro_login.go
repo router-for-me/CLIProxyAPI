@@ -42,6 +42,7 @@ func DoKiroGoogleLogin(cfg *config.Config, options *LoginOptions) {
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
+		ProxyURL:  options.ProxyURL,
 	})
 	if err != nil {
 		log.Errorf("Kiro Google authentication failed: %v", err)
@@ -90,6 +91,7 @@ func DoKiroAWSLogin(cfg *config.Config, options *LoginOptions) {
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
+		ProxyURL:  options.ProxyURL,
 	})
 	if err != nil {
 		log.Errorf("Kiro AWS authentication failed: %v", err)
@@ -138,6 +140,7 @@ func DoKiroAWSAuthCodeLogin(cfg *config.Config, options *LoginOptions) {
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
+		ProxyURL:  options.ProxyURL,
 	})
 	if err != nil {
 		log.Errorf("Kiro AWS authentication (auth code) failed: %v", err)
@@ -231,6 +234,7 @@ func DoKiroIDCLogin(cfg *config.Config, options *LoginOptions, startURL, region,
 		NoBrowser: options.NoBrowser,
 		Metadata:  metadata,
 		Prompt:    options.Prompt,
+		ProxyURL:  options.ProxyURL,
 	})
 	if err != nil {
 		log.Errorf("Kiro IDC authentication failed: %v", err)

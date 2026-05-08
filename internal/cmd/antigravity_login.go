@@ -26,6 +26,7 @@ func DoAntigravityLogin(cfg *config.Config, options *LoginOptions) {
 		CallbackPort: options.CallbackPort,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
+		ProxyURL:     options.ProxyURL,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "antigravity", cfg, authOpts)

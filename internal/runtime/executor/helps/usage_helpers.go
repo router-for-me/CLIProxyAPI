@@ -22,13 +22,14 @@ type UsageReporter struct {
 	authIndex   string
 	authType    string
 	apiKey      string
+	baseURL     string
 	source      string
 	requestedAt time.Time
 	once        sync.Once
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
-	apiKey := APIKeyFromContext(ctx)
+	apiKey := resolveUsageAPIKey(auth, ctx)
 	reporter := &UsageReporter{
 		provider:    provider,
 		model:       model,
@@ -36,12 +37,48 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
 		authType:    resolveUsageAuthType(auth),
+		baseURL:     resolveUsageBaseURL(auth),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
+}
+
+// resolveUsageAPIKey picks the credential identifier that the AI Providers card
+// (GET /api-key-usage) and the request-statistics page expect to see in
+// record.APIKey: the **upstream** api-key that this auth uses to call the
+// provider, NOT the inbound principal that authenticated the management
+// request. Without this, every record from a single inbound key collapses
+// onto one (provider, baseURL, inbound) bucket and the per-entry refresh
+// counters on the AI Providers page stay at zero.
+//
+// Order:
+//  1. auth.Attributes["api_key"]   — synthesizer-populated for native api-key
+//                                    providers (gemini, codex, claude, vertex)
+//                                    and openai-compatibility entries
+//  2. auth.Metadata["api_key"]     — uploaded auth files / ad-hoc entries
+//  3. APIKeyFromContext(ctx)       — fall back to inbound principal when the
+//                                    auth has no upstream api-key (OAuth-based
+//                                    providers like claude OAuth, codex OAuth,
+//                                    gemini-cli, github-copilot)
+func resolveUsageAPIKey(auth *cliproxyauth.Auth, ctx context.Context) string {
+	if auth != nil {
+		if len(auth.Attributes) > 0 {
+			if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+				return v
+			}
+		}
+		if auth.Metadata != nil {
+			if v, ok := auth.Metadata["api_key"].(string); ok {
+				if trimmed := strings.TrimSpace(v); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return APIKeyFromContext(ctx)
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
@@ -141,6 +178,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Model:       model,
 		Source:      r.source,
 		APIKey:      r.apiKey,
+		BaseURL:     r.baseURL,
 		AuthID:      r.authID,
 		AuthIndex:   r.authIndex,
 		AuthType:    r.authType,
@@ -237,6 +275,29 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 		return "apikey"
 	}
 	return kind
+}
+
+// resolveUsageBaseURL returns the per-key baseURL associated with this auth, if any.
+// Used to disambiguate same-API-key entries that point at different upstream URLs
+// (typical for openai-compatibility, claude-via-custom-endpoint, etc). Empty string
+// is a valid value and matches the frontend's lookup when no baseURL is configured.
+func resolveUsageBaseURL(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["base_url"]); v != "" {
+			return v
+		}
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["base_url"].(string); ok {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {

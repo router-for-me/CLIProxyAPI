@@ -658,6 +658,11 @@ type OpenAICompatibility struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// Timeout sets the upstream request timeout in seconds for this provider.
+	// 0 means no client-level timeout (default), relying on context cancellation.
+	// Recommended: 300-900 for large-context models that need long inference times.
+	Timeout int `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -667,6 +672,18 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Headers optionally adds extra HTTP headers scoped to this single API key.
+	// Values defined here override any provider-level Headers when keys collide.
+	// Useful for credentials that vary per key (e.g., per-account session cookies
+	// for xiaomi/anyrouter balance lookups).
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// BalanceToken is an optional Bearer token used only for provider balance/usage
+	// queries (e.g. DeepSeek's platform get_user_summary endpoint). It is never
+	// forwarded to inference; APIKey is used for that. Leave empty to disable
+	// balance display for this credential.
+	BalanceToken string `yaml:"balance-token,omitempty" json:"balance-token,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,

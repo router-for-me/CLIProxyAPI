@@ -44,6 +44,22 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// ServerTimeout configures HTTP server timeouts. All values are in seconds.
+	// These prevent hung connections from consuming resources indefinitely.
+	//   - ReadTimeout:      max time to read the entire request (default 0 = no timeout)
+	//   - ReadHeaderTimeout: max time to read request headers (default 10s)
+	//   - WriteTimeout:     max time to write the full response, including long-polling/streaming (default 0 = no timeout)
+	//   - IdleTimeout:      max time to keep an idle keep-alive connection (default 120s)
+	ServerTimeout ServerTimeoutConfig `yaml:"server-timeout" json:"server-timeout"`
+}
+
+// ServerTimeoutConfig holds HTTP server timeout settings.
+type ServerTimeoutConfig struct {
+	ReadTimeout      int `yaml:"read-timeout,omitempty" json:"read-timeout,omitempty"`
+	ReadHeaderTimeout int `yaml:"read-header-timeout,omitempty" json:"read-header-timeout,omitempty"`
+	WriteTimeout     int `yaml:"write-timeout,omitempty" json:"write-timeout,omitempty"`
+	IdleTimeout      int `yaml:"idle-timeout,omitempty" json:"idle-timeout,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

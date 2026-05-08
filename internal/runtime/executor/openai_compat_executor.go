@@ -29,6 +29,18 @@ type OpenAICompatExecutor struct {
 	cfg      *config.Config
 }
 
+// upstreamTimeout returns the configured upstream request timeout for this provider,
+// or 0 (no client-level timeout) if not set.
+func (e *OpenAICompatExecutor) upstreamTimeout(auth *cliproxyauth.Auth) time.Duration {
+	if auth != nil {
+		compat := e.resolveCompatConfig(auth)
+		if compat != nil && compat.Timeout > 0 {
+			return time.Duration(compat.Timeout) * time.Second
+		}
+	}
+	return 0
+}
+
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
@@ -66,7 +78,7 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, e.upstreamTimeout(auth))
 	return httpClient.Do(httpReq)
 }
 
@@ -143,7 +155,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, e.upstreamTimeout(auth))
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -247,7 +259,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, e.upstreamTimeout(auth))
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)

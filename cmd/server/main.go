@@ -33,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -103,6 +104,7 @@ func main() {
 	var noIncognito bool
 	var useIncognito bool
 	var localModel bool
+	var loginProxyURL string
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -133,6 +135,7 @@ func main() {
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
+	flag.StringVar(&loginProxyURL, "proxy-url", "", "Proxy URL applied to the OAuth login handshake; persisted on the resulting auth file (e.g. socks5://host:1080, http://host:8080, direct). Empty inherits the global proxy-url.")
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
@@ -480,10 +483,22 @@ func main() {
 	}
 	managementasset.SetCurrentConfig(cfg)
 
+	// Validate the per-login proxy URL up-front so a bad value fails fast before any
+	// OAuth handshake begins. Empty value falls back to cfg.ProxyURL inside each
+	// authenticator (preserves prior behaviour).
+	if trimmedLoginProxy := strings.TrimSpace(loginProxyURL); trimmedLoginProxy != "" {
+		if _, errProxyParse := proxyutil.Parse(trimmedLoginProxy); errProxyParse != nil {
+			fmt.Fprintf(os.Stderr, "invalid -proxy-url: %v\n", errProxyParse)
+			os.Exit(2)
+		}
+		loginProxyURL = trimmedLoginProxy
+	}
+
 	// Create login options to be used in authentication flows.
 	options := &cmd.LoginOptions{
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
+		ProxyURL:     loginProxyURL,
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.

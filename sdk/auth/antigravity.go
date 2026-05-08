@@ -42,6 +42,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	callbackPort := antigravity.CallbackPort
 	if opts.CallbackPort > 0 {
@@ -216,6 +217,7 @@ waitForCallback:
 		FileName: fileName,
 		Label:    label,
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }
 

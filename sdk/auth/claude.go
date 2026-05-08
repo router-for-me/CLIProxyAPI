@@ -76,7 +76,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		}
 	}()
 
-	authSvc := claude.NewClaudeAuth(cfg)
+	authSvc := claude.NewClaudeAuth(CloneCfgWithProxy(cfg, opts.ProxyURL))
 
 	authURL, returnedState, err := authSvc.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
@@ -216,5 +216,6 @@ waitForCallback:
 		FileName: fileName,
 		Storage:  tokenStorage,
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }

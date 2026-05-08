@@ -54,6 +54,7 @@ func (a *GitLabAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	switch strings.ToLower(strings.TrimSpace(opts.Metadata[gitLabLoginModeMetadataKey])) {
 	case "", gitLabLoginModeOAuth:
@@ -223,6 +224,7 @@ waitForCallback:
 		FileName: fileName,
 		Label:    identifier,
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }
 
@@ -267,6 +269,7 @@ func (a *GitLabAuthenticator) loginPAT(ctx context.Context, cfg *config.Config, 
 		FileName: fileName,
 		Label:    identifier + " (PAT)",
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }
 

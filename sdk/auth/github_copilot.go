@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
@@ -39,6 +40,7 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	authSvc := copilot.NewCopilotAuth(cfg)
 
@@ -114,6 +116,7 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 		Label:    label,
 		Storage:  tokenStorage,
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }
 

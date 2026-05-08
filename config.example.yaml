@@ -48,6 +48,17 @@ api-keys:
 # Enable debug logging
 debug: false
 
+# HTTP server timeouts to prevent hung connections from consuming resources.
+# All values are in seconds. Set to 0 to disable a specific timeout.
+# Defaults: read-header-timeout=10, idle-timeout=120, read-timeout=0 (disabled), write-timeout=0 (disabled).
+# For large-context models that need long inference times, you may need to increase write-timeout
+# or leave it at 0 (no limit) and rely on upstream provider timeouts instead.
+# server-timeout:
+#   read-timeout: 0           # max time to read the entire request body (0 = no limit)
+#   read-header-timeout: 10   # max time to read request headers (default 10s)
+#   write-timeout: 0          # max time to write the full response, including streaming (0 = no limit)
+#   idle-timeout: 120         # max time to keep an idle keep-alive connection (default 120s)
+
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
@@ -98,6 +109,25 @@ usage-statistics-enabled: false
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
+
+# Per-OAuth-login proxy can be specified at LOGIN time, independent of the global proxy-url
+# above. Useful when the OAuth handshake host (claude.ai / accounts.google.com /
+# GitHub OAuth / Codex login / Kimi device flow / etc.) is reachable only via a specific
+# network egress, while inference traffic uses a different (or no) proxy.
+#
+# CLI:        cli-proxy-api -claude-login -proxy-url=socks5://10.0.0.1:1080
+# Mgmt API:   GET /v0/management/anthropic-auth-url?proxy_url=socks5://10.0.0.1:1080
+#             (similarly for codex/gemini-cli/kimi/kiro/antigravity/gitlab/github/iflow/kilo/cursor)
+# Body POST:  RequestGitLabPATToken / RequestIFlowCookieToken accept "proxy_url" in JSON body.
+#
+# The supplied proxy URL is:
+#   1. Validated up front (invalid -> CLI exits / API returns HTTP 400)
+#   2. Used for the OAuth handshake (token exchange + initial refresh)
+#   3. Persisted onto the resulting auth file's `proxy_url` field, so subsequent
+#      token refresh and inference for that credential continue to use the same
+#      proxy regardless of this global setting.
+# The resulting per-credential proxy can later be edited via the management API
+# (PATCH /v0/management/auth-files/fields).
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
@@ -304,6 +334,8 @@ codex-oauth:
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     timeout: 600 # optional: upstream request timeout in seconds (default 0 = no client-level timeout).
+#                   # Increase this (e.g. 600-900) for large-context models that need long inference times.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
@@ -341,6 +373,24 @@ codex-oauth:
 #     models:
 #       - name: "gemma3:4b"
 #         alias: "ollama-gemma3"
+
+# DeepSeek (OpenAI-compatible) example with balance display:
+# When the provider name is "deepseek", the management API will fetch wallet
+# balance and monthly cost from https://platform.deepseek.com/api/v0/users/get_user_summary.
+# Auth for balance is independent from `api-key` (which is used for inference).
+# Mint a Bearer token from platform.deepseek.com (DevTools → Network → any
+# request's `authorization: Bearer ...`) and set it as `balance-token`.
+# openai-compatibility:
+#   - name: "deepseek"
+#     base-url: "https://api.deepseek.com/v1"
+#     api-key-entries:
+#       - api-key: "sk-..."                        # used for chat/completions
+#         balance-token: "tN6wX7EORr+...DIzD2sv"  # used only for balance lookup
+#     models:
+#       - name: "deepseek-chat"
+#         alias: "deepseek-chat"
+#       - name: "deepseek-reasoner"
+#         alias: "deepseek-reasoner"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:

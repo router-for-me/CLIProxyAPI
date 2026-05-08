@@ -70,6 +70,7 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 		CallbackPort: options.CallbackPort,
 		Metadata:     map[string]string{},
 		Prompt:       callbackPrompt,
+		ProxyURL:     options.ProxyURL,
 	}
 
 	authenticator := sdkAuth.NewGeminiAuthenticator()

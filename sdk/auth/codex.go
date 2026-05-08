@@ -45,6 +45,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	if shouldUseCodexDeviceFlow(opts) {
 		return a.loginWithDeviceFlow(ctx, cfg, opts)
@@ -195,5 +196,5 @@ waitForCallback:
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return a.buildAuthRecord(authSvc, authBundle, opts.ProxyURL)
 }

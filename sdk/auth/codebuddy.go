@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy"
@@ -45,6 +46,7 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	authSvc := codebuddy.NewCodeBuddyAuth(cfg)
 
@@ -91,5 +93,6 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 			"domain":        storage.Domain,
 			"expires_in":    storage.ExpiresIn,
 		},
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }

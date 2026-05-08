@@ -25,6 +25,7 @@ func DoCodeBuddyLogin(cfg *config.Config, options *LoginOptions) {
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
+		ProxyURL:  options.ProxyURL,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "codebuddy", cfg, authOpts)

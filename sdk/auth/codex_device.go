@@ -122,7 +122,7 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return a.buildAuthRecord(authSvc, authBundle, opts.ProxyURL)
 }
 
 func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
@@ -251,7 +251,7 @@ func codexDeviceIsSuccessStatus(code int) bool {
 	return code >= 200 && code < 300
 }
 
-func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
+func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle, proxyURL string) (*coreauth.Auth, error) {
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
 	if tokenStorage == nil || tokenStorage.Email == "" {
@@ -290,5 +290,6 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 		Attributes: map[string]string{
 			"plan_type": planType,
 		},
+		ProxyURL: strings.TrimSpace(proxyURL),
 	}, nil
 }

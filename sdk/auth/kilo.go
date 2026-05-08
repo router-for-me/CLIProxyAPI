@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kilo"
@@ -37,9 +38,13 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
+	_ = cfg // kilo's device flow currently bypasses cfg.ProxyURL during login;
+	// the per-credential proxy is still persisted onto the resulting Auth so
+	// future refresh & inference for this credential honour it.
 
 	kilocodeAuth := kilo.NewKiloAuth()
-	
+
 	fmt.Println("Initiating Kilo device authentication...")
 	resp, err := kilocodeAuth.InitiateDeviceFlow(ctx)
 	if err != nil {
@@ -48,7 +53,7 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	fmt.Printf("Please visit: %s\n", resp.VerificationURL)
 	fmt.Printf("And enter code: %s\n", resp.Code)
-	
+
 	fmt.Println("Waiting for authorization...")
 	status, err := kilocodeAuth.PollForToken(ctx, resp.Code)
 	if err != nil {
@@ -68,7 +73,7 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		for i, org := range profile.Orgs {
 			fmt.Printf("[%d] %s (%s)\n", i+1, org.Name, org.ID)
 		}
-		
+
 		if opts.Prompt != nil {
 			input, err := opts.Prompt("Enter the number of the organization: ")
 			if err != nil {
@@ -108,7 +113,7 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	metadata := map[string]any{
 		"email":           status.UserEmail,
 		"organization_id": orgID,
-		"model":          defaults.Model,
+		"model":           defaults.Model,
 	}
 
 	return &coreauth.Auth{
@@ -117,5 +122,6 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		FileName: fileName,
 		Storage:  ts,
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }

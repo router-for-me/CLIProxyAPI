@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor"
@@ -39,6 +40,10 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
+	_ = cfg // cursor auth currently bypasses cfg.ProxyURL during login; the
+	// per-credential proxy is still persisted onto the resulting Auth so future
+	// refresh & inference for this credential honour it.
 
 	// Generate PKCE auth parameters
 	authParams, err := cursorauth.GenerateAuthParams()
@@ -94,5 +99,6 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		FileName: fileName,
 		Label:    cursorauth.DisplayLabel("", subHash),
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }

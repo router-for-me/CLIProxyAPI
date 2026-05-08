@@ -24,8 +24,8 @@ services:
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: cli-proxy-api
-    # env_file:
-    #   - .env
+    env_file:
+       - .env
     environment:
       <<: *proxy-vars
       DEPLOY: ${DEPLOY:-}

@@ -62,7 +62,7 @@ func (a *KiroAuthenticator) RefreshLead() *time.Duration {
 }
 
 // createAuthRecord creates an auth record from token data.
-func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, source string) (*coreauth.Auth, error) {
+func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, source, proxyURL string) (*coreauth.Auth, error) {
 	// Parse expires_at
 	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
 	if err != nil {
@@ -146,6 +146,7 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 		UpdatedAt:  now,
 		Metadata:   metadata,
 		Attributes: attributes,
+		ProxyURL:   strings.TrimSpace(proxyURL),
 		// NextRefreshAfter: 20 minutes before expiry
 		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}
@@ -165,10 +166,14 @@ func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	if cfg == nil {
 		return nil, fmt.Errorf("kiro auth: configuration is required")
 	}
+	if opts == nil {
+		opts = &LoginOptions{}
+	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	// Extract IDC options from metadata if present
 	var idcOpts *kiroauth.IDCLoginOptions
-	if opts != nil && opts.Metadata != nil {
+	if opts.Metadata != nil {
 		if startURL := opts.Metadata["start-url"]; startURL != "" {
 			idcOpts = &kiroauth.IDCLoginOptions{
 				StartURL:      startURL,
@@ -185,7 +190,7 @@ func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		return nil, fmt.Errorf("login failed: %w", err)
 	}
 
-	return a.createAuthRecord(tokenData, "aws")
+	return a.createAuthRecord(tokenData, "aws", opts.ProxyURL)
 }
 
 // LoginWithAuthCode performs OAuth login for Kiro with AWS Builder ID using authorization code flow.
@@ -194,6 +199,10 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 	if cfg == nil {
 		return nil, fmt.Errorf("kiro auth: configuration is required")
 	}
+	if opts == nil {
+		opts = &LoginOptions{}
+	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	oauth := kiroauth.NewKiroOAuth(cfg)
 
@@ -240,6 +249,7 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 			"source":      "aws-builder-id-authcode",
 			"email":       tokenData.Email,
 		},
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 		// NextRefreshAfter: 20 minutes before expiry
 		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}

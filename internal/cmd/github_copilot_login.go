@@ -26,6 +26,7 @@ func DoGitHubCopilotLogin(cfg *config.Config, options *LoginOptions) {
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
+		ProxyURL:  options.ProxyURL,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "github-copilot", cfg, authOpts)

@@ -1096,6 +1096,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
 		entry.APIKeyEntries[i].APIKey = trimmed
+		entry.APIKeyEntries[i].Headers = config.NormalizeHeaders(entry.APIKeyEntries[i].Headers)
 		if trimmed != "" {
 			existing[trimmed] = struct{}{}
 		}

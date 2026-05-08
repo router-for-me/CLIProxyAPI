@@ -43,6 +43,7 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 
 	authSvc := kimi.NewKimiAuth(cfg)
 
@@ -119,5 +120,6 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		Label:    "Kimi User",
 		Storage:  tokenStorage,
 		Metadata: metadata,
+		ProxyURL: strings.TrimSpace(opts.ProxyURL),
 	}, nil
 }
