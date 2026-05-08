@@ -28,6 +28,7 @@ import (
 //   - []byte: The transformed request data in OpenAI chat completions format
 func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
+
 	// Base OpenAI chat completions template with default values
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
 
@@ -67,6 +68,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
+				// Skip items with empty role - these are invalid messages
+				if role == "" {
+					return true
+				}
 				if role == "developer" {
 					role = "user"
 				}
@@ -109,6 +114,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
+				// Handle reasoning_content in message (for DeepSeek thinking mode)
+				// When assistant message has reasoning_content, pass it through
+				if role == "assistant" {
+					if rc := item.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+						message, _ = sjson.SetBytes(message, "reasoning_content", rc.String())
+					}
+				}
+
 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
 
 			case "function_call":
@@ -145,6 +158,38 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+
+			case "reasoning":
+				// Handle reasoning item conversion for DeepSeek thinking mode
+				// DeepSeek requires reasoning_content to be passed back in subsequent requests
+				// The reasoning item has a summary array with text content
+				summary := item.Get("summary")
+				if summary.Exists() && summary.IsArray() {
+					// Concatenate all summary text parts
+					var reasoningText strings.Builder
+					summary.ForEach(func(_, summaryItem gjson.Result) bool {
+						if summaryItem.Get("type").String() == "summary_text" {
+							text := summaryItem.Get("text").String()
+							if text != "" {
+								reasoningText.WriteString(text)
+							}
+						}
+						return true
+					})
+
+					// DeepSeek V4 requires reasoning_content even if empty
+					// When Codex CLI sends empty reasoning text, fill with placeholder
+					reasoningStr := reasoningText.String()
+					if reasoningStr == "" {
+						reasoningStr = "[reasoning unavailable]"
+					}
+
+					// Create assistant message with reasoning_content for DeepSeek
+					// DeepSeek expects: {"role":"assistant","content":"","reasoning_content":"..."}
+					reasoningMessage := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
+					reasoningMessage, _ = sjson.SetBytes(reasoningMessage, "reasoning_content", reasoningStr)
+					out, _ = sjson.SetRawBytes(out, "messages.-1", reasoningMessage)
+				}
 			}
 
 			return true
@@ -173,18 +218,45 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			chatTool := []byte(`{"type":"function","function":{}}`)
 
 			// Convert tool structure from responses format to chat completions format
+			// Handle both flat format {"name": "xxx"} and nested format {"function": {"name": "xxx"}}
 			function := []byte(`{"name":"","description":"","parameters":{}}`)
 
-			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.SetBytes(function, "name", name.String())
+			// Try nested format first (Codex CLI sends {"type": "function", "function": {"name": "xxx"}})
+			nestedFunction := tool.Get("function")
+			if nestedFunction.Exists() && nestedFunction.IsObject() {
+				if name := nestedFunction.Get("name"); name.Exists() {
+					function, _ = sjson.SetBytes(function, "name", name.String())
+				}
+				if description := nestedFunction.Get("description"); description.Exists() {
+					function, _ = sjson.SetBytes(function, "description", description.String())
+				}
+				if parameters := nestedFunction.Get("parameters"); parameters.Exists() {
+					function, _ = sjson.SetRawBytes(function, "parameters", []byte(parameters.Raw))
+				}
+				// Ensure parameters has type: object (required by most providers)
+				if !gjson.GetBytes(function, "parameters.type").Exists() {
+					function, _ = sjson.SetBytes(function, "parameters.type", "object")
+				}
+			} else {
+				// Fall back to flat format {"type": "function", "name": "xxx"}
+				if name := tool.Get("name"); name.Exists() {
+					function, _ = sjson.SetBytes(function, "name", name.String())
+				}
+				if description := tool.Get("description"); description.Exists() {
+					function, _ = sjson.SetBytes(function, "description", description.String())
+				}
+				if parameters := tool.Get("parameters"); parameters.Exists() {
+					function, _ = sjson.SetRawBytes(function, "parameters", []byte(parameters.Raw))
+				}
+				// Ensure parameters has type: object (required by most providers)
+				if !gjson.GetBytes(function, "parameters.type").Exists() {
+					function, _ = sjson.SetBytes(function, "parameters.type", "object")
+				}
 			}
 
-			if description := tool.Get("description"); description.Exists() {
-				function, _ = sjson.SetBytes(function, "description", description.String())
-			}
-
-			if parameters := tool.Get("parameters"); parameters.Exists() {
-				function, _ = sjson.SetRawBytes(function, "parameters", []byte(parameters.Raw))
+			// Skip tools with empty names (invalid for most providers)
+			if gjson.GetBytes(function, "name").String() == "" {
+				return true
 			}
 
 			chatTool, _ = sjson.SetRawBytes(chatTool, "function", function)
