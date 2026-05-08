@@ -17,21 +17,21 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -496,8 +496,10 @@ func main() {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				if !localModel {
+				if !localModel && !cfg.Home.Enabled {
 					registry.StartModelsUpdater(context.Background())
+				} else if cfg.Home.Enabled {
+					log.Info("Home mode: remote model updates disabled")
 				}
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
@@ -572,8 +574,10 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			if !localModel {
+			if !localModel && !cfg.Home.Enabled {
 				registry.StartModelsUpdater(context.Background())
+			} else if cfg.Home.Enabled {
+				log.Info("Home mode: remote model updates disabled")
 			}
 			cmd.StartService(cfg, configFilePath, password)
 		}

@@ -9,11 +9,11 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,12 +21,12 @@ import (
 // from gin.Context to the request context for SecretSource lookup.
 type clientAPIKeyContextKey struct{}
 
-// clientAPIKeyMiddleware injects the authenticated client API key from gin.Context["apiKey"]
+// clientAPIKeyMiddleware injects the authenticated client API key from gin.Context["userApiKey"]
 // into the request context so that SecretSource can look it up for per-client upstream routing.
 func clientAPIKeyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Extract the client API key from gin context (set by AuthMiddleware)
-		if apiKey, exists := c.Get("apiKey"); exists {
+		if apiKey, exists := c.Get("userApiKey"); exists {
 			if keyStr, ok := apiKey.(string); ok && keyStr != "" {
 				// Inject into request context for SecretSource.Get(ctx) to read
 				ctx := context.WithValue(c.Request.Context(), clientAPIKeyContextKey{}, keyStr)

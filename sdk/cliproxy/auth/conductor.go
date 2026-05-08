@@ -16,13 +16,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -377,6 +378,15 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
+// HomeEnabled reports whether the home control plane integration is enabled in the runtime config.
+func (m *Manager) HomeEnabled() bool {
+	if m == nil {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	return cfg != nil && cfg.Home.Enabled
+}
+
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
 	if m == nil {
 		return ""
@@ -522,6 +532,11 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 }
 
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
+	if auth != nil && auth.Attributes != nil {
+		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
+			return []string{homeModel}
+		}
+	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
@@ -555,6 +570,14 @@ func (m *Manager) selectionModelKeyForAuth(auth *Auth, routeModel string) string
 }
 
 func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool) string {
+	if auth != nil && auth.Attributes != nil {
+		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
+			if resolved := strings.TrimSpace(upstreamModel); resolved != "" {
+				return resolved
+			}
+			return homeModel
+		}
+	}
 	stateModel := executionResultModel(routeModel, upstreamModel, pooled)
 	selectionModel := m.selectionModelForAuth(auth, routeModel)
 	if canonicalModelKey(selectionModel) == canonicalModelKey(upstreamModel) && strings.TrimSpace(selectionModel) != "" {
@@ -2710,6 +2733,11 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if m.HomeEnabled() {
+		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts)
+		return auth, exec, err
+	}
+
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -2779,6 +2807,11 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if m.HomeEnabled() {
+		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts)
+		return auth, exec, err
+	}
+
 	if !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
@@ -2836,6 +2869,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if m.HomeEnabled() {
+		return m.pickNextViaHome(ctx, model, opts)
+	}
+
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -2928,6 +2965,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if m.HomeEnabled() {
+		return m.pickNextViaHome(ctx, model, opts)
+	}
+
 	if !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
@@ -3010,6 +3051,148 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		}
 		return authCopy, executor, providerKey, nil
 	}
+}
+
+type homeErrorEnvelope struct {
+	Error *homeErrorDetail `json:"error"`
+}
+
+type homeErrorDetail struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
+}
+
+const homeUpstreamModelAttributeKey = "home_upstream_model"
+
+type homeAuthDispatchResponse struct {
+	Model      string `json:"model"`
+	Provider   string `json:"provider"`
+	AuthIndex  string `json:"auth_index"`
+	UserAPIKey string `json:"user_api_key"`
+	Auth       Auth   `json:"auth"`
+}
+
+func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" || ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(interface{ Set(string, any) })
+	if !ok || ginCtx == nil {
+		return
+	}
+	ginCtx.Set("userApiKey", apiKey)
+}
+
+func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts cliproxyexecutor.Options) (*Auth, ProviderExecutor, string, error) {
+	if m == nil {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client := home.Current()
+	if client == nil || !client.HeartbeatOK() {
+		return nil, nil, "", &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
+	}
+
+	requestedModel := requestedModelFromMetadata(opts.Metadata, model)
+	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+
+	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, opts.Headers)
+	if err != nil {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
+	}
+
+	var env homeErrorEnvelope
+	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
+		code := strings.TrimSpace(env.Error.Type)
+		if code == "" {
+			code = strings.TrimSpace(env.Error.Code)
+		}
+		msg := strings.TrimSpace(env.Error.Message)
+		if msg == "" {
+			msg = "home returned error"
+		}
+		status := http.StatusBadGateway
+		switch strings.ToLower(code) {
+		case "model_not_found":
+			status = http.StatusNotFound
+		case "authentication_error", "unauthorized":
+			status = http.StatusUnauthorized
+		}
+		return nil, nil, "", &Error{Code: code, Message: msg, HTTPStatus: status}
+	}
+
+	var dispatch homeAuthDispatchResponse
+	if errUnmarshal := json.Unmarshal(raw, &dispatch); errUnmarshal != nil {
+		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
+	}
+	setHomeUserAPIKeyOnGinContext(ctx, dispatch.UserAPIKey)
+	auth := dispatch.Auth
+	if strings.TrimSpace(auth.ID) == "" {
+		// Backward compatibility: older home instances returned the auth directly.
+		if errUnmarshal := json.Unmarshal(raw, &auth); errUnmarshal != nil {
+			return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
+		}
+	}
+	if upstreamModel := strings.TrimSpace(dispatch.Model); upstreamModel != "" {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string, 1)
+		}
+		auth.Attributes[homeUpstreamModelAttributeKey] = upstreamModel
+	}
+	if strings.TrimSpace(auth.ID) == "" {
+		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if providerKey == "" {
+		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without provider", HTTPStatus: http.StatusBadGateway}
+	}
+
+	homeAuthIndex := strings.TrimSpace(dispatch.AuthIndex)
+	if homeAuthIndex != "" {
+		auth.Index = homeAuthIndex
+		auth.indexAssigned = true
+	} else {
+		auth.EnsureIndex()
+	}
+
+	executor, ok := m.Executor(providerKey)
+	if !ok && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
+		executor, ok = m.Executor("openai-compatibility")
+		if ok {
+			providerKey = "openai-compatibility"
+		}
+	}
+	if !ok {
+		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered", HTTPStatus: http.StatusBadGateway}
+	}
+
+	return auth.Clone(), executor, providerKey, nil
+}
+
+func requestedModelFromMetadata(metadata map[string]any, fallback string) string {
+	if metadata != nil {
+		if v, ok := metadata[cliproxyexecutor.RequestedModelMetadataKey]; ok {
+			switch typed := v.(type) {
+			case string:
+				if trimmed := strings.TrimSpace(typed); trimmed != "" {
+					return trimmed
+				}
+			case []byte:
+				if trimmed := strings.TrimSpace(string(typed)); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	fallback = strings.TrimSpace(fallback)
+	if fallback == "" {
+		return "unknown"
+	}
+	return fallback
 }
 
 func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opts cliproxyexecutor.Options) []creditsCandidateEntry {

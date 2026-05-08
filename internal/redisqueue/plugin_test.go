@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
@@ -44,6 +44,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "alias", "client-gpt")
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "auth_type", "apikey")
+		requireStringField(t, payload, "user_api_key", "test-key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireBoolField(t, payload, "failed", false)
 	})
@@ -80,6 +81,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 		requireStringField(t, payload, "alias", "client-mini")
 		requireStringField(t, payload, "endpoint", "GET /v1/responses")
 		requireStringField(t, payload, "auth_type", "apikey")
+		requireStringField(t, payload, "user_api_key", "test-key")
 		requireStringField(t, payload, "request_id", "gin-request-id")
 		requireBoolField(t, payload, "failed", true)
 	})
@@ -123,6 +125,7 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 		payload := waitForSinglePayload(t, 2*time.Second)
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "alias", "client-gpt")
+		requireStringField(t, payload, "user_api_key", "test-key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireBoolField(t, payload, "failed", true)
 	})

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -35,6 +35,9 @@ type Config struct {
 
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
+
+	// Home config enables the Redis-based control plane integration.
+	Home HomeConfig `yaml:"home" json:"-"`
 
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
