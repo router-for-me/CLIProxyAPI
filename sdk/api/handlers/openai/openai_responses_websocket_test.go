@@ -662,6 +662,34 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForOrphanOutput(t *te
 	}
 }
 
+func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForPreviousResponseOutput(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	callCache.record(sessionKey, "call-1", []byte(`{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"}`))
+
+	raw := []byte(`{"previous_response_id":"resp-latest","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1","output":"ok"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
+
+	if got := gjson.GetBytes(repaired, "previous_response_id").String(); got != "resp-latest" {
+		t.Fatalf("previous_response_id = %q, want resp-latest", got)
+	}
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("repaired input len = %d, want 3: %s", len(input), repaired)
+	}
+	if input[0].Get("type").String() != "function_call" || input[0].Get("call_id").String() != "call-1" {
+		t.Fatalf("missing inserted call: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "function_call_output" || input[1].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected output item: %s", input[1].Raw)
+	}
+	if input[2].Get("type").String() != "message" || input[2].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[2].Raw)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsDropsOrphanOutputWhenCallMissing(t *testing.T) {
 	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
 	callCache := newWebsocketToolOutputCache(time.Minute, 10)
