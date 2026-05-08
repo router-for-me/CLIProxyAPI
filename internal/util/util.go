@@ -75,7 +75,7 @@ func SetLogLevel(cfg *config.Config) {
 // It expands a leading tilde (~) to the user's home directory and returns a cleaned path.
 func ResolveAuthDir(authDir string) (string, error) {
 	if authDir == "" {
-		return "", nil
+		authDir = "~/.cli-proxy-api"
 	}
 	if strings.HasPrefix(authDir, "~") {
 		home, err := os.UserHomeDir()
