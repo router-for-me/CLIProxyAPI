@@ -99,3 +99,32 @@ func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeSt
 		t.Fatalf("expected re-added auth to re-register models in global registry")
 	}
 }
+
+func TestForceHomeRuntimeConfigEnablesUsageStatistics(t *testing.T) {
+	cfg := &config.Config{
+		UsageStatisticsEnabled: false,
+	}
+
+	forceHomeRuntimeConfig(cfg)
+
+	if !cfg.UsageStatisticsEnabled {
+		t.Fatal("expected home runtime config to force usage statistics enabled")
+	}
+}
+
+func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
+	baseCfg := &config.Config{}
+	baseCfg.Home.Enabled = true
+	service := &Service{cfg: baseCfg}
+
+	service.applyHomeOverlay(&config.Config{
+		UsageStatisticsEnabled: false,
+	})
+
+	if service.cfg == nil || !service.cfg.UsageStatisticsEnabled {
+		t.Fatal("expected home overlay to force usage statistics enabled")
+	}
+	if !service.cfg.Home.Enabled {
+		t.Fatal("expected home overlay to preserve local home settings")
+	}
+}

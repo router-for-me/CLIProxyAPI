@@ -190,7 +190,20 @@ func headersToLowerMap(headers http.Header) map[string]string {
 	return out
 }
 
-func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header) ([]byte, error) {
+func newAuthDispatchRequest(requestedModel string, sessionID string, headers http.Header, count int) authDispatchRequest {
+	if count <= 0 {
+		count = 1
+	}
+	return authDispatchRequest{
+		Type:      "auth",
+		Model:     requestedModel,
+		Count:     count,
+		SessionID: strings.TrimSpace(sessionID),
+		Headers:   headersToLowerMap(headers),
+	}
+}
+
+func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error) {
 	if err := c.ensureClients(); err != nil {
 		return nil, err
 	}
@@ -198,12 +211,7 @@ func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID 
 	if requestedModel == "" {
 		return nil, fmt.Errorf("home: requested model is empty")
 	}
-	req := authDispatchRequest{
-		Type:      "auth",
-		Model:     requestedModel,
-		SessionID: strings.TrimSpace(sessionID),
-		Headers:   headersToLowerMap(headers),
-	}
+	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count)
 	keyBytes, err := json.Marshal(&req)
 	if err != nil {
 		return nil, err

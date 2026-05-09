@@ -561,6 +561,7 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 		return
 	}
 	cfg.APIKeys = nil
+	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.WebsocketAuth = false
 	cfg.EnableGeminiCLIEndpoint = false
@@ -732,6 +733,7 @@ func (s *Service) Run(ctx context.Context) error {
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
+		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)

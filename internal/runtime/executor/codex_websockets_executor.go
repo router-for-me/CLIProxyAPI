@@ -580,7 +580,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "read_error"
 				terminateErr = errRead
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailure(ctx, errRead)
 				_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
 				return
 			}
@@ -590,7 +590,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					terminateReason = "unexpected_binary"
 					terminateErr = err
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "unexpected_binary", err)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailure(ctx, err)
 					if sess != nil {
 						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", err)
 					}
@@ -610,7 +610,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailure(ctx, wsErr)
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 				}

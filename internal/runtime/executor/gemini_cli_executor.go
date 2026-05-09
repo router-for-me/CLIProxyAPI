@@ -430,7 +430,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailure(ctx, errScan)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 					case <-ctx.Done():
@@ -444,7 +444,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			data, errRead := io.ReadAll(resp.Body)
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailure(ctx, errRead)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
 				case <-ctx.Done():

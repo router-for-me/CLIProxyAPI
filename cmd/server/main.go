@@ -290,6 +290,7 @@ func main() {
 		}
 		parsed.Home = homeCfg
 		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
+		parsed.UsageStatisticsEnabled = true
 		cfg = parsed
 
 		// Keep a non-empty config path for downstream components (log paths, management assets, etc),
