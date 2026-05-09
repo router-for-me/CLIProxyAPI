@@ -1335,7 +1335,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
-			if lastErr != nil && !homeMode {
+			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, errPick
@@ -1423,7 +1423,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
-			if lastErr != nil && !homeMode {
+			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, errPick
@@ -1511,7 +1511,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
-			if lastErr != nil && !homeMode {
+			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return nil, lastErr
 			}
 			return nil, errPick
@@ -3125,7 +3125,28 @@ type homeErrorDetail struct {
 	Code    string `json:"code,omitempty"`
 }
 
-const homeUpstreamModelAttributeKey = "home_upstream_model"
+const (
+	homeUpstreamModelAttributeKey     = "home_upstream_model"
+	homeRequestRetryExceededErrorCode = "request_retry_exceeded"
+)
+
+func isHomeRequestRetryExceededError(err error) bool {
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(authErr.Code), homeRequestRetryExceededErrorCode)
+}
+
+func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick error) bool {
+	if lastErr == nil {
+		return false
+	}
+	if !homeMode {
+		return true
+	}
+	return isHomeRequestRetryExceededError(errPick)
+}
 
 type homeAuthDispatchResponse struct {
 	Model      string `json:"model"`
