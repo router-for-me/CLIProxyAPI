@@ -480,6 +480,42 @@ func TestOpenAICompatPayloadKimiPreservesDataURLImages(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatPayloadKimiPreservesAssistantReasoningContent(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[
+			{"role":"assistant","content":"planning","reasoning_content":"actual reasoning","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}
+		],
+		"reasoning_effort":"high"
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.kimi.com/coding/v1")
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "actual reasoning" {
+		t.Fatalf("messages.0.reasoning_content = %q, want actual reasoning: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "reasoning_effort").Exists() {
+		t.Fatalf("reasoning_effort should be removed for kimi compat payload: %s", string(out))
+	}
+}
+
+func TestOpenAICompatPayloadKimiRepairsMissingAssistantToolCallReasoning(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[
+			{"role":"assistant","content":"I will read it","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}
+		]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.kimi.com/coding/v1")
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "I will read it" {
+		t.Fatalf("messages.0.reasoning_content = %q, want content fallback: %s", got, string(out))
+	}
+}
+
 func TestOpenAICompatPayloadXiaomiScrubsUnsupportedOpenAIExtras(t *testing.T) {
 	payload := []byte(`{
 		"model":"mimo-v2.5",

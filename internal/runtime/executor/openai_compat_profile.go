@@ -228,7 +228,9 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 				payload = updated
 			}
 		}
-		payload = deleteMessageReasoningContent(payload)
+		if config.NormalizeOpenAICompatibilityKind(profile.Kind) != "kimi" {
+			payload = deleteMessageReasoningContent(payload)
+		}
 	}
 	return payload
 }
@@ -236,6 +238,13 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfile, model string, baseURL string) []byte {
 	payload = scrubOpenAICompatPayload(payload, profile)
 	payload = repairOpenAICompatToolCallHistory(payload)
+	if config.NormalizeOpenAICompatibilityKind(profile.Kind) == "kimi" {
+		if normalized, err := normalizeKimiToolMessageLinks(payload); err == nil {
+			payload = normalized
+		} else {
+			log.WithError(err).Warn("openai compat executor: failed to normalize kimi tool message history")
+		}
+	}
 	payload = scrubOpenAICompatProviderToolPayload(payload, profile)
 	payload = scrubOpenAICompatToolChoice(payload, profile)
 	if config.NormalizeOpenAICompatibilityKind(profile.Kind) == "zhipu" {
