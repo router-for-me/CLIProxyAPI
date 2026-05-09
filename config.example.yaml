@@ -69,7 +69,7 @@ logs-max-total-size-mb: 0
 error-logs-max-files: 10
 
 # When false, disable in-memory usage statistics aggregation
-usage-statistics-enabled: false
+usage-statistics-enabled: true
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
