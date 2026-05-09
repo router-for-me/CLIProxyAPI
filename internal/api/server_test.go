@@ -15,6 +15,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -208,6 +209,67 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 			}
 			if body := rr.Body.String(); !strings.Contains(body, tc.wantContains) {
 				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
+			}
+		})
+	}
+}
+
+func TestServerTrustedProxiesConfigControlsClientIP(t *testing.T) {
+	testCases := []struct {
+		name           string
+		trustedProxies []string
+		remoteAddr     string
+		wantClientIP   string
+	}{
+		{
+			name:           "omitted config keeps gin default",
+			trustedProxies: nil,
+			remoteAddr:     "10.0.0.10:12345",
+			wantClientIP:   "203.0.113.7",
+		},
+		{
+			name:           "untrusted proxy ignores forwarded header",
+			trustedProxies: []string{},
+			remoteAddr:     "10.0.0.10:12345",
+			wantClientIP:   "10.0.0.10",
+		},
+		{
+			name:           "trusted proxy uses forwarded header",
+			trustedProxies: []string{"10.0.0.0/8"},
+			remoteAddr:     "10.0.0.10:12345",
+			wantClientIP:   "203.0.113.7",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			cfg := &proxyconfig.Config{
+				TrustedProxies: tc.trustedProxies,
+				AuthDir:        t.TempDir(),
+				Debug:          true,
+			}
+			authManager := auth.NewManager(nil, nil, nil)
+			accessManager := sdkaccess.NewManager()
+			server := NewServer(cfg, authManager, accessManager, filepath.Join(t.TempDir(), "config.yaml"), WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *proxyconfig.Config) {
+				engine.GET("/client-ip", func(c *gin.Context) {
+					c.String(http.StatusOK, c.ClientIP())
+				})
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/client-ip", nil)
+			req.RemoteAddr = tc.remoteAddr
+			req.Header.Set("X-Forwarded-For", "203.0.113.7")
+			rr := httptest.NewRecorder()
+
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			if got := rr.Body.String(); got != tc.wantClientIP {
+				t.Fatalf("ClientIP = %q, want %q", got, tc.wantClientIP)
 			}
 		})
 	}
