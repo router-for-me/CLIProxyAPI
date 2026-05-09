@@ -498,6 +498,7 @@ func main() {
 				misc.StartAntigravityVersionUpdater(context.Background())
 				if !localModel {
 					registry.StartModelsUpdater(context.Background())
+					registry.StartOpenRouterEnrichment(context.Background())
 				}
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
@@ -574,6 +575,7 @@ func main() {
 			misc.StartAntigravityVersionUpdater(context.Background())
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
+				registry.StartOpenRouterEnrichment(context.Background())
 			}
 			cmd.StartService(cfg, configFilePath, password)
 		}

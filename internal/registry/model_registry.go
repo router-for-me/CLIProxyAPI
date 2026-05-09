@@ -243,6 +243,14 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		if model == nil || model.ID == "" {
 			continue
 		}
+		if staticInfo := LookupStaticModelInfo(model.ID); staticInfo != nil {
+			if model.ContextLength == 0 && staticInfo.ContextLength > 0 {
+				model.ContextLength = staticInfo.ContextLength
+			}
+			if model.MaxCompletionTokens == 0 && staticInfo.MaxCompletionTokens > 0 {
+				model.MaxCompletionTokens = staticInfo.MaxCompletionTokens
+			}
+		}
 		rawModelIDs = append(rawModelIDs, model.ID)
 		newCounts[model.ID]++
 		if _, exists := newModels[model.ID]; exists {
@@ -875,6 +883,25 @@ func cloneModelMapValue(value any) any {
 //
 // Returns:
 //   - []*ModelInfo: List of available models for the provider
+// GetAllRegisteredModels returns metadata for every registered model regardless of
+// suspension or quota state. Use this for administrative/health endpoints that need
+// visibility into ALL models, including unhealthy ones.
+func (r *ModelRegistry) GetAllRegisteredModels(handlerType string) []map[string]any {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	models := make([]map[string]any, 0, len(r.models))
+	for _, registration := range r.models {
+		if registration.Info == nil {
+			continue
+		}
+		model := r.convertModelToMap(registration.Info, handlerType)
+		if model != nil {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
 func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelInfo {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
@@ -1158,6 +1185,14 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
 		}
+		if model.ContextLength > 0 {
+			result["context_length"] = model.ContextLength
+			result["context_window_size"] = model.ContextLength
+		}
+		if model.MaxCompletionTokens > 0 {
+			result["max_completion_tokens"] = model.MaxCompletionTokens
+			result["max_output_tokens"] = model.MaxCompletionTokens
+		}
 		return result
 
 	case "gemini":
@@ -1314,4 +1349,48 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 		}
 	}
 	return result
+}
+
+// GetModelHealthDetails returns detailed health information for a model including
+// providers, suspended clients with reasons, and availability counts.
+func (r *ModelRegistry) GetModelHealthDetails(modelID string) (providers map[string]int, suspendedClients map[string]string, count int) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	if registration, exists := r.models[modelID]; exists && registration != nil {
+		// Clone providers map
+		if len(registration.Providers) > 0 {
+			providers = make(map[string]int, len(registration.Providers))
+			for k, v := range registration.Providers {
+				providers[k] = v
+			}
+		}
+		// Clone suspended clients map
+		if len(registration.SuspendedClients) > 0 {
+			suspendedClients = make(map[string]string, len(registration.SuspendedClients))
+			for k, v := range registration.SuspendedClients {
+				suspendedClients[k] = v
+			}
+		}
+		count = registration.Count
+	}
+	return
+}
+
+// SetModelContextLength updates the context_length on the live model registration.
+// This writes through to the actual stored ModelInfo, not a clone, and invalidates
+// the per-handler GetAvailableModels cache so subsequent reads reflect the new value.
+func (r *ModelRegistry) SetModelContextLength(modelID string, contextLength int) bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	reg, ok := r.models[modelID]
+	if !ok || reg == nil || reg.Info == nil {
+		return false
+	}
+	if reg.Info.ContextLength == contextLength {
+		return true
+	}
+	reg.Info.ContextLength = contextLength
+	r.invalidateAvailableModelsCacheLocked()
+	return true
 }
