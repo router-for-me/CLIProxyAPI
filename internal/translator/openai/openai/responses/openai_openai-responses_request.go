@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -32,6 +33,22 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
 
 	root := gjson.ParseBytes(rawJSON)
+	appendMessage := func(message []byte) {
+		out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+	}
+
+	flushAssistantToolCalls := func(toolCalls []string) {
+		if len(toolCalls) == 0 {
+			return
+		}
+
+		assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+		for idx, toolCall := range toolCalls {
+			path := "tool_calls." + strconv.Itoa(idx)
+			assistantMessage, _ = sjson.SetRawBytes(assistantMessage, path, []byte(toolCall))
+		}
+		appendMessage(assistantMessage)
+	}
 
 	// Set model name
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -57,6 +74,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		pendingAssistantToolCalls := make([]string, 0)
 		input.ForEach(func(_, item gjson.Result) bool {
 			itemType := item.Get("type").String()
 			if itemType == "" && item.Get("role").String() != "" {
@@ -65,6 +83,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			switch itemType {
 			case "message", "":
+				flushAssistantToolCalls(pendingAssistantToolCalls)
+				pendingAssistantToolCalls = pendingAssistantToolCalls[:0]
 				// Handle regular message conversion
 				role := item.Get("role").String()
 				if role == "developer" {
@@ -109,12 +129,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
-				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+				appendMessage(message)
 
 			case "function_call":
-				// Handle function call conversion to assistant message with tool_calls
-				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-
+				// Consecutive Responses function_call items belong to the same assistant
+				// turn and must remain grouped under one Chat Completions message.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
 				if callId := item.Get("call_id"); callId.Exists() {
@@ -129,10 +148,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
 				}
 
-				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+				pendingAssistantToolCalls = append(pendingAssistantToolCalls, string(toolCall))
 
 			case "function_call_output":
+				flushAssistantToolCalls(pendingAssistantToolCalls)
+				pendingAssistantToolCalls = pendingAssistantToolCalls[:0]
 				// Handle function call output conversion to tool message
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 
@@ -144,16 +164,17 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
 				}
 
-				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				appendMessage(toolMessage)
 			}
 
 			return true
 		})
+		flushAssistantToolCalls(pendingAssistantToolCalls)
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
 		msg, _ = sjson.SetBytes(msg, "content", input.String())
-		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+		appendMessage(msg)
 	}
 
 	// Convert tools from responses format to chat completions format
