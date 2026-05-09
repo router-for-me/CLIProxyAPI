@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -159,6 +161,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	for _, w := range WarnAuthAliasExclusionConflicts(a, cfg, perAccountExcluded, "oauth") {
+		log.Warnf("%s", w)
+	}
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
@@ -173,6 +178,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 			for _, v := range virtuals {
 				ApplyAuthExcludedModelsMeta(v, cfg, perAccountExcluded, "oauth")
+				for _, w := range WarnAuthAliasExclusionConflicts(v, cfg, perAccountExcluded, "oauth") {
+					log.Warnf("%s", w)
+				}
 			}
 			out := make([]*coreauth.Auth, 0, 1+len(virtuals))
 			out = append(out, a)

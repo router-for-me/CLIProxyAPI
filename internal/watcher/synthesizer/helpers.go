@@ -103,6 +103,95 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	}
 }
 
+// WarnAuthAliasExclusionConflicts returns warnings for any oauth-model-alias
+// upstream that would be wildcard-blocked by this auth's per-account
+// excluded_models. Counterpart to validateOAuthAliasExclusions in
+// sdk/cliproxy (which handles provider-wide exclusions at config-load).
+//
+// Per-account exclusions live as auth attributes populated by
+// ApplyAuthExcludedModelsMeta, so this check only fires meaningfully at
+// synthesizer time when both the alias config and the auth's perKey list
+// are visible together. Returns nil when there's nothing to check.
+//
+// Caller logs each returned string at WARN level. Cardinality: one call per
+// synthesized auth file per synthesizer pass.
+func WarnAuthAliasExclusionConflicts(auth *coreauth.Auth, cfg *config.Config, perKey []string, authKind string) []string {
+	if auth == nil || cfg == nil || len(cfg.OAuthModelAlias) == 0 || len(perKey) == 0 {
+		return nil
+	}
+	channel := coreauth.OAuthModelAliasChannel(strings.TrimSpace(auth.Provider), authKind)
+	if channel == "" {
+		return nil
+	}
+	aliases := cfg.OAuthModelAlias[channel]
+	if len(aliases) == 0 {
+		return nil
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		authID = "<unknown>"
+	}
+	var warnings []string
+	for _, entry := range aliases {
+		upstream := strings.TrimSpace(entry.Name)
+		alias := strings.TrimSpace(entry.Alias)
+		if upstream == "" || alias == "" || strings.EqualFold(upstream, alias) {
+			continue
+		}
+		upstreamLower := strings.ToLower(upstream)
+		for _, pattern := range perKey {
+			p := strings.TrimSpace(pattern)
+			if p == "" {
+				continue
+			}
+			if matchExclusionWildcard(strings.ToLower(p), upstreamLower) {
+				warnings = append(warnings, fmt.Sprintf(
+					"oauth-model-alias: auth=%q channel=%q alias=%q upstream=%q matches per-account excluded-models pattern=%q — alias will not resolve at runtime",
+					authID, channel, alias, upstream, p,
+				))
+			}
+		}
+	}
+	return warnings
+}
+
+// matchExclusionWildcard performs case-insensitive wildcard matching where
+// '*' matches any substring. Inputs are expected pre-lowercased by callers.
+// Mirrors sdk/cliproxy.matchWildcard semantics; duplicated here to keep
+// this package's import surface narrow (no synthesizer -> sdk/cliproxy edge).
+func matchExclusionWildcard(pattern, value string) bool {
+	if pattern == "" {
+		return false
+	}
+	if !strings.Contains(pattern, "*") {
+		return pattern == value
+	}
+	parts := strings.Split(pattern, "*")
+	if prefix := parts[0]; prefix != "" {
+		if !strings.HasPrefix(value, prefix) {
+			return false
+		}
+		value = value[len(prefix):]
+	}
+	if suffix := parts[len(parts)-1]; suffix != "" {
+		if !strings.HasSuffix(value, suffix) {
+			return false
+		}
+		value = value[:len(value)-len(suffix)]
+	}
+	for _, segment := range parts[1 : len(parts)-1] {
+		if segment == "" {
+			continue
+		}
+		idx := strings.Index(value, segment)
+		if idx < 0 {
+			return false
+		}
+		value = value[idx+len(segment):]
+	}
+	return true
+}
+
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
