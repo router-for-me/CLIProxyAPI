@@ -979,7 +979,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				}
 			}()
 
-			content, toolUses, usageInfo, stopReason, estimatedCacheUsage, err := e.parseEventStream(httpResp.Body, req.Model)
+			content, toolUses, usageInfo, stopReason, estimatedCacheRead, estimatedCacheWrite, err := e.parseEventStream(httpResp.Body, req.Model)
 			if err != nil {
 				recordAPIResponseError(ctx, e.cfg, err)
 				return resp, err
@@ -1025,7 +1025,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			}
 
 			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
-			reporter.publish(ctx, usageDetailForInternalStats(usageInfo, estimatedCacheUsage))
+			reporter.publish(ctx, usageDetailForInternalStats(usageInfo, estimatedCacheRead, estimatedCacheWrite))
 
 			// Record success for rate limiting
 			// DISABLED: 已移除速率限制
@@ -1793,12 +1793,15 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	return "claude-sonnet-4.5"
 }
 
-// kiroCreditUSD is Kiro's published credit-to-USD conversion rate.
-const kiroCreditUSD = 0.04
+// kiroCreditUSD is Kiro's empirical credit-to-USD conversion rate. The
+// published overage rate is $0.04/credit, but Kiro applies a discount on
+// top so each credit reflects roughly $0.12 of effective spend.
+const kiroCreditUSD = 0.12
 
-// kiroTokenPrice holds post-multiplier USD-per-Mtok prices for one Kiro model
-// class. Cache prices follow Anthropic ratios: cache_write = 1.25 × input,
-// cache_read = 0.10 × input.
+// kiroTokenPrice holds Anthropic MSRP per Mtok for one Kiro model class.
+// Cache prices follow the 5-minute cache ratios (cache_write = 1.25 × input,
+// cache_read = 0.10 × input); 1-hour cache (cache_write = 2 × input) is the
+// minority case and absorbed as estimation slack in cache_creation tokens.
 type kiroTokenPrice struct {
 	inputPerMTok      float64
 	outputPerMTok     float64
@@ -1806,34 +1809,33 @@ type kiroTokenPrice struct {
 	cacheReadPerMTok  float64
 }
 
-// kiroTokenPriceForModel returns Kiro's effective per-Mtok pricing after
-// applying the per-model Kiro multiplier on top of Anthropic MSRP.
-//
-// Multipliers (Kiro internal): sonnet=1.3, opus=2.2, haiku=0.4.
-// MSRP per Mtok: sonnet $3/$15, opus $15/$75, haiku $1/$5.
+// kiroTokenPriceForModel returns Anthropic MSRP per Mtok for the given Kiro
+// model class. Empirically, Kiro bills credits such that
+// `credits × kiroCreditUSD ≈ MSRP-priced cost`, so no per-model multiplier
+// is needed on top.
 func kiroTokenPriceForModel(model string) kiroTokenPrice {
 	modelLower := strings.ToLower(model)
 	switch {
 	case strings.Contains(modelLower, "haiku"):
 		return kiroTokenPrice{
-			inputPerMTok:      0.4,
-			outputPerMTok:     2.0,
-			cacheWritePerMTok: 0.5,
-			cacheReadPerMTok:  0.04,
+			inputPerMTok:      1.0,
+			outputPerMTok:     5.0,
+			cacheWritePerMTok: 1.25,
+			cacheReadPerMTok:  0.10,
 		}
 	case strings.Contains(modelLower, "opus"):
 		return kiroTokenPrice{
-			inputPerMTok:      33.0,
-			outputPerMTok:     165.0,
-			cacheWritePerMTok: 41.25,
-			cacheReadPerMTok:  3.3,
+			inputPerMTok:      15.0,
+			outputPerMTok:     75.0,
+			cacheWritePerMTok: 18.75,
+			cacheReadPerMTok:  1.50,
 		}
 	default:
 		return kiroTokenPrice{
-			inputPerMTok:      3.9,
-			outputPerMTok:     19.5,
-			cacheWritePerMTok: 4.875,
-			cacheReadPerMTok:  0.39,
+			inputPerMTok:      3.0,
+			outputPerMTok:     15.0,
+			cacheWritePerMTok: 3.75,
+			cacheReadPerMTok:  0.30,
 		}
 	}
 }
@@ -1841,39 +1843,49 @@ func kiroTokenPriceForModel(model string) kiroTokenPrice {
 // estimateKiroCacheUsage refines `detail` with cache_read / cache_creation
 // estimates when upstream did not return an authoritative breakdown.
 //
+// Kiro reports `cacheReadInputTokens` but never `cacheWriteInputTokens`, so
+// the common case here is "CR officially given, CW unknown" — solved as a
+// one-unknown linear equation against the credit charge. The "neither
+// reported" case keeps the older Branch A / B / C logic.
+//
 // Inputs:
 //   - detail.InputTokens    — uncached input (only meaningful when hasUncached)
 //   - detail.OutputTokens   — output tokens (always required)
 //   - detail.ReasoningTokens
 //   - detail.TotalTokens    — optional; if > 0, gives cached_total exactly
 //   - credits               — accumulated upstream credit usage (0 if absent)
-//   - hasOfficialCache      — true when upstream supplied cache fields directly
+//   - hasOfficialCacheRead  — true when upstream supplied cacheReadInputTokens
+//   - hasOfficialCacheWrite — true when upstream supplied cacheWriteInputTokens
 //   - hasUncached           — true when InputTokens explicitly means uncached
 //
 // Decision tree:
 //
-//	hasOfficialCache=true OR hasUncached=false                     → no-op
-//	credits>0 AND total>0  (Branch A: linear solve CR/CW)          → both fields
-//	credits>0 AND total==0 (Branch B: assume CW=0, back-derive CR) → CR only
-//	credits==0 AND total>0 (Branch C: deterministic, all → CR)     → CR only
-//	otherwise                                                      → no-op
+//	both cache fields given OR hasUncached=false                       → no-op
+//	credits>0 AND only CR given (solve CW)                             → CW
+//	credits>0 AND only CW given (solve CR)                             → CR
+//	credits>0 AND neither, total>0  (Branch A: linear solve CR/CW)     → both
+//	credits>0 AND neither, no total (Branch B: assume CW=0, derive CR) → CR only
+//	credits==0 AND neither, total>0 (Branch C: deterministic, all→CR)  → CR only
+//	otherwise                                                          → no-op
 //
-// Returns (detail, estimated). Estimated=true means the caller is responsible
-// for routing this through usageDetailForInternalStats before recording it in
-// internal billing stats — the values are an estimate, not a measurement.
-func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, hasOfficialCache, hasUncached bool) (usage.Detail, bool) {
-	if hasOfficialCache {
-		return detail, false
+// Returns (detail, estimatedCacheRead, estimatedCacheWrite). A field is
+// flagged as estimated only when this function wrote a value into it that was
+// not officially supplied by upstream — usageDetailForInternalStats relies on
+// per-field flags so an officially-reported CR isn't accidentally stripped
+// when only CW was estimated.
+func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, hasOfficialCacheRead, hasOfficialCacheWrite, hasUncached bool) (usage.Detail, bool, bool) {
+	if hasOfficialCacheRead && hasOfficialCacheWrite {
+		return detail, false, false
 	}
 	if !hasUncached {
-		return detail, false
+		return detail, false, false
 	}
 	if detail.InputTokens < 0 || detail.OutputTokens < 0 {
-		return detail, false
+		return detail, false, false
 	}
 
 	// hasTotal distinguishes "upstream gave us an authoritative total" from
-	// "total still unknown". Branch B (back-derive CR from credits alone) must
+	// "total still unknown". Branches that infer cache from credits alone must
 	// only fire when total is genuinely missing — otherwise an upstream total
 	// that proves zero or negative cache room would be ignored and credits
 	// would fabricate phantom cache reads.
@@ -1884,14 +1896,17 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 		// cachedTotal <= 0 means upstream's total is contradictory (negative)
 		// or proves no cache happened (zero). Trust upstream and stop here.
 		if cachedTotal <= 0 {
-			return detail, false
+			return detail, false, false
 		}
 	}
 
+	hasOneSide := hasOfficialCacheRead || hasOfficialCacheWrite
+
 	if credits <= 0 {
-		// Branch C: no credits — fall back to deterministic inference, all → CR.
-		if !hasTotal {
-			return detail, false
+		// Branch C: no credits — only safe move is the deterministic all→CR
+		// inference, and only when neither side is officially given.
+		if !hasTotal || hasOneSide {
+			return detail, false, false
 		}
 		detail.CacheReadInputTokens = cachedTotal
 		detail.CacheCreationInputTokens = 0
@@ -1899,19 +1914,32 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 		if detail.TotalTokens == 0 {
 			detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 		}
-		return detail, true
+		return detail, true, true
 	}
 
 	price := kiroTokenPriceForModel(model)
 	targetUSD := credits * kiroCreditUSD
+
+	// knownUSD includes any officially reported cache fields so the unknown
+	// side can be solved in isolation.
 	knownUSD := (float64(detail.InputTokens)*price.inputPerMTok + float64(detail.OutputTokens)*price.outputPerMTok) / 1_000_000
+	if hasOfficialCacheRead {
+		knownUSD += float64(detail.CacheReadInputTokens) * price.cacheReadPerMTok / 1_000_000
+	}
+	if hasOfficialCacheWrite {
+		knownUSD += float64(detail.CacheCreationInputTokens) * price.cacheWritePerMTok / 1_000_000
+	}
 	remainingUSD := targetUSD - knownUSD
 
 	if remainingUSD <= 0 {
-		// Pricing-assumption miss or no cache happened. Fall through to
-		// deterministic Branch C if total is known; otherwise give up.
+		// Pricing-assumption miss or no additional cache happened.
+		// Trust whatever upstream gave (don't overwrite an officially-reported
+		// CR/CW). Fall back to all→CR only when neither side is given.
+		if hasOneSide {
+			return detail, false, false
+		}
 		if !hasTotal {
-			return detail, false
+			return detail, false, false
 		}
 		detail.CacheReadInputTokens = cachedTotal
 		detail.CacheCreationInputTokens = 0
@@ -1919,43 +1947,94 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 		if detail.TotalTokens == 0 {
 			detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 		}
-		return detail, true
+		return detail, true, true
 	}
 
 	cacheValue := remainingUSD * 1_000_000
 
 	var cacheRead, cacheWrite int64
-	if hasTotal {
-		// Branch A: solve the linear system
-		//   CR + CW = cachedTotal
-		//   CR × P_cr + CW × P_cw = cacheValue
-		denom := price.cacheWritePerMTok - price.cacheReadPerMTok
-		if denom <= 0 {
-			return detail, false
+	var estimatedCR, estimatedCW bool
+	switch {
+	case hasOfficialCacheRead:
+		// CR fixed; solve CW from the credit residual.
+		if price.cacheWritePerMTok <= 0 {
+			return detail, false, false
 		}
-		cw := (cacheValue - price.cacheReadPerMTok*float64(cachedTotal)) / denom
+		cw := cacheValue / price.cacheWritePerMTok
 		if cw < 0 {
 			cw = 0
 		}
-		if cw > float64(cachedTotal) {
-			cw = float64(cachedTotal)
+		if hasTotal {
+			maxCW := cachedTotal - detail.CacheReadInputTokens
+			if maxCW < 0 {
+				maxCW = 0
+			}
+			if cw > float64(maxCW) {
+				cw = float64(maxCW)
+			}
 		}
+		cacheRead = detail.CacheReadInputTokens
 		cacheWrite = int64(math.Round(cw))
-		if cacheWrite > cachedTotal {
-			cacheWrite = cachedTotal
-		}
-		cacheRead = cachedTotal - cacheWrite
-	} else {
-		// Branch B: no total — assume CW=0 and back-derive CR.
+		estimatedCW = true
+
+	case hasOfficialCacheWrite:
+		// CW fixed; solve CR from the credit residual.
 		if price.cacheReadPerMTok <= 0 {
-			return detail, false
+			return detail, false, false
 		}
 		cr := cacheValue / price.cacheReadPerMTok
-		if cr <= 0 {
-			return detail, false
+		if cr < 0 {
+			cr = 0
+		}
+		if hasTotal {
+			maxCR := cachedTotal - detail.CacheCreationInputTokens
+			if maxCR < 0 {
+				maxCR = 0
+			}
+			if cr > float64(maxCR) {
+				cr = float64(maxCR)
+			}
 		}
 		cacheRead = int64(math.Round(cr))
-		cacheWrite = 0
+		cacheWrite = detail.CacheCreationInputTokens
+		estimatedCR = true
+
+	default:
+		// Neither side given: existing Branch A (with total) or B (without).
+		if hasTotal {
+			// Branch A: solve the linear system
+			//   CR + CW = cachedTotal
+			//   CR × P_cr + CW × P_cw = cacheValue
+			denom := price.cacheWritePerMTok - price.cacheReadPerMTok
+			if denom <= 0 {
+				return detail, false, false
+			}
+			cw := (cacheValue - price.cacheReadPerMTok*float64(cachedTotal)) / denom
+			if cw < 0 {
+				cw = 0
+			}
+			if cw > float64(cachedTotal) {
+				cw = float64(cachedTotal)
+			}
+			cacheWrite = int64(math.Round(cw))
+			if cacheWrite > cachedTotal {
+				cacheWrite = cachedTotal
+			}
+			cacheRead = cachedTotal - cacheWrite
+		} else {
+			// Branch B: no total — assume CW=0 and back-derive CR.
+			if price.cacheReadPerMTok <= 0 {
+				return detail, false, false
+			}
+			cr := cacheValue / price.cacheReadPerMTok
+			if cr <= 0 {
+				return detail, false, false
+			}
+			cacheRead = int64(math.Round(cr))
+			cacheWrite = 0
+		}
+		estimatedCR = true
+		estimatedCW = true
 	}
 
 	detail.CacheReadInputTokens = cacheRead
@@ -1965,9 +2044,9 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 	}
 
-	log.Debugf("kiro: estimated cache usage: model=%s credits=%.4f cached_total=%d cache_read=%d cache_creation=%d",
-		model, credits, cachedTotal, cacheRead, cacheWrite)
-	return detail, true
+	log.Debugf("kiro: estimated cache usage: model=%s credits=%.4f cached_total=%d cache_read=%d cache_creation=%d official_cr=%t official_cw=%t",
+		model, credits, cachedTotal, cacheRead, cacheWrite, hasOfficialCacheRead, hasOfficialCacheWrite)
+	return detail, estimatedCR, estimatedCW
 }
 
 // usageDetailForInternalStats strips estimated cache fields back into
@@ -1975,17 +2054,26 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 // Kiro credit charges and should not be polluted with token-level estimates;
 // downstream consumers (e.g. sub2api re-billing) read the un-stripped detail
 // from the response payload instead.
-func usageDetailForInternalStats(detail usage.Detail, estimated bool) usage.Detail {
-	if !estimated {
+func usageDetailForInternalStats(detail usage.Detail, estimatedCR, estimatedCW bool) usage.Detail {
+	if !estimatedCR && !estimatedCW {
 		return detail
 	}
-	if detail.CacheReadInputTokens <= 0 && detail.CacheCreationInputTokens <= 0 {
+	var moved int64
+	if estimatedCR {
+		moved += detail.CacheReadInputTokens
+		detail.CacheReadInputTokens = 0
+	}
+	if estimatedCW {
+		moved += detail.CacheCreationInputTokens
+		detail.CacheCreationInputTokens = 0
+	}
+	if moved == 0 {
+		// Officially-reported sides only; nothing to strip.
+		detail.CachedTokens = detail.CacheReadInputTokens + detail.CacheCreationInputTokens
 		return detail
 	}
-	detail.InputTokens += detail.CacheReadInputTokens + detail.CacheCreationInputTokens
-	detail.CachedTokens = 0
-	detail.CacheReadInputTokens = 0
-	detail.CacheCreationInputTokens = 0
+	detail.InputTokens += moved
+	detail.CachedTokens = detail.CacheReadInputTokens + detail.CacheCreationInputTokens
 	return detail
 }
 
@@ -2015,8 +2103,8 @@ type eventStreamMessage struct {
 // parseEventStream parses AWS Event Stream binary format.
 // Extracts text content, tool uses, and stop_reason from the response.
 // Supports embedded [Called ...] tool calls and input buffering for toolUseEvent.
-// Returns: content, toolUses, usageInfo, stopReason, error
-func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, []kiroclaude.KiroToolUse, usage.Detail, string, bool, error) {
+// Returns: content, toolUses, usageInfo, stopReason, estimatedCacheRead, estimatedCacheWrite, error
+func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, []kiroclaude.KiroToolUse, usage.Detail, string, bool, bool, error) {
 	var content strings.Builder
 	var toolUses []kiroclaude.KiroToolUse
 	var usageInfo usage.Detail
@@ -2031,14 +2119,15 @@ func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, [
 	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
 	var upstreamCreditUsage float64       // Accumulated credit usage from meteringEvent.
 	var hasOfficialTokenUsage bool        // Whether tokenUsage supplied authoritative token fields.
-	var hasOfficialCacheUsage bool        // Whether tokenUsage supplied authoritative cache fields.
+	var hasOfficialCacheRead bool         // Whether tokenUsage supplied cacheReadInputTokens.
+	var hasOfficialCacheWrite bool        // Whether tokenUsage supplied cacheWriteInputTokens.
 	var hasUncachedInputTokens bool       // Whether InputTokens explicitly means uncached input.
 
 	for {
 		msg, eventErr := e.readEventStreamMessage(reader)
 		if eventErr != nil {
 			log.Errorf("kiro: parseEventStream error: %v", eventErr)
-			return content.String(), toolUses, usageInfo, stopReason, false, eventErr
+			return content.String(), toolUses, usageInfo, stopReason, false, false, eventErr
 		}
 		if msg == nil {
 			// Normal end of stream (EOF)
@@ -2066,7 +2155,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, [
 				errMsg = msg
 			}
 			log.Errorf("kiro: received AWS error in event stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, false, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
+			return "", nil, usageInfo, stopReason, false, false, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
 		}
 		if errType, hasErrType := event["type"].(string); hasErrType && (errType == "error" || errType == "exception") {
 			// Generic error event
@@ -2079,7 +2168,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, [
 				}
 			}
 			log.Errorf("kiro: received error event in stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, false, fmt.Errorf("kiro API error: %s", errMsg)
+			return "", nil, usageInfo, stopReason, false, false, fmt.Errorf("kiro API error: %s", errMsg)
 		}
 
 		// Extract stop_reason from various event formats
@@ -2227,13 +2316,13 @@ func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, [
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
 					usageInfo.CacheReadInputTokens = int64(cacheReadTokens)
-					hasOfficialCacheUsage = true
+					hasOfficialCacheRead = true
 					log.Debugf("kiro: parseEventStream found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
 				}
 				// cacheWriteInputTokens - tokens written to cache
 				if cacheWriteTokens, ok := tokenUsage["cacheWriteInputTokens"].(float64); ok {
 					usageInfo.CacheCreationInputTokens = int64(cacheWriteTokens)
-					hasOfficialCacheUsage = true
+					hasOfficialCacheWrite = true
 					log.Debugf("kiro: parseEventStream found cacheWriteInputTokens in tokenUsage: %d", int64(cacheWriteTokens))
 				}
 				usageInfo.CachedTokens = usageInfo.CacheReadInputTokens + usageInfo.CacheCreationInputTokens
@@ -2404,7 +2493,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, [
 
 			// For other errors, return the error
 			if errMsg != "" {
-				return "", nil, usageInfo, stopReason, false, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
+				return "", nil, usageInfo, stopReason, false, false, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
 			}
 
 		default:
@@ -2518,12 +2607,12 @@ func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, [
 		}
 	}
 
-	var estimated bool
+	var estimatedCR, estimatedCW bool
 	if hasUncachedInputTokens {
-		usageInfo, estimated = estimateKiroCacheUsage(model, usageInfo, upstreamCreditUsage, hasOfficialCacheUsage, hasUncachedInputTokens)
+		usageInfo, estimatedCR, estimatedCW = estimateKiroCacheUsage(model, usageInfo, upstreamCreditUsage, hasOfficialCacheRead, hasOfficialCacheWrite, hasUncachedInputTokens)
 	}
 
-	return cleanedContent, toolUses, usageInfo, stopReason, estimated, nil
+	return cleanedContent, toolUses, usageInfo, stopReason, estimatedCR, estimatedCW, nil
 }
 
 // readEventStreamMessage reads and validates a single AWS Event Stream message.
@@ -2754,9 +2843,11 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	var upstreamCreditUsage float64       // Accumulated credit usage from meteringEvent.
 	var hasUpstreamUsage bool             // Whether we received usage from upstream
 	var hasOfficialTokenUsage bool        // Whether tokenUsage supplied authoritative token fields.
-	var hasOfficialCacheUsage bool        // Whether tokenUsage supplied authoritative cache fields.
+	var hasOfficialCacheRead bool         // Whether tokenUsage supplied cacheReadInputTokens.
+	var hasOfficialCacheWrite bool        // Whether tokenUsage supplied cacheWriteInputTokens.
 	var hasUncachedInputTokens bool       // Whether InputTokens explicitly means uncached input.
-	var estimatedCacheUsage bool          // Whether end-of-stream estimator filled in cache fields.
+	var estimatedCacheRead bool           // Whether end-of-stream estimator filled in cache_read.
+	var estimatedCacheWrite bool          // Whether end-of-stream estimator filled in cache_creation.
 
 	// Translator param for maintaining tool call state across streaming events
 	// IMPORTANT: This must persist across all TranslateStream calls
@@ -2807,7 +2898,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Ensure usage is published even on early return
 	defer func() {
-		reporter.publish(ctx, usageDetailForInternalStats(totalUsage, estimatedCacheUsage))
+		reporter.publish(ctx, usageDetailForInternalStats(totalUsage, estimatedCacheRead, estimatedCacheWrite))
 	}()
 
 	for {
@@ -3606,14 +3697,14 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
 					totalUsage.CacheReadInputTokens = int64(cacheReadTokens)
-					hasOfficialCacheUsage = true
+					hasOfficialCacheRead = true
 					hasUpstreamUsage = true
 					log.Debugf("kiro: streamToChannel found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
 				}
 				// cacheWriteInputTokens - tokens written to cache
 				if cacheWriteTokens, ok := tokenUsage["cacheWriteInputTokens"].(float64); ok {
 					totalUsage.CacheCreationInputTokens = int64(cacheWriteTokens)
-					hasOfficialCacheUsage = true
+					hasOfficialCacheWrite = true
 					hasUpstreamUsage = true
 					log.Debugf("kiro: streamToChannel found cacheWriteInputTokens in tokenUsage: %d", int64(cacheWriteTokens))
 				}
@@ -3819,7 +3910,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// fallback would otherwise look authoritative and force-route credit-only
 	// requests into the linear-solve path with cachedTotal=0.
 	if hasUncachedInputTokens {
-		totalUsage, estimatedCacheUsage = estimateKiroCacheUsage(model, totalUsage, upstreamCreditUsage, hasOfficialCacheUsage, hasUncachedInputTokens)
+		totalUsage, estimatedCacheRead, estimatedCacheWrite = estimateKiroCacheUsage(model, totalUsage, upstreamCreditUsage, hasOfficialCacheRead, hasOfficialCacheWrite, hasUncachedInputTokens)
 	}
 
 	// Update TotalTokens when upstream did not provide an authoritative total.

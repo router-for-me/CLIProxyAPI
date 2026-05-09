@@ -268,7 +268,7 @@ func TestParseEventStream_KiroCacheUsageDoesNotDoubleCountInput(t *testing.T) {
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
+	_, _, usageInfo, _, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -291,12 +291,12 @@ func TestParseEventStream_KiroCacheUsageDoesNotDoubleCountInput(t *testing.T) {
 
 func TestEstimateKiroCacheUsage_NoCredits(t *testing.T) {
 	// Branch C: total only, no credits. All inferred cache → CR.
-	detail, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
 		InputTokens:  10,
 		OutputTokens: 2,
 		TotalTokens:  22,
-	}, 0, false, true)
-	if !estimated {
+	}, 0, false, false, true)
+	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
 	if detail.CacheReadInputTokens != 10 {
@@ -314,25 +314,26 @@ func TestEstimateKiroCacheUsage_NoCredits(t *testing.T) {
 }
 
 func TestEstimateKiroCacheUsage_BranchA_Sonnet(t *testing.T) {
+	// Sonnet MSRP: in=3, out=15, cw=3.75, cr=0.30; 1 credit = $0.12.
 	// uncached=1000, output=500, total=21000 → cached_total=19500
-	// known_USD = (1000×3.9 + 500×19.5)/1M = 0.013650
-	// remaining_USD = 0.034 - 0.013650 = 0.020350
-	// cache_value = 20350
-	// CW = (20350 - 0.39×19500) / (4.875 - 0.39) = (20350 - 7605) / 4.485 ≈ 2842.36
-	// CR = 19500 - 2842 = 16658
-	detail, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
+	// known_USD = (1000×3 + 500×15)/1M = 0.0105
+	// target_USD = 0.3 × 0.12 = 0.036
+	// remaining_USD = 0.0255 → cache_value = 25500
+	// CW = (25500 - 0.30×19500) / (3.75 - 0.30) = (25500 - 5850) / 3.45 ≈ 5695.65
+	// CR = 19500 - 5696 = 13804
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
 		InputTokens:  1000,
 		OutputTokens: 500,
 		TotalTokens:  21000,
-	}, 0.85, false, true)
-	if !estimated {
+	}, 0.3, false, false, true)
+	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
-	if detail.CacheCreationInputTokens != 2842 {
-		t.Fatalf("CacheCreationInputTokens = %d, want 2842", detail.CacheCreationInputTokens)
+	if detail.CacheCreationInputTokens != 5696 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 5696", detail.CacheCreationInputTokens)
 	}
-	if detail.CacheReadInputTokens != 16658 {
-		t.Fatalf("CacheReadInputTokens = %d, want 16658", detail.CacheReadInputTokens)
+	if detail.CacheReadInputTokens != 13804 {
+		t.Fatalf("CacheReadInputTokens = %d, want 13804", detail.CacheReadInputTokens)
 	}
 	if detail.CachedTokens != 19500 {
 		t.Fatalf("CachedTokens = %d, want 19500", detail.CachedTokens)
@@ -340,40 +341,40 @@ func TestEstimateKiroCacheUsage_BranchA_Sonnet(t *testing.T) {
 }
 
 func TestEstimateKiroCacheUsage_BranchA_Opus(t *testing.T) {
-	// Opus prices: in=33, out=165, cw=41.25, cr=3.30
+	// Opus MSRP: in=15, out=75, cw=18.75, cr=1.50; 1 credit = $0.12.
 	// uncached=100, output=200, total=10300 → cached_total=10000
-	// known_USD = (100×33 + 200×165)/1M = 0.036300
-	// Pick credits=2.0 → target_USD = 0.08, remaining_USD = 0.0437, cache_value = 43700
-	// CW = (43700 - 3.30×10000) / (41.25 - 3.30) = (43700 - 33000) / 37.95 ≈ 281.95 → 282
-	// CR = 10000 - 282 = 9718
-	detail, estimated := estimateKiroCacheUsage("claude-opus-4.5", usage.Detail{
+	// known_USD = (100×15 + 200×75)/1M = 0.0165
+	// target_USD = 0.35 × 0.12 = 0.042 → remaining_USD = 0.0255 → cache_value = 25500
+	// CW = (25500 - 1.50×10000) / (18.75 - 1.50) = (25500 - 15000) / 17.25 ≈ 608.70 → 609
+	// CR = 10000 - 609 = 9391
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-opus-4.5", usage.Detail{
 		InputTokens:  100,
 		OutputTokens: 200,
 		TotalTokens:  10300,
-	}, 2.0, false, true)
-	if !estimated {
+	}, 0.35, false, false, true)
+	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
-	if detail.CacheCreationInputTokens != 282 {
-		t.Fatalf("CacheCreationInputTokens = %d, want 282", detail.CacheCreationInputTokens)
+	if detail.CacheCreationInputTokens != 609 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 609", detail.CacheCreationInputTokens)
 	}
-	if detail.CacheReadInputTokens != 9718 {
-		t.Fatalf("CacheReadInputTokens = %d, want 9718", detail.CacheReadInputTokens)
+	if detail.CacheReadInputTokens != 9391 {
+		t.Fatalf("CacheReadInputTokens = %d, want 9391", detail.CacheReadInputTokens)
 	}
 }
 
 func TestEstimateKiroCacheUsage_BranchA_Haiku(t *testing.T) {
-	// Haiku prices: in=0.4, out=2.0, cw=0.5, cr=0.04
+	// Haiku MSRP: in=1.0, out=5.0, cw=1.25, cr=0.10; 1 credit = $0.12.
 	// uncached=2000, output=1000, total=22000 → cached_total=19000
-	// known_USD = (2000×0.4 + 1000×2.0)/1M = 0.0028
-	// credits=0.05 → target_USD = 0.002, remaining_USD = -0.0008
+	// known_USD = (2000×1 + 1000×5)/1M = 0.007
+	// credits=0.05 → target_USD = 0.006 → remaining_USD = -0.001
 	// remaining_USD ≤ 0 with cached_total > 0 → fall to Branch C: CR=cached_total, CW=0
-	detail, estimated := estimateKiroCacheUsage("claude-haiku-4.5", usage.Detail{
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-haiku-4.5", usage.Detail{
 		InputTokens:  2000,
 		OutputTokens: 1000,
 		TotalTokens:  22000,
-	}, 0.05, false, true)
-	if !estimated {
+	}, 0.05, false, false, true)
+	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
 	if detail.CacheReadInputTokens != 19000 {
@@ -387,15 +388,15 @@ func TestEstimateKiroCacheUsage_BranchA_Haiku(t *testing.T) {
 func TestEstimateKiroCacheUsage_BranchA_ClampCWHigh(t *testing.T) {
 	// Force a scenario where the linear solve yields CW > cached_total.
 	// Sonnet, uncached=10, output=10, total=1010 → cached_total=990
-	// known_USD = (10×3.9 + 10×19.5)/1M = 0.000234
-	// credits=10 → target_USD = 0.4 → remaining_USD ≈ 0.3998 → cache_value ≈ 399766
-	// solve CW = (399766 - 0.39×990)/(4.875-0.39) ≈ 89034 → > cached_total, clamp to 990, CR=0.
-	detail, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
+	// known_USD = (10×3 + 10×15)/1M = 0.000180
+	// credits=10 → target_USD = 1.2 → remaining ≈ 1.19982 → cache_value ≈ 1199820
+	// solve CW = (1199820 - 0.30×990)/(3.75-0.30) ≈ 347688 → > cached_total, clamp to 990, CR=0.
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
 		InputTokens:  10,
 		OutputTokens: 10,
 		TotalTokens:  1010,
-	}, 10, false, true)
-	if !estimated {
+	}, 10, false, false, true)
+	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
 	if detail.CacheCreationInputTokens != 990 {
@@ -409,18 +410,15 @@ func TestEstimateKiroCacheUsage_BranchA_ClampCWHigh(t *testing.T) {
 func TestEstimateKiroCacheUsage_BranchA_ClampCWLow(t *testing.T) {
 	// Force a scenario where the linear solve yields CW < 0.
 	// Sonnet, uncached=100, output=100, total=10100 → cached_total=9900
-	// known_USD = (100×3.9 + 100×19.5)/1M = 0.00234
-	// credits=0.2 → target_USD = 0.008 → remaining_USD ≈ 0.00566 → cache_value ≈ 5660
-	// solve CW = (5660 - 0.39×9900)/(4.875-0.39) = (5660 - 3861)/4.485 ≈ 401.1 → positive.
-	// Need a smaller cache_value: drop credits so remaining is barely above 0.39×cached_total/1M? No.
-	// Use credits=0.15 → target_USD = 0.006 → remaining = 0.00366 → cache_value = 3660
-	// solve CW = (3660 - 3861)/4.485 ≈ -44.8 → clamp to 0, CR = 9900.
-	detail, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
+	// known_USD = (100×3 + 100×15)/1M = 0.0018
+	// credits=0.03 → target_USD = 0.0036 → remaining = 0.0018 → cache_value = 1800
+	// solve CW = (1800 - 0.30×9900)/(3.75-0.30) = (1800 - 2970)/3.45 ≈ -339 → clamp to 0, CR = 9900.
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
 		InputTokens:  100,
 		OutputTokens: 100,
 		TotalTokens:  10100,
-	}, 0.15, false, true)
-	if !estimated {
+	}, 0.03, false, false, true)
+	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
 	if detail.CacheCreationInputTokens != 0 {
@@ -434,21 +432,21 @@ func TestEstimateKiroCacheUsage_BranchA_ClampCWLow(t *testing.T) {
 func TestEstimateKiroCacheUsage_BranchB_NoTotal(t *testing.T) {
 	// uncached + credits, no total. Assume CW=0, back-derive CR from credits.
 	// Sonnet, uncached=1000, output=500, no total
-	// known_USD = (1000×3.9 + 500×19.5)/1M = 0.013650
-	// credits=0.5 → target_USD = 0.02 → remaining_USD = 0.00635 → cache_value = 6350
-	// CR = 6350 / 0.39 ≈ 16282
-	detail, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
+	// known_USD = (1000×3 + 500×15)/1M = 0.0105
+	// credits=0.10 → target_USD = 0.012 → remaining = 0.0015 → cache_value = 1500
+	// CR = 1500 / 0.30 = 5000
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
 		InputTokens:  1000,
 		OutputTokens: 500,
-	}, 0.5, false, true)
-	if !estimated {
+	}, 0.10, false, false, true)
+	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
 	if detail.CacheCreationInputTokens != 0 {
 		t.Fatalf("CacheCreationInputTokens = %d, want 0 (Branch B)", detail.CacheCreationInputTokens)
 	}
-	if detail.CacheReadInputTokens < 16280 || detail.CacheReadInputTokens > 16285 {
-		t.Fatalf("CacheReadInputTokens = %d, want ≈16282", detail.CacheReadInputTokens)
+	if detail.CacheReadInputTokens != 5000 {
+		t.Fatalf("CacheReadInputTokens = %d, want 5000", detail.CacheReadInputTokens)
 	}
 	if detail.TotalTokens != detail.InputTokens+detail.OutputTokens+detail.CachedTokens {
 		t.Fatalf("TotalTokens = %d, want backfilled to input+output+cached", detail.TotalTokens)
@@ -464,12 +462,89 @@ func TestEstimateKiroCacheUsage_OfficialCacheSkipped(t *testing.T) {
 		CacheCreationInputTokens: 7500,
 		CachedTokens:             19500,
 	}
-	out, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, true, true)
-	if estimated {
-		t.Fatalf("estimated = true, want false (hasOfficialCache should skip)")
+	out, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, true, true, true)
+	if estCR || estCW {
+		t.Fatalf("estimated = true, want false (both cache fields official should skip)")
 	}
 	if out != in {
 		t.Fatalf("detail mutated: got %+v, want %+v", out, in)
+	}
+}
+
+// Kiro reports cacheReadInputTokens but never cacheWriteInputTokens. The
+// estimator must keep the official CR and back-derive CW from credits.
+func TestEstimateKiroCacheUsage_OnlyCROfficial_SolveCW(t *testing.T) {
+	// Sonnet, uncached=0, output=247, official CR=9666, no total
+	// known_USD = (0×3 + 247×15 + 9666×0.30)/1M = 0.0066048
+	// credits=0.2595 → target = 0.03114 → remaining = 0.024535 → cache_value = 24535
+	// CW = 24535 / 3.75 ≈ 6542.7 → 6543
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
+		InputTokens:          0,
+		OutputTokens:         247,
+		CacheReadInputTokens: 9666,
+		CachedTokens:         9666,
+	}, 0.2595, true, false, true)
+	if estCR {
+		t.Fatalf("estCR = true, want false (CR was officially reported, must not be flagged as estimated)")
+	}
+	if !estCW {
+		t.Fatalf("estCW = false, want true (CW must be derived from credits)")
+	}
+	if detail.CacheReadInputTokens != 9666 {
+		t.Fatalf("CacheReadInputTokens = %d, want 9666 (official preserved)", detail.CacheReadInputTokens)
+	}
+	if detail.CacheCreationInputTokens != 6543 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 6543", detail.CacheCreationInputTokens)
+	}
+	if detail.CachedTokens != 9666+6543 {
+		t.Fatalf("CachedTokens = %d, want %d", detail.CachedTokens, 9666+6543)
+	}
+}
+
+// When CR is officially given but the credit charge implies no extra cache
+// (or the pricing is off), preserve the official CR untouched and skip CW.
+func TestEstimateKiroCacheUsage_OnlyCROfficial_RemainingNonPositive(t *testing.T) {
+	in := usage.Detail{
+		InputTokens:          5000,
+		OutputTokens:         500,
+		CacheReadInputTokens: 1000,
+		CachedTokens:         1000,
+	}
+	// known_USD = (5000×3 + 500×15 + 1000×0.30)/1M = 0.022800
+	// credits=0.10 → target = 0.012 → remaining = -0.0108 → preserve as-is.
+	out, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.10, true, false, true)
+	if estCR || estCW {
+		t.Fatalf("estimated = true, want false (no positive room for CW)")
+	}
+	if out != in {
+		t.Fatalf("detail mutated: got %+v, want %+v", out, in)
+	}
+}
+
+// Symmetric branch: CW officially given but CR unknown. Kiro doesn't actually
+// produce this shape today, but the estimator supports it for completeness.
+func TestEstimateKiroCacheUsage_OnlyCWOfficial_SolveCR(t *testing.T) {
+	// Sonnet, uncached=0, output=247, official CW=1000, no total
+	// known_USD = (0×3 + 247×15 + 1000×3.75)/1M = 0.007455
+	// credits=0.20 → target = 0.024 → remaining = 0.016545 → cache_value = 16545
+	// CR = 16545 / 0.30 = 55150
+	detail, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", usage.Detail{
+		InputTokens:              0,
+		OutputTokens:             247,
+		CacheCreationInputTokens: 1000,
+		CachedTokens:             1000,
+	}, 0.20, false, true, true)
+	if !estCR {
+		t.Fatalf("estCR = false, want true (CR must be derived)")
+	}
+	if estCW {
+		t.Fatalf("estCW = true, want false (CW was officially reported)")
+	}
+	if detail.CacheCreationInputTokens != 1000 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 1000 (official preserved)", detail.CacheCreationInputTokens)
+	}
+	if detail.CacheReadInputTokens != 55150 {
+		t.Fatalf("CacheReadInputTokens = %d, want 55150", detail.CacheReadInputTokens)
 	}
 }
 
@@ -479,8 +554,8 @@ func TestEstimateKiroCacheUsage_NoUncachedSkipped(t *testing.T) {
 		OutputTokens: 500,
 		TotalTokens:  21000,
 	}
-	out, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, false, false)
-	if estimated {
+	out, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, false, false, false)
+	if estCR || estCW {
 		t.Fatalf("estimated = true, want false (hasUncached=false should skip)")
 	}
 	if out != in {
@@ -496,8 +571,8 @@ func TestEstimateKiroCacheUsage_TotalProvidedNoCacheRoom(t *testing.T) {
 		OutputTokens: 500,
 		TotalTokens:  1500,
 	}
-	out, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, false, true)
-	if estimated {
+	out, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, false, false, true)
+	if estCR || estCW {
 		t.Fatalf("estimated = true, want false (total proves no cache room)")
 	}
 	if out != in {
@@ -513,8 +588,8 @@ func TestEstimateKiroCacheUsage_TotalContradictory(t *testing.T) {
 		OutputTokens: 500,
 		TotalTokens:  1200,
 	}
-	out, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, false, true)
-	if estimated {
+	out, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0.85, false, false, true)
+	if estCR || estCW {
 		t.Fatalf("estimated = true, want false (contradictory total)")
 	}
 	if out != in {
@@ -527,8 +602,8 @@ func TestEstimateKiroCacheUsage_NoTotalNoCredits(t *testing.T) {
 		InputTokens:  1000,
 		OutputTokens: 500,
 	}
-	out, estimated := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0, false, true)
-	if estimated {
+	out, estCR, estCW := estimateKiroCacheUsage("claude-sonnet-4.5", in, 0, false, false, true)
+	if estCR || estCW {
 		t.Fatalf("estimated = true, want false (no signal)")
 	}
 	if out != in {
@@ -545,7 +620,7 @@ func TestUsageDetailForInternalStats_StripsEstimated(t *testing.T) {
 		CacheCreationInputTokens: 3500,
 		CachedTokens:             19500,
 	}
-	stripped := usageDetailForInternalStats(in, true)
+	stripped := usageDetailForInternalStats(in, true, true)
 	if stripped.InputTokens != 1000+16000+3500 {
 		t.Fatalf("InputTokens = %d, want 20500 (uncached + cache_read + cache_write)", stripped.InputTokens)
 	}
@@ -566,9 +641,59 @@ func TestUsageDetailForInternalStats_NoOpWhenNotEstimated(t *testing.T) {
 		CacheCreationInputTokens: 3500,
 		CachedTokens:             19500,
 	}
-	out := usageDetailForInternalStats(in, false)
+	out := usageDetailForInternalStats(in, false, false)
 	if out != in {
 		t.Fatalf("detail mutated when estimated=false: got %+v, want %+v", out, in)
+	}
+}
+
+// Only-CW-estimated case: an officially reported CR must NOT be folded back
+// into InputTokens — only the estimated CW is stripped.
+func TestUsageDetailForInternalStats_PreservesOfficialCacheRead(t *testing.T) {
+	in := usage.Detail{
+		InputTokens:              1000,
+		OutputTokens:             500,
+		TotalTokens:              21000,
+		CacheReadInputTokens:     16000, // official
+		CacheCreationInputTokens: 3500,  // estimated
+		CachedTokens:             19500,
+	}
+	out := usageDetailForInternalStats(in, false, true)
+	if out.InputTokens != 1000+3500 {
+		t.Fatalf("InputTokens = %d, want 4500 (uncached + estimated CW only)", out.InputTokens)
+	}
+	if out.CacheReadInputTokens != 16000 {
+		t.Fatalf("CacheReadInputTokens = %d, want 16000 (official preserved)", out.CacheReadInputTokens)
+	}
+	if out.CacheCreationInputTokens != 0 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 0 (estimated stripped)", out.CacheCreationInputTokens)
+	}
+	if out.CachedTokens != 16000 {
+		t.Fatalf("CachedTokens = %d, want 16000 (only CR remains)", out.CachedTokens)
+	}
+}
+
+// Symmetric: only CR estimated, official CW preserved.
+func TestUsageDetailForInternalStats_PreservesOfficialCacheWrite(t *testing.T) {
+	in := usage.Detail{
+		InputTokens:              1000,
+		OutputTokens:             500,
+		CacheReadInputTokens:     16000, // estimated
+		CacheCreationInputTokens: 3500,  // official
+		CachedTokens:             19500,
+	}
+	out := usageDetailForInternalStats(in, true, false)
+	if out.InputTokens != 1000+16000 {
+		t.Fatalf("InputTokens = %d, want 17000 (uncached + estimated CR only)", out.InputTokens)
+	}
+	if out.CacheReadInputTokens != 0 {
+		t.Fatalf("CacheReadInputTokens = %d, want 0 (estimated stripped)", out.CacheReadInputTokens)
+	}
+	if out.CacheCreationInputTokens != 3500 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 3500 (official preserved)", out.CacheCreationInputTokens)
+	}
+	if out.CachedTokens != 3500 {
+		t.Fatalf("CachedTokens = %d, want 3500 (only CW remains)", out.CachedTokens)
 	}
 }
 
@@ -583,7 +708,7 @@ func TestParseEventStream_DoesNotInferCacheFromGenericTotalTokens(t *testing.T) 
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
+	_, _, usageInfo, _, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -612,32 +737,32 @@ func TestParseEventStream_EstimatesCacheFromCredits(t *testing.T) {
 	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
 		"meteringEvent": {
 			"unit": "credit",
-			"usage": 0.85
+			"usage": 0.3
 		}
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, estimated, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
+	_, _, usageInfo, _, estCR, estCW, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
-	if !estimated {
-		t.Fatalf("estimated = false, want true (credits + total + no official cache)")
+	if !estCR || !estCW {
+		t.Fatalf("estimatedCR=%t estimatedCW=%t, want both true (credits + total + no official cache)", estCR, estCW)
 	}
-	// Math (sonnet @ 1.3 multiplier, 1 credit = $0.04):
-	//   target_USD = 0.034
-	//   known_USD = (1000×3.9 + 500×19.5)/1M = 0.013650
-	//   cache_value = 20350; cached_total = 19500
-	//   CW = (20350 - 0.39×19500) / (4.875 - 0.39) ≈ 2842
-	//   CR = 19500 - 2842 = 16658
+	// Math (sonnet MSRP, 1 credit = $0.12):
+	//   target_USD = 0.036
+	//   known_USD = (1000×3 + 500×15)/1M = 0.0105
+	//   cache_value = 25500; cached_total = 19500
+	//   CW = (25500 - 0.30×19500) / (3.75 - 0.30) ≈ 5696
+	//   CR = 19500 - 5696 = 13804
 	if usageInfo.InputTokens != 1000 {
 		t.Fatalf("InputTokens = %d, want 1000 (uncached preserved)", usageInfo.InputTokens)
 	}
-	if usageInfo.CacheCreationInputTokens != 2842 {
-		t.Fatalf("CacheCreationInputTokens = %d, want 2842", usageInfo.CacheCreationInputTokens)
+	if usageInfo.CacheCreationInputTokens != 5696 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 5696", usageInfo.CacheCreationInputTokens)
 	}
-	if usageInfo.CacheReadInputTokens != 16658 {
-		t.Fatalf("CacheReadInputTokens = %d, want 16658", usageInfo.CacheReadInputTokens)
+	if usageInfo.CacheReadInputTokens != 13804 {
+		t.Fatalf("CacheReadInputTokens = %d, want 13804", usageInfo.CacheReadInputTokens)
 	}
 	if usageInfo.CachedTokens != 19500 {
 		t.Fatalf("CachedTokens = %d, want 19500", usageInfo.CachedTokens)
@@ -667,7 +792,7 @@ func TestParseEventStream_UsageEventDoesNotOverwriteUncachedInput(t *testing.T) 
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
+	_, _, usageInfo, _, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -696,7 +821,7 @@ func TestParseEventStream_TotalTokensFallbackIncludesCache(t *testing.T) {
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
+	_, _, usageInfo, _, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -732,7 +857,7 @@ func TestParseEventStream_SupplementaryWebLinksDoesNotOverwriteUncachedInput(t *
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
+	_, _, usageInfo, _, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -766,7 +891,7 @@ func TestParseEventStream_LegacyMetadataDoesNotOverwriteAllCached(t *testing.T) 
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
+	_, _, usageInfo, _, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "claude-sonnet-4.5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -858,7 +983,7 @@ func TestStreamToChannel_EstimatesCacheFromCreditsBranchB(t *testing.T) {
 		}
 	}`))
 	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
-		"meteringEvent": {"unit": "credit", "usage": 0.5}
+		"meteringEvent": {"unit": "credit", "usage": 0.10}
 	}`))
 
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
@@ -889,13 +1014,13 @@ func TestStreamToChannel_EstimatesCacheFromCreditsBranchB(t *testing.T) {
 	if messageDelta == "" {
 		t.Fatalf("expected message_delta event")
 	}
-	// Sonnet @1.3, 1 credit=$0.04: target=0.02, known=(1000×3.9+500×19.5)/1M=0.013650,
-	// remaining=0.00635, cache_value=6350, CR=6350/0.39≈16282, CW=0.
+	// Sonnet MSRP, 1 credit=$0.12: target=0.012, known=(1000×3+500×15)/1M=0.0105,
+	// remaining=0.0015, cache_value=1500, CR=1500/0.30=5000, CW=0.
 	if got := gjson.Get(messageDelta, "usage.input_tokens").Int(); got != 1000 {
 		t.Fatalf("usage.input_tokens = %d, want uncached 1000", got)
 	}
-	if got := gjson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got < 16280 || got > 16285 {
-		t.Fatalf("usage.cache_read_input_tokens = %d, want ≈16282", got)
+	if got := gjson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 5000 {
+		t.Fatalf("usage.cache_read_input_tokens = %d, want 5000", got)
 	}
 	if got := gjson.Get(messageDelta, "usage.cache_creation_input_tokens").Int(); got != 0 {
 		t.Fatalf("usage.cache_creation_input_tokens = %d, want 0 (Branch B)", got)
