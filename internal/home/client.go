@@ -20,6 +20,7 @@ const (
 	redisChannelConfig = "config"
 	redisKeyModels     = "models"
 	redisKeyUsage      = "usage"
+	redisKeyRequestLog = "request-log"
 
 	homeReconnectInterval = time.Second
 )
@@ -259,6 +260,16 @@ func (c *Client) LPushUsage(ctx context.Context, payload []byte) error {
 		return nil
 	}
 	return c.cmd.LPush(ctx, redisKeyUsage, payload).Err()
+}
+
+func (c *Client) RPushRequestLog(ctx context.Context, payload []byte) error {
+	if err := c.ensureClients(); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	return c.cmd.RPush(ctx, redisKeyRequestLog, payload).Err()
 }
 
 // StartConfigSubscriber connects to home, fetches config once via GET config, then subscribes to

@@ -67,7 +67,9 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
-	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
+	return logger
 }
 
 // WithMiddleware appends additional Gin middleware during server construction.
@@ -1194,6 +1196,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			s.loggerToggle(cfg.RequestLog)
 		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
 			toggler.SetEnabled(cfg.RequestLog)
+		}
+	}
+
+	if oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled {
+		if setter, ok := s.requestLogger.(interface{ SetHomeEnabled(bool) }); ok {
+			setter.SetHomeEnabled(cfg.Home.Enabled)
 		}
 	}
 
