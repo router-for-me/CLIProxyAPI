@@ -63,6 +63,20 @@ func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageIgnoresUsageWithoutTokenFields(t *testing.T) {
+	lines := map[string][]byte{
+		"empty object":  []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[],"usage":{}}`),
+		"metadata only": []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[],"usage":{"status":"pending"}}`),
+	}
+	for name, line := range lines {
+		t.Run(name, func(t *testing.T) {
+			if detail, ok := ParseOpenAIStreamUsage(line); ok {
+				t.Fatalf("ParseOpenAIStreamUsage() = (%+v, true), want false for usage without token fields", detail)
+			}
+		})
+	}
+}
+
 func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
 	detail, ok := ParseOpenAIStreamUsage(line)
