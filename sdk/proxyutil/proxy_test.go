@@ -1,8 +1,12 @@
 package proxyutil
 
 import (
+	"bufio"
+	"io"
+	"net"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func mustDefaultTransport(t *testing.T) *http.Transport {
@@ -157,5 +161,69 @@ func TestBuildHTTPTransportSOCKS5HProxy(t *testing.T) {
 	}
 	if transport.DialContext == nil {
 		t.Fatal("expected SOCKS5H transport to have custom DialContext")
+	}
+}
+
+func TestBuildDialerHTTPProxyConnect(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("Listen returned error: %v", errListen)
+	}
+	defer listener.Close()
+
+	reqCh := make(chan *http.Request, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			errCh <- errAccept
+			return
+		}
+		defer conn.Close()
+
+		req, errRead := http.ReadRequest(bufio.NewReader(conn))
+		if errRead != nil {
+			errCh <- errRead
+			return
+		}
+		_ = req.Body.Close()
+		reqCh <- req
+
+		if _, errWrite := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); errWrite != nil {
+			errCh <- errWrite
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	dialer, mode, errBuild := BuildDialer("http://user:pass@" + listener.Addr().String())
+	if errBuild != nil {
+		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+
+	conn, errDial := dialer.Dial("tcp", "api.anthropic.com:443")
+	if errDial != nil {
+		t.Fatalf("Dial returned error: %v", errDial)
+	}
+	_ = conn.Close()
+
+	select {
+	case req := <-reqCh:
+		if req.Method != http.MethodConnect {
+			t.Fatalf("method = %s, want CONNECT", req.Method)
+		}
+		if req.Host != "api.anthropic.com:443" {
+			t.Fatalf("host = %s, want api.anthropic.com:443", req.Host)
+		}
+		if got := req.Header.Get("Proxy-Authorization"); got != "Basic dXNlcjpwYXNz" {
+			t.Fatalf("Proxy-Authorization = %q, want Basic dXNlcjpwYXNz", got)
+		}
+	case err := <-errCh:
+		t.Fatalf("proxy server returned error: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for CONNECT request")
 	}
 }

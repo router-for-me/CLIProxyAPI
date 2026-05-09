@@ -1,6 +1,10 @@
 package helps
 
 import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -24,6 +28,8 @@ type utlsRoundTripper struct {
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
 }
+
+var errHTTP2NotNegotiated = errors.New("http2 was not negotiated")
 
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
@@ -84,12 +90,16 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
+	tlsConfig := &tls.Config{ServerName: host, NextProtos: []string{"h2", "http/1.1"}}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()
 		return nil, err
+	}
+	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
+		tlsConn.Close()
+		return nil, errHTTP2NotNegotiated
 	}
 
 	tr := &http2.Transport{}
@@ -112,6 +122,9 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	h2Conn, err := t.getOrCreateConnection(hostname, addr)
 	if err != nil {
+		if errors.Is(err, errHTTP2NotNegotiated) {
+			return t.roundTripHTTP1(req, hostname, addr)
+		}
 		return nil, err
 	}
 
@@ -126,6 +139,52 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	return resp, nil
+}
+
+func (t *utlsRoundTripper) roundTripHTTP1(req *http.Request, host, addr string) (*http.Response, error) {
+	conn, err := t.dialer.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsConfig := &tls.Config{ServerName: host, NextProtos: []string{"http/1.1"}}
+	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	if err := tlsConn.Handshake(); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+
+	if negotiated := tlsConn.ConnectionState().NegotiatedProtocol; negotiated == "h2" {
+		_ = tlsConn.Close()
+		return nil, fmt.Errorf("unexpected HTTP/2 ALPN negotiation in HTTP/1.1 fallback")
+	}
+
+	if err := req.Write(tlsConn); err != nil {
+		_ = tlsConn.Close()
+		return nil, err
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(tlsConn), req)
+	if err != nil {
+		_ = tlsConn.Close()
+		return nil, err
+	}
+	resp.Body = &connClosingBody{ReadCloser: resp.Body, conn: tlsConn}
+	return resp, nil
+}
+
+type connClosingBody struct {
+	io.ReadCloser
+	conn io.Closer
+}
+
+func (b *connClosingBody) Close() error {
+	bodyErr := b.ReadCloser.Close()
+	connErr := b.conn.Close()
+	if bodyErr != nil {
+		return bodyErr
+	}
+	return connErr
 }
 
 // anthropicHosts contains the hosts that should use utls Chrome TLS fingerprint.

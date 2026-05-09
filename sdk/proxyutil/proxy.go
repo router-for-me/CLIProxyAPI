@@ -1,8 +1,12 @@
 package proxyutil
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -134,6 +138,9 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	case ModeDirect:
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
+		if setting.URL.Scheme == "http" || setting.URL.Scheme == "https" {
+			return &httpConnectDialer{proxyURL: setting.URL, forward: proxy.Direct}, setting.Mode, nil
+		}
 		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
 		if errDialer != nil {
 			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
@@ -142,4 +149,74 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+type httpConnectDialer struct {
+	proxyURL *url.URL
+	forward  proxy.Dialer
+}
+
+func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
+	if d == nil || d.proxyURL == nil {
+		return nil, fmt.Errorf("http proxy dialer is not configured")
+	}
+	if network != "tcp" && network != "tcp4" && network != "tcp6" {
+		return nil, fmt.Errorf("http proxy only supports tcp, got %s", network)
+	}
+
+	forward := d.forward
+	if forward == nil {
+		forward = proxy.Direct
+	}
+
+	conn, errDial := forward.Dial(network, d.proxyURL.Host)
+	if errDial != nil {
+		return nil, errDial
+	}
+
+	if d.proxyURL.Scheme == "https" {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: d.proxyURL.Hostname()})
+		if errHandshake := tlsConn.Handshake(); errHandshake != nil {
+			_ = conn.Close()
+			return nil, errHandshake
+		}
+		conn = tlsConn
+	}
+
+	req := &http.Request{Method: http.MethodConnect, URL: &url.URL{Host: addr}, Host: addr}
+	var connectBuilder strings.Builder
+	connectBuilder.WriteString("CONNECT ")
+	connectBuilder.WriteString(addr)
+	connectBuilder.WriteString(" HTTP/1.1\r\nHost: ")
+	connectBuilder.WriteString(addr)
+	connectBuilder.WriteString("\r\n")
+	if d.proxyURL.User != nil {
+		username := d.proxyURL.User.Username()
+		password, _ := d.proxyURL.User.Password()
+		token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		connectBuilder.WriteString("Proxy-Authorization: Basic ")
+		connectBuilder.WriteString(token)
+		connectBuilder.WriteString("\r\n")
+	}
+	connectBuilder.WriteString("\r\n")
+
+	if _, errWrite := io.WriteString(conn, connectBuilder.String()); errWrite != nil {
+		_ = conn.Close()
+		return nil, errWrite
+	}
+
+	resp, errRead := http.ReadResponse(bufio.NewReader(conn), req)
+	if errRead != nil {
+		_ = conn.Close()
+		return nil, errRead
+	}
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, fmt.Errorf("http proxy CONNECT failed: %s", resp.Status)
+	}
+
+	return conn, nil
 }
