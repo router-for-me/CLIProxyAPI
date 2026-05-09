@@ -24,7 +24,14 @@ type Record struct {
 	FirstByteLatency time.Duration
 	ThinkingEffort   string
 	Failed           bool
+	Fail             Failure
 	Detail           Detail
+}
+
+// Failure holds HTTP failure metadata for an upstream request attempt.
+type Failure struct {
+	StatusCode int
+	Body       string
 }
 
 // Detail holds the token usage breakdown.

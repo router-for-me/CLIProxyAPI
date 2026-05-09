@@ -3,15 +3,16 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -54,7 +55,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false)
+	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
 }
 
 func (r *UsageReporter) CaptureThinkingEffort(body []byte, model, fromFormat, toFormat string) {
@@ -86,11 +87,11 @@ func (r *UsageReporter) buildAdditionalModelRecord(ctx context.Context, model st
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(ctx, model, detail, false), true
+	return r.buildRecordForModel(ctx, model, detail, false, usage.Failure{}), true
 }
 
-func (r *UsageReporter) PublishFailure(ctx context.Context) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -98,17 +99,17 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
-		r.PublishFailure(ctx)
+		r.PublishFailure(ctx, *errPtr)
 	}
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, fail usage.Failure) {
 	if r == nil {
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed, fail))
 	})
 }
 
@@ -139,15 +140,19 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false, usage.Failure{}))
 	})
 }
 
-func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool) usage.Record {
-	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed}
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
+	var fail usage.Failure
+	if len(failures) > 0 {
+		fail = failures[0]
 	}
-	return r.buildRecordForModel(ctx, r.model, detail, failed)
+	if r == nil {
+		return usage.Record{Detail: detail, Failed: failed, Fail: fail}
+	}
+	return r.buildRecordForModel(ctx, r.model, detail, failed, fail)
 }
 
 func (r *UsageReporter) resolveThinkingEffort(ctx context.Context, model string) string {
@@ -160,9 +165,9 @@ func (r *UsageReporter) resolveThinkingEffort(ctx context.Context, model string)
 	return thinking.ExtractEffort(nil, model, "", "")
 }
 
-func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed}
+		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
 		Provider:         r.provider,
@@ -178,8 +183,26 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		FirstByteLatency: r.firstByteLatency(ctx),
 		ThinkingEffort:   r.resolveThinkingEffort(ctx, model),
 		Failed:           failed,
+		Fail:             fail,
 		Detail:           detail,
 	}
+}
+
+func failFromErrors(errs ...error) usage.Failure {
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		fail := usage.Failure{
+			Body: strings.TrimSpace(err.Error()),
+		}
+		var se interface{ StatusCode() int }
+		if errors.As(err, &se) && se != nil {
+			fail.StatusCode = se.StatusCode()
+		}
+		return fail
+	}
+	return usage.Failure{}
 }
 
 func (r *UsageReporter) latency() time.Duration {
@@ -220,7 +243,7 @@ func APIKeyFromContext(ctx context.Context) string {
 	if !ok || ginCtx == nil {
 		return ""
 	}
-	if v, exists := ginCtx.Get("apiKey"); exists {
+	if v, exists := ginCtx.Get("userApiKey"); exists {
 		switch value := v.(type) {
 		case string:
 			return value
@@ -291,7 +314,7 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -299,7 +322,7 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.tool_usage.image_gen")
-	if !usageNode.Exists() || !usageNode.IsObject() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -307,10 +330,25 @@ func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 
 func ParseOpenAIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}
 	}
 	return parseOpenAIStyleUsageNode(usageNode)
+}
+
+func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return false
+	}
+	return usageNode.Get("prompt_tokens").Exists() ||
+		usageNode.Get("input_tokens").Exists() ||
+		usageNode.Get("completion_tokens").Exists() ||
+		usageNode.Get("output_tokens").Exists() ||
+		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
 
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
@@ -350,21 +388,10 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("prompt_tokens").Int(),
-		OutputTokens: usageNode.Get("completion_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
-	}
-	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	return detail, true
+	return parseOpenAIStyleUsageNode(usageNode), true
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {

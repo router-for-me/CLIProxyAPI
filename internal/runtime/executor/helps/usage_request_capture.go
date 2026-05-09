@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
 
 const usageRequestCaptureKey = "__cliproxy_usage_request_capture__"

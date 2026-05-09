@@ -13,13 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -56,6 +56,31 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
+
+	wsDone := make(chan struct{})
+	defer close(wsDone)
+
+	if h != nil && h.AuthManager != nil {
+		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
+			type upstreamDisconnectSubscriber interface {
+				UpstreamDisconnectChan(sessionID string) <-chan error
+			}
+			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
+				disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
+				if disconnectCh != nil {
+					go func() {
+						select {
+						case <-wsDone:
+							return
+						case <-disconnectCh:
+							_ = conn.Close()
+						}
+					}()
+				}
+			}
+		}
+	}
+
 	var wsTerminateErr error
 	var wsTimelineLog strings.Builder
 	defer func() {
