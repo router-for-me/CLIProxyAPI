@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -42,6 +43,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	rootResult := gjson.ParseBytes(rawJSON)
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
+	if shouldInjectGPT5AnthropicAgentInstructions(modelName, rootResult) {
+		template, _ = sjson.SetBytes(template, "instructions", strings.TrimSpace(misc.GPT5AnthropicAgentInstructions))
+	}
 
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
@@ -326,6 +330,53 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
 
 	return template
+}
+
+func shouldInjectGPT5AnthropicAgentInstructions(modelName string, root gjson.Result) bool {
+	if !isGPT5Model(modelName) || strings.TrimSpace(misc.GPT5AnthropicAgentInstructions) == "" {
+		return false
+	}
+	return hasAnthropicAgentSystemMarker(root.Get("system"))
+}
+
+func isGPT5Model(modelName string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
+	return strings.HasPrefix(baseModel, "gpt-5")
+}
+
+func hasAnthropicAgentSystemMarker(system gjson.Result) bool {
+	if !system.Exists() {
+		return false
+	}
+	if system.Type == gjson.String {
+		return containsAnthropicAgentSystemMarker(system.String())
+	}
+	if !system.IsArray() {
+		return false
+	}
+	for _, item := range system.Array() {
+		if item.Type == gjson.String && containsAnthropicAgentSystemMarker(item.String()) {
+			return true
+		}
+		if item.Get("type").String() == "text" && containsAnthropicAgentSystemMarker(item.Get("text").String()) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnthropicAgentSystemMarker(text string) bool {
+	text = strings.TrimSpace(text)
+	if strings.Contains(text, "You are Claude Code, Anthropic's official CLI for Claude.") {
+		return true
+	}
+	if strings.Contains(text, "You are a Claude agent, built on Anthropic's Claude Agent SDK.") {
+		return true
+	}
+	lower := strings.ToLower(text)
+	return strings.HasPrefix(lower, "x-anthropic-billing-header:") &&
+		strings.Contains(lower, "cc_version=") &&
+		(strings.Contains(lower, "cc_entrypoint=cli") || strings.Contains(lower, "cc_entrypoint=sdk-py"))
 }
 
 // isFernetLikeReasoningSignature checks only the encrypted_content envelope shape
