@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -256,45 +257,65 @@ func (a *Auth) indexSeed() string {
 		return ""
 	}
 
-	if fileName := strings.TrimSpace(a.FileName); fileName != "" {
-		return "file:" + fileName
-	}
-
-	providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
+	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatName := ""
 	baseURL := ""
 	apiKey := ""
-	source := ""
+	filePath := ""
 	if a.Attributes != nil {
-		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
-			providerKey = strings.ToLower(value)
-		}
-		compatName = strings.ToLower(strings.TrimSpace(a.Attributes["compat_name"]))
+		compatName = strings.TrimSpace(a.Attributes["compat_name"])
 		baseURL = strings.TrimSpace(a.Attributes["base_url"])
 		apiKey = strings.TrimSpace(a.Attributes["api_key"])
-		source = strings.TrimSpace(a.Attributes["source"])
+		filePath = strings.TrimSpace(a.Attributes["path"])
+		if filePath == "" {
+			filePath = strings.TrimSpace(a.Attributes["source"])
+		}
 	}
 
-	proxyURL := strings.TrimSpace(a.ProxyURL)
-	hasCredentialIdentity := compatName != "" || baseURL != "" || proxyURL != "" || apiKey != "" || source != ""
-	if providerKey != "" && hasCredentialIdentity {
-		parts := []string{"provider=" + providerKey}
-		if compatName != "" {
-			parts = append(parts, "compat="+compatName)
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.FileName)
+	}
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.ID)
+	}
+
+	if filePath != "" && strings.HasSuffix(strings.ToLower(filePath), ".json") {
+		abs, errAbs := filepath.Abs(filePath)
+		if errAbs == nil && strings.TrimSpace(abs) != "" {
+			filePath = abs
 		}
-		if baseURL != "" {
-			parts = append(parts, "base="+baseURL)
+		filePath = filepath.Clean(filePath)
+
+		authType := ""
+		if a.Metadata != nil {
+			if rawType, ok := a.Metadata["type"].(string); ok {
+				authType = strings.TrimSpace(rawType)
+			}
 		}
-		if proxyURL != "" {
-			parts = append(parts, "proxy="+proxyURL)
+		if authType == "" {
+			authType = strings.TrimSpace(provider)
 		}
-		if apiKey != "" {
-			parts = append(parts, "api_key="+apiKey)
+		authType = strings.ToLower(strings.TrimSpace(authType))
+		if authType != "" {
+			return authType + ":" + filePath
 		}
-		if source != "" {
-			parts = append(parts, "source="+source)
+	}
+
+	apiPrefix := ""
+	if apiKey != "" {
+		switch {
+		case compatName != "" || strings.EqualFold(provider, "openai-compatibility"):
+			apiPrefix = "openai-compatibility"
+		case strings.EqualFold(provider, "gemini"):
+			apiPrefix = "gemini-api-key"
+		case strings.EqualFold(provider, "codex"):
+			apiPrefix = "codex-api-key"
+		case strings.EqualFold(provider, "claude"):
+			apiPrefix = "claude-api-key"
 		}
-		return "config:" + strings.Join(parts, "\x00")
+	}
+	if apiPrefix != "" {
+		return apiPrefix + ":" + strings.TrimSpace(baseURL) + "+" + strings.TrimSpace(apiKey)
 	}
 
 	if id := strings.TrimSpace(a.ID); id != "" {

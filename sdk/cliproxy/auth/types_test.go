@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,8 +98,40 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	if geminiIndex == altBaseIndex {
 		t.Fatalf("same provider/key with different base_url produced duplicate auth_index %q", geminiIndex)
 	}
-	if geminiIndex == duplicateIndex {
-		t.Fatalf("duplicate config entries should be separated by source-derived seed, got %q", geminiIndex)
+	if geminiIndex != duplicateIndex {
+		t.Fatalf("same provider/key with different source should share auth_index, got %q vs %q", geminiIndex, duplicateIndex)
+	}
+}
+
+func TestEnsureIndexUsesOAuthTypeAndAbsolutePath(t *testing.T) {
+	t.Parallel()
+
+	wd, errWd := os.Getwd()
+	if errWd != nil {
+		t.Fatalf("os.Getwd returned error: %v", errWd)
+	}
+
+	relPath := "test-oauth.json"
+	absPath := filepath.Join(wd, relPath)
+	expectedSeed := "gemini:" + filepath.Clean(absPath)
+	expectedIndex := stableAuthIndex(expectedSeed)
+
+	a := &Auth{
+		Provider: "gemini-cli",
+		Attributes: map[string]string{
+			"path": relPath,
+		},
+		Metadata: map[string]any{
+			"type": "gemini",
+		},
+	}
+
+	got := a.EnsureIndex()
+	if got == "" {
+		t.Fatal("auth index should not be empty")
+	}
+	if got != expectedIndex {
+		t.Fatalf("auth index = %q, want %q", got, expectedIndex)
 	}
 }
 
