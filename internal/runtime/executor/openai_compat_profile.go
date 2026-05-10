@@ -238,6 +238,7 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfile, model string, baseURL string) []byte {
 	payload = scrubOpenAICompatPayload(payload, profile)
 	payload = repairOpenAICompatToolCallHistory(payload)
+	payload = sanitizeOpenAICompatToolSchemas(payload)
 	if config.NormalizeOpenAICompatibilityKind(profile.Kind) == "kimi" {
 		if normalized, err := normalizeKimiToolMessageLinks(payload); err == nil {
 			payload = normalized
@@ -320,11 +321,64 @@ func scrubZhipuImageURLDataURLs(payload []byte) []byte {
 
 func scrubOpenAICompatProviderToolPayload(payload []byte, profile openAICompatProfile) []byte {
 	switch config.NormalizeOpenAICompatibilityKind(profile.Kind) {
-	case "kimi", "minimax", "zhipu":
+	case "kimi", "minimax", "xiaomi", "zhipu", "xfyun", "maas", "langengyun", "newapi":
 		return scrubOpenAICompatFunctionToolPayload(payload, profile)
 	default:
 		return payload
 	}
+}
+
+func sanitizeOpenAICompatToolSchemas(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.GetBytes(payload, "tools").IsArray() {
+		return payload
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
+	tools, ok := root["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return payload
+	}
+
+	changed := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"input_schema", "parameters", "parametersJsonSchema"} {
+			if normalized, okNormalize := normalizeOpenAICompatParameterNode(tool[key]); okNormalize {
+				if !jsonValuesEqual(tool[key], normalized) {
+					tool[key] = normalized
+					changed = true
+				}
+			}
+		}
+		function, okFunction := tool["function"].(map[string]any)
+		if !okFunction {
+			continue
+		}
+		for _, key := range []string{"parameters", "parametersJsonSchema"} {
+			if normalized, okNormalize := normalizeOpenAICompatParameterNode(function[key]); okNormalize {
+				if !jsonValuesEqual(function[key], normalized) {
+					function[key] = normalized
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return payload
+	}
+
+	root["tools"] = tools
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return payload
+	}
+	return out
 }
 
 func scrubOpenAICompatFunctionToolPayload(payload []byte, profile openAICompatProfile) []byte {
@@ -787,13 +841,118 @@ func deepSeekToolParameters(function map[string]any, tool map[string]any) (any, 
 }
 
 func normalizeOpenAICompatParameters(parameters any) any {
-	schema, ok := parameters.(map[string]any)
+	normalized, ok := normalizeOpenAICompatParameterNode(parameters)
 	if !ok {
-		return parameters
+		return map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		}
 	}
+	return normalized
+}
+
+func normalizeOpenAICompatParameterNode(parameters any) (map[string]any, bool) {
+	if raw, ok := parameters.(string); ok {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil, false
+		}
+		if schemaType, okType := normalizeOpenAICompatSchemaType(raw); okType {
+			return openAICompatSchemaForType(schemaType), true
+		}
+		if !gjson.Valid(raw) {
+			return nil, false
+		}
+		var parsed any
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			return nil, false
+		}
+		return normalizeOpenAICompatSchemaNode(parsed)
+	}
+	return normalizeOpenAICompatSchemaNode(parameters)
+}
+
+func normalizeOpenAICompatSchemaNode(node any) (map[string]any, bool) {
+	schema, ok := node.(map[string]any)
+	if !ok {
+		if schemaType, okType := normalizeOpenAICompatScalarSchemaType(node); okType {
+			return openAICompatSchemaForType(schemaType), true
+		}
+		return nil, false
+	}
+
 	out := make(map[string]any, len(schema)+2)
 	for key, value := range schema {
-		out[key] = value
+		if value == nil {
+			continue
+		}
+		switch key {
+		case "properties":
+			if properties, okProperties := value.(map[string]any); okProperties {
+				cleanedProperties := make(map[string]any, len(properties))
+				for propertyName, rawProperty := range properties {
+					if propertyName = strings.TrimSpace(propertyName); propertyName == "" {
+						continue
+					}
+					if normalizedProperty, okNormalize := normalizeOpenAICompatSchemaNode(rawProperty); okNormalize {
+						cleanedProperties[propertyName] = normalizedProperty
+					} else {
+						cleanedProperties[propertyName] = map[string]any{"type": "string"}
+					}
+				}
+				out[key] = cleanedProperties
+			} else {
+				out[key] = map[string]any{}
+			}
+		case "items":
+			switch items := value.(type) {
+			case []any:
+				cleanedItems := make([]any, 0, len(items))
+				for _, rawItem := range items {
+					if normalizedItem, okNormalize := normalizeOpenAICompatSchemaNode(rawItem); okNormalize {
+						cleanedItems = append(cleanedItems, normalizedItem)
+					}
+				}
+				if len(cleanedItems) > 0 {
+					out[key] = cleanedItems
+				}
+			default:
+				if normalizedItem, okNormalize := normalizeOpenAICompatSchemaNode(items); okNormalize {
+					out[key] = normalizedItem
+				}
+			}
+		case "additionalProperties":
+			switch additionalProperties := value.(type) {
+			case bool:
+				out[key] = additionalProperties
+			default:
+				if normalizedAdditional, okNormalize := normalizeOpenAICompatSchemaNode(additionalProperties); okNormalize {
+					out[key] = normalizedAdditional
+				}
+			}
+		case "required":
+			if required := normalizeOpenAICompatStringArray(value); len(required) > 0 {
+				out[key] = required
+			}
+		case "anyOf", "oneOf", "allOf":
+			if branches, okBranches := value.([]any); okBranches {
+				cleanedBranches := make([]any, 0, len(branches))
+				for _, rawBranch := range branches {
+					if normalizedBranch, okNormalize := normalizeOpenAICompatSchemaNode(rawBranch); okNormalize {
+						cleanedBranches = append(cleanedBranches, normalizedBranch)
+					}
+				}
+				if len(cleanedBranches) > 0 {
+					out[key] = cleanedBranches
+				}
+			}
+		case "type":
+			if schemaType, okType := normalizeOpenAICompatScalarSchemaType(value); okType {
+				out[key] = schemaType
+			}
+		default:
+			out[key] = value
+		}
 	}
 	schemaType := strings.TrimSpace(compatStringValue(out["type"]))
 	if schemaType == "" {
@@ -805,7 +964,75 @@ func normalizeOpenAICompatParameters(parameters any) any {
 			out["properties"] = map[string]any{}
 		}
 	}
-	return out
+	if schemaType == "array" {
+		if _, okItems := out["items"]; !okItems {
+			out["items"] = map[string]any{"type": "string"}
+		}
+	}
+	return out, true
+}
+
+func normalizeOpenAICompatScalarSchemaType(value any) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return normalizeOpenAICompatSchemaType(typed)
+	case []any:
+		for _, item := range typed {
+			if str, ok := item.(string); ok {
+				if schemaType, okType := normalizeOpenAICompatSchemaType(str); okType && schemaType != "null" {
+					return schemaType, true
+				}
+			}
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+func normalizeOpenAICompatSchemaType(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "object", "array", "string", "number", "integer", "boolean", "null":
+		return strings.ToLower(strings.TrimSpace(raw)), true
+	default:
+		return "", false
+	}
+}
+
+func openAICompatSchemaForType(schemaType string) map[string]any {
+	schema := map[string]any{"type": schemaType}
+	switch schemaType {
+	case "object":
+		schema["properties"] = map[string]any{}
+	case "array":
+		schema["items"] = map[string]any{"type": "string"}
+	}
+	return schema
+}
+
+func normalizeOpenAICompatStringArray(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if item = strings.TrimSpace(item); item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if str, ok := item.(string); ok {
+				if str = strings.TrimSpace(str); str != "" {
+					out = append(out, str)
+				}
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func schemaValueFromString(raw string) any {

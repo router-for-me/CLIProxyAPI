@@ -7,6 +7,7 @@ package gemini
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -222,19 +223,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					tool, _ = sjson.SetBytes(tool, "description", v.String())
 				}
 				if prm := fn.Get("parameters"); prm.Exists() {
-					cleaned := util.CleanJSONSchemaForStrictUpstream(prm.Raw)
-					cleanedBytes := []byte(cleaned)
-					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
-					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanCodexGeminiToolSchema(prm.Raw))
 				} else if prm = fn.Get("parametersJsonSchema"); prm.Exists() {
-					cleaned := util.CleanJSONSchemaForStrictUpstream(prm.Raw)
-					cleanedBytes := []byte(cleaned)
-					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
-					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanCodexGeminiToolSchema(prm.Raw))
 				} else {
-					cleanedBytes := []byte(util.CleanJSONSchemaForStrictUpstream(""))
-					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
-					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanCodexGeminiToolSchema(""))
 				}
 				tool, _ = sjson.SetBytes(tool, "strict", false)
 				out, _ = sjson.SetRawBytes(out, "tools.-1", tool)
@@ -296,6 +289,66 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 
 	return out
+}
+
+func cleanCodexGeminiToolSchema(raw string) []byte {
+	cleanedBytes := []byte(util.CleanJSONSchemaForStrictUpstream(raw))
+	cleanedBytes = restoreCodexGeminiSchemaDefaults(cleanedBytes, []byte(raw))
+	cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
+	return cleanedBytes
+}
+
+func restoreCodexGeminiSchemaDefaults(cleaned []byte, original []byte) []byte {
+	if !gjson.ValidBytes(cleaned) || !gjson.ValidBytes(original) {
+		return cleaned
+	}
+	var cleanedValue any
+	var originalValue any
+	if err := json.Unmarshal(cleaned, &cleanedValue); err != nil {
+		return cleaned
+	}
+	if err := json.Unmarshal(original, &originalValue); err != nil {
+		return cleaned
+	}
+	restoreCodexGeminiSchemaDefaultValues(cleanedValue, originalValue)
+	out, err := json.Marshal(cleanedValue)
+	if err != nil || !gjson.ValidBytes(out) {
+		return cleaned
+	}
+	return out
+}
+
+func restoreCodexGeminiSchemaDefaultValues(cleaned any, original any) {
+	cleanedMap, okCleaned := cleaned.(map[string]any)
+	originalMap, okOriginal := original.(map[string]any)
+	if okCleaned && okOriginal {
+		if defaultValue, okDefault := originalMap["default"]; okDefault {
+			cleanedMap["default"] = defaultValue
+		}
+		for key, cleanedChild := range cleanedMap {
+			if key == "default" {
+				continue
+			}
+			originalChild, okChild := originalMap[key]
+			if !okChild {
+				continue
+			}
+			restoreCodexGeminiSchemaDefaultValues(cleanedChild, originalChild)
+		}
+		return
+	}
+
+	cleanedList, okCleanedList := cleaned.([]any)
+	originalList, okOriginalList := original.([]any)
+	if !okCleanedList || !okOriginalList {
+		return
+	}
+	for i := range cleanedList {
+		if i >= len(originalList) {
+			return
+		}
+		restoreCodexGeminiSchemaDefaultValues(cleanedList[i], originalList[i])
+	}
 }
 
 // shortenNameIfNeeded applies the simple shortening rule for a single name.

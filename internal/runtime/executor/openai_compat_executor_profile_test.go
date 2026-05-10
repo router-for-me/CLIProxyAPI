@@ -431,6 +431,41 @@ func TestOpenAICompatPayloadKimiNormalizesToolsAndDisablesStrict(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatPayloadKimiSanitizesMoonshotSchemaFlavor(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"inspect",
+			"description":"Inspect values",
+			"input_schema":{
+				"type":"object",
+				"properties":{
+					"type":"object",
+					"additionalProperties":"object"
+				},
+				"additionalProperties":"object",
+				"required":null
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.moonshot.ai/v1")
+
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.type.type").String(); got != "object" {
+		t.Fatalf("properties.type should be an object schema, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.additionalProperties.type").String(); got != "object" {
+		t.Fatalf("properties.additionalProperties should be an object schema, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.additionalProperties.type").String(); got != "object" {
+		t.Fatalf("root additionalProperties should be an object schema, got %q: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.function.parameters.required").Exists() {
+		t.Fatalf("required=null should be removed: %s", string(out))
+	}
+}
+
 func TestOpenAICompatPayloadZhipuForcesAutoToolChoice(t *testing.T) {
 	payload := []byte(`{
 		"model":"glm-4.6",
@@ -547,6 +582,34 @@ func TestOpenAICompatPayloadXiaomiScrubsUnsupportedOpenAIExtras(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatPayloadXiaomiNormalizesClaudeStyleTools(t *testing.T) {
+	payload := []byte(`{
+		"model":"mimo-v2.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"inspect",
+			"description":"Inspect values",
+			"input_schema":{
+				"type":"object",
+				"properties":{"type":"object"},
+				"required":null
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("xiaomi"), "mimo-v2.5", "https://api.xiaomimimo.com/v1")
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.input_schema").Exists() {
+		t.Fatalf("input_schema should be converted away: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.type.type").String(); got != "object" {
+		t.Fatalf("properties.type should be an object schema, got %q: %s", got, string(out))
+	}
+}
+
 func TestOpenAICompatPayloadNormalizesFunctionNameReferences(t *testing.T) {
 	payload := []byte(`{
 		"model":"kimi-k2.6",
@@ -635,6 +698,78 @@ func TestOpenAICompatPayloadDeepSeekConvertsInputSchemaTools(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.path.type").String(); got != "string" {
 		t.Fatalf("converted parameters missing path type, got %q payload=%s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadDeepSeekSanitizesLooseSchemaValues(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"inspect",
+				"parameters":{
+					"type":"object",
+					"properties":{
+						"type":"object",
+						"required":"array"
+					},
+					"additionalProperties":"object",
+					"required":null
+				}
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "deepseek-v4-pro", "https://api.deepseek.com/v1")
+
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.type.type").String(); got != "object" {
+		t.Fatalf("properties.type should be an object schema, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.required.type").String(); got != "array" {
+		t.Fatalf("properties.required should be an array schema, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.additionalProperties.type").String(); got != "object" {
+		t.Fatalf("additionalProperties should be an object schema, got %q: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.function.parameters.required").Exists() {
+		t.Fatalf("required=null should be removed: %s", string(out))
+	}
+}
+
+func TestOpenAICompatPayloadGenericSanitizesFunctionSchemaWithoutDroppingStrict(t *testing.T) {
+	payload := []byte(`{
+		"model":"gpt-5",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"inspect",
+				"strict":true,
+				"parameters":{
+					"type":"object",
+					"properties":{"type":"object"},
+					"additionalProperties":"object",
+					"required":null
+				}
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "gpt-5", "https://api.openai.com/v1")
+
+	if got := gjson.GetBytes(out, "tools.0.function.strict").Bool(); !got {
+		t.Fatalf("generic strict flag should be preserved: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.type.type").String(); got != "object" {
+		t.Fatalf("properties.type should be an object schema, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.additionalProperties.type").String(); got != "object" {
+		t.Fatalf("additionalProperties should be an object schema, got %q: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tools.0.function.parameters.required").Exists() {
+		t.Fatalf("required=null should be removed: %s", string(out))
 	}
 }
 
