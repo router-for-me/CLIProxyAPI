@@ -9,7 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
-func TestRegisterManagementRoutesRegistersUsageAndQueueRoutes(t *testing.T) {
+func TestRegisterManagementRoutesRegistersForkOwnedRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
@@ -20,7 +20,6 @@ func TestRegisterManagementRoutesRegistersUsageAndQueueRoutes(t *testing.T) {
 	expectedRoutes := map[string]bool{
 		http.MethodGet + " /v0/management/usage":              false,
 		http.MethodDelete + " /v0/management/usage":           false,
-		http.MethodGet + " /v0/management/usage-queue":        false,
 		http.MethodGet + " /v0/management/auth-refresh-queue": false,
 	}
 

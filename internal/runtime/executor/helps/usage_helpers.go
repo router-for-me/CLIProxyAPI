@@ -18,18 +18,16 @@ import (
 )
 
 type UsageReporter struct {
-	provider       string
-	model          string
-	alias          string
-	authID         string
-	authIndex      string
-	authType       string
-	apiKey         string
-	source         string
-	requestedAt    time.Time
-	thinkingEffort string
-	thinkingOnce   sync.Once
-	once           sync.Once
+	provider    string
+	model       string
+	alias       string
+	authID      string
+	authIndex   string
+	authType    string
+	apiKey      string
+	source      string
+	requestedAt time.Time
+	once        sync.Once
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -56,15 +54,6 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
-}
-
-func (r *UsageReporter) CaptureThinkingEffort(body []byte, model, fromFormat, toFormat string) {
-	if r == nil {
-		return
-	}
-	r.thinkingOnce.Do(func() {
-		r.thinkingEffort = thinking.ExtractEffort(body, model, fromFormat, toFormat)
-	})
 }
 
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
@@ -158,9 +147,6 @@ func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, fa
 func (r *UsageReporter) resolveThinkingEffort(ctx context.Context, model string) string {
 	if effort, ok := capturedUsageThinkingEffort(ctx, model); ok && effort != "" {
 		return effort
-	}
-	if r.thinkingEffort != "" {
-		return r.thinkingEffort
 	}
 	return thinking.ExtractEffort(nil, model, "", "")
 }

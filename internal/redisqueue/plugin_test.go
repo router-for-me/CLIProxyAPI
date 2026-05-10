@@ -22,17 +22,15 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:         "openai",
-			Model:            "gpt-5.4",
-			Alias:            "client-gpt",
-			APIKey:           "test-key",
-			AuthIndex:        "0",
-			AuthType:         "apikey",
-			Source:           "user@example.com",
-			RequestedAt:      time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:          1500 * time.Millisecond,
-			FirstByteLatency: 250 * time.Millisecond,
-			ThinkingEffort:   "high",
+			Provider:    "openai",
+			Model:       "gpt-5.4",
+			Alias:       "client-gpt",
+			APIKey:      "test-key",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			Source:      "user@example.com",
+			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:     1500 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -41,22 +39,13 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		})
 
 		payload := popSinglePayload(t)
-		requireStringField(t, payload, "id", "")
 		requireStringField(t, payload, "provider", "openai")
 		requireStringField(t, payload, "model", "gpt-5.4")
 		requireStringField(t, payload, "alias", "client-gpt")
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "auth_type", "apikey")
-		requireStringField(t, payload, "api_key", "test-key")
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
-		requireNumberField(t, payload, "latency_ms", 1500)
-		requireNumberField(t, payload, "first_byte_latency_ms", 250)
-		requireNumberField(t, payload, "generation_ms", 1250)
-		requireStringField(t, payload, "source", "user@example.com")
-		requireStringField(t, payload, "auth_index", "0")
-		requireStringField(t, payload, "thinking_effort", "high")
-		requireNestedNumberField(t, payload, "tokens", "total_tokens", 30)
 		requireBoolField(t, payload, "failed", false)
 		requireFailField(t, payload, http.StatusOK, "")
 	})
@@ -101,24 +90,6 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 		requireStringField(t, payload, "request_id", "gin-request-id")
 		requireBoolField(t, payload, "failed", true)
 		requireFailField(t, payload, http.StatusInternalServerError, "upstream failed")
-	})
-}
-
-func TestUsageQueuePluginClampsInconsistentLatencies(t *testing.T) {
-	withEnabledQueue(t, func() {
-		plugin := &usageQueuePlugin{}
-		plugin.HandleUsage(context.Background(), coreusage.Record{
-			Provider:         "openai",
-			Model:            "gpt-5.4",
-			RequestedAt:      time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:          -100 * time.Millisecond,
-			FirstByteLatency: 200 * time.Millisecond,
-		})
-
-		payload := popSinglePayload(t)
-		requireNumberField(t, payload, "latency_ms", 0)
-		requireNumberField(t, payload, "first_byte_latency_ms", 200)
-		requireNumberField(t, payload, "generation_ms", 0)
 	})
 }
 
@@ -171,27 +142,11 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 	})
 }
 
-func TestUsageQueuePluginSkipsQueueWhenLocalUsageStatisticsDisabled(t *testing.T) {
-	withEnabledQueue(t, func() {
-		SetUsageStatisticsEnabled(false)
-
-		plugin := &usageQueuePlugin{}
-		plugin.HandleUsage(context.Background(), coreusage.Record{
-			Provider: "openai",
-			Model:    "gpt-5.4",
-		})
-
-		if items := PopOldest(10); len(items) != 0 {
-			t.Fatalf("PopOldest() items = %d, want 0", len(items))
-		}
-	})
-}
-
 func withEnabledQueue(t *testing.T, fn func()) {
 	t.Helper()
 
 	prevQueueEnabled := Enabled()
-	prevStatsEnabled := UsageStatisticsEnabled()
+	prevUsageEnabled := UsageStatisticsEnabled()
 
 	SetEnabled(false)
 	SetEnabled(true)
@@ -200,7 +155,7 @@ func withEnabledQueue(t *testing.T, fn func()) {
 	defer func() {
 		SetEnabled(false)
 		SetEnabled(prevQueueEnabled)
-		SetUsageStatisticsEnabled(prevStatsEnabled)
+		SetUsageStatisticsEnabled(prevUsageEnabled)
 	}()
 
 	fn()
@@ -271,36 +226,6 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
 	}
-}
-
-func requireNumberField(t *testing.T, payload map[string]json.RawMessage, key string, want int64) {
-	t.Helper()
-
-	raw, ok := payload[key]
-	if !ok {
-		t.Fatalf("payload missing %q", key)
-	}
-	var got int64
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal %q: %v", key, err)
-	}
-	if got != want {
-		t.Fatalf("%s = %d, want %d", key, got, want)
-	}
-}
-
-func requireNestedNumberField(t *testing.T, payload map[string]json.RawMessage, key, nestedKey string, want int64) {
-	t.Helper()
-
-	raw, ok := payload[key]
-	if !ok {
-		t.Fatalf("payload missing %q", key)
-	}
-	var nested map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &nested); err != nil {
-		t.Fatalf("unmarshal %q: %v", key, err)
-	}
-	requireNumberField(t, nested, nestedKey, want)
 }
 
 func requireMissingField(t *testing.T, payload map[string]json.RawMessage, key string) {

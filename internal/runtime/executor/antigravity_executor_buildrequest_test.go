@@ -4,13 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net/http"
-	"net/http/httptest"
-	"reflect"
 	"testing"
 
-	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -93,71 +88,6 @@ func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithEmptyToolsArray(t *t
 	}`))
 
 	assertNonSchemaRequestPreserved(t, body)
-}
-
-func TestAntigravityBuildRequest_CapturesFinalBodyWhenRequestLogDisabled(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", nil)
-	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-
-	modelName := "gemini-2.5-pro"
-	executor := NewAntigravityExecutor(&config.Config{SDKConfig: config.SDKConfig{RequestLog: false}})
-	payload := []byte(`{
-		"request": {
-			"contents": [
-				{
-					"role": "user",
-					"parts": [{"text": "hello"}]
-				}
-			],
-			"generationConfig": {
-				"thinkingConfig": {
-					"thinkingBudget": 1234
-				}
-			}
-		}
-	}`)
-	req, err := executor.buildRequest(ctx, &cliproxyauth.Auth{ID: "antigravity-auth"}, "token", modelName, payload, false, "", "https://example.com")
-	if err != nil {
-		t.Fatalf("buildRequest error: %v", err)
-	}
-	if _, exists := ginCtx.Get("API_REQUEST"); exists {
-		t.Fatalf("request log was written even though RequestLog is disabled")
-	}
-
-	raw, err := io.ReadAll(req.Body)
-	if err != nil {
-		t.Fatalf("read request body error: %v", err)
-	}
-	capturedRaw, exists := ginCtx.Get("__cliproxy_usage_request_capture__")
-	if !exists {
-		t.Fatalf("usage request capture was not recorded")
-	}
-	capturedBody := reflect.ValueOf(capturedRaw).FieldByName("body").Bytes()
-	if string(capturedBody) != string(raw) {
-		t.Fatalf("captured body = %s, want final request body %s", string(capturedBody), string(raw))
-	}
-
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		t.Fatalf("unmarshal request body error: %v, body=%s", err, string(raw))
-	}
-	request, ok := body["request"].(map[string]any)
-	if !ok {
-		t.Fatalf("request missing or invalid type")
-	}
-	generationConfig, ok := request["generationConfig"].(map[string]any)
-	if !ok {
-		t.Fatalf("generationConfig missing or invalid type")
-	}
-	thinkingConfig, ok := generationConfig["thinkingConfig"].(map[string]any)
-	if !ok {
-		t.Fatalf("thinkingConfig missing or invalid type")
-	}
-	if got, ok := thinkingConfig["thinkingBudget"].(float64); !ok || got != 1234 {
-		t.Fatalf("thinkingBudget = %v, want 1234", thinkingConfig["thinkingBudget"])
-	}
 }
 
 func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {

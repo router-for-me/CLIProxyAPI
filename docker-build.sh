@@ -1,37 +1,17 @@
 #!/usr/bin/env bash
 #
-# docker-build.sh - Linux/macOS Build Script
+# build.sh - Linux/macOS Build Script
 #
 # This script automates the process of building and running the Docker container
 # with version information dynamically injected at build time.
-#
-# Usage statistics persist in the service's SQLite database under the configured
-# log directory. Docker Compose mounts ./logs by default (override with
-# CLI_PROXY_LOG_PATH), so rebuilds/restarts do not need usage API import/export.
 
 set -euo pipefail
 
-show_usage() {
+if [[ "${1:-}" != "" ]]; then
+  echo "Error: unknown option '${1}'."
   echo "Usage: ./docker-build.sh"
-  echo
-  echo "Usage statistics persist in SQLite at logs/usage.db by default."
-  echo "Docker Compose mounts ./logs through CLI_PROXY_LOG_PATH, so rebuilds"
-  echo "and restarts preserve usage data without management API import/export."
-}
-
-case "${1:-}" in
-  "")
-    ;;
-  "-h" | "--help")
-    show_usage
-    exit 0
-    ;;
-  *)
-    echo "Error: unknown option '${1}'."
-    show_usage
-    exit 1
-    ;;
-esac
+  exit 1
+fi
 
 # --- Step 1: Choose Environment ---
 echo "Please select an option:"

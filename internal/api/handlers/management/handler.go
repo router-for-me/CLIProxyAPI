@@ -15,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -41,7 +40,6 @@ type Handler struct {
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
-	usageStore          usage.Store
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
@@ -60,7 +58,6 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
-		usageStore:          usage.DefaultStore(),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
@@ -122,25 +119,6 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	h.mu.Lock()
 	h.authManager = manager
 	h.mu.Unlock()
-}
-
-// SetUsageStore allows replacing the usage store reference.
-func (h *Handler) SetUsageStore(store usage.Store) {
-	if h == nil {
-		return
-	}
-	h.mu.Lock()
-	h.usageStore = store
-	h.mu.Unlock()
-}
-
-func (h *Handler) currentUsageStore() usage.Store {
-	if h == nil {
-		return nil
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.usageStore
 }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.

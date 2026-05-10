@@ -9,10 +9,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type UsageStoreSetter interface {
-	SetUsageStore(usage.Store)
-}
-
 func ApplyUsageConfig(cfg *config.Config) {
 	if cfg == nil {
 		return
@@ -22,7 +18,7 @@ func ApplyUsageConfig(cfg *config.Config) {
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 }
 
-func InitUsageStore(logDir string, setter UsageStoreSetter) {
+func InitUsageStore(logDir string) {
 	trimmedLogDir := strings.TrimSpace(logDir)
 	if trimmedLogDir == "" {
 		return
@@ -30,9 +26,6 @@ func InitUsageStore(logDir string, setter UsageStoreSetter) {
 	if err := usage.InitDefaultStoreInLogDir(trimmedLogDir); err != nil {
 		log.WithError(err).Warn("usage store unavailable")
 		return
-	}
-	if setter != nil {
-		setter.SetUsageStore(usage.DefaultStore())
 	}
 }
 

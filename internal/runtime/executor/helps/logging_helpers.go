@@ -198,6 +198,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	captureUsageRequest(ctx, info)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}

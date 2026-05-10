@@ -1,6 +1,7 @@
 package forkruntime
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,16 +81,22 @@ func TestApplyUsageConfigEnablesUsageStatisticsAndSetsRetention(t *testing.T) {
 }
 
 func TestInitUsageStoreTrimsLogDirBeforeInitializingDefaultStore(t *testing.T) {
-	restore := usage.SetDefaultStoreForTest(nil)
-	defer restore()
+	restoreRuntime := saveUsageRuntimeState()
+	defer restoreRuntime()
+	usage.SetStatisticsEnabled(true)
+	restoreStore := usage.SetDefaultStoreForTest(nil)
+	defer restoreStore()
 	defer CloseUsageStore()
 
 	parentDir := t.TempDir()
 	trimmedLogDir := filepath.Join(parentDir, "usage-store")
 	rawLogDir := filepath.Join(parentDir, " "+"usage-store")
 
-	InitUsageStore("  "+trimmedLogDir+"  ", nil)
+	InitUsageStore("  " + trimmedLogDir + "  ")
 
+	if usage.DefaultStore() == nil {
+		t.Fatal("DefaultStore() = nil, want initialized store")
+	}
 	if _, err := os.Stat(filepath.Join(trimmedLogDir, "usage.db")); err != nil {
 		t.Fatalf("trimmed usage.db missing: %v", err)
 	}
@@ -98,29 +105,38 @@ func TestInitUsageStoreTrimsLogDirBeforeInitializingDefaultStore(t *testing.T) {
 	}
 }
 
-func TestInitUsageStoreDoesNotCallSetterWhenInitFails(t *testing.T) {
-	restore := usage.SetDefaultStoreForTest(nil)
+func TestCloseUsageStoreClosesDefaultStore(t *testing.T) {
+	store := &closeRecordingStore{}
+	restore := usage.SetDefaultStoreForTest(store)
 	defer restore()
 
-	blocked := filepath.Join(t.TempDir(), "blocked")
-	if err := os.WriteFile(blocked, []byte("blocked"), 0o644); err != nil {
-		t.Fatalf("write blocking file: %v", err)
+	CloseUsageStore()
+
+	if !store.closed {
+		t.Fatal("default store was not closed")
 	}
-
-	called := false
-	InitUsageStore(filepath.Join(blocked, "logs"), usageStoreSetterFunc(func(usage.Store) {
-		called = true
-	}))
-
-	if called {
-		t.Fatal("setter was called despite init failure")
+	if got := usage.DefaultStore(); got != nil {
+		t.Fatalf("DefaultStore() = %T, want nil", got)
 	}
 }
 
-type usageStoreSetterFunc func(usage.Store)
+type closeRecordingStore struct {
+	closed bool
+}
 
-func (f usageStoreSetterFunc) SetUsageStore(store usage.Store) {
-	f(store)
+func (s *closeRecordingStore) Insert(ctx context.Context, record usage.Record) error { return nil }
+
+func (s *closeRecordingStore) Query(ctx context.Context, rng usage.QueryRange) (usage.APIUsage, error) {
+	return nil, nil
+}
+
+func (s *closeRecordingStore) Delete(ctx context.Context, ids []string) (usage.DeleteResult, error) {
+	return usage.DeleteResult{}, nil
+}
+
+func (s *closeRecordingStore) Close() error {
+	s.closed = true
+	return nil
 }
 
 func saveUsageRuntimeState() func() {

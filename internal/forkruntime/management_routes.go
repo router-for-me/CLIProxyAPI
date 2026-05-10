@@ -6,7 +6,7 @@ import (
 )
 
 // RegisterManagementRoutes registers this fork's conflict-prone management extensions only:
-// persisted usage statistics, redisqueue usage queue, and auth refresh queue.
+// persisted usage statistics and auth refresh queue.
 // Callers should pass the authenticated /v0/management group.
 func RegisterManagementRoutes(group gin.IRoutes, handler *management.Handler) {
 	if group == nil || handler == nil {
@@ -15,6 +15,5 @@ func RegisterManagementRoutes(group gin.IRoutes, handler *management.Handler) {
 
 	group.GET("/usage", handler.GetUsageStatistics)
 	group.DELETE("/usage", handler.DeleteUsageRecords)
-	group.GET("/usage-queue", handler.GetUsageQueue)
 	group.GET("/auth-refresh-queue", handler.GetAuthRefreshQueue)
 }

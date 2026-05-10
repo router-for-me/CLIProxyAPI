@@ -633,6 +633,66 @@ func logHomeConfigChanges(oldCfg, newCfg *config.Config) {
 	}
 }
 
+func (s *Service) startHomeUsageForwarder(ctx context.Context, client *home.Client) {
+	if s == nil || client == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	sleep := func(d time.Duration) bool {
+		if d <= 0 {
+			return true
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if !client.HeartbeatOK() {
+				if !sleep(time.Second) {
+					return
+				}
+				continue
+			}
+
+			items := redisqueue.PopOldest(64)
+			if len(items) == 0 {
+				if !sleep(500 * time.Millisecond) {
+					return
+				}
+				continue
+			}
+
+			for i := range items {
+				if errPush := client.LPushUsage(ctx, items[i]); errPush != nil {
+					for j := i; j < len(items); j++ {
+						redisqueue.Enqueue(items[j])
+					}
+					if !sleep(time.Second) {
+						return
+					}
+					break
+				}
+			}
+		}
+	}()
+}
+
 func (s *Service) startHomeSubscriber(ctx context.Context) {
 	if s == nil {
 		return
@@ -673,7 +733,7 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 		s.applyHomeOverlay(parsed)
 		return nil
 	})
-	forkruntime.StartHomeUsageForwarder(homeCtx, client)
+	s.startHomeUsageForwarder(homeCtx, client)
 }
 
 // Run starts the service and blocks until the context is cancelled or the server stops.

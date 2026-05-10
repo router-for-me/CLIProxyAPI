@@ -115,7 +115,7 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
-func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
+func TestManagementRoutesRequireManagementAuthAndExposeForkRoutes(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	prevQueueEnabled := redisqueue.Enabled()
@@ -137,25 +137,22 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 		t.Fatalf("missing key status = %d, want %d body=%s", missingKeyRR.Code, http.StatusUnauthorized, missingKeyRR.Body.String())
 	}
 
-	usageReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
-	usageReq.Header.Set("Authorization", "Bearer test-management-key")
-	usageRR := httptest.NewRecorder()
-	server.engine.ServeHTTP(usageRR, usageReq)
-	if usageRR.Code != http.StatusOK {
-		t.Fatalf("usage statistics status = %d, want %d body=%s", usageRR.Code, http.StatusOK, usageRR.Body.String())
+	requestWithManagementAuth := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		return rr
 	}
 
-	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
-	authReq.Header.Set("Authorization", "Bearer test-management-key")
-	authRR := httptest.NewRecorder()
-	server.engine.ServeHTTP(authRR, authReq)
-	if authRR.Code != http.StatusOK {
-		t.Fatalf("authenticated status = %d, want %d body=%s", authRR.Code, http.StatusOK, authRR.Body.String())
+	usageQueueRR := requestWithManagementAuth("/v0/management/usage-queue?count=2")
+	if usageQueueRR.Code != http.StatusOK {
+		t.Fatalf("usage queue status = %d, want %d body=%s", usageQueueRR.Code, http.StatusOK, usageQueueRR.Body.String())
 	}
 
 	var payload []json.RawMessage
-	if errUnmarshal := json.Unmarshal(authRR.Body.Bytes(), &payload); errUnmarshal != nil {
-		t.Fatalf("unmarshal response: %v body=%s", errUnmarshal, authRR.Body.String())
+	if errUnmarshal := json.Unmarshal(usageQueueRR.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v body=%s", errUnmarshal, usageQueueRR.Body.String())
 	}
 	if len(payload) != 2 {
 		t.Fatalf("response records = %d, want 2", len(payload))
@@ -174,6 +171,16 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+
+	usageRR := requestWithManagementAuth("/v0/management/usage")
+	if usageRR.Code != http.StatusOK {
+		t.Fatalf("fork usage status = %d, want %d body=%s", usageRR.Code, http.StatusOK, usageRR.Body.String())
+	}
+
+	authRefreshRR := requestWithManagementAuth("/v0/management/auth-refresh-queue")
+	if authRefreshRR.Code != http.StatusOK {
+		t.Fatalf("fork auth refresh queue status = %d, want %d body=%s", authRefreshRR.Code, http.StatusOK, authRefreshRR.Body.String())
 	}
 }
 
