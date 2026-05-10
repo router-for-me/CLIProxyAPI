@@ -396,6 +396,60 @@ func TestOpenAICompatPayloadDropsToolOnlyAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatPayloadDropsEmptyMessages(t *testing.T) {
+	payload := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[
+			{"role":"user","content":[]},
+			{"role":"assistant","content":[{"type":"text","text":""}]},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "gpt-5.5", "https://api.openai.com/v1")
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1: %s", len(messages), string(out))
+	}
+	if got := messages[0].Get("content").String(); got != "continue" {
+		t.Fatalf("remaining content = %q, want continue: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadDropsMalformedToolCallsAndResults(t *testing.T) {
+	payload := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[
+			{"role":"assistant","content":"checking","tool_calls":[
+				{"id":"call_ok","type":"function","function":{"name":"read:file","arguments":{"path":"README.md"}}},
+				{"id":"call_bad","type":"function","function":{"arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_ok","content":"ok"},
+			{"role":"tool","tool_call_id":"call_bad","content":"bad"},
+			{"role":"user","content":"next"}
+		]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "gpt-5.5", "https://api.openai.com/v1")
+
+	if got := len(gjson.GetBytes(out, "messages.0.tool_calls").Array()); got != 1 {
+		t.Fatalf("tool_calls length = %d, want 1: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.0.function.name").String(); got != "read_file" {
+		t.Fatalf("normalized function.name = %q, want read_file: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.0.function.arguments").String(); got != `{"path":"README.md"}` {
+		t.Fatalf("normalized function.arguments = %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_ok" {
+		t.Fatalf("kept tool result id = %q, want call_ok: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, `messages.#(tool_call_id=="call_bad")`).Exists() {
+		t.Fatalf("malformed tool result should be removed: %s", string(out))
+	}
+}
+
 func TestOpenAICompatPayloadKimiNormalizesToolsAndDisablesStrict(t *testing.T) {
 	payload := []byte(`{
 		"model":"kimi-k2.6",
@@ -463,6 +517,41 @@ func TestOpenAICompatPayloadKimiSanitizesMoonshotSchemaFlavor(t *testing.T) {
 	}
 	if gjson.GetBytes(out, "tools.0.function.parameters.required").Exists() {
 		t.Fatalf("required=null should be removed: %s", string(out))
+	}
+}
+
+func TestOpenAICompatPayloadKimiRemovesParentTypeFromAnyOfSchema(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"inspect",
+			"description":"Inspect values",
+			"input_schema":{
+				"type":"object",
+				"properties":{
+					"modules":{
+						"type":"array",
+						"anyOf":[
+							{"type":"array","items":{"type":"string"}},
+							{"type":"null"}
+						]
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-k2.6", "https://api.moonshot.ai/v1")
+
+	if gjson.GetBytes(out, "tools.0.function.parameters.properties.modules.type").Exists() {
+		t.Fatalf("anyOf parent type should be removed for moonshot schema flavor: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.modules.anyOf.0.type").String(); got != "array" {
+		t.Fatalf("anyOf branch type should be preserved, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.modules.anyOf.0.items.type").String(); got != "string" {
+		t.Fatalf("anyOf branch items should be preserved, got %q: %s", got, string(out))
 	}
 }
 

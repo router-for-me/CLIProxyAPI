@@ -498,12 +498,20 @@ func repairOpenAICompatToolCallHistory(payload []byte) []byte {
 
 		pending = nil
 		if role != "assistant" {
+			if !openAICompatMessageHasContent(message) {
+				changed = true
+				continue
+			}
 			repaired = append(repaired, message)
 			continue
 		}
 
 		toolCalls, ok := message["tool_calls"].([]any)
 		if !ok || len(toolCalls) == 0 {
+			if !openAICompatMessageHasContent(message) {
+				changed = true
+				continue
+			}
 			repaired = append(repaired, message)
 			continue
 		}
@@ -512,12 +520,20 @@ func repairOpenAICompatToolCallHistory(payload []byte) []byte {
 		keptToolCalls := make([]any, 0, len(toolCalls))
 		keptIDs := make(map[string]bool)
 		for _, rawToolCall := range toolCalls {
+			normalizedToolCall, changedToolCall, okToolCall := normalizeOpenAICompatHistoryToolCall(rawToolCall)
+			if !okToolCall {
+				changed = true
+				continue
+			}
+			if changedToolCall {
+				changed = true
+			}
 			toolCallID := strings.TrimSpace(openAICompatToolCallID(rawToolCall))
 			if toolCallID == "" || !nextToolResults[toolCallID] {
 				changed = true
 				continue
 			}
-			keptToolCalls = append(keptToolCalls, rawToolCall)
+			keptToolCalls = append(keptToolCalls, normalizedToolCall)
 			keptIDs[toolCallID] = true
 		}
 
@@ -573,6 +589,49 @@ func openAICompatToolCallID(rawToolCall any) string {
 	return compatStringValue(toolCall["id"])
 }
 
+func normalizeOpenAICompatHistoryToolCall(rawToolCall any) (any, bool, bool) {
+	toolCall, ok := rawToolCall.(map[string]any)
+	if !ok {
+		return nil, false, false
+	}
+	changed := false
+
+	function, ok := toolCall["function"].(map[string]any)
+	if !ok {
+		function = map[string]any{}
+		toolCall["function"] = function
+		changed = true
+	}
+
+	name, okName := normalizeOpenAICompatFunctionName(compatStringValue(function["name"]))
+	if !okName {
+		name, okName = normalizeOpenAICompatFunctionName(compatStringValue(toolCall["name"]))
+	}
+	if !okName {
+		return nil, changed, false
+	}
+	if compatStringValue(function["name"]) != name {
+		function["name"] = name
+		changed = true
+	}
+	if strings.TrimSpace(compatStringValue(toolCall["type"])) == "" {
+		toolCall["type"] = "function"
+		changed = true
+	}
+	if _, okArguments := function["arguments"].(string); !okArguments {
+		if function["arguments"] == nil {
+			function["arguments"] = ""
+		} else if rawArguments, err := json.Marshal(function["arguments"]); err == nil {
+			function["arguments"] = string(rawArguments)
+		} else {
+			function["arguments"] = ""
+		}
+		changed = true
+	}
+
+	return toolCall, changed, true
+}
+
 func openAICompatMessageHasContent(message map[string]any) bool {
 	content, ok := message["content"]
 	if !ok || content == nil {
@@ -582,7 +641,30 @@ func openAICompatMessageHasContent(message map[string]any) bool {
 	case string:
 		return strings.TrimSpace(v) != ""
 	case []any:
-		return len(v) > 0
+		for _, rawPart := range v {
+			switch part := rawPart.(type) {
+			case string:
+				if strings.TrimSpace(part) != "" {
+					return true
+				}
+			case map[string]any:
+				if strings.TrimSpace(compatStringValue(part["text"])) != "" {
+					return true
+				}
+				if imageURL, okImageURL := part["image_url"].(map[string]any); okImageURL {
+					if strings.TrimSpace(compatStringValue(imageURL["url"])) != "" {
+						return true
+					}
+				} else if strings.TrimSpace(compatStringValue(part["image_url"])) != "" {
+					return true
+				}
+			default:
+				if rawPart != nil {
+					return true
+				}
+			}
+		}
+		return false
 	default:
 		return true
 	}
@@ -968,6 +1050,12 @@ func normalizeOpenAICompatSchemaNode(node any) (map[string]any, bool) {
 		if _, okItems := out["items"]; !okItems {
 			out["items"] = map[string]any{"type": "string"}
 		}
+	}
+	if _, hasAnyOf := out["anyOf"]; hasAnyOf {
+		delete(out, "type")
+	}
+	if _, hasOneOf := out["oneOf"]; hasOneOf {
+		delete(out, "type")
 	}
 	return out, true
 }

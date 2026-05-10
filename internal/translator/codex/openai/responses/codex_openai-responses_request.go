@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -43,6 +44,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
+	rawJSON = dedupeCodexResponsesFunctionCalls(rawJSON)
 
 	return rawJSON
 }
@@ -160,4 +162,70 @@ func normalizeCodexBuiltinToolType(toolType string) string {
 	default:
 		return ""
 	}
+}
+
+func dedupeCodexResponsesFunctionCalls(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(rawJSON, &root); err != nil {
+		return rawJSON
+	}
+	input, ok := root["input"].([]any)
+	if !ok || len(input) == 0 {
+		return rawJSON
+	}
+
+	seenCallIDs := make(map[string]bool)
+	cleaned := make([]any, 0, len(input))
+	changed := false
+	for _, rawItem := range input {
+		item, okItem := rawItem.(map[string]any)
+		if !okItem {
+			cleaned = append(cleaned, rawItem)
+			continue
+		}
+		if !isCodexResponsesFunctionCallType(stringValue(item["type"])) {
+			cleaned = append(cleaned, rawItem)
+			continue
+		}
+		callID := stringValue(item["call_id"])
+		if callID == "" {
+			cleaned = append(cleaned, rawItem)
+			continue
+		}
+		if seenCallIDs[callID] {
+			changed = true
+			continue
+		}
+		seenCallIDs[callID] = true
+		cleaned = append(cleaned, rawItem)
+	}
+
+	if !changed {
+		return rawJSON
+	}
+	root["input"] = cleaned
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return rawJSON
+	}
+	return out
+}
+
+func isCodexResponsesFunctionCallType(itemType string) bool {
+	switch itemType {
+	case "function_call", "custom_tool_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func stringValue(value any) string {
+	str, _ := value.(string)
+	return str
 }

@@ -310,6 +310,32 @@ func TestConvertOpenAIResponsesRequestToCodex_NormalizesTopLevelToolChoicePrevie
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_DedupesFunctionCalls(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+			{"type":"function_call","call_id":"call_dup","name":"read_file","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_dup","output":"ok"},
+			{"type":"function_call","call_id":"call_dup","name":"read_file","arguments":"{}"},
+			{"type":"function_call","call_id":"call_other","name":"glob","arguments":"{}"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, false)
+
+	calls := gjson.GetBytes(output, `input.#(type=="function_call")#`).Array()
+	if len(calls) != 2 {
+		t.Fatalf("function_call count = %d, want 2: %s", len(calls), string(output))
+	}
+	if got := calls[0].Get("call_id").String(); got != "call_dup" {
+		t.Fatalf("first call_id = %q, want call_dup: %s", got, string(output))
+	}
+	if got := calls[1].Get("call_id").String(); got != "call_other" {
+		t.Fatalf("second call_id = %q, want call_other: %s", got, string(output))
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToCodex_NormalizesStructuredOutputRequiredFields(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.4-mini",
