@@ -381,6 +381,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
 	body = ensureModelMaxTokens(body, baseModel)
+	body = applyMiniMaxStreamingThinkingDefaultForCompat(compatKind, body, true)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -1159,6 +1160,24 @@ func checkSystemInstructions(payload []byte) []byte {
 	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
 }
 
+func applyMiniMaxStreamingThinkingDefaultForCompat(compatKind string, body []byte, stream bool) []byte {
+	if compatKind != "minimax" || !stream || len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	if gjson.GetBytes(body, "thinking").Exists() || gjson.GetBytes(body, "output_config.effort").Exists() {
+		return body
+	}
+	switch gjson.GetBytes(body, "tool_choice.type").String() {
+	case "any", "tool":
+		return body
+	}
+	out, err := sjson.SetBytes(body, "thinking.type", "disabled")
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
@@ -1322,7 +1341,7 @@ func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any)
 		}
 		partType := strings.TrimSpace(compatStringValue(part["type"]))
 		switch {
-		case isUnsupportedDeepSeekClaudeContentPart(compatKind, partType):
+		case isUnsupportedClaudeContentPartForCompat(compatKind, partType):
 			changed = true
 			if text := claudeUnsupportedContentText(part); text != "" {
 				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
@@ -1368,8 +1387,8 @@ func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any)
 	return cleaned, changed
 }
 
-func isUnsupportedDeepSeekClaudeContentPart(compatKind, partType string) bool {
-	if compatKind != "deepseek" {
+func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
+	if compatKind != "deepseek" && compatKind != "minimax" {
 		return false
 	}
 	switch partType {
@@ -1386,7 +1405,7 @@ func isClaudeServerToolResultPart(partType string) bool {
 }
 
 func downgradeClaudeToolResultContentForCompat(compatKind string, part map[string]any) (map[string]any, bool) {
-	if compatKind != "deepseek" {
+	if compatKind != "deepseek" && compatKind != "minimax" {
 		return part, false
 	}
 	content, ok := part["content"]
@@ -1405,7 +1424,7 @@ func downgradeClaudeToolResultContentForCompat(compatKind string, part map[strin
 				continue
 			}
 			nestedType := strings.TrimSpace(compatStringValue(nested["type"]))
-			if !isUnsupportedDeepSeekClaudeContentPart(compatKind, nestedType) {
+			if !isUnsupportedClaudeContentPartForCompat(compatKind, nestedType) {
 				cleaned = append(cleaned, rawNested)
 				continue
 			}
@@ -1421,7 +1440,7 @@ func downgradeClaudeToolResultContentForCompat(compatKind string, part map[strin
 		return part, true
 	case map[string]any:
 		nestedType := strings.TrimSpace(compatStringValue(typed["type"]))
-		if !isUnsupportedDeepSeekClaudeContentPart(compatKind, nestedType) {
+		if !isUnsupportedClaudeContentPartForCompat(compatKind, nestedType) {
 			return part, false
 		}
 		if text := claudeUnsupportedContentText(typed); text != "" {
@@ -2205,6 +2224,7 @@ func sanitizeClaudeHTTPRequestToolNames(req *http.Request) (*claudeToolNameSanit
 		compatKind = config.InferCompatKindFromBaseURL(req.URL.String())
 	}
 	body = downgradeClaudeToolSearchForCompatKind(compatKind, requestURLString(req), body)
+	body = applyMiniMaxStreamingThinkingDefaultForCompat(compatKind, body, gjson.GetBytes(body, "stream").Bool())
 	updated, mapping := sanitizeClaudeToolNamesForUpstream(body)
 	req.Body = io.NopCloser(bytes.NewReader(updated))
 	req.ContentLength = int64(len(updated))

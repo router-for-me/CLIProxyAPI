@@ -1409,7 +1409,11 @@ func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 		],
 		"tool_choice":{"type":"tool","name":"web_search"},
 		"messages":[
-			{"role":"user","content":[{"type":"text","text":"search"}]},
+			{"role":"user","content":[
+				{"type":"text","text":"search"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+				{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}
+			]},
 			{"role":"assistant","content":[
 				{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"current date"}},
 				{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[]}
@@ -1428,6 +1432,13 @@ func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 	if gjson.GetBytes(out, "tool_choice").Exists() {
 		t.Fatalf("tool_choice for removed server tool should be removed: %s", string(out))
 	}
+	userContent := gjson.GetBytes(out, "messages.0.content").Array()
+	if hasClaudePartType(userContent, "image_url") || hasClaudePartType(userContent, "mcp_tool_result") {
+		t.Fatalf("MiniMax unsupported content block remained: %s", string(out))
+	}
+	if !hasClaudeText(userContent, "search") || !hasClaudeText(userContent, "mcp ok") {
+		t.Fatalf("MiniMax compatible text should be preserved: %s", string(out))
+	}
 	for _, partType := range []string{"server_tool_use", "web_search_tool_result"} {
 		if gjson.GetBytes(out, `messages.1.content.#(type=="`+partType+`")`).Exists() {
 			t.Fatalf("%s should be downgraded away: %s", partType, string(out))
@@ -1435,6 +1446,51 @@ func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 	}
 	if err := validateClaudeUpstreamPayload("https://api.minimax.io/anthropic", out); err != nil {
 		t.Fatalf("downgraded MiniMax payload should pass validation: %v", err)
+	}
+}
+
+func TestApplyMiniMaxStreamingThinkingDefaultForCompat(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"model":"MiniMax-M2.7","messages":[{"role":"user","content":"hi"}]}`)
+	out := applyMiniMaxStreamingThinkingDefaultForCompat("minimax", payload, true)
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "disabled" {
+		t.Fatalf("thinking.type = %q, want disabled: %s", got, string(out))
+	}
+
+	explicit := []byte(`{"model":"MiniMax-M2.7","thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hi"}]}`)
+	out = applyMiniMaxStreamingThinkingDefaultForCompat("minimax", explicit, true)
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("explicit thinking.type = %q, want enabled: %s", got, string(out))
+	}
+
+	forcedToolChoice := []byte(`{"tool_choice":{"type":"tool","name":"read"},"messages":[{"role":"user","content":"hi"}]}`)
+	out = applyMiniMaxStreamingThinkingDefaultForCompat("minimax", forcedToolChoice, true)
+	if gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("forced tool_choice should not receive implicit thinking: %s", string(out))
+	}
+
+	nonStream := applyMiniMaxStreamingThinkingDefaultForCompat("minimax", payload, false)
+	if gjson.GetBytes(nonStream, "thinking").Exists() {
+		t.Fatalf("non-stream MiniMax request should not be changed: %s", string(nonStream))
+	}
+}
+
+func TestSanitizeClaudeHTTPRequestToolNames_DisablesImplicitMiniMaxStreamingThinking(t *testing.T) {
+	t.Parallel()
+
+	payload := `{"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "https://api.minimax.io/anthropic/v1/messages?beta=true", strings.NewReader(payload))
+
+	if _, err := sanitizeClaudeHTTPRequestToolNames(req); err != nil {
+		t.Fatalf("sanitizeClaudeHTTPRequestToolNames() error = %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "thinking.type").String(); got != "disabled" {
+		t.Fatalf("thinking.type = %q, want disabled: %s", got, string(body))
 	}
 }
 
