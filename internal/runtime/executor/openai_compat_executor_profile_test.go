@@ -396,6 +396,32 @@ func TestOpenAICompatPayloadDropsToolOnlyAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatHTTPRequestBodyRepairsKimiOrphanReplyToolCall(t *testing.T) {
+	payload := `{
+		"model":"kimi-k2.5",
+		"messages":[
+			{"role":"user","content":"start"},
+			{"role":"assistant","content":"reply pending","tool_calls":[{"id":"reply:0","type":"function","function":{"name":"reply","arguments":"{}"}}]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "https://api.kimi.com/coding/v1/chat/completions", strings.NewReader(payload))
+
+	if err := sanitizeOpenAICompatHTTPRequestBody(req, openAICompatProfileForKind("kimi"), "https://api.kimi.com/coding/v1"); err != nil {
+		t.Fatalf("sanitizeOpenAICompatHTTPRequestBody() error = %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if gjson.GetBytes(body, "messages.1.tool_calls").Exists() {
+		t.Fatalf("orphan reply tool_call should be removed: %s", string(body))
+	}
+	if got := gjson.GetBytes(body, "messages.1.content").String(); got != "reply pending" {
+		t.Fatalf("assistant content = %q, want preserved text: %s", got, string(body))
+	}
+}
+
 func TestOpenAICompatPayloadDropsEmptyMessages(t *testing.T) {
 	payload := []byte(`{
 		"model":"gpt-5.5",

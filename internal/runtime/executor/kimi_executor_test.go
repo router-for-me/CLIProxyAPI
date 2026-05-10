@@ -1,9 +1,14 @@
 package executor
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -44,6 +49,77 @@ func TestNormalizeKimiToolMessageLinks_InferSinglePendingID(t *testing.T) {
 	got := gjson.GetBytes(out, "messages.1.tool_call_id").String()
 	if got != "call_123" {
 		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "call_123")
+	}
+}
+
+func TestSanitizeKimiOpenAICompatibleRequestBodyDropsOrphanReplyToolCall(t *testing.T) {
+	body := []byte(`{
+		"model":"kimi-k2.5",
+		"messages":[
+			{"role":"user","content":"start"},
+			{"role":"assistant","content":"reply pending","tool_calls":[{"id":"reply:0","type":"function","function":{"name":"reply","arguments":"{}"}}]},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out, err := sanitizeKimiOpenAICompatibleRequestBody(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiOpenAICompatibleRequestBody() error = %v", err)
+	}
+
+	if gjson.GetBytes(out, "messages.1.tool_calls").Exists() {
+		t.Fatalf("orphan reply tool_call should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content").String(); got != "reply pending" {
+		t.Fatalf("assistant content = %q, want preserved text: %s", got, string(out))
+	}
+}
+
+func TestKimiExecutorHttpRequestSanitizesDirectChatBody(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("Authorization = %q, want Bearer test-key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"kimi-k2.5","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	payload := `{
+		"model":"kimi-k2.5",
+		"messages":[
+			{"role":"assistant","content":"reply pending","tool_calls":[{"id":"reply:0","type":"function","function":{"name":"reply","arguments":"{}"}}]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	executor := NewKimiExecutor(nil)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+
+	resp, err := executor.HttpRequest(context.Background(), auth, req)
+	if err != nil {
+		t.Fatalf("HttpRequest error: %v", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Fatalf("close response body: %v", errClose)
+		}
+	}()
+
+	if gjson.GetBytes(gotBody, "messages.0.tool_calls").Exists() {
+		t.Fatalf("direct Kimi HttpRequest should remove orphan tool_calls: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.content").String(); got != "reply pending" {
+		t.Fatalf("assistant content = %q, want preserved text: %s", got, string(gotBody))
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -68,11 +70,40 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
+	profile := e.resolveProfile(auth)
+	baseURL, _ := e.resolveCredentials(auth)
+	if err := sanitizeOpenAICompatHTTPRequestBody(httpReq, profile, baseURL); err != nil {
+		return nil, err
+	}
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
+}
+
+func sanitizeOpenAICompatHTTPRequestBody(req *http.Request, profile openAICompatProfile, baseURL string) error {
+	if req == nil || req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	body, errRead := io.ReadAll(req.Body)
+	if errRead != nil {
+		return errRead
+	}
+	if errClose := req.Body.Close(); errClose != nil {
+		log.Errorf("openai compat executor: request body close error: %v", errClose)
+	}
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	updated := scrubOpenAICompatPayloadForModel(body, profile, model, baseURL)
+	req.Body = io.NopCloser(bytes.NewReader(updated))
+	req.ContentLength = int64(len(updated))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(updated)), nil
+	}
+	if req.Header != nil {
+		req.Header.Set("Content-Length", strconv.Itoa(len(updated)))
+	}
+	return nil
 }
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

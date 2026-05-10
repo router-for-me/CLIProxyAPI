@@ -64,11 +64,40 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
+	if err := sanitizeKimiHTTPRequestBody(httpReq); err != nil {
+		return nil, err
+	}
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
+}
+
+func sanitizeKimiHTTPRequestBody(req *http.Request) error {
+	if req == nil || req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	body, errRead := io.ReadAll(req.Body)
+	if errRead != nil {
+		return errRead
+	}
+	if errClose := req.Body.Close(); errClose != nil {
+		log.Errorf("kimi executor: request body close error: %v", errClose)
+	}
+	updated, err := sanitizeKimiOpenAICompatibleRequestBody(body)
+	if err != nil {
+		return err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(updated))
+	req.ContentLength = int64(len(updated))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(updated)), nil
+	}
+	if req.Header != nil {
+		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(updated)))
+	}
+	return nil
 }
 
 // Execute performs a non-streaming chat completion request to Kimi.
@@ -115,7 +144,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
-	body, err = normalizeKimiToolMessageLinks(body)
+	body, err = sanitizeKimiOpenAICompatibleRequestBody(body)
 	if err != nil {
 		return resp, err
 	}
@@ -230,7 +259,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
-	body, err = normalizeKimiToolMessageLinks(body)
+	body, err = sanitizeKimiOpenAICompatibleRequestBody(body)
 	if err != nil {
 		return nil, err
 	}
@@ -676,6 +705,11 @@ func claudeToolResultIDsInNextUserMessage(messages []gjson.Result, assistantIdx 
 		}
 	}
 	return result
+}
+
+func sanitizeKimiOpenAICompatibleRequestBody(body []byte) ([]byte, error) {
+	body = repairOpenAICompatToolCallHistory(body)
+	return normalizeKimiToolMessageLinks(body)
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
