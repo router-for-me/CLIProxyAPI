@@ -17,7 +17,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -606,7 +608,28 @@ func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
 	merged.Home = baseCfg.Home
 	forceHomeRuntimeConfig(&merged)
 
+	logHomeConfigChanges(baseCfg, &merged)
 	s.applyConfigUpdate(&merged)
+}
+
+func logHomeConfigChanges(oldCfg, newCfg *config.Config) {
+	if oldCfg == nil || newCfg == nil || !newCfg.Home.Enabled || (!oldCfg.Debug && !newCfg.Debug) {
+		return
+	}
+
+	details := diff.BuildConfigChangeDetails(oldCfg, newCfg)
+	if len(details) == 0 {
+		return
+	}
+
+	if newCfg.Debug && !log.IsLevelEnabled(log.DebugLevel) {
+		util.SetLogLevel(newCfg)
+	}
+
+	log.Debugf("home config changes detected:")
+	for _, detail := range details {
+		log.Debugf("  %s", detail)
+	}
 }
 
 func (s *Service) startHomeUsageForwarder(ctx context.Context, client *home.Client) {
