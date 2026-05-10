@@ -153,9 +153,7 @@ type Manager struct {
 	scheduler *authScheduler
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
-	homeRuntimeAuths        map[string]*Auth
-	homeRuntimeAuthSessions map[string]map[string]struct{}
-	homeRuntimeAuthRefs     map[string]int
+	homeRuntimeAuths map[string]map[string]*Auth
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -195,16 +193,14 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:                   store,
-		executors:               make(map[string]ProviderExecutor),
-		selector:                selector,
-		hook:                    hook,
-		auths:                   make(map[string]*Auth),
-		homeRuntimeAuths:        make(map[string]*Auth),
-		homeRuntimeAuthSessions: make(map[string]map[string]struct{}),
-		homeRuntimeAuthRefs:     make(map[string]int),
-		providerOffsets:         make(map[string]int),
-		modelPoolOffsets:        make(map[string]int),
+		store:            store,
+		executors:        make(map[string]ProviderExecutor),
+		selector:         selector,
+		hook:             hook,
+		auths:            make(map[string]*Auth),
+		homeRuntimeAuths: make(map[string]map[string]*Auth),
+		providerOffsets:  make(map[string]int),
+		modelPoolOffsets: make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -2724,10 +2720,24 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	defer m.mu.RUnlock()
 	auth, ok := m.auths[id]
 	if !ok {
-		auth, ok = m.homeRuntimeAuths[id]
-		if !ok {
-			return nil, false
-		}
+		return nil, false
+	}
+	return auth.Clone(), true
+}
+
+// GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.
+func (m *Manager) GetExecutionSessionAuthByID(sessionID string, authID string) (*Auth, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	authID = strings.TrimSpace(authID)
+	if m == nil || sessionID == "" || authID == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sessionAuths := m.homeRuntimeAuths[sessionID]
+	auth := sessionAuths[authID]
+	if auth == nil {
+		return nil, false
 	}
 	return auth.Clone(), true
 }
@@ -3218,9 +3228,7 @@ func (m *Manager) clearHomeRuntimeAuthsLocked() {
 	if m == nil {
 		return
 	}
-	m.homeRuntimeAuths = make(map[string]*Auth)
-	m.homeRuntimeAuthSessions = make(map[string]map[string]struct{})
-	m.homeRuntimeAuthRefs = make(map[string]int)
+	m.homeRuntimeAuths = make(map[string]map[string]*Auth)
 }
 
 func (m *Manager) clearHomeRuntimeAuthsForSessionLocked(sessionID string) {
@@ -3228,21 +3236,7 @@ func (m *Manager) clearHomeRuntimeAuthsForSessionLocked(sessionID string) {
 	if m == nil || sessionID == "" {
 		return
 	}
-	authIDs := m.homeRuntimeAuthSessions[sessionID]
-	if len(authIDs) == 0 {
-		delete(m.homeRuntimeAuthSessions, sessionID)
-		return
-	}
-	for authID := range authIDs {
-		refCount := m.homeRuntimeAuthRefs[authID]
-		if refCount <= 1 {
-			delete(m.homeRuntimeAuthRefs, authID)
-			delete(m.homeRuntimeAuths, authID)
-			continue
-		}
-		m.homeRuntimeAuthRefs[authID] = refCount - 1
-	}
-	delete(m.homeRuntimeAuthSessions, sessionID)
+	delete(m.homeRuntimeAuths, sessionID)
 }
 
 func (m *Manager) rememberHomeRuntimeAuth(sessionID string, auth *Auth) {
@@ -3256,24 +3250,14 @@ func (m *Manager) rememberHomeRuntimeAuth(sessionID string, auth *Auth) {
 	}
 	m.mu.Lock()
 	if m.homeRuntimeAuths == nil {
-		m.homeRuntimeAuths = make(map[string]*Auth)
+		m.homeRuntimeAuths = make(map[string]map[string]*Auth)
 	}
-	if m.homeRuntimeAuthSessions == nil {
-		m.homeRuntimeAuthSessions = make(map[string]map[string]struct{})
-	}
-	if m.homeRuntimeAuthRefs == nil {
-		m.homeRuntimeAuthRefs = make(map[string]int)
-	}
-	m.homeRuntimeAuths[authID] = auth.Clone()
-	sessionAuths := m.homeRuntimeAuthSessions[sessionID]
+	sessionAuths := m.homeRuntimeAuths[sessionID]
 	if sessionAuths == nil {
-		sessionAuths = make(map[string]struct{})
-		m.homeRuntimeAuthSessions[sessionID] = sessionAuths
+		sessionAuths = make(map[string]*Auth)
+		m.homeRuntimeAuths[sessionID] = sessionAuths
 	}
-	if _, exists := sessionAuths[authID]; !exists {
-		sessionAuths[authID] = struct{}{}
-		m.homeRuntimeAuthRefs[authID]++
-	}
+	sessionAuths[authID] = auth.Clone()
 	m.mu.Unlock()
 }
 
@@ -3284,12 +3268,8 @@ func (m *Manager) homeRuntimeAuthByID(sessionID string, authID string) (*Auth, P
 		return nil, nil, "", false
 	}
 	m.mu.RLock()
-	sessionAuths := m.homeRuntimeAuthSessions[sessionID]
-	if _, ok := sessionAuths[authID]; !ok {
-		m.mu.RUnlock()
-		return nil, nil, "", false
-	}
-	auth := m.homeRuntimeAuths[authID]
+	sessionAuths := m.homeRuntimeAuths[sessionID]
+	auth := sessionAuths[authID]
 	m.mu.RUnlock()
 	if auth == nil || !authWebsocketsEnabled(auth) {
 		return nil, nil, "", false

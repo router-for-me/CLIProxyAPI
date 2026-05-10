@@ -104,6 +104,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
+		if h == nil || h.AuthManager == nil {
+			return nil, false
+		}
+		if auth, ok := h.AuthManager.GetExecutionSessionAuthByID(passthroughSessionID, authID); ok {
+			return auth, true
+		}
+		return h.AuthManager.GetByID(authID)
+	}
 	forceTranscriptReplayNextRequest := false
 
 	for {
@@ -130,8 +139,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		appendWebsocketTimelineEvent(&wsTimelineLog, "request", payload, time.Now())
 
 		allowIncrementalInputWithPreviousResponseID := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+		if pinnedAuthID != "" {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
 			}
 		} else {
@@ -146,8 +155,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		allowCompactionReplayBypass := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+		if pinnedAuthID != "" {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
 			}
 		} else {
@@ -228,7 +237,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if authID == "" || h == nil || h.AuthManager == nil {
 					return
 				}
-				selectedAuth, ok := h.AuthManager.GetByID(authID)
+				selectedAuth, ok := sessionAuthByID(authID)
 				if !ok || selectedAuth == nil {
 					return
 				}

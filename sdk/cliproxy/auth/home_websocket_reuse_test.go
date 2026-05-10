@@ -27,9 +27,9 @@ func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.
 	}
 	auth.EnsureIndex()
 	manager.rememberHomeRuntimeAuth("session-1", auth)
-	cachedAuth, ok := manager.GetByID("home-auth-1")
+	cachedAuth, ok := manager.GetExecutionSessionAuthByID("session-1", "home-auth-1")
 	if !ok || cachedAuth == nil || !authWebsocketsEnabled(cachedAuth) {
-		t.Fatalf("GetByID() did not expose remembered websocket home auth: auth=%#v ok=%v", cachedAuth, ok)
+		t.Fatalf("GetExecutionSessionAuthByID() did not expose remembered websocket home auth: auth=%#v ok=%v", cachedAuth, ok)
 	}
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
@@ -53,6 +53,61 @@ func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.
 	}
 	if provider != "test" {
 		t.Fatalf("pickNextViaHome() provider = %q, want test", provider)
+	}
+}
+
+func TestPickNextViaHomeKeepsSameAuthIDPayloadSessionScoped(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	manager.rememberHomeRuntimeAuth("session-1", &Auth{
+		ID:       "home-auth-1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"websockets":                  "true",
+			homeUpstreamModelAttributeKey: "upstream-model-a",
+		},
+	})
+	manager.rememberHomeRuntimeAuth("session-2", &Auth{
+		ID:       "home-auth-1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"websockets":                  "true",
+			homeUpstreamModelAttributeKey: "upstream-model-b",
+		},
+	})
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	optsSession1 := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+			cliproxyexecutor.PinnedAuthMetadataKey:       "home-auth-1",
+		},
+	}
+	optsSession2 := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-2",
+			cliproxyexecutor.PinnedAuthMetadataKey:       "home-auth-1",
+		},
+	}
+
+	gotSession1, _, _, errSession1 := manager.pickNextViaHome(ctx, "gpt-5.4", optsSession1, nil)
+	if errSession1 != nil {
+		t.Fatalf("pickNextViaHome(session-1) error = %v", errSession1)
+	}
+	if got := gotSession1.Attributes[homeUpstreamModelAttributeKey]; got != "upstream-model-a" {
+		t.Fatalf("pickNextViaHome(session-1) upstream model = %q, want upstream-model-a", got)
+	}
+
+	gotSession2, _, _, errSession2 := manager.pickNextViaHome(ctx, "gpt-5.4", optsSession2, nil)
+	if errSession2 != nil {
+		t.Fatalf("pickNextViaHome(session-2) error = %v", errSession2)
+	}
+	if got := gotSession2.Attributes[homeUpstreamModelAttributeKey]; got != "upstream-model-b" {
+		t.Fatalf("pickNextViaHome(session-2) upstream model = %q, want upstream-model-b", got)
 	}
 }
 
@@ -135,10 +190,12 @@ func TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth(t *testing.T) {
 	manager.RegisterExecutor(schedulerTestExecutor{})
 
 	manager.mu.Lock()
-	manager.homeRuntimeAuths["home-auth-1"] = &Auth{
-		ID:       "home-auth-1",
-		Provider: "test",
-		Status:   StatusActive,
+	manager.homeRuntimeAuths["session-1"] = map[string]*Auth{
+		"home-auth-1": &Auth{
+			ID:       "home-auth-1",
+			Provider: "test",
+			Status:   StatusActive,
+		},
 	}
 	manager.mu.Unlock()
 
@@ -175,12 +232,12 @@ func TestHomeRuntimeAuthsClearWhenHomeDisabled(t *testing.T) {
 		},
 	})
 
-	if _, ok := manager.GetByID("home-auth-1"); !ok {
+	if _, ok := manager.GetExecutionSessionAuthByID("session-1", "home-auth-1"); !ok {
 		t.Fatal("expected remembered home auth before disabling home")
 	}
 
 	manager.SetConfig(&internalconfig.Config{})
-	if _, ok := manager.GetByID("home-auth-1"); ok {
+	if _, ok := manager.GetExecutionSessionAuthByID("session-1", "home-auth-1"); ok {
 		t.Fatal("remembered home auth was not cleared when home was disabled")
 	}
 }
@@ -199,12 +256,15 @@ func TestCloseExecutionSessionClearsHomeRuntimeAuthForSession(t *testing.T) {
 	manager.rememberHomeRuntimeAuth("session-2", auth)
 
 	manager.CloseExecutionSession("session-1")
-	if _, ok := manager.GetByID("home-auth-1"); !ok {
-		t.Fatal("shared home auth was cleared while another session still referenced it")
+	if _, ok := manager.GetExecutionSessionAuthByID("session-1", "home-auth-1"); ok {
+		t.Fatal("home auth for closed session was not cleared")
+	}
+	if _, ok := manager.GetExecutionSessionAuthByID("session-2", "home-auth-1"); !ok {
+		t.Fatal("home auth for another session was cleared")
 	}
 
 	manager.CloseExecutionSession("session-2")
-	if _, ok := manager.GetByID("home-auth-1"); ok {
+	if _, ok := manager.GetExecutionSessionAuthByID("session-2", "home-auth-1"); ok {
 		t.Fatal("home auth was not cleared when its last session closed")
 	}
 }
