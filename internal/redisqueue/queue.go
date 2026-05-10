@@ -53,6 +53,10 @@ func SetRetentionSeconds(value int) {
 	retentionSeconds.Store(normalized)
 }
 
+func RetentionSeconds() int {
+	return int(retentionSeconds.Load())
+}
+
 func Enqueue(payload []byte) {
 	if !Enabled() {
 		return

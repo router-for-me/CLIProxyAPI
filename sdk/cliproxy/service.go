@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/forkruntime"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -610,66 +610,6 @@ func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
 	s.applyConfigUpdate(&merged)
 }
 
-func (s *Service) startHomeUsageForwarder(ctx context.Context, client *home.Client) {
-	if s == nil || client == nil {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	sleep := func(d time.Duration) bool {
-		if d <= 0 {
-			return true
-		}
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return false
-		case <-timer.C:
-			return true
-		}
-	}
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			if !client.HeartbeatOK() {
-				if !sleep(time.Second) {
-					return
-				}
-				continue
-			}
-
-			items := redisqueue.PopOldest(64)
-			if len(items) == 0 {
-				if !sleep(500 * time.Millisecond) {
-					return
-				}
-				continue
-			}
-
-			for i := range items {
-				if errPush := client.LPushUsage(ctx, items[i]); errPush != nil {
-					for j := i; j < len(items); j++ {
-						redisqueue.Enqueue(items[j])
-					}
-					if !sleep(time.Second) {
-						return
-					}
-					break
-				}
-			}
-		}
-	}()
-}
-
 func (s *Service) startHomeSubscriber(ctx context.Context) {
 	if s == nil {
 		return
@@ -710,7 +650,7 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 		s.applyHomeOverlay(parsed)
 		return nil
 	})
-	s.startHomeUsageForwarder(homeCtx, client)
+	forkruntime.StartHomeUsageForwarder(homeCtx, client)
 }
 
 // Run starts the service and blocks until the context is cancelled or the server stops.
@@ -993,9 +933,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
-		if err := internalusage.CloseDefaultStore(); err != nil {
-			log.WithError(err).Warn("failed to close usage store")
-		}
+		forkruntime.CloseUsageStore()
 	})
 	return shutdownErr
 }
