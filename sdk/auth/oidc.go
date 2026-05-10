@@ -156,8 +156,11 @@ func (a *OIDCAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		providerName = "oidc"
 	}
 	fileName := fmt.Sprintf("oidc-%s-%s.json", providerName, identity)
+	now := time.Now().Format(time.RFC3339)
 	metadata := map[string]any{
-		"type": "oidc",
+		"type":         "oidc",
+		"oidc_name":    opts.Metadata[oidc.MetadataNameKey],
+		"last_refresh": now,
 	}
 	fmt.Println("OIDC authentication successful")
 

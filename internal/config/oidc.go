@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 const (
@@ -13,7 +15,26 @@ const (
 	DefaultCallbackPort = 38965
 )
 
-// OIDCConfig holds default values for one configurable OIDC login flow.
+type OIDCModel struct {
+	// Name is the actual model name used by the external provider.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the model name alias that clients will use to reference this model.
+	Alias string `yaml:"alias" json:"alias"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+}
+
+func (m OIDCModel) GetName() string {
+	return m.Name
+}
+
+func (m OIDCModel) GetAlias() string {
+	return m.Alias
+}
+
 // Command-line flags may override any populated field at runtime.
 type OIDCConfig struct {
 	Name          string `yaml:"name" json:"name"`
@@ -26,10 +47,10 @@ type OIDCConfig struct {
 	RedirectURI   string `yaml:"redirect-uri" json:"redirect-uri"`
 	LLMEndpoint   string `yaml:"llm-endpoint" json:"llm-endpoint"`
 	// 参考 https://github.com/router-for-me/CLIProxyAPI/blob/main/docs/sdk-advanced_CN.md
-	RequestFormat  string                     `yaml:"request-format" json:"request-format"`
-	ResponseFormat string                     `yaml:"response-format" json:"response-format"`
-	Headers        map[string]string          `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Models         []OpenAICompatibilityModel `yaml:"models,omitempty" json:"models,omitempty"`
+	RequestFormat  string            `yaml:"request-format" json:"request-format"`
+	ResponseFormat string            `yaml:"response-format" json:"response-format"`
+	Headers        map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Models         []OIDCModel       `yaml:"models,omitempty" json:"models,omitempty"`
 }
 
 // OIDCConfigs supports either a single mapping or a list of mappings under `oidc:`.

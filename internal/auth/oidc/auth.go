@@ -28,10 +28,11 @@ const (
 
 type Auth struct {
 	httpClient *http.Client
-	config     config.OIDCConfig
+	Config     config.OIDCConfig
 }
 
 type TokenData struct {
+	IDToken      string `json:"id_token"`
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	Email        string `json:"email"`
@@ -44,11 +45,11 @@ type TokenData struct {
 func NewAuth(cfg *config.Config, config config.OIDCConfig) *Auth {
 	client := &http.Client{Timeout: 30 * time.Second}
 	if cfg == nil {
-		return &Auth{httpClient: client, config: config}
+		return &Auth{httpClient: client, Config: config}
 	}
 	return &Auth{
 		httpClient: util.SetProxy(&cfg.SDKConfig, client),
-		config:     config,
+		Config:     config,
 	}
 }
 
@@ -65,19 +66,19 @@ func (a *Auth) AuthorizationURL(state, redirectURI string, pkce *PKCECodes) (str
 	}
 	values := url.Values{}
 	values.Set("response_type", "code")
-	values.Set("client_id", a.config.ClientID)
+	values.Set("client_id", a.Config.ClientID)
 	values.Set("redirect_uri", redirectURI)
-	values.Set("scope", a.config.Scope)
+	values.Set("scope", a.Config.Scope)
 	values.Set("state", state)
 	values.Set("code_challenge", pkce.CodeChallenge)
 	values.Set("code_challenge_method", "S256")
-	return joinURL(a.config.Domain, a.config.AuthorizePath) + "?" + values.Encode(), nil
+	return joinURL(a.Config.Domain, a.Config.AuthorizePath) + "?" + values.Encode(), nil
 }
 
 func (a *Auth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI, codeVerifier string) (*TokenData, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
-	form.Set("client_id", a.config.ClientID)
+	form.Set("client_id", a.Config.ClientID)
 	form.Set("code", strings.TrimSpace(code))
 	form.Set("redirect_uri", strings.TrimSpace(redirectURI))
 	form.Set("code_verifier", strings.TrimSpace(codeVerifier))
@@ -87,7 +88,7 @@ func (a *Auth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI, cod
 func (a *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
-	form.Set("client_id", a.config.ClientID)
+	form.Set("client_id", a.Config.ClientID)
 	form.Set("refresh_token", strings.TrimSpace(refreshToken))
 	return a.tokenRequest(ctx, form)
 }
@@ -105,7 +106,7 @@ func (a *Auth) tokenRequest(ctx context.Context, form url.Values) (*TokenData, e
 	if a == nil {
 		return nil, fmt.Errorf("oidc auth is nil")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, joinURL(a.config.Domain, a.config.TokenPath), strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, joinURL(a.Config.Domain, a.Config.TokenPath), strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("oidc token: create request failed: %w", err)
 	}
@@ -136,6 +137,7 @@ func (a *Auth) tokenRequest(ctx context.Context, form url.Values) (*TokenData, e
 		return nil, fmt.Errorf("oidc token: parse response failed: %w", err)
 	}
 	data := &TokenData{
+		IDToken:      tokenResp.IDToken,
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 	}
