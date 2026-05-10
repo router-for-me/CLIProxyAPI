@@ -1793,119 +1793,146 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	return "claude-sonnet-4.5"
 }
 
-// kiroCreditUSD is Kiro's empirical credit-to-USD conversion rate. The
-// published overage rate is $0.04/credit, but Kiro applies a discount on
-// top so each credit reflects roughly $0.12 of effective spend.
-const kiroCreditUSD = 0.12
+// kiroCreditUSDForModel returns the empirical USD-equivalence of one Kiro
+// credit when reconciled against the model's Anthropic MSRP price table.
+// Calibrated per-model because Kiro's published task-level multipliers
+// (Auto=1.0, Sonnet=1.3, Haiku=0.4, Opus=2.2) are about how much credit a
+// given task burns on each model — they don't scale linearly with token
+// count, so they don't predict $/credit when reconciled against per-Mtok
+// MSRP. Empirical values (TSV-based fit, ±10% variance):
+//
+//	sonnet : 0.135  (10 sample rows, range 0.12-0.14)
+//	haiku  : 0.37   (4  sample rows, range 0.30-0.40)
+//	opus   : 0.225  (no live data; placeholder = sonnet × MSRP-ratio 5/3)
+func kiroCreditUSDForModel(model string) float64 {
+	modelLower := strings.ToLower(model)
+	switch {
+	case strings.Contains(modelLower, "haiku"):
+		return 0.37
+	case strings.Contains(modelLower, "opus"):
+		return 0.225
+	default:
+		return 0.135
+	}
+}
 
 // kiroTokenPrice holds Anthropic MSRP per Mtok for one Kiro model class.
-// Cache prices follow the 5-minute cache ratios (cache_write = 1.25 × input,
-// cache_read = 0.10 × input); 1-hour cache (cache_write = 2 × input) is the
-// minority case and absorbed as estimation slack in cache_creation tokens.
+// 5-minute and 1-hour ephemeral cache_write rates differ (1.25× input vs
+// 2× input). When credits demand more value than all-cache_write at 5-min
+// can provide, we fall back to 1-hour pricing for the linear solve and
+// inflate the forwarded cache_creation_input_tokens count to compensate
+// sub2api's default 5-min pricing.
 type kiroTokenPrice struct {
-	inputPerMTok      float64
-	outputPerMTok     float64
-	cacheWritePerMTok float64
-	cacheReadPerMTok  float64
+	inputPerMTok        float64
+	outputPerMTok       float64
+	cacheWritePerMTok   float64 // 5-minute ephemeral cache_write
+	cacheWrite1HPerMTok float64 // 1-hour ephemeral cache_write (premium fallback)
+	cacheReadPerMTok    float64
 }
 
 // kiroTokenPriceForModel returns Anthropic MSRP per Mtok for the given Kiro
-// model class. Empirically, Kiro bills credits such that
-// `credits × kiroCreditUSD ≈ MSRP-priced cost`, so no per-model multiplier
-// is needed on top.
+// model class.
 func kiroTokenPriceForModel(model string) kiroTokenPrice {
 	modelLower := strings.ToLower(model)
 	switch {
 	case strings.Contains(modelLower, "haiku"):
 		return kiroTokenPrice{
-			inputPerMTok:      1.0,
-			outputPerMTok:     5.0,
-			cacheWritePerMTok: 1.25,
-			cacheReadPerMTok:  0.10,
+			inputPerMTok:        1.0,
+			outputPerMTok:       5.0,
+			cacheWritePerMTok:   1.25, // 5-min
+			cacheWrite1HPerMTok: 2.0,  // 1-hour
+			cacheReadPerMTok:    0.10,
 		}
 	case strings.Contains(modelLower, "opus"):
+		// Opus 4.x pricing (Opus 4.5/4.6/4.7 are all $5/$25/Mtok; the prior
+		// $15/$75 numbers in this file were Opus 3 era).
 		return kiroTokenPrice{
-			inputPerMTok:      15.0,
-			outputPerMTok:     75.0,
-			cacheWritePerMTok: 18.75,
-			cacheReadPerMTok:  1.50,
+			inputPerMTok:        5.0,
+			outputPerMTok:       25.0,
+			cacheWritePerMTok:   6.25, // 5-min
+			cacheWrite1HPerMTok: 10.0, // 1-hour
+			cacheReadPerMTok:    0.50,
 		}
 	default:
 		return kiroTokenPrice{
-			inputPerMTok:      3.0,
-			outputPerMTok:     15.0,
-			cacheWritePerMTok: 3.75,
-			cacheReadPerMTok:  0.30,
+			inputPerMTok:        3.0,
+			outputPerMTok:       15.0,
+			cacheWritePerMTok:   3.75, // 5-min
+			cacheWrite1HPerMTok: 6.0,  // 1-hour
+			cacheReadPerMTok:    0.30,
 		}
 	}
 }
 
 // estimateKiroCacheUsage refines `detail` with cache_read / cache_creation
-// estimates when upstream did not return an authoritative breakdown.
+// estimates, using the upstream credit charge as the budget constraint.
 //
-// Kiro reports `cacheReadInputTokens` but never `cacheWriteInputTokens`, so
-// the common case here is "CR officially given, CW unknown" — solved as a
-// one-unknown linear equation against the credit charge. The "neither
-// reported" case keeps the older Branch A / B / C logic.
+// Kiro never returns cacheReadInputTokens or cacheWriteInputTokens. The most
+// it gives us is { uncachedInputTokens, totalTokens } (via tokenUsage) or a
+// flat { inputTokens } (legacy events). Either way, we must back out the
+// CR/CW split from credits.
 //
 // Inputs:
-//   - detail.InputTokens    — uncached input (only meaningful when hasUncached)
-//   - detail.OutputTokens   — output tokens (always required)
+//   - detail.InputTokens    — semantics depend on hasUncached:
+//                             hasUncached=true  → uncached input only
+//                             hasUncached=false → flat "total input"
+//                                                  (uncached + CR + CW)
+//   - detail.OutputTokens   — output tokens
 //   - detail.ReasoningTokens
-//   - detail.TotalTokens    — optional; if > 0, gives cached_total exactly
+//   - detail.TotalTokens    — optional grand total of all token classes;
+//                             only meaningful when hasUncached=true.
 //   - credits               — accumulated upstream credit usage (0 if absent)
-//   - hasOfficialCacheRead  — true when upstream supplied cacheReadInputTokens
-//   - hasOfficialCacheWrite — true when upstream supplied cacheWriteInputTokens
-//   - hasUncached           — true when InputTokens explicitly means uncached
+//   - hasUncached           — see above
 //
 // Decision tree:
 //
-//	both cache fields given OR hasUncached=false                       → no-op
-//	credits>0 AND only CR given (solve CW)                             → CW
-//	credits>0 AND only CW given (solve CR)                             → CR
-//	credits>0 AND neither, total>0  (Branch A: linear solve CR/CW)     → both
-//	credits>0 AND neither, no total (Branch B: assume CW=0, derive CR) → CR only
-//	credits==0 AND neither, total>0 (Branch C: deterministic, all→CR)  → CR only
-//	otherwise                                                          → no-op
-//
-// Returns (detail, estimatedCacheRead, estimatedCacheWrite). A field is
-// flagged as estimated only when this function wrote a value into it that was
-// not officially supplied by upstream — usageDetailForInternalStats relies on
-// per-field flags so an officially-reported CR isn't accidentally stripped
-// when only CW was estimated.
-func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, hasOfficialCacheRead, hasOfficialCacheWrite, hasUncached bool) (usage.Detail, bool, bool) {
-	if hasOfficialCacheRead && hasOfficialCacheWrite {
-		return detail, false, false
-	}
-	if !hasUncached {
-		return detail, false, false
-	}
+//	hasUncached && hasTotal && credits>0 → Branch A: solve CR+CW with
+//	                                       cached_total = total-uncached-…
+//	hasUncached && !hasTotal && credits>0 → Branch B: assume CW=0, derive CR
+//	hasUncached && hasTotal && credits<=0 → Branch C: all cached → CR
+//	!hasUncached && InputTokens>0 && credits>0 → Branch D: split flat input
+//	otherwise → no-op
+func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, hasUncached bool) (usage.Detail, bool, bool) {
 	if detail.InputTokens < 0 || detail.OutputTokens < 0 {
 		return detail, false, false
 	}
+	// If upstream already supplied either cache field, treat the entire cache
+	// breakdown as authoritative and don't second-guess via credits. Kiro never
+	// sends these in practice, but the guard keeps us safe if Kiro starts to —
+	// or if a fixture/test threads pre-set values through.
+	if detail.CacheReadInputTokens > 0 || detail.CacheCreationInputTokens > 0 {
+		return detail, false, false
+	}
 
-	// hasTotal distinguishes "upstream gave us an authoritative total" from
-	// "total still unknown". Branches that infer cache from credits alone must
-	// only fire when total is genuinely missing — otherwise an upstream total
-	// that proves zero or negative cache room would be ignored and credits
-	// would fabricate phantom cache reads.
+	price := kiroTokenPriceForModel(model)
+	creditUSD := kiroCreditUSDForModel(model)
+
+	// Branch D: flat InputTokens semantics — Kiro gave us "total input"
+	// without labeling the cache split. Use credits to pick uncached vs CR
+	// (or uncached vs CW when credits suggest a premium).
+	if !hasUncached {
+		if detail.InputTokens <= 0 || credits <= 0 {
+			return detail, false, false
+		}
+		return splitFlatInputByCredits(detail, credits, creditUSD, price)
+	}
+
+	// hasUncached path: InputTokens is uncached-only. Cache lives in
+	// (TotalTokens - InputTokens - OutputTokens - ReasoningTokens).
 	hasTotal := detail.TotalTokens > 0
 	var cachedTotal int64
 	if hasTotal {
 		cachedTotal = detail.TotalTokens - detail.InputTokens - detail.OutputTokens - detail.ReasoningTokens
-		// cachedTotal <= 0 means upstream's total is contradictory (negative)
-		// or proves no cache happened (zero). Trust upstream and stop here.
+		// cachedTotal <= 0 means upstream's total proves no cache happened
+		// (zero) or is contradictory (negative). Trust upstream and stop.
 		if cachedTotal <= 0 {
 			return detail, false, false
 		}
 	}
 
-	hasOneSide := hasOfficialCacheRead || hasOfficialCacheWrite
-
 	if credits <= 0 {
-		// Branch C: no credits — only safe move is the deterministic all→CR
-		// inference, and only when neither side is officially given.
-		if !hasTotal || hasOneSide {
+		// Branch C: no credits — deterministic all→CR only when total is given.
+		if !hasTotal {
 			return detail, false, false
 		}
 		detail.CacheReadInputTokens = cachedTotal
@@ -1917,27 +1944,13 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 		return detail, true, true
 	}
 
-	price := kiroTokenPriceForModel(model)
-	targetUSD := credits * kiroCreditUSD
-
-	// knownUSD includes any officially reported cache fields so the unknown
-	// side can be solved in isolation.
+	targetUSD := credits * creditUSD
 	knownUSD := (float64(detail.InputTokens)*price.inputPerMTok + float64(detail.OutputTokens)*price.outputPerMTok) / 1_000_000
-	if hasOfficialCacheRead {
-		knownUSD += float64(detail.CacheReadInputTokens) * price.cacheReadPerMTok / 1_000_000
-	}
-	if hasOfficialCacheWrite {
-		knownUSD += float64(detail.CacheCreationInputTokens) * price.cacheWritePerMTok / 1_000_000
-	}
 	remainingUSD := targetUSD - knownUSD
 
 	if remainingUSD <= 0 {
-		// Pricing-assumption miss or no additional cache happened.
-		// Trust whatever upstream gave (don't overwrite an officially-reported
-		// CR/CW). Fall back to all→CR only when neither side is given.
-		if hasOneSide {
-			return detail, false, false
-		}
+		// Credits cover input+output but leave no budget for cache.
+		// Fall back to all→CR if total is given, else no-op.
 		if !hasTotal {
 			return detail, false, false
 		}
@@ -1953,88 +1966,61 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 	cacheValue := remainingUSD * 1_000_000
 
 	var cacheRead, cacheWrite int64
-	var estimatedCR, estimatedCW bool
-	switch {
-	case hasOfficialCacheRead:
-		// CR fixed; solve CW from the credit residual.
-		if price.cacheWritePerMTok <= 0 {
+	if hasTotal {
+		// Branch A: solve linear system
+		//   CR + CW = cachedTotal
+		//   CR × P_cr + CW × P_cw = cacheValue
+		// Step 1: 5-min solve.
+		denom := price.cacheWritePerMTok - price.cacheReadPerMTok
+		if denom <= 0 || price.cacheWritePerMTok <= 0 {
 			return detail, false, false
 		}
-		cw := cacheValue / price.cacheWritePerMTok
+		cwRate := price.cacheWritePerMTok
+		cw := (cacheValue - price.cacheReadPerMTok*float64(cachedTotal)) / denom
+
+		// Step 2: 5-min cap insufficient → switch to 1-hour rate for the
+		// real-token solve.
+		if cw > float64(cachedTotal) && price.cacheWrite1HPerMTok > cwRate {
+			cwRate = price.cacheWrite1HPerMTok
+			denom1h := cwRate - price.cacheReadPerMTok
+			cw = (cacheValue - price.cacheReadPerMTok*float64(cachedTotal)) / denom1h
+		}
+
 		if cw < 0 {
 			cw = 0
 		}
-		if hasTotal {
-			maxCW := cachedTotal - detail.CacheReadInputTokens
-			if maxCW < 0 {
-				maxCW = 0
-			}
-			if cw > float64(maxCW) {
-				cw = float64(maxCW)
-			}
+		if cw > float64(cachedTotal) {
+			cw = float64(cachedTotal)
 		}
-		cacheRead = detail.CacheReadInputTokens
-		cacheWrite = int64(math.Round(cw))
-		estimatedCW = true
+		cwReal := int64(math.Round(cw))
+		if cwReal > cachedTotal {
+			cwReal = cachedTotal
+		}
+		cacheRead = cachedTotal - cwReal
 
-	case hasOfficialCacheWrite:
-		// CW fixed; solve CR from the credit residual.
+		// Step 3: forward CW count chosen so sub2api's default 5-min rate
+		// recovers cacheValue. Closes the math regardless of solve tier.
+		cw5min := price.cacheWritePerMTok
+		cwForwarded := (cacheValue - price.cacheReadPerMTok*float64(cacheRead)) / cw5min
+		if cwForwarded < 0 {
+			cwForwarded = 0
+		}
+		cacheWrite = int64(math.Round(cwForwarded))
+		if cacheWrite > cwReal {
+			log.Debugf("kiro: Branch A inflated cache_creation: cw_real=%d cw_forwarded=%d (rate-tier solve %.2f → 5min)",
+				cwReal, cacheWrite, cwRate)
+		}
+	} else {
+		// Branch B: no total — assume CW=0 and back-derive CR.
 		if price.cacheReadPerMTok <= 0 {
 			return detail, false, false
 		}
 		cr := cacheValue / price.cacheReadPerMTok
-		if cr < 0 {
-			cr = 0
-		}
-		if hasTotal {
-			maxCR := cachedTotal - detail.CacheCreationInputTokens
-			if maxCR < 0 {
-				maxCR = 0
-			}
-			if cr > float64(maxCR) {
-				cr = float64(maxCR)
-			}
+		if cr <= 0 {
+			return detail, false, false
 		}
 		cacheRead = int64(math.Round(cr))
-		cacheWrite = detail.CacheCreationInputTokens
-		estimatedCR = true
-
-	default:
-		// Neither side given: existing Branch A (with total) or B (without).
-		if hasTotal {
-			// Branch A: solve the linear system
-			//   CR + CW = cachedTotal
-			//   CR × P_cr + CW × P_cw = cacheValue
-			denom := price.cacheWritePerMTok - price.cacheReadPerMTok
-			if denom <= 0 {
-				return detail, false, false
-			}
-			cw := (cacheValue - price.cacheReadPerMTok*float64(cachedTotal)) / denom
-			if cw < 0 {
-				cw = 0
-			}
-			if cw > float64(cachedTotal) {
-				cw = float64(cachedTotal)
-			}
-			cacheWrite = int64(math.Round(cw))
-			if cacheWrite > cachedTotal {
-				cacheWrite = cachedTotal
-			}
-			cacheRead = cachedTotal - cacheWrite
-		} else {
-			// Branch B: no total — assume CW=0 and back-derive CR.
-			if price.cacheReadPerMTok <= 0 {
-				return detail, false, false
-			}
-			cr := cacheValue / price.cacheReadPerMTok
-			if cr <= 0 {
-				return detail, false, false
-			}
-			cacheRead = int64(math.Round(cr))
-			cacheWrite = 0
-		}
-		estimatedCR = true
-		estimatedCW = true
+		cacheWrite = 0
 	}
 
 	detail.CacheReadInputTokens = cacheRead
@@ -2044,9 +2030,119 @@ func estimateKiroCacheUsage(model string, detail usage.Detail, credits float64, 
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 	}
 
-	log.Debugf("kiro: estimated cache usage: model=%s credits=%.4f cached_total=%d cache_read=%d cache_creation=%d official_cr=%t official_cw=%t",
-		model, credits, cachedTotal, cacheRead, cacheWrite, hasOfficialCacheRead, hasOfficialCacheWrite)
-	return detail, estimatedCR, estimatedCW
+	log.Debugf("kiro: estimated cache usage (uncached path): model=%s credits=%.4f cached_total=%d cache_read=%d cache_creation=%d",
+		model, credits, cachedTotal, cacheRead, cacheWrite)
+	return detail, true, true
+}
+
+// splitFlatInputByCredits handles Branch D: Kiro gave us a flat
+// inputTokens that means total-input (uncached + CR + CW), no breakdown.
+// Use the credit residual to decide the split.
+//
+// Heuristic: assume one of {CR, CW} is zero, picking the side that closes
+// the math. Credits below full-input MSRP imply some cache_read presence
+// (CW=0); credits above imply some cache_write (CR=0).
+func splitFlatInputByCredits(detail usage.Detail, credits, creditUSD float64, price kiroTokenPrice) (usage.Detail, bool, bool) {
+	inputTotal := detail.InputTokens
+	creditValue := credits * creditUSD * 1_000_000
+	outputValue := float64(detail.OutputTokens) * price.outputPerMTok
+	remaining := creditValue - outputValue
+	if remaining <= 0 {
+		return detail, false, false
+	}
+
+	fullInputValue := float64(inputTotal) * price.inputPerMTok
+
+	var uncached, cacheRead, cacheWrite int64
+	switch {
+	case math.Abs(remaining-fullInputValue) < 1:
+		// Credits exactly match all-uncached → no split needed.
+		return detail, false, false
+
+	case remaining < fullInputValue:
+		// Credit-implied discount → some tokens are cache_read. Set CW=0.
+		// Solve: P_in × U + P_cr × CR = remaining, U + CR = inputTotal
+		denom := price.inputPerMTok - price.cacheReadPerMTok
+		if denom <= 0 {
+			return detail, false, false
+		}
+		u := (remaining - price.cacheReadPerMTok*float64(inputTotal)) / denom
+		if u < 0 {
+			u = 0
+		}
+		if u > float64(inputTotal) {
+			u = float64(inputTotal)
+		}
+		uncached = int64(math.Round(u))
+		cacheRead = inputTotal - uncached
+		cacheWrite = 0
+
+	default: // remaining > fullInputValue
+		// Credit-implied premium → some tokens are cache_write. Set CR=0.
+		// Step 1: try 5-min solve (P_in × U + P_cw × CW = remaining,
+		// U + CW = inputTotal).
+		cwRate := price.cacheWritePerMTok
+		denom := cwRate - price.inputPerMTok
+		if denom <= 0 || price.cacheWritePerMTok <= 0 {
+			return detail, false, false
+		}
+		cw := (remaining - price.inputPerMTok*float64(inputTotal)) / denom
+
+		// Step 2: 5-min cap can't close it → switch to 1-hour rate for the
+		// real-token solve. The forwarded CW count gets inflated below to
+		// compensate sub2api's default 5-min lookup.
+		if cw > float64(inputTotal) && price.cacheWrite1HPerMTok > cwRate {
+			cwRate = price.cacheWrite1HPerMTok
+			denom1h := cwRate - price.inputPerMTok
+			cw = (remaining - price.inputPerMTok*float64(inputTotal)) / denom1h
+		}
+
+		if cw < 0 {
+			cw = 0
+		}
+		if cw > float64(inputTotal) {
+			cw = float64(inputTotal)
+		}
+		cwReal := int64(math.Round(cw))
+		if cwReal > inputTotal {
+			cwReal = inputTotal
+		}
+		uncached = inputTotal - cwReal
+
+		// Step 3: forwarded CW count is whatever value, when multiplied by
+		// sub2api's default 5-min rate, makes uncached×inp + cw_forwarded×cw_5min
+		// = remaining. This closes the math regardless of which solve tier
+		// fired. When 1h pricing also saturates inputTotal (very high credits
+		// vs few tokens — likely Kiro charged extra for reasoning/thinking
+		// outside the visible counts), the formula inflates cw_forwarded
+		// beyond inputTotal to absorb the residual.
+		cw5min := price.cacheWritePerMTok
+		cwForwarded := (remaining - price.inputPerMTok*float64(uncached)) / cw5min
+		if cwForwarded < 0 {
+			cwForwarded = 0
+		}
+		cacheWrite = int64(math.Round(cwForwarded))
+		cacheRead = 0
+		if cacheWrite > cwReal {
+			log.Debugf("kiro: Branch D inflated cache_creation: cw_real=%d cw_forwarded=%d (rate-tier solve %.2f → 5min)",
+				cwReal, cacheWrite, cwRate)
+		}
+	}
+
+	if cacheRead == 0 && cacheWrite == 0 {
+		return detail, false, false
+	}
+
+	detail.InputTokens = uncached
+	detail.CacheReadInputTokens = cacheRead
+	detail.CacheCreationInputTokens = cacheWrite
+	detail.CachedTokens = cacheRead + cacheWrite
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = uncached + detail.OutputTokens + detail.ReasoningTokens + cacheRead + cacheWrite
+	}
+	log.Debugf("kiro: split flat input by credits: input_total=%d → uncached=%d cache_read=%d cache_creation=%d (credits=%.4f credit_usd=%.4f)",
+		inputTotal, uncached, cacheRead, cacheWrite, credits, creditUSD)
+	return detail, cacheRead > 0, cacheWrite > 0
 }
 
 // usageDetailForInternalStats strips estimated cache fields back into
@@ -2607,9 +2703,17 @@ func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, [
 		}
 	}
 
+	// Run estimator if upstream gave us anything we can split. Two trigger paths:
+	//   - hasUncachedInputTokens: tokenUsage block with uncached/total
+	//     → "uncached" semantics, Branch A/B/C
+	//   - flat InputTokens > 0 + credits > 0: legacy events without tokenUsage
+	//     → "total input" semantics, Branch D
+	// hasOfficialCacheRead/CacheWrite are tracked for diagnostics only; Kiro
+	// does not report either field in practice, so they're informational.
+	_, _ = hasOfficialCacheRead, hasOfficialCacheWrite
 	var estimatedCR, estimatedCW bool
-	if hasUncachedInputTokens {
-		usageInfo, estimatedCR, estimatedCW = estimateKiroCacheUsage(model, usageInfo, upstreamCreditUsage, hasOfficialCacheRead, hasOfficialCacheWrite, hasUncachedInputTokens)
+	if hasUncachedInputTokens || (usageInfo.InputTokens > 0 && upstreamCreditUsage > 0) {
+		usageInfo, estimatedCR, estimatedCW = estimateKiroCacheUsage(model, usageInfo, upstreamCreditUsage, hasUncachedInputTokens)
 	}
 
 	return cleanedContent, toolUses, usageInfo, stopReason, estimatedCR, estimatedCW, nil
@@ -3909,8 +4013,15 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// available" (TotalTokens == 0), and a synthetic InputTokens+OutputTokens
 	// fallback would otherwise look authoritative and force-route credit-only
 	// requests into the linear-solve path with cachedTotal=0.
-	if hasUncachedInputTokens {
-		totalUsage, estimatedCacheRead, estimatedCacheWrite = estimateKiroCacheUsage(model, totalUsage, upstreamCreditUsage, hasOfficialCacheRead, hasOfficialCacheWrite, hasUncachedInputTokens)
+	//
+	// Two trigger paths (mirror parseEventStream):
+	//   - hasUncachedInputTokens (tokenUsage with uncached/total): Branch A/B/C
+	//   - flat InputTokens > 0 + credits > 0 (legacy events): Branch D
+	// hasOfficialCacheRead/CacheWrite tracked for diagnostics only — Kiro
+	// never sends those fields.
+	_, _ = hasOfficialCacheRead, hasOfficialCacheWrite
+	if hasUncachedInputTokens || (totalUsage.InputTokens > 0 && upstreamCreditUsage > 0) {
+		totalUsage, estimatedCacheRead, estimatedCacheWrite = estimateKiroCacheUsage(model, totalUsage, upstreamCreditUsage, hasUncachedInputTokens)
 	}
 
 	// Update TotalTokens when upstream did not provide an authoritative total.
