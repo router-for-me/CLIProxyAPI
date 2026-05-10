@@ -150,6 +150,17 @@ func (a *Auth) tokenRequest(ctx context.Context, form url.Values) (*TokenData, e
 		data.Username = claims.Username
 		data.Subject = claims.Subject
 		data.Name = claims.Name
+		if claims.Expired != "" {
+			if data.Expired == "" {
+				data.Expired = claims.Expired
+			} else if currentExpiry, errCurrent := time.Parse(time.RFC3339, data.Expired); errCurrent == nil {
+				if claimExpiry, errClaim := time.Parse(time.RFC3339, claims.Expired); errClaim == nil {
+					if claimExpiry.Before(currentExpiry) {
+						data.Expired = claims.Expired
+					}
+				}
+			}
+		}
 	}
 	return data, nil
 }
@@ -161,6 +172,7 @@ type idTokenClaims struct {
 	Username string
 	Name     string
 	Issuer   string
+	Expired  string
 }
 
 func parseIDTokenClaims(token string) (*idTokenClaims, error) {
@@ -190,6 +202,7 @@ func parseIDTokenClaims(token string) (*idTokenClaims, error) {
 		Username: firstString(raw, "preferred_username", "username", "login"),
 		Name:     firstString(raw, "name", "given_name"),
 		Issuer:   firstString(raw, "iss"),
+		Expired:  firstExpiry(raw, "exp", "expires_at", "expire"),
 	}, nil
 }
 
@@ -245,6 +258,39 @@ func firstString(raw map[string]any, keys ...string) string {
 		text, ok := value.(string)
 		if ok && strings.TrimSpace(text) != "" {
 			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func firstExpiry(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := raw[key]
+		if !ok {
+			continue
+		}
+		switch v := value.(type) {
+		case float64:
+			return time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+		case int64:
+			return time.Unix(v, 0).UTC().Format(time.RFC3339)
+		case int:
+			return time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				return time.Unix(n, 0).UTC().Format(time.RFC3339)
+			}
+		case string:
+			trimmed := strings.TrimSpace(v)
+			if trimmed == "" {
+				continue
+			}
+			if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+				return parsed.UTC().Format(time.RFC3339)
+			}
+			if n, err := json.Number(trimmed).Int64(); err == nil {
+				return time.Unix(n, 0).UTC().Format(time.RFC3339)
+			}
 		}
 	}
 	return ""
