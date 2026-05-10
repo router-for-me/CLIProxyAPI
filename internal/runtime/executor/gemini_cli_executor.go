@@ -16,15 +16,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -430,7 +430,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailure(ctx, errScan)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 					case <-ctx.Done():
@@ -444,7 +444,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			data, errRead := io.ReadAll(resp.Body)
 			if errRead != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailure(ctx, errRead)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
 				case <-ctx.Done():
@@ -599,7 +599,10 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini CLI).
-func (e *GeminiCLIExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *GeminiCLIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	return auth, nil
 }
 
@@ -609,36 +612,42 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 		return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
 	}
 
-	var base map[string]any
-	if tokenRaw, ok := metadata["token"].(map[string]any); ok && tokenRaw != nil {
-		base = cloneMap(tokenRaw)
-	} else {
-		base = make(map[string]any)
-	}
-
-	var token oauth2.Token
-	if len(base) > 0 {
-		if raw, err := json.Marshal(base); err == nil {
-			_ = json.Unmarshal(raw, &token)
+	buildToken := func(meta map[string]any) (map[string]any, oauth2.Token) {
+		var base map[string]any
+		if tokenRaw, ok := meta["token"].(map[string]any); ok && tokenRaw != nil {
+			base = cloneMap(tokenRaw)
+		} else {
+			base = make(map[string]any)
 		}
-	}
 
-	if token.AccessToken == "" {
-		token.AccessToken = stringValue(metadata, "access_token")
-	}
-	if token.RefreshToken == "" {
-		token.RefreshToken = stringValue(metadata, "refresh_token")
-	}
-	if token.TokenType == "" {
-		token.TokenType = stringValue(metadata, "token_type")
-	}
-	if token.Expiry.IsZero() {
-		if expiry := stringValue(metadata, "expiry"); expiry != "" {
-			if ts, err := time.Parse(time.RFC3339, expiry); err == nil {
-				token.Expiry = ts
+		var token oauth2.Token
+		if len(base) > 0 {
+			if raw, err := json.Marshal(base); err == nil {
+				_ = json.Unmarshal(raw, &token)
 			}
 		}
+
+		if token.AccessToken == "" {
+			token.AccessToken = stringValue(meta, "access_token")
+		}
+		if token.RefreshToken == "" {
+			token.RefreshToken = stringValue(meta, "refresh_token")
+		}
+		if token.TokenType == "" {
+			token.TokenType = stringValue(meta, "token_type")
+		}
+		if token.Expiry.IsZero() {
+			if expiry := stringValue(meta, "expiry"); expiry != "" {
+				if ts, err := time.Parse(time.RFC3339, expiry); err == nil {
+					token.Expiry = ts
+				}
+			}
+		}
+
+		return base, token
 	}
+
+	base, token := buildToken(metadata)
 
 	conf := &oauth2.Config{
 		ClientID:     geminiOAuthClientID,
@@ -650,6 +659,29 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	ctxToken := ctx
 	if httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
 		ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
+	}
+
+	if cfg != nil && cfg.Home.Enabled {
+		now := time.Now()
+		if token.AccessToken == "" || (!token.Expiry.IsZero() && token.Expiry.Before(now.Add(30*time.Second))) {
+			refreshed, handled, errRefresh := helps.RefreshAuthViaHome(ctx, cfg, auth)
+			if handled {
+				if errRefresh != nil {
+					return nil, nil, errRefresh
+				}
+				auth = refreshed
+				metadata = geminiOAuthMetadata(auth)
+				if metadata == nil {
+					return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
+				}
+				base, token = buildToken(metadata)
+			}
+		}
+		if token.AccessToken == "" {
+			return nil, nil, fmt.Errorf("gemini-cli access token missing")
+		}
+		updateGeminiCLITokenMetadata(auth, base, &token)
+		return oauth2.StaticTokenSource(&token), base, nil
 	}
 
 	src := conf.TokenSource(ctxToken, &token)
