@@ -25,7 +25,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
-	cfg.TransientErrorCooldownSeconds = 60
+	cfg.TransientErrorCooldownSeconds = DefaultTransientErrorCooldownSeconds
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -35,6 +35,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
+	cfg.transientErrorCooldownSet = hasTopLevelYAMLKey(data, transientErrorCooldownKey)
 
 	// Hash remote management key if plaintext is detected (nested), but do NOT persist.
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
@@ -69,13 +70,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		log.WithField("value", cfg.RedisUsageQueueRetentionSeconds).Warn("redis-usage-queue-retention-seconds too large; clamping to 3600")
 		cfg.RedisUsageQueueRetentionSeconds = 3600
 	}
-	if cfg.TransientErrorCooldownSeconds < 0 {
-		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds cannot be negative; clamping to 0")
-		cfg.TransientErrorCooldownSeconds = 0
-	} else if cfg.TransientErrorCooldownSeconds > 3600 {
-		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds too large; clamping to 3600")
-		cfg.TransientErrorCooldownSeconds = 3600
-	}
+	cfg.ApplyRuntimeDefaults()
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
