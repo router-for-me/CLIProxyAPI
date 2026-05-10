@@ -16,7 +16,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -41,10 +40,14 @@ func (e *OIDCExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 	if token := e.resolveBearerToken(auth); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	if auth != nil {
-		util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
-	}
 	req.Header.Set("User-Agent", "cli-proxy-oidc")
+
+	headers := e.oidcHeaders(auth)
+	if headers != nil {
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+	}
 	return nil
 }
 
@@ -76,12 +79,6 @@ func (e *OIDCExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	endpoint := e.resolveEndpoint(auth)
 	if endpoint == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing oidc llm endpoint"}
-		return
-	}
-
-	jwt := e.resolveBearerToken(auth)
-	if jwt == "" {
-		err = statusErr{code: http.StatusUnauthorized, msg: "missing oidc jwt"}
 		return
 	}
 
@@ -166,11 +163,6 @@ func (e *OIDCExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing oidc llm endpoint"}
 		return nil, err
 	}
-	jwt := e.resolveBearerToken(auth)
-	if jwt == "" {
-		err = statusErr{code: http.StatusUnauthorized, msg: "missing oidc jwt"}
-		return nil, err
-	}
 
 	from := opts.SourceFormat
 	to := e.oidcRequestFormat(auth)
@@ -195,21 +187,17 @@ func (e *OIDCExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
+	e.recordRequest(ctx, auth, endpoint, translated)
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+jwt)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
-	if auth != nil {
-		util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)
-	}
 
-	e.recordRequest(ctx, auth, endpoint, translated)
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := e.HttpRequest(ctx, auth, httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -401,6 +389,17 @@ func (e *OIDCExecutor) resolveEndpoint(auth *cliproxyauth.Auth) string {
 		return ""
 	}
 	return config.LLMEndpoint
+}
+
+func (e *OIDCExecutor) oidcHeaders(auth *cliproxyauth.Auth) map[string]string {
+	if auth == nil {
+		return nil
+	}
+	config, err := oidc.SelectOIDCConfig(e.cfg, metadataNestedStringValue(auth.Metadata, "oidc_name"))
+	if err != nil {
+		return nil
+	}
+	return config.Headers
 }
 
 func (e *OIDCExecutor) oidcRequestFormat(auth *cliproxyauth.Auth) sdktranslator.Format {
