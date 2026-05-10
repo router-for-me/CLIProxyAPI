@@ -78,6 +78,10 @@ func main() {
 	var standalone bool
 	var localModel bool
 
+	//oidcInit
+	var oidcInit string
+	flag.StringVar(&oidcInit, "oidc-init", "", "Initialize login using the configured OIDC provider name")
+
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
@@ -550,6 +554,10 @@ func main() {
 		cmd.DoKimiLogin(cfg, options)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
+	} else if oidcInit != "" {
+		cmd.DoOIDCLogin(cfg, &cmd.OIDCLoginParams{
+			Name: oidcInit,
+		}, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
