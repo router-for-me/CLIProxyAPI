@@ -323,7 +323,7 @@ func (e *OIDCExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		return nil, fmt.Errorf("oidc executor: auth is nil")
 	}
 	metadataMap := metadataStringMap(auth.Metadata)
-	flowConfig, err := oidc.SelectOIDCConfig(e.cfg, metadataMap[oidc.MetadataNameKey])
+	flowConfig, err := oidc.SelectOIDCConfig(e.cfg, metadataMap["oidc_name"])
 	if err != nil {
 		return nil, err
 	}
@@ -345,6 +345,11 @@ func (e *OIDCExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	auth.Metadata["expired"] = tokenData.Expired
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
+	if expiry := strings.TrimSpace(tokenData.Expired); expiry != "" {
+		if ts, errParse := time.Parse(time.RFC3339, expiry); errParse == nil {
+			auth.NextRefreshAfter = ts.UTC()
+		}
+	}
 	return auth, nil
 }
 
