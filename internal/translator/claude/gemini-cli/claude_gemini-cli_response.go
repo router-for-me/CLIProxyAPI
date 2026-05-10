@@ -7,8 +7,8 @@ package geminiCLI
 import (
 	"context"
 
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/gemini"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 )
 
 // ConvertClaudeResponseToGeminiCLI converts Claude Code streaming response format to Gemini CLI format.

@@ -1,10 +1,11 @@
 package helps
 
 import (
+	"context"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -47,6 +48,88 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
+	data := []byte(`{"usage":null}`)
+	detail := ParseOpenAIUsage(data)
+	if detail != (usage.Detail{}) {
+		t.Fatalf("detail = %+v, want zero detail", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}`)
+	if detail, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("ParseOpenAIStreamUsage() = (%+v, true), want false for null usage", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 8 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 8)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.TotalTokens != 13 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 13)
+	}
+	if detail.CachedTokens != 3 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.ReasoningTokens != 2 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
+	}
+}
+
+func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
+	data := []byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":21,"cachedContentTokenCount":5}}`)
+	detail := ParseGeminiCLIUsage(data)
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.OutputTokens != 7 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 7)
+	}
+	if detail.ReasoningTokens != 3 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3)
+	}
+	if detail.TotalTokens != 21 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 21)
+	}
+	if detail.CachedTokens != 5 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 5)
+	}
+}
+
+func TestParseGeminiCLIStreamUsage_ResponseSnakeCaseUsageMetadata(t *testing.T) {
+	line := []byte(`data: {"response":{"usage_metadata":{"promptTokenCount":13,"candidatesTokenCount":2,"totalTokenCount":15}}}`)
+	detail, ok := ParseGeminiCLIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseGeminiCLIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 13 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 13)
+	}
+	if detail.OutputTokens != 2 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	}
+	if detail.TotalTokens != 15 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 15)
+	}
+}
+
+func TestParseGeminiCLIStreamUsage_IgnoresTrafficTypeOnlyUsageMetadata(t *testing.T) {
+	line := []byte(`data: {"response":{"usageMetadata":{"trafficType":"ON_DEMAND"}}}`)
+	if detail, ok := ParseGeminiCLIStreamUsage(line); ok {
+		t.Fatalf("ParseGeminiCLIStreamUsage() = (%+v, true), want false for traffic-only usage metadata", detail)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
@@ -60,6 +143,19 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
+	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Model != "gpt-5.4" {
+		t.Fatalf("model = %q, want %q", record.Model, "gpt-5.4")
+	}
+	if record.Alias != "client-gpt" {
+		t.Fatalf("alias = %q, want %q", record.Alias, "client-gpt")
 	}
 }
 

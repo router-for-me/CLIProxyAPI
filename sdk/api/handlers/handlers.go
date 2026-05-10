@@ -14,14 +14,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
 )
 
@@ -198,15 +198,23 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only include it if the client explicitly provides it.
 	key := ""
+	requestPath := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
+			requestPath = strings.TrimSpace(ginCtx.FullPath())
+			if requestPath == "" && ginCtx.Request.URL != nil {
+				requestPath = strings.TrimSpace(ginCtx.Request.URL.Path)
+			}
 		}
 	}
 
 	meta := make(map[string]any)
 	if key != "" {
 		meta[idempotencyKeyMetadataKey] = key
+	}
+	if requestPath != "" {
+		meta[coreexecutor.RequestPathMetadataKey] = requestPath
 	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
@@ -367,11 +375,32 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
-		} else if requestID := logging.GetGinRequestID(c); requestID != "" {
+		} else if requestID = logging.GetGinRequestID(c); requestID != "" {
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
+
+	endpoint := ""
+	if c != nil && c.Request != nil {
+		path := strings.TrimSpace(c.FullPath())
+		if path == "" && c.Request.URL != nil {
+			path = strings.TrimSpace(c.Request.URL.Path)
+		}
+		if path != "" {
+			method := strings.TrimSpace(c.Request.Method)
+			if method != "" {
+				endpoint = method + " " + path
+			} else {
+				endpoint = path
+			}
+		}
+	}
+	if endpoint != "" {
+		newCtx = logging.WithEndpoint(newCtx, endpoint)
+	}
+	newCtx = logging.WithResponseStatusHolder(newCtx)
+
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
 		go func() {
@@ -385,6 +414,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
+		if c != nil {
+			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
+		}
 		if h.Cfg.RequestLog && len(params) == 1 {
 			if existing, exists := c.Get("API_RESPONSE"); exists {
 				if existingBytes, ok := existing.([]byte); ok && len(bytes.TrimSpace(existingBytes)) > 0 {
@@ -507,7 +539,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -555,7 +587,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -607,7 +639,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -818,14 +850,22 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
-		if initialSuffix.HasSuffix {
-			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
+		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+			resolvedModelName = modelName
 		} else {
-			resolvedModelName = resolvedBase
+			resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+			if initialSuffix.HasSuffix {
+				resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
+			} else {
+				resolvedModelName = resolvedBase
+			}
 		}
 	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
+		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+			resolvedModelName = modelName
+		} else {
+			resolvedModelName = util.ResolveAutoModel(modelName)
+		}
 	}
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
@@ -836,6 +876,10 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
 		}
+	}
+
+	if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+		return []string{"home"}, resolvedModelName, nil
 	}
 
 	providers = util.GetProviderName(baseModel)

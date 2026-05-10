@@ -10,8 +10,8 @@ import (
 	"context"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -236,7 +236,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
-					if name := function.Get("name"); name.Exists() {
+					if name := function.Get("name"); name.Exists() && name.String() != "" {
 						accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
 
 						stopThinkingContentBlock(param, &results)

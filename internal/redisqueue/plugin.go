@@ -3,14 +3,11 @@ package redisqueue
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func init() {
@@ -23,7 +20,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if p == nil {
 		return
 	}
-	if !Enabled() || !internalusage.StatisticsEnabled() {
+	if !Enabled() || !UsageStatisticsEnabled() {
 		return
 	}
 
@@ -36,6 +33,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if modelName == "" {
 		modelName = "unknown"
 	}
+	aliasName := strings.TrimSpace(record.Alias)
+	if aliasName == "" {
+		aliasName = modelName
+	}
 	provider := strings.TrimSpace(record.Provider)
 	if provider == "" {
 		provider = "unknown"
@@ -46,13 +47,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
-	if requestID == "" {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
-			requestID = strings.TrimSpace(internallogging.GetGinRequestID(ginCtx))
-		}
-	}
 
-	tokens := internalusage.TokenStats{
+	tokens := tokenStats{
 		InputTokens:     record.Detail.InputTokens,
 		OutputTokens:    record.Detail.OutputTokens,
 		ReasoningTokens: record.Detail.ReasoningTokens,
@@ -70,20 +66,23 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if !failed {
 		failed = !resolveSuccess(ctx)
 	}
+	fail := resolveFail(ctx, record, failed)
 
-	detail := internalusage.RequestDetail{
+	detail := requestDetail{
 		Timestamp: timestamp,
 		LatencyMs: record.Latency.Milliseconds(),
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
 		Tokens:    tokens,
 		Failed:    failed,
+		Fail:      fail,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		RequestDetail: detail,
+		requestDetail: detail,
 		Provider:      provider,
 		Model:         modelName,
+		Alias:         aliasName,
 		Endpoint:      resolveEndpoint(ctx),
 		AuthType:      authType,
 		APIKey:        apiKey,
@@ -96,50 +95,66 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 }
 
 type queuedUsageDetail struct {
-	internalusage.RequestDetail
+	requestDetail
 	Provider  string `json:"provider"`
 	Model     string `json:"model"`
+	Alias     string `json:"alias"`
 	Endpoint  string `json:"endpoint"`
 	AuthType  string `json:"auth_type"`
 	APIKey    string `json:"api_key"`
 	RequestID string `json:"request_id"`
 }
 
+type requestDetail struct {
+	Timestamp time.Time  `json:"timestamp"`
+	LatencyMs int64      `json:"latency_ms"`
+	Source    string     `json:"source"`
+	AuthIndex string     `json:"auth_index"`
+	Tokens    tokenStats `json:"tokens"`
+	Failed    bool       `json:"failed"`
+	Fail      failDetail `json:"fail"`
+}
+
+type tokenStats struct {
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	TotalTokens     int64 `json:"total_tokens"`
+}
+
+type failDetail struct {
+	StatusCode int    `json:"status_code"`
+	Body       string `json:"body"`
+}
+
+func resolveFail(ctx context.Context, record coreusage.Record, failed bool) failDetail {
+	fail := failDetail{
+		StatusCode: record.Fail.StatusCode,
+		Body:       strings.TrimSpace(record.Fail.Body),
+	}
+	if !failed {
+		return failDetail{StatusCode: 200}
+	}
+	if fail.StatusCode <= 0 {
+		fail.StatusCode = internallogging.GetResponseStatus(ctx)
+	}
+	if fail.StatusCode <= 0 {
+		fail.StatusCode = 500
+	}
+	return fail
+}
+
 func resolveSuccess(ctx context.Context) bool {
-	if ctx == nil {
-		return true
-	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
-	if !ok || ginCtx == nil {
-		return true
-	}
-	status := ginCtx.Writer.Status()
+	status := internallogging.GetResponseStatus(ctx)
 	if status == 0 {
 		return true
 	}
-	return status < http.StatusBadRequest
+	return status < httpStatusBadRequest
 }
 
 func resolveEndpoint(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
-	if !ok || ginCtx == nil || ginCtx.Request == nil {
-		return ""
-	}
-
-	path := strings.TrimSpace(ginCtx.FullPath())
-	if path == "" && ginCtx.Request.URL != nil {
-		path = strings.TrimSpace(ginCtx.Request.URL.Path)
-	}
-	if path == "" {
-		return ""
-	}
-
-	method := strings.TrimSpace(ginCtx.Request.Method)
-	if method == "" {
-		return path
-	}
-	return method + " " + path
+	return strings.TrimSpace(internallogging.GetEndpoint(ctx))
 }
+
+const httpStatusBadRequest = 400
