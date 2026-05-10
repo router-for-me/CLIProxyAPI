@@ -653,6 +653,10 @@ func InferCompatKindFromBaseURL(rawBaseURL string) string {
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	path := strings.ToLower(strings.TrimSpace(parsed.Path))
 	switch host {
+	case "api.deepseek.com":
+		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
+			return "deepseek"
+		}
 	case "api.minimaxi.com", "api.minimaxi.io", "api.minimax.io":
 		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
 			return "minimax"

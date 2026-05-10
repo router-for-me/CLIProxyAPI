@@ -34,6 +34,16 @@ func TestInferCompatKindFromBaseURL(t *testing.T) {
 			want:    "",
 		},
 		{
+			name:    "deepseek anthropic",
+			baseURL: "https://api.deepseek.com/anthropic",
+			want:    "deepseek",
+		},
+		{
+			name:    "deepseek anthropic messages",
+			baseURL: "https://api.deepseek.com/anthropic/v1/messages?beta=true",
+			want:    "deepseek",
+		},
+		{
 			name:    "kimi coding",
 			baseURL: "https://api.kimi.com/coding",
 			want:    "kimi",

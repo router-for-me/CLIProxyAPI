@@ -1447,12 +1447,14 @@ func TestDowngradeClaudeToolSearchForCompatSkipsOfficialAnthropic(t *testing.T) 
 }
 
 func TestFilterClaudeBetasForCompatDropsToolSearch(t *testing.T) {
-	out := filterClaudeBetasForCompat("claude-code-20250219, tool-search-2025-11-19,tool_search_tool_regex_20251119,oauth-2025-04-20")
-	if strings.Contains(out, "tool-search") || strings.Contains(out, "tool_search") {
-		t.Fatalf("tool search betas should be removed, got %q", out)
+	out := filterClaudeBetasForCompat("claude-code-20250219, tool-search-2025-11-19,tool_search_tool_regex_20251119,oauth-2025-04-20,provider-beta-2099-01-01")
+	for _, dropped := range []string{"claude-code", "tool-search", "tool_search", "oauth"} {
+		if strings.Contains(out, dropped) {
+			t.Fatalf("%s beta should be removed for compat endpoints, got %q", dropped, out)
+		}
 	}
-	if !strings.Contains(out, "claude-code-20250219") || !strings.Contains(out, "oauth-2025-04-20") {
-		t.Fatalf("unrelated betas should be preserved, got %q", out)
+	if !strings.Contains(out, "provider-beta-2099-01-01") {
+		t.Fatalf("unknown provider beta should be preserved, got %q", out)
 	}
 }
 
@@ -2785,6 +2787,117 @@ func TestDowngradeClaudeStructuredOutputForCompat_AppendsArraySystemBlock(t *tes
 	if got := gjson.GetBytes(out, "system.1.text").String(); !strings.Contains(got, "json_object") {
 		t.Fatalf("system.1.text missing format: %q", got)
 	}
+}
+
+func TestDowngradeClaudeToolSearchForCompatKind_DeepSeekRemovesUnsupportedBlocks(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search"},
+			{"name":"read_file","description":"Read file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"hi"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}},
+				{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"CCCC"}},
+				{"type":"search_result","content":[{"type":"text","text":"search ok"}]},
+				{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}
+			]},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"plan"},
+				{"type":"redacted_thinking","data":"secret"},
+				{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"README.md"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"tool ok"},
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"DDDD"}}
+				]}
+			]}
+		]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompatKind("deepseek", "https://api.deepseek.com/anthropic", payload)
+
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+		t.Fatalf("tools count = %d, want 1: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "read_file" {
+		t.Fatalf("kept tool name = %q, want read_file: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice for removed server tool should be removed: %s", string(out))
+	}
+
+	userContent := gjson.GetBytes(out, "messages.0.content").Array()
+	if hasClaudePartType(userContent, "image") || hasClaudePartType(userContent, "image_url") || hasClaudePartType(userContent, "document") || hasClaudePartType(userContent, "search_result") || hasClaudePartType(userContent, "mcp_tool_result") {
+		t.Fatalf("DeepSeek unsupported user content block remained: %s", string(out))
+	}
+	for _, wantText := range []string{"hi", "search ok", "mcp ok"} {
+		if !hasClaudeText(userContent, wantText) {
+			t.Fatalf("expected text %q in downgraded content: %s", wantText, string(out))
+		}
+	}
+
+	assistantContent := gjson.GetBytes(out, "messages.1.content").Array()
+	if hasClaudePartType(assistantContent, "redacted_thinking") {
+		t.Fatalf("redacted_thinking should be removed for DeepSeek: %s", string(out))
+	}
+	if !hasClaudePartType(assistantContent, "thinking") || !hasClaudePartType(assistantContent, "tool_use") {
+		t.Fatalf("supported thinking/tool_use blocks should be preserved: %s", string(out))
+	}
+
+	toolResultContent := gjson.GetBytes(out, "messages.2.content.0.content").Array()
+	if hasClaudePartType(toolResultContent, "image") {
+		t.Fatalf("unsupported image inside tool_result should be removed: %s", string(out))
+	}
+	if !hasClaudeText(toolResultContent, "tool ok") {
+		t.Fatalf("tool_result text should be preserved: %s", string(out))
+	}
+}
+
+func TestSanitizeClaudeHTTPRequestToolNames_DowngradesDeepSeekAnthropicBody(t *testing.T) {
+	t.Parallel()
+
+	payload := `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "https://api.deepseek.com/anthropic/v1/messages?beta=true", strings.NewReader(payload))
+
+	if _, err := sanitizeClaudeHTTPRequestToolNames(req); err != nil {
+		t.Fatalf("sanitizeClaudeHTTPRequestToolNames() error = %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if hasClaudePartType(gjson.GetBytes(body, "messages.0.content").Array(), "image") {
+		t.Fatalf("DeepSeek direct HttpRequest body should remove image blocks: %s", string(body))
+	}
+	if !hasClaudeText(gjson.GetBytes(body, "messages.0.content").Array(), "hi") {
+		t.Fatalf("text should be preserved: %s", string(body))
+	}
+}
+
+func hasClaudePartType(parts []gjson.Result, partType string) bool {
+	for _, part := range parts {
+		if part.Get("type").String() == partType {
+			return true
+		}
+	}
+	return false
+}
+
+func hasClaudeText(parts []gjson.Result, text string) bool {
+	for _, part := range parts {
+		if part.Get("type").String() == "text" && part.Get("text").String() == text {
+			return true
+		}
+	}
+	return false
 }
 
 func TestValidateClaudeUpstreamPayload_NonMiniMaxAllowsStructuredOutputFormat(t *testing.T) {

@@ -1042,7 +1042,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if !isAnthropicBase {
 		baseBetas = filterClaudeBetasForCompat(baseBetas)
 	}
-	r.Header.Set("Anthropic-Beta", baseBetas)
+	if strings.TrimSpace(baseBetas) != "" {
+		r.Header.Set("Anthropic-Beta", baseBetas)
+	} else {
+		r.Header.Del("Anthropic-Beta")
+	}
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	// Only set browser access header for API key mode; real Claude Code CLI does not send it.
@@ -1103,7 +1107,7 @@ func filterClaudeBetasForCompat(raw string) string {
 			continue
 		}
 		normalized := strings.ToLower(beta)
-		if strings.Contains(normalized, "tool-search") || strings.Contains(normalized, "tool_search") {
+		if isNativeAnthropicBetaForCompat(normalized) {
 			continue
 		}
 		if seen[beta] {
@@ -1113,6 +1117,26 @@ func filterClaudeBetasForCompat(raw string) string {
 		seen[beta] = true
 	}
 	return strings.Join(filtered, ",")
+}
+
+func isNativeAnthropicBetaForCompat(normalized string) bool {
+	if strings.Contains(normalized, "tool-search") || strings.Contains(normalized, "tool_search") {
+		return true
+	}
+	switch normalized {
+	case "claude-code-20250219",
+		"oauth-2025-04-20",
+		"interleaved-thinking-2025-05-14",
+		"context-management-2025-06-27",
+		"prompt-caching-scope-2026-01-05",
+		"structured-outputs-2025-12-15",
+		"fast-mode-2026-02-01",
+		"redact-thinking-2026-02-12",
+		"token-efficient-tools-2026-03-28":
+		return true
+	default:
+		return false
+	}
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -1244,7 +1268,7 @@ func downgradeClaudeToolSearchForCompatKind(compatKind, baseURL string, body []b
 				cleanedMessages = append(cleanedMessages, message)
 				continue
 			}
-			cleanedContent, contentChanged := downgradeClaudeToolSearchContent(content)
+			cleanedContent, contentChanged := downgradeClaudeToolSearchContentForCompat(compatKind, content)
 			if contentChanged {
 				changed = true
 				if len(cleanedContent) == 0 {
@@ -1273,7 +1297,10 @@ func isClaudeToolSearchTool(toolType string, toolName string) bool {
 }
 
 func isUnsupportedClaudeServerToolForCompat(compatKind string, toolType string, tool map[string]any) bool {
-	if compatKind != "minimax" || toolType == "" {
+	if toolType == "" {
+		return false
+	}
+	if compatKind != "minimax" && compatKind != "deepseek" {
 		return false
 	}
 	_, hasInputSchema := tool["input_schema"]
@@ -1281,6 +1308,10 @@ func isUnsupportedClaudeServerToolForCompat(compatKind string, toolType string, 
 }
 
 func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
+	return downgradeClaudeToolSearchContentForCompat("", content)
+}
+
+func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any) ([]any, bool) {
 	cleaned := make([]any, 0, len(content))
 	changed := false
 	for _, rawPart := range content {
@@ -1291,6 +1322,12 @@ func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
 		}
 		partType := strings.TrimSpace(compatStringValue(part["type"]))
 		switch {
+		case isUnsupportedDeepSeekClaudeContentPart(compatKind, partType):
+			changed = true
+			if text := claudeUnsupportedContentText(part); text != "" {
+				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
+			}
+			continue
 		case partType == "server_tool_use":
 			changed = true
 			continue
@@ -1310,7 +1347,17 @@ func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
 			}
 			continue
 		case partType == "tool_result":
-			if updated, updatedChanged := downgradeClaudeToolResultReferences(part); updatedChanged {
+			updated := part
+			updatedChanged := false
+			if next, nextChanged := downgradeClaudeToolResultContentForCompat(compatKind, updated); nextChanged {
+				updated = next
+				updatedChanged = true
+			}
+			if next, nextChanged := downgradeClaudeToolResultReferences(updated); nextChanged {
+				updated = next
+				updatedChanged = true
+			}
+			if updatedChanged {
 				cleaned = append(cleaned, updated)
 				changed = true
 				continue
@@ -1321,8 +1368,120 @@ func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
 	return cleaned, changed
 }
 
+func isUnsupportedDeepSeekClaudeContentPart(compatKind, partType string) bool {
+	if compatKind != "deepseek" {
+		return false
+	}
+	switch partType {
+	case "image", "image_url", "document", "search_result", "redacted_thinking", "server_tool_use",
+		"web_search_tool_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result", "container_upload":
+		return true
+	default:
+		return false
+	}
+}
+
 func isClaudeServerToolResultPart(partType string) bool {
 	return partType != "" && partType != "tool_result" && strings.HasSuffix(partType, "_tool_result")
+}
+
+func downgradeClaudeToolResultContentForCompat(compatKind string, part map[string]any) (map[string]any, bool) {
+	if compatKind != "deepseek" {
+		return part, false
+	}
+	content, ok := part["content"]
+	if !ok {
+		return part, false
+	}
+
+	switch typed := content.(type) {
+	case []any:
+		cleaned := make([]any, 0, len(typed))
+		changed := false
+		for _, rawNested := range typed {
+			nested, okNested := rawNested.(map[string]any)
+			if !okNested {
+				cleaned = append(cleaned, rawNested)
+				continue
+			}
+			nestedType := strings.TrimSpace(compatStringValue(nested["type"]))
+			if !isUnsupportedDeepSeekClaudeContentPart(compatKind, nestedType) {
+				cleaned = append(cleaned, rawNested)
+				continue
+			}
+			changed = true
+			if text := claudeUnsupportedContentText(nested); text != "" {
+				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
+			}
+		}
+		if !changed {
+			return part, false
+		}
+		part["content"] = cleaned
+		return part, true
+	case map[string]any:
+		nestedType := strings.TrimSpace(compatStringValue(typed["type"]))
+		if !isUnsupportedDeepSeekClaudeContentPart(compatKind, nestedType) {
+			return part, false
+		}
+		if text := claudeUnsupportedContentText(typed); text != "" {
+			part["content"] = []any{map[string]any{"type": "text", "text": text}}
+		} else {
+			part["content"] = []any{}
+		}
+		return part, true
+	default:
+		return part, false
+	}
+}
+
+func claudeUnsupportedContentText(part map[string]any) string {
+	if part == nil {
+		return ""
+	}
+	fragments := make([]string, 0, 2)
+	collectClaudeTextFragments(part["text"], &fragments)
+	collectClaudeTextFragments(part["content"], &fragments)
+	collectClaudeTextFragments(part["error_message"], &fragments)
+	return strings.Join(dedupeNonEmptyStrings(fragments), "\n\n")
+}
+
+func collectClaudeTextFragments(value any, fragments *[]string) {
+	switch typed := value.(type) {
+	case string:
+		if text := strings.TrimSpace(typed); text != "" {
+			*fragments = append(*fragments, text)
+		}
+	case []any:
+		for _, item := range typed {
+			collectClaudeTextFragments(item, fragments)
+		}
+	case map[string]any:
+		if strings.TrimSpace(compatStringValue(typed["type"])) == "text" {
+			collectClaudeTextFragments(typed["text"], fragments)
+			return
+		}
+		collectClaudeTextFragments(typed["text"], fragments)
+		collectClaudeTextFragments(typed["content"], fragments)
+		collectClaudeTextFragments(typed["error_message"], fragments)
+	}
+}
+
+func dedupeNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func downgradeClaudeToolResultReferences(part map[string]any) (map[string]any, bool) {
@@ -2041,6 +2200,11 @@ func sanitizeClaudeHTTPRequestToolNames(req *http.Request) (*claudeToolNameSanit
 	if errClose := req.Body.Close(); errClose != nil {
 		log.Errorf("request body close error: %v", errClose)
 	}
+	compatKind := ""
+	if req.URL != nil {
+		compatKind = config.InferCompatKindFromBaseURL(req.URL.String())
+	}
+	body = downgradeClaudeToolSearchForCompatKind(compatKind, requestURLString(req), body)
 	updated, mapping := sanitizeClaudeToolNamesForUpstream(body)
 	req.Body = io.NopCloser(bytes.NewReader(updated))
 	req.ContentLength = int64(len(updated))
@@ -2051,6 +2215,13 @@ func sanitizeClaudeHTTPRequestToolNames(req *http.Request) (*claudeToolNameSanit
 		req.Header.Set("Content-Length", strconv.Itoa(len(updated)))
 	}
 	return mapping, nil
+}
+
+func requestURLString(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	return req.URL.String()
 }
 
 func restoreClaudeHTTPResponseToolNames(resp *http.Response, mapping *claudeToolNameSanitization) {
