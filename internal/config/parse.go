@@ -25,6 +25,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.TransientErrorCooldownSeconds = 60
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -67,6 +68,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	} else if cfg.RedisUsageQueueRetentionSeconds > 3600 {
 		log.WithField("value", cfg.RedisUsageQueueRetentionSeconds).Warn("redis-usage-queue-retention-seconds too large; clamping to 3600")
 		cfg.RedisUsageQueueRetentionSeconds = 3600
+	}
+	if cfg.TransientErrorCooldownSeconds < 0 {
+		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds cannot be negative; clamping to 0")
+		cfg.TransientErrorCooldownSeconds = 0
 	}
 
 	if cfg.MaxRetryCredentials < 0 {

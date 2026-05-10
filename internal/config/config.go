@@ -77,6 +77,10 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// TransientErrorCooldownSeconds controls auth/model cooldown after transient upstream failures.
+	// Applies to 408/500/502/503/504 responses. Set to 0 to disable only this cooldown.
+	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
@@ -626,6 +630,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.TransientErrorCooldownSeconds = 60
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -692,6 +697,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	} else if cfg.RedisUsageQueueRetentionSeconds > 3600 {
 		log.WithField("value", cfg.RedisUsageQueueRetentionSeconds).Warn("redis-usage-queue-retention-seconds too large; clamping to 3600")
 		cfg.RedisUsageQueueRetentionSeconds = 3600
+	}
+	if cfg.TransientErrorCooldownSeconds < 0 {
+		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds cannot be negative; clamping to 0")
+		cfg.TransientErrorCooldownSeconds = 0
 	}
 
 	if cfg.MaxRetryCredentials < 0 {
