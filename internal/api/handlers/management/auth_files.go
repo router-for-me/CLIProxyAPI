@@ -1515,6 +1515,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: map[string]any{"email": tokenStorage.Email},
 		}
+		if tokenStorage.AccountUUID != "" {
+			record.Metadata["account_uuid"] = tokenStorage.AccountUUID
+		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)

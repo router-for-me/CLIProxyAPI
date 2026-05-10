@@ -78,11 +78,11 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 					StatusCode: http.StatusOK,
 					Body: io.NopCloser(strings.NewReader(`{
 						"access_token":"new-access",
-						"refresh_token":"new-refresh",
-						"token_type":"Bearer",
-						"expires_in":3600,
-						"account":{"email_address":"shared@example.com"}
-					}`)),
+							"refresh_token":"new-refresh",
+							"token_type":"Bearer",
+							"expires_in":3600,
+							"account":{"uuid":"acct-uuid-1","email_address":"shared@example.com"}
+						}`)),
 					Header:  make(http.Header),
 					Request: req,
 				}, nil
@@ -115,6 +115,9 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 		td := <-results
 		if td == nil || td.AccessToken != "new-access" {
 			t.Fatalf("expected refreshed access token, got %#v", td)
+		}
+		if td.AccountUUID != "acct-uuid-1" {
+			t.Fatalf("expected refreshed account UUID, got %q", td.AccountUUID)
 		}
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {

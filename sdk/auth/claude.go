@@ -204,6 +204,9 @@ waitForCallback:
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
+	if tokenStorage.AccountUUID != "" {
+		metadata["account_uuid"] = tokenStorage.AccountUUID
+	}
 
 	fmt.Println("Claude authentication successful")
 	if authBundle.APIKey != "" {

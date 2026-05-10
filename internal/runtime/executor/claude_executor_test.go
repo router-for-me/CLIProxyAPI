@@ -597,6 +597,79 @@ func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallbac
 	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
 
+func TestApplyClaudeHeaders_AddsRequiredBetasAndScrubsProxyTraceHeaders(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-claude-trace-scrub",
+		Attributes: map[string]string{
+			"api_key":                  "key-claude-trace-scrub",
+			"header:X-Forwarded-For":   "203.0.113.10",
+			"header:X-Forwarded-Proto": "https",
+			"header:Cdn-Loop":          "TencentEdgeOne; loops=2",
+			"header:Eo-Connecting-Ip":  "203.0.113.10",
+			"header:Eo-Log-Uuid":       "trace-id",
+		},
+	}
+	incoming := http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.123 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.81.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+		"Anthropic-Beta":              []string{"claude-code-20250219,context-1m-2025-08-07"},
+	}
+
+	req := newClaudeHeaderTestRequest(t, incoming)
+	applyClaudeHeaders(req, auth, "key-claude-trace-scrub", false, nil, cfg)
+
+	if got := req.Header.Get("User-Agent"); got != "claude-cli/2.1.123 (external, cli)" {
+		t.Fatalf("User-Agent = %q, want preserved client version", got)
+	}
+	if got := req.Header.Get("X-Stainless-Package-Version"); got != "0.81.0" {
+		t.Fatalf("X-Stainless-Package-Version = %q, want preserved client package version", got)
+	}
+	for _, name := range []string{
+		"X-Forwarded-For",
+		"X-Forwarded-Proto",
+		"Cdn-Loop",
+		"Eo-Connecting-Ip",
+		"Eo-Log-Uuid",
+	} {
+		if got := req.Header.Get(name); got != "" {
+			t.Fatalf("%s = %q, want scrubbed", name, got)
+		}
+	}
+
+	betas := req.Header.Get("Anthropic-Beta")
+	for _, beta := range []string{
+		"claude-code-20250219",
+		"context-1m-2025-08-07",
+		"oauth-2025-04-20",
+		"interleaved-thinking-2025-05-14",
+		"advanced-tool-use-2025-11-20",
+	} {
+		if !hasClaudeBeta(betas, beta) {
+			t.Fatalf("Anthropic-Beta = %q, missing %q", betas, beta)
+		}
+	}
+}
+
+func hasClaudeBeta(betas, beta string) bool {
+	for _, existing := range strings.Split(betas, ",") {
+		if strings.EqualFold(strings.TrimSpace(existing), beta) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
 	if helps.ClaudeDeviceProfileStabilizationEnabled(nil) {
 		t.Fatal("expected nil config to default to disabled stabilization")
@@ -933,6 +1006,62 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
 		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	}
+}
+
+func TestApplyClaudeAccountUUID_FillsJSONUserIDFromTopLevelMetadata(t *testing.T) {
+	payload := []byte(`{"metadata":{"user_id":"{\"device_id\":\"device-1\",\"session_id\":\"session-1\"}"}}`)
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"account_uuid": "11111111-2222-4333-8444-555555555555",
+		},
+	}
+
+	out := applyClaudeAccountUUID(payload, auth)
+	userID := gjson.GetBytes(out, "metadata.user_id").String()
+
+	if got := gjson.Get(userID, "account_uuid").String(); got != "11111111-2222-4333-8444-555555555555" {
+		t.Fatalf("account_uuid = %q, want auth metadata account_uuid", got)
+	}
+	if got := gjson.Get(userID, "device_id").String(); got != "device-1" {
+		t.Fatalf("device_id = %q, want preserved", got)
+	}
+	if got := gjson.Get(userID, "session_id").String(); got != "session-1" {
+		t.Fatalf("session_id = %q, want preserved", got)
+	}
+}
+
+func TestApplyClaudeAccountUUID_FillsJSONUserIDFromNestedAccount(t *testing.T) {
+	payload := []byte(`{"metadata":{"user_id":"{\"device_id\":\"device-1\",\"account_uuid\":\"\",\"session_id\":\"session-1\"}"}}`)
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"account": map[string]any{
+				"uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+			},
+		},
+	}
+
+	out := applyClaudeAccountUUID(payload, auth)
+	userID := gjson.GetBytes(out, "metadata.user_id").String()
+
+	if got := gjson.Get(userID, "account_uuid").String(); got != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" {
+		t.Fatalf("account_uuid = %q, want nested account uuid", got)
+	}
+}
+
+func TestApplyClaudeAccountUUID_DoesNotOverrideExistingJSONUserIDAccountUUID(t *testing.T) {
+	payload := []byte(`{"metadata":{"user_id":"{\"device_id\":\"device-1\",\"account_uuid\":\"existing-account\",\"session_id\":\"session-1\"}"}}`)
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"account_uuid": "replacement-account",
+		},
+	}
+
+	out := applyClaudeAccountUUID(payload, auth)
+	userID := gjson.GetBytes(out, "metadata.user_id").String()
+
+	if got := gjson.Get(userID, "account_uuid").String(); got != "existing-account" {
+		t.Fatalf("account_uuid = %q, want existing-account", got)
 	}
 }
 

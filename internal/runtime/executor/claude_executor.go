@@ -161,6 +161,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = applyClaudeAccountUUID(body, auth)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -339,6 +340,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = applyClaudeAccountUUID(body, auth)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -598,6 +600,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	body = applyClaudeAccountUUID(body, auth)
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -716,6 +719,9 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
 	auth.Metadata["email"] = td.Email
+	if td.AccountUUID != "" {
+		auth.Metadata["account_uuid"] = td.AccountUUID
+	}
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "claude"
 	now := time.Now().Format(time.RFC3339)
@@ -947,13 +953,10 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
-		if !strings.Contains(val, "oauth") {
-			baseBetas += ",oauth-2025-04-20"
-		}
 	}
-	if !strings.Contains(baseBetas, "interleaved-thinking") {
-		baseBetas += ",interleaved-thinking-2025-05-14"
-	}
+	baseBetas = ensureClaudeBeta(baseBetas, "oauth-2025-04-20")
+	baseBetas = ensureClaudeBeta(baseBetas, "interleaved-thinking-2025-05-14")
+	baseBetas = ensureClaudeBeta(baseBetas, "advanced-tool-use-2025-11-20")
 
 	// Merge extra betas from request body and request flags.
 	if len(extraBetas) > 0 {
@@ -1015,11 +1018,52 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	scrubClaudeProxyTraceHeaders(r)
 	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
 	// may override it with a user-configured value.  Compressed SSE breaks the line
 	// scanner regardless of user preference, so this is non-negotiable for streams.
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
+	}
+}
+
+func ensureClaudeBeta(betas, beta string) string {
+	beta = strings.TrimSpace(beta)
+	if beta == "" {
+		return betas
+	}
+	for _, existing := range strings.Split(betas, ",") {
+		if strings.EqualFold(strings.TrimSpace(existing), beta) {
+			return betas
+		}
+	}
+	if strings.TrimSpace(betas) == "" {
+		return beta
+	}
+	return betas + "," + beta
+}
+
+func scrubClaudeProxyTraceHeaders(r *http.Request) {
+	if r == nil {
+		return
+	}
+	for _, name := range []string{
+		"X-Forwarded-For",
+		"X-Forwarded-Host",
+		"X-Forwarded-Proto",
+		"X-Forwarded-Port",
+		"X-Real-IP",
+		"Forwarded",
+		"Via",
+		"Cdn-Loop",
+		"Eo-Connecting-Ip",
+		"Eo-Log-Uuid",
+		"CF-Connecting-IP",
+		"CF-Ray",
+		"CF-Visitor",
+		"True-Client-IP",
+	} {
+		r.Header.Del(name)
 	}
 }
 
@@ -1037,6 +1081,75 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func claudeAccountUUID(a *cliproxyauth.Auth) string {
+	if a == nil || a.Metadata == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(metaString(a.Metadata, "account_uuid")); v != "" {
+		return v
+	}
+	if account, ok := a.Metadata["account"].(map[string]any); ok {
+		if v := strings.TrimSpace(metaString(account, "uuid")); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(metaString(account, "account_uuid")); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func metaString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	if v, ok := metadata[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func applyClaudeAccountUUID(payload []byte, auth *cliproxyauth.Auth) []byte {
+	accountUUID := claudeAccountUUID(auth)
+	if accountUUID == "" {
+		return payload
+	}
+	userID := gjson.GetBytes(payload, "metadata.user_id")
+	if !userID.Exists() {
+		return payload
+	}
+	if userID.IsObject() {
+		if strings.TrimSpace(userID.Get("account_uuid").String()) != "" {
+			return payload
+		}
+		updated, err := sjson.SetBytes(payload, "metadata.user_id.account_uuid", accountUUID)
+		if err != nil {
+			return payload
+		}
+		return updated
+	}
+	if userID.Type != gjson.String {
+		return payload
+	}
+	rawUserID := strings.TrimSpace(userID.String())
+	if rawUserID == "" || !gjson.Valid(rawUserID) {
+		return payload
+	}
+	parsedUserID := gjson.Parse(rawUserID)
+	if !parsedUserID.IsObject() || strings.TrimSpace(parsedUserID.Get("account_uuid").String()) != "" {
+		return payload
+	}
+	updatedUserID, err := sjson.Set(rawUserID, "account_uuid", accountUUID)
+	if err != nil {
+		return payload
+	}
+	updatedPayload, err := sjson.SetBytes(payload, "metadata.user_id", updatedUserID)
+	if err != nil {
+		return payload
+	}
+	return updatedPayload
 }
 
 func checkSystemInstructions(payload []byte) []byte {
