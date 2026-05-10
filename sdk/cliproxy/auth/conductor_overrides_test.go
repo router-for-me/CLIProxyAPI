@@ -525,11 +525,11 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 func TestManager_MarkResult_TransientErrorCooldownCanBeDisabled(t *testing.T) {
 	prevCooling := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
-	prevTransient := transientErrorCooldownSeconds.Load()
+	prevTransient := transientErrorCooldownNanos.Load()
 	SetTransientErrorCooldown(0)
 	t.Cleanup(func() {
 		quotaCooldownDisabled.Store(prevCooling)
-		transientErrorCooldownSeconds.Store(prevTransient)
+		transientErrorCooldownNanos.Store(prevTransient)
 	})
 
 	m := NewManager(nil, nil, nil)

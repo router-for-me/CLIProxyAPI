@@ -72,6 +72,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if cfg.TransientErrorCooldownSeconds < 0 {
 		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds cannot be negative; clamping to 0")
 		cfg.TransientErrorCooldownSeconds = 0
+	} else if cfg.TransientErrorCooldownSeconds > 3600 {
+		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds too large; clamping to 3600")
+		cfg.TransientErrorCooldownSeconds = 3600
 	}
 
 	if cfg.MaxRetryCredentials < 0 {

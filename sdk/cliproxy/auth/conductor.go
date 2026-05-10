@@ -78,11 +78,11 @@ const (
 
 var (
 	quotaCooldownDisabled         atomic.Bool
-	transientErrorCooldownSeconds atomic.Int64
+	transientErrorCooldownNanos   atomic.Int64
 )
 
 func init() {
-	transientErrorCooldownSeconds.Store(int64((1 * time.Minute) / time.Second))
+	transientErrorCooldownNanos.Store(int64(1 * time.Minute))
 }
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
@@ -96,15 +96,15 @@ func SetTransientErrorCooldown(duration time.Duration) {
 	if duration < 0 {
 		duration = 0
 	}
-	transientErrorCooldownSeconds.Store(int64(duration / time.Second))
+	transientErrorCooldownNanos.Store(int64(duration))
 }
 
 func transientErrorCooldown() time.Duration {
-	seconds := transientErrorCooldownSeconds.Load()
-	if seconds <= 0 {
+	nanos := transientErrorCooldownNanos.Load()
+	if nanos <= 0 {
 		return 0
 	}
-	return time.Duration(seconds) * time.Second
+	return time.Duration(nanos)
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {

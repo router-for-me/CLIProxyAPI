@@ -102,7 +102,7 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
-# Auth/model cooldown in seconds after transient upstream errors (408/500/502/503/504).
+# Auth/model cooldown in seconds after transient upstream errors (408/500/502/503/504), capped at 3600.
 # Set to 0 to disable only this transient-error cooldown while keeping auth/quota cooldowns.
 transient-error-cooldown-seconds: 60
 
