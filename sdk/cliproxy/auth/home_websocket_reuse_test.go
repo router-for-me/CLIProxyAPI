@@ -26,7 +26,7 @@ func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.
 		Metadata: map[string]any{"email": "home@example.com"},
 	}
 	auth.EnsureIndex()
-	manager.rememberHomeRuntimeAuth(auth)
+	manager.rememberHomeRuntimeAuth("session-1", auth)
 	cachedAuth, ok := manager.GetByID("home-auth-1")
 	if !ok || cachedAuth == nil || !authWebsocketsEnabled(cachedAuth) {
 		t.Fatalf("GetByID() did not expose remembered websocket home auth: auth=%#v ok=%v", cachedAuth, ok)
@@ -41,7 +41,7 @@ func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.
 		Headers: http.Header{"Authorization": {"Bearer client-key"}},
 	}
 
-	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts)
+	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts, nil)
 	if errPick != nil {
 		t.Fatalf("pickNextViaHome() error = %v", errPick)
 	}
@@ -53,6 +53,79 @@ func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.
 	}
 	if provider != "test" {
 		t.Fatalf("pickNextViaHome() provider = %q, want test", provider)
+	}
+}
+
+func TestPickNextViaHomeDoesNotReuseTriedPinnedWebsocketAuth(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	auth := &Auth{
+		ID:       "home-auth-1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"websockets": "true",
+		},
+	}
+	manager.rememberHomeRuntimeAuth("session-1", auth)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+			cliproxyexecutor.PinnedAuthMetadataKey:       "home-auth-1",
+		},
+	}
+	tried := map[string]struct{}{"home-auth-1": {}}
+
+	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts, tried)
+	if errPick == nil {
+		t.Fatal("pickNextViaHome() error is nil, want home unavailable error")
+	}
+	var authErr *Error
+	if !errors.As(errPick, &authErr) || authErr.Code != "home_unavailable" {
+		t.Fatalf("pickNextViaHome() error = %v, want home_unavailable", errPick)
+	}
+	if got != nil || executor != nil || provider != "" {
+		t.Fatalf("pickNextViaHome() reused tried auth: auth=%#v executor=%#v provider=%q", got, executor, provider)
+	}
+}
+
+func TestPickNextViaHomeDoesNotReusePinnedWebsocketAuthAfterFirstHomeAttempt(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	auth := &Auth{
+		ID:       "home-auth-1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"websockets": "true",
+		},
+	}
+	manager.rememberHomeRuntimeAuth("session-1", auth)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	opts := withHomeAuthCount(cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+			cliproxyexecutor.PinnedAuthMetadataKey:       "home-auth-1",
+		},
+	}, 2)
+
+	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts, nil)
+	if errPick == nil {
+		t.Fatal("pickNextViaHome() error is nil, want home unavailable error")
+	}
+	var authErr *Error
+	if !errors.As(errPick, &authErr) || authErr.Code != "home_unavailable" {
+		t.Fatalf("pickNextViaHome() error = %v, want home_unavailable", errPick)
+	}
+	if got != nil || executor != nil || provider != "" {
+		t.Fatalf("pickNextViaHome() reused auth after first home attempt: auth=%#v executor=%#v provider=%q", got, executor, provider)
 	}
 }
 
@@ -78,7 +151,7 @@ func TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth(t *testing.T) {
 		Headers: http.Header{"Authorization": {"Bearer client-key"}},
 	}
 
-	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts)
+	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts, nil)
 	if errPick == nil {
 		t.Fatal("pickNextViaHome() error is nil, want home unavailable error")
 	}
@@ -94,7 +167,7 @@ func TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth(t *testing.T) {
 func TestHomeRuntimeAuthsClearWhenHomeDisabled(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
-	manager.rememberHomeRuntimeAuth(&Auth{
+	manager.rememberHomeRuntimeAuth("session-1", &Auth{
 		ID:       "home-auth-1",
 		Provider: "test",
 		Attributes: map[string]string{
@@ -109,5 +182,29 @@ func TestHomeRuntimeAuthsClearWhenHomeDisabled(t *testing.T) {
 	manager.SetConfig(&internalconfig.Config{})
 	if _, ok := manager.GetByID("home-auth-1"); ok {
 		t.Fatal("remembered home auth was not cleared when home was disabled")
+	}
+}
+
+func TestCloseExecutionSessionClearsHomeRuntimeAuthForSession(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "home-auth-1",
+		Provider: "test",
+		Attributes: map[string]string{
+			"websockets": "true",
+		},
+	}
+
+	manager.rememberHomeRuntimeAuth("session-1", auth)
+	manager.rememberHomeRuntimeAuth("session-2", auth)
+
+	manager.CloseExecutionSession("session-1")
+	if _, ok := manager.GetByID("home-auth-1"); !ok {
+		t.Fatal("shared home auth was cleared while another session still referenced it")
+	}
+
+	manager.CloseExecutionSession("session-2")
+	if _, ok := manager.GetByID("home-auth-1"); ok {
+		t.Fatal("home auth was not cleared when its last session closed")
 	}
 }
