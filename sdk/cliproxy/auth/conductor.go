@@ -2182,6 +2182,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					// Anthropic 400 "out of extra usage" is per-credential
+					// subscription quota; treat like 429 so the auth gets cooled
+					// rather than returning the error to the client.
+					if statusCode == http.StatusBadRequest && result.Error != nil &&
+						(strings.Contains(result.Error.Message, "out of extra usage") ||
+							strings.Contains(result.Error.Message, "claude.ai/settings/usage")) {
+						statusCode = http.StatusTooManyRequests
+					}
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -2586,6 +2594,13 @@ func isRequestInvalidError(err error) bool {
 	switch status {
 	case http.StatusBadRequest:
 		msg := err.Error()
+		// Anthropic OAuth subscription quota exhaustion arrives as 400
+		// invalid_request_error but is per-credential, not per-request.
+		// Let it fall through to rotation + cool-down (see MarkResult promotion).
+		if strings.Contains(msg, "out of extra usage") ||
+			strings.Contains(msg, "claude.ai/settings/usage") {
+			return false
+		}
 		return strings.Contains(msg, "invalid_request_error") ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
 			strings.Contains(msg, "FAILED_PRECONDITION")
