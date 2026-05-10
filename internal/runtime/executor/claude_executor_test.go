@@ -1449,6 +1449,77 @@ func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 	}
 }
 
+func TestDowngradeClaudeUnsupportedBlocksForXiaomi(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":8},
+			{"name":"read_file","description":"Read files","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"search"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+				{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}
+			]},
+			{"role":"assistant","content":[
+				{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"current date"}},
+				{"type":"code_execution_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"text","text":"code ok"}]},
+				{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"README.md"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"file ok"},
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"BBBB"}}
+				]}
+			]}
+		]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompat("https://token-plan-cn.xiaomimimo.com/anthropic", payload)
+
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "read_file" {
+		t.Fatalf("remaining tool = %q, want read_file: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice for removed server tool should be removed: %s", string(out))
+	}
+
+	userContent := gjson.GetBytes(out, "messages.0.content").Array()
+	if hasClaudePartType(userContent, "image_url") || hasClaudePartType(userContent, "mcp_tool_result") {
+		t.Fatalf("Xiaomi unsupported content block remained: %s", string(out))
+	}
+	if !hasClaudeText(userContent, "search") || !hasClaudeText(userContent, "mcp ok") {
+		t.Fatalf("Xiaomi compatible text should be preserved: %s", string(out))
+	}
+
+	assistantContent := gjson.GetBytes(out, "messages.1.content").Array()
+	for _, partType := range []string{"server_tool_use", "code_execution_tool_result"} {
+		if hasClaudePartType(assistantContent, partType) {
+			t.Fatalf("%s should be downgraded away: %s", partType, string(out))
+		}
+	}
+	if !hasClaudePartType(assistantContent, "tool_use") {
+		t.Fatalf("custom tool_use should be preserved: %s", string(out))
+	}
+
+	toolResultContent := gjson.GetBytes(out, "messages.2.content.0.content").Array()
+	if hasClaudePartType(toolResultContent, "image") {
+		t.Fatalf("unsupported image inside tool_result should be removed: %s", string(out))
+	}
+	if !hasClaudeText(toolResultContent, "file ok") {
+		t.Fatalf("tool_result text should be preserved: %s", string(out))
+	}
+	if err := validateClaudeUpstreamPayload("https://token-plan-cn.xiaomimimo.com/anthropic", out); err != nil {
+		t.Fatalf("downgraded Xiaomi payload should pass validation: %v", err)
+	}
+}
+
 func TestApplyMiniMaxStreamingThinkingDefaultForCompat(t *testing.T) {
 	t.Parallel()
 
@@ -1491,6 +1562,28 @@ func TestSanitizeClaudeHTTPRequestToolNames_DisablesImplicitMiniMaxStreamingThin
 	}
 	if got := gjson.GetBytes(body, "thinking.type").String(); got != "disabled" {
 		t.Fatalf("thinking.type = %q, want disabled: %s", got, string(body))
+	}
+}
+
+func TestSanitizeClaudeHTTPRequestToolNames_DowngradesXiaomiAnthropicBody(t *testing.T) {
+	t.Parallel()
+
+	payload := `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "https://api.xiaomimimo.com/anthropic/v1/messages?beta=true", strings.NewReader(payload))
+
+	if _, err := sanitizeClaudeHTTPRequestToolNames(req); err != nil {
+		t.Fatalf("sanitizeClaudeHTTPRequestToolNames() error = %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	content := gjson.GetBytes(body, "messages.0.content").Array()
+	if hasClaudePartType(content, "image_url") || hasClaudePartType(content, "mcp_tool_result") {
+		t.Fatalf("Xiaomi direct HttpRequest body should remove unsupported blocks: %s", string(body))
+	}
+	if !hasClaudeText(content, "hi") || !hasClaudeText(content, "mcp ok") {
+		t.Fatalf("text should be preserved: %s", string(body))
 	}
 }
 

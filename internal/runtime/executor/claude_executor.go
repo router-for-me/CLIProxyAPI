@@ -1319,7 +1319,7 @@ func isUnsupportedClaudeServerToolForCompat(compatKind string, toolType string, 
 	if toolType == "" {
 		return false
 	}
-	if compatKind != "minimax" && compatKind != "deepseek" {
+	if !requiresClaudeContentBlockDowngradeForCompat(compatKind) {
 		return false
 	}
 	_, hasInputSchema := tool["input_schema"]
@@ -1388,7 +1388,7 @@ func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any)
 }
 
 func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
-	if compatKind != "deepseek" && compatKind != "minimax" {
+	if !requiresClaudeContentBlockDowngradeForCompat(compatKind) {
 		return false
 	}
 	switch partType {
@@ -1400,12 +1400,21 @@ func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
 	}
 }
 
+func requiresClaudeContentBlockDowngradeForCompat(compatKind string) bool {
+	switch compatKind {
+	case "deepseek", "minimax", "xiaomi":
+		return true
+	default:
+		return false
+	}
+}
+
 func isClaudeServerToolResultPart(partType string) bool {
 	return partType != "" && partType != "tool_result" && strings.HasSuffix(partType, "_tool_result")
 }
 
 func downgradeClaudeToolResultContentForCompat(compatKind string, part map[string]any) (map[string]any, bool) {
-	if compatKind != "deepseek" && compatKind != "minimax" {
+	if !requiresClaudeContentBlockDowngradeForCompat(compatKind) {
 		return part, false
 	}
 	content, ok := part["content"]
