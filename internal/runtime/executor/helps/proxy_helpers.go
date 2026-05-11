@@ -34,12 +34,15 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
+	skipVerify := cfg != nil && cfg.InsecureSkipVerify
+
 	// Priority: request override, then auth.ProxyURL, then cfg.ProxyURL.
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
+		transport = proxyutil.SetInsecureSkipVerify(transport, skipVerify)
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient
@@ -51,6 +54,8 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+	} else if skipVerify {
+		httpClient.Transport = proxyutil.SetInsecureSkipVerify(nil, true)
 	}
 
 	return httpClient

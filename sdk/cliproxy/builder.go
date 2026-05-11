@@ -266,7 +266,7 @@ func (b *Builder) Build() (*Service, error) {
 		appliedRoutingState = &routingState
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
-	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider(b.cfg.InsecureSkipVerify))
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 	if pluginHost != nil {

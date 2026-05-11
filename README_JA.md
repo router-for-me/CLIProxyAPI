@@ -129,6 +129,16 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 
 CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/)
 
+### Git でのアップグレード
+
+すでにリポジトリをクローンしている場合は、以下のコマンドで最新バージョンにアップグレードできます：
+
+```bash
+cd CLIProxyAPI
+git pull
+go build -o cli-proxy-api ./cmd/server
+```
+
 ## 管理API
 
 [MANAGEMENT_API.md](https://help.router-for.me/management/api)を参照
