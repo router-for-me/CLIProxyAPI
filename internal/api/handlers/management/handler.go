@@ -62,6 +62,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		tokenStore:          sdkAuth.GetTokenStore(),
+			usageStats:          usage.GetRequestStatistics(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
