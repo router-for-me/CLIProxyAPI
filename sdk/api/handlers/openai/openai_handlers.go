@@ -59,21 +59,9 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
-	allModels := h.Models()
-	models := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
-		copyModel := make(map[string]any, len(model))
-		for k, v := range model {
-			copyModel[k] = v
-		}
-		if _, ok := copyModel["object"]; !ok {
-			copyModel["object"] = "model"
-		}
-		models[i] = copyModel
-	}
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
-		"data":   models,
+		"data":   h.Models(),
 	})
 }
 
