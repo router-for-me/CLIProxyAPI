@@ -245,7 +245,7 @@ func TestOpenAIResponsesCompactSkipsOrphanToolOutputEvidence(t *testing.T) {
 }
 
 func TestCompactSameTurnEvidenceRequiresTailMarker(t *testing.T) {
-	evidenceJSON, hit, err := compactSameTurnEvidenceJSON([]byte(`{
+	evidence, err := compactSameTurnEvidenceJSON([]byte(`{
 		"input":[
 			{"type":"message","role":"assistant","id":"assistant-without-marker"},
 			{"type":"function_call","call_id":"call-without-marker","name":"shell"},
@@ -255,13 +255,16 @@ func TestCompactSameTurnEvidenceRequiresTailMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compactSameTurnEvidenceJSON: %v", err)
 	}
-	if hit {
-		t.Fatalf("evidence hit = true, want false; evidence=%s", evidenceJSON)
+	if evidence.hit {
+		t.Fatalf("evidence hit = true, want false; evidence=%s", evidence.rawJSON)
+	}
+	if evidence.skipped {
+		t.Fatalf("evidence skipped = true, want false; reason=%s", evidence.skipReason)
 	}
 }
 
 func TestCompactSameTurnEvidenceUsesCompactionMarkerTail(t *testing.T) {
-	evidenceJSON, hit, err := compactSameTurnEvidenceJSON([]byte(`{
+	evidenceResult, err := compactSameTurnEvidenceJSON([]byte(`{
 		"input":[
 			{"type":"message","role":"assistant","id":"stale-assistant"},
 			{"type":"function_call","call_id":"stale-call","name":"shell"},
@@ -276,14 +279,52 @@ func TestCompactSameTurnEvidenceUsesCompactionMarkerTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compactSameTurnEvidenceJSON: %v", err)
 	}
-	if !hit {
+	if !evidenceResult.hit {
 		t.Fatalf("evidence hit = false, want true")
 	}
-	evidence := gjson.Parse(evidenceJSON)
-	if got, want := len(evidence.Array()), 3; got != want {
-		t.Fatalf("evidence item count = %d, want %d; evidence=%s", got, want, evidenceJSON)
+	if !evidenceResult.skipped {
+		t.Fatalf("evidence skipped = false, want true for orphan output")
 	}
-	if strings.Contains(evidenceJSON, "stale-call") || strings.Contains(evidenceJSON, "orphan-call") {
-		t.Fatalf("evidence contains stale or orphan item: %s", evidenceJSON)
+	if evidenceResult.skipReason != compactEvidenceSkipToolOutputBeforeCall {
+		t.Fatalf("skip reason = %q, want %q", evidenceResult.skipReason, compactEvidenceSkipToolOutputBeforeCall)
+	}
+	evidence := gjson.Parse(evidenceResult.rawJSON)
+	if got, want := len(evidence.Array()), 3; got != want {
+		t.Fatalf("evidence item count = %d, want %d; evidence=%s", got, want, evidenceResult.rawJSON)
+	}
+	if strings.Contains(evidenceResult.rawJSON, "stale-call") || strings.Contains(evidenceResult.rawJSON, "orphan-call") {
+		t.Fatalf("evidence contains stale or orphan item: %s", evidenceResult.rawJSON)
+	}
+}
+
+func TestCompactSameTurnEvidenceRequiresCallBeforeOutput(t *testing.T) {
+	evidenceResult, err := compactSameTurnEvidenceJSON([]byte(`{
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},
+			{"type":"function_call_output","call_id":"late-call","output":"skip"},
+			{"type":"function_call","call_id":"late-call","name":"shell","arguments":"{}"}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("compactSameTurnEvidenceJSON: %v", err)
+	}
+	if !evidenceResult.hit {
+		t.Fatalf("evidence hit = false, want true for later tool call")
+	}
+	if !evidenceResult.skipped {
+		t.Fatalf("evidence skipped = false, want true for output before call")
+	}
+	if evidenceResult.skipReason != compactEvidenceSkipToolOutputBeforeCall {
+		t.Fatalf("skip reason = %q, want %q", evidenceResult.skipReason, compactEvidenceSkipToolOutputBeforeCall)
+	}
+	evidence := gjson.Parse(evidenceResult.rawJSON)
+	if got, want := len(evidence.Array()), 1; got != want {
+		t.Fatalf("evidence item count = %d, want %d; evidence=%s", got, want, evidenceResult.rawJSON)
+	}
+	if got := evidence.Array()[0].Get("type").String(); got != "function_call" {
+		t.Fatalf("evidence[0].type = %q, want function_call; evidence=%s", got, evidenceResult.rawJSON)
+	}
+	if strings.Contains(evidenceResult.rawJSON, "skip") || strings.Contains(evidenceResult.rawJSON, "function_call_output") {
+		t.Fatalf("evidence injected out-of-order tool output: %s", evidenceResult.rawJSON)
 	}
 }

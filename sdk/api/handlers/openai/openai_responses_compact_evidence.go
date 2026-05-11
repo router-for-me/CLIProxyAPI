@@ -13,11 +13,15 @@ import (
 const (
 	compactEvidenceFailNone                 = "none"
 	compactEvidenceFailInvalidSameTurnInput = "invalid_same_turn_evidence"
+	compactEvidenceSkipNone                 = "none"
+	compactEvidenceSkipToolOutputBeforeCall = "tool_output_without_prior_call"
 )
 
 type compactEvidenceDiagnostic struct {
 	compactOutputHasEvidence         bool
 	sameTurnEvidenceHit              bool
+	sameTurnEvidenceSkipped          bool
+	sameTurnEvidenceSkipReason       string
 	compactResponseEvidenceAugmented bool
 	failReason                       string
 	inputCounts                      compactEvidenceCounts
@@ -33,8 +37,9 @@ type compactEvidenceCounts struct {
 
 func compactResponseWithSameTurnEvidence(requestJSON, responseJSON []byte) ([]byte, compactEvidenceDiagnostic, error) {
 	diagnostic := compactEvidenceDiagnostic{
-		failReason:  compactEvidenceFailNone,
-		inputCounts: compactEvidenceInputCounts(requestJSON),
+		failReason:                 compactEvidenceFailNone,
+		sameTurnEvidenceSkipReason: compactEvidenceSkipNone,
+		inputCounts:                compactEvidenceInputCounts(requestJSON),
 	}
 
 	outputJSON, outputPath := compactResponseOutputJSON(gjson.ParseBytes(responseJSON))
@@ -44,17 +49,19 @@ func compactResponseWithSameTurnEvidence(requestJSON, responseJSON []byte) ([]by
 		return responseJSON, diagnostic, nil
 	}
 
-	evidenceJSON, evidenceHit, errEvidence := compactSameTurnEvidenceJSON(requestJSON)
-	diagnostic.sameTurnEvidenceHit = evidenceHit
+	evidence, errEvidence := compactSameTurnEvidenceJSON(requestJSON)
+	diagnostic.sameTurnEvidenceHit = evidence.hit
+	diagnostic.sameTurnEvidenceSkipped = evidence.skipped
+	diagnostic.sameTurnEvidenceSkipReason = evidence.skipReason
 	if errEvidence != nil {
 		diagnostic.failReason = compactEvidenceFailInvalidSameTurnInput
 		return nil, diagnostic, errEvidence
 	}
-	if !evidenceHit {
+	if !evidence.hit {
 		return responseJSON, diagnostic, nil
 	}
 
-	mergedOutput, errMerge := mergeJSONArrayRaw(string(outputJSON), evidenceJSON)
+	mergedOutput, errMerge := mergeJSONArrayRaw(string(outputJSON), evidence.rawJSON)
 	if errMerge != nil {
 		diagnostic.failReason = compactEvidenceFailInvalidSameTurnInput
 		return nil, diagnostic, fmt.Errorf("merge compact evidence: %w", errMerge)
@@ -72,18 +79,20 @@ func compactResponseWithSameTurnEvidence(requestJSON, responseJSON []byte) ([]by
 
 func logCompactEvidenceDiagnostic(diagnostic compactEvidenceDiagnostic) {
 	fields := log.Fields{
-		"compact_input_item_count":            diagnostic.inputCounts.itemCount,
-		"compact_input_assistant_count":       diagnostic.inputCounts.assistantMessageCount,
-		"compact_input_tool_call_count":       diagnostic.inputCounts.toolCallCount,
-		"compact_input_tool_output_count":     diagnostic.inputCounts.toolCallOutputCount,
-		"compact_output_has_evidence":         diagnostic.compactOutputHasEvidence,
-		"compact_same_turn_evidence_hit":      diagnostic.sameTurnEvidenceHit,
-		"compact_response_evidence_augmented": diagnostic.compactResponseEvidenceAugmented,
-		"compact_fail_reason":                 diagnostic.failReason,
-		"compact_output_item_count":           diagnostic.outputCounts.itemCount,
-		"compact_output_assistant_count":      diagnostic.outputCounts.assistantMessageCount,
-		"compact_output_tool_call_count":      diagnostic.outputCounts.toolCallCount,
-		"compact_output_tool_output_count":    diagnostic.outputCounts.toolCallOutputCount,
+		"compact_input_item_count":               diagnostic.inputCounts.itemCount,
+		"compact_input_assistant_count":          diagnostic.inputCounts.assistantMessageCount,
+		"compact_input_tool_call_count":          diagnostic.inputCounts.toolCallCount,
+		"compact_input_tool_output_count":        diagnostic.inputCounts.toolCallOutputCount,
+		"compact_output_has_evidence":            diagnostic.compactOutputHasEvidence,
+		"compact_same_turn_evidence_hit":         diagnostic.sameTurnEvidenceHit,
+		"compact_same_turn_evidence_skipped":     diagnostic.sameTurnEvidenceSkipped,
+		"compact_same_turn_evidence_skip_reason": diagnostic.sameTurnEvidenceSkipReason,
+		"compact_response_evidence_augmented":    diagnostic.compactResponseEvidenceAugmented,
+		"compact_fail_reason":                    diagnostic.failReason,
+		"compact_output_item_count":              diagnostic.outputCounts.itemCount,
+		"compact_output_assistant_count":         diagnostic.outputCounts.assistantMessageCount,
+		"compact_output_tool_call_count":         diagnostic.outputCounts.toolCallCount,
+		"compact_output_tool_output_count":       diagnostic.outputCounts.toolCallOutputCount,
 	}
 	if diagnostic.failReason != compactEvidenceFailNone {
 		log.WithFields(fields).Warn("openai responses compact evidence diagnostic")
@@ -92,29 +101,29 @@ func logCompactEvidenceDiagnostic(diagnostic compactEvidenceDiagnostic) {
 	log.WithFields(fields).Info("openai responses compact evidence diagnostic")
 }
 
-func compactSameTurnEvidenceJSON(rawJSON []byte) (string, bool, error) {
+type compactSameTurnEvidence struct {
+	rawJSON    string
+	hit        bool
+	skipped    bool
+	skipReason string
+}
+
+func compactSameTurnEvidenceJSON(rawJSON []byte) (compactSameTurnEvidence, error) {
+	evidence := compactSameTurnEvidence{
+		rawJSON:    "[]",
+		skipReason: compactEvidenceSkipNone,
+	}
 	input := gjson.GetBytes(rawJSON, "input")
 	if !input.IsArray() {
-		return "[]", false, nil
+		return evidence, nil
 	}
 
 	tail := compactLatestTailWindow(input)
 	if len(tail) == 0 {
-		return "[]", false, nil
+		return evidence, nil
 	}
 
-	callIDs := make(map[string]struct{}, len(tail))
-	for _, item := range tail {
-		itemType := strings.TrimSpace(item.Get("type").String())
-		if !isResponsesToolCallType(itemType) {
-			continue
-		}
-		callID := strings.TrimSpace(item.Get("call_id").String())
-		if callID != "" {
-			callIDs[callID] = struct{}{}
-		}
-	}
-
+	seenCallIDs := make(map[string]struct{}, len(tail))
 	items := make([]string, 0, len(tail))
 	for _, item := range tail {
 		itemType := strings.TrimSpace(item.Get("type").String())
@@ -123,24 +132,31 @@ func compactSameTurnEvidenceJSON(rawJSON []byte) (string, bool, error) {
 			continue
 		}
 		if isResponsesToolCallType(itemType) {
-			if strings.TrimSpace(item.Get("call_id").String()) == "" {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID == "" {
 				continue
 			}
 			items = append(items, item.Raw)
+			seenCallIDs[callID] = struct{}{}
 			continue
 		}
 		if isResponsesToolCallOutputType(itemType) {
 			callID := strings.TrimSpace(item.Get("call_id").String())
-			if _, ok := callIDs[callID]; ok {
+			if _, ok := seenCallIDs[callID]; ok {
 				items = append(items, item.Raw)
+				continue
 			}
+			evidence.skipped = true
+			evidence.skipReason = compactEvidenceSkipToolOutputBeforeCall
 		}
 	}
 	if len(items) == 0 {
-		return "[]", false, nil
+		return evidence, nil
 	}
 
-	return "[" + strings.Join(items, ",") + "]", true, nil
+	evidence.rawJSON = "[" + strings.Join(items, ",") + "]"
+	evidence.hit = true
+	return evidence, nil
 }
 
 func compactLatestTailWindow(input gjson.Result) []gjson.Result {
