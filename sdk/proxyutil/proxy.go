@@ -2,6 +2,7 @@ package proxyutil
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -119,6 +120,22 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+// SetInsecureSkipVerify sets InsecureSkipVerify on the provided transport.
+// If t is nil, it clones the default transport.
+func SetInsecureSkipVerify(t *http.Transport, skip bool) *http.Transport {
+	if !skip {
+		return t
+	}
+	if t == nil {
+		t = cloneDefaultTransport()
+	}
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{}
+	}
+	t.TLSClientConfig.InsecureSkipVerify = true
+	return t
 }
 
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.

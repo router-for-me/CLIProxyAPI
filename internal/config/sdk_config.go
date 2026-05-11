@@ -44,6 +44,11 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// InsecureSkipVerify controls whether the proxy verifies the upstream server's certificate chain and host name.
+	// When true, TLS accepts any certificate presented by the upstream and any host name in that certificate.
+	// Use with caution as this disables TLS security checks.
+	InsecureSkipVerify bool `yaml:"insecure-skip-verify" json:"insecure-skip-verify"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

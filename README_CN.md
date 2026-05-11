@@ -62,6 +62,16 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### 通过 Git 升级
+
+如果你已通过 Git 克隆本项目，可使用以下命令升级到最新版本：
+
+```bash
+cd CLIProxyAPI
+git pull
+go build -o cli-proxy-api ./cmd/server
+```
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

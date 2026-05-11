@@ -651,17 +651,18 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 
 	for _, proxyStr := range proxyCandidates {
 		if transport := buildProxyTransport(proxyStr); transport != nil {
+			transport = proxyutil.SetInsecureSkipVerify(transport, h.cfg.InsecureSkipVerify)
 			return transport
 		}
 	}
 
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || transport == nil {
-		return &http.Transport{Proxy: nil}
+		return proxyutil.SetInsecureSkipVerify(&http.Transport{Proxy: nil}, h.cfg.InsecureSkipVerify)
 	}
 	clone := transport.Clone()
 	clone.Proxy = nil
-	return clone
+	return proxyutil.SetInsecureSkipVerify(clone, h.cfg.InsecureSkipVerify)
 }
 
 type apiKeyConfigEntry interface {

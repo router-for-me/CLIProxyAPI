@@ -81,9 +81,15 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
-	} else if transport != nil {
-		proxyClient := &http.Client{Transport: transport}
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyClient)
+	} else {
+		transport = proxyutil.SetInsecureSkipVerify(transport, cfg.InsecureSkipVerify)
+		if transport != nil {
+			proxyClient := &http.Client{Transport: transport}
+			ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyClient)
+		} else if cfg.InsecureSkipVerify {
+			proxyClient := &http.Client{Transport: proxyutil.SetInsecureSkipVerify(nil, true)}
+			ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyClient)
+		}
 	}
 
 	var err error

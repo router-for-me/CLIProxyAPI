@@ -62,6 +62,16 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Upgrade via Git
+
+If you already cloned the repository, upgrade to the latest version with:
+
+```bash
+cd CLIProxyAPI
+git pull
+go build -o cli-proxy-api ./cmd/server
+```
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
@@ -116,7 +126,16 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+3. Commit your changes with a clear description:
+   ```bash
+   git commit -m "feat: add some amazing feature"
+   ```
+   Prefix commit messages with a type tag when possible:
+   - `feat:` — new feature or capability
+   - `fix:` — bug fix
+   - `docs:` — documentation only changes
+   - `refactor:` — code change that neither fixes a bug nor adds a feature
+   - `chore:` — build process or auxiliary tool changes
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
