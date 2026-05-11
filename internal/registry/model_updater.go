@@ -124,6 +124,11 @@ func tryRefreshModels(ctx context.Context, label string) {
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
+	// Preserve embedded github-copilot models if remote doesn't have them.
+	if len(parsed.GithubCopilot) == 0 && oldData != nil && len(oldData.GithubCopilot) > 0 {
+		parsed.GithubCopilot = oldData.GithubCopilot
+	}
+
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = parsed
@@ -215,6 +220,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
+		{"github-copilot", oldData.GithubCopilot, newData.GithubCopilot},
 	}
 
 	seen := make(map[string]bool, len(sections))

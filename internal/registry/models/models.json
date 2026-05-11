@@ -2064,5 +2064,167 @@
         ]
       }
     }
+  ],
+  "github-copilot": [
+    {
+      "id": "claude-sonnet-4.6",
+      "object": "model",
+      "created": 1771372800,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Sonnet 4.6",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "claude-sonnet-4.5",
+      "object": "model",
+      "created": 1759104000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Sonnet 4.5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true
+      }
+    },
+    {
+      "id": "claude-haiku-4.5",
+      "object": "model",
+      "created": 1759276800,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Haiku 4.5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT 5.4 Mini",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "object": "model",
+      "created": 1770307200,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT 5.3 Codex",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.2-codex",
+      "object": "model",
+      "created": 1765440000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT 5.2 Codex",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.2",
+      "object": "model",
+      "created": 1765440000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT 5.2",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5-mini",
+      "object": "model",
+      "created": 1752192000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT 5 Mini",
+      "context_length": 1047576,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "gpt-4.1",
+      "object": "model",
+      "created": 1744761600,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT 4.1",
+      "context_length": 1047576,
+      "max_completion_tokens": 32768
+    }
   ]
 }

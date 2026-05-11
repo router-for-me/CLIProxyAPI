@@ -169,6 +169,18 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// For github-copilot auth files, set base_url and api_key for OpenAICompatExecutor.
+	if provider == "github-copilot" {
+		if accessToken, ok := metadata["access_token"].(string); ok && strings.TrimSpace(accessToken) != "" {
+			a.Attributes["api_key"] = accessToken
+			a.Attributes["base_url"] = "https://api.githubcopilot.com"
+			a.Attributes["header:Copilot-Integration-Id"] = "vscode-chat"
+			a.Attributes["header:Editor-Version"] = "vscode/1.100.0"
+			a.Attributes["header:Editor-Plugin-Version"] = "copilot-chat/0.25.0"
+			a.Attributes["header:User-Agent"] = "GitHubCopilotChat/0.25.0"
+			a.Attributes["header:Openai-Intent"] = "conversation-panel"
+		}
+	}
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 			for _, v := range virtuals {

@@ -10,17 +10,18 @@ const codexBuiltinImageModelID = "gpt-image-2"
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
-	Claude      []*ModelInfo `json:"claude"`
-	Gemini      []*ModelInfo `json:"gemini"`
-	Vertex      []*ModelInfo `json:"vertex"`
-	GeminiCLI   []*ModelInfo `json:"gemini-cli"`
-	AIStudio    []*ModelInfo `json:"aistudio"`
-	CodexFree   []*ModelInfo `json:"codex-free"`
-	CodexTeam   []*ModelInfo `json:"codex-team"`
-	CodexPlus   []*ModelInfo `json:"codex-plus"`
-	CodexPro    []*ModelInfo `json:"codex-pro"`
-	Kimi        []*ModelInfo `json:"kimi"`
-	Antigravity []*ModelInfo `json:"antigravity"`
+	Claude        []*ModelInfo `json:"claude"`
+	Gemini        []*ModelInfo `json:"gemini"`
+	Vertex        []*ModelInfo `json:"vertex"`
+	GeminiCLI     []*ModelInfo `json:"gemini-cli"`
+	AIStudio      []*ModelInfo `json:"aistudio"`
+	CodexFree     []*ModelInfo `json:"codex-free"`
+	CodexTeam     []*ModelInfo `json:"codex-team"`
+	CodexPlus     []*ModelInfo `json:"codex-plus"`
+	CodexPro      []*ModelInfo `json:"codex-pro"`
+	Kimi          []*ModelInfo `json:"kimi"`
+	Antigravity   []*ModelInfo `json:"antigravity"`
+	GithubCopilot []*ModelInfo `json:"github-copilot"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -76,6 +77,11 @@ func GetKimiModels() []*ModelInfo {
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
+}
+
+// GetGithubCopilotModels returns the standard GitHub Copilot model definitions.
+func GetGithubCopilotModels() []*ModelInfo {
+	return cloneModelInfos(getModels().GithubCopilot)
 }
 
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
@@ -186,6 +192,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "github-copilot":
+		return GetGithubCopilotModels()
 	default:
 		return nil
 	}
@@ -208,6 +216,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.CodexPro,
 		data.Kimi,
 		data.Antigravity,
+		data.GithubCopilot,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -109,6 +111,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
+	}
+
+	// Copilot GPT models require max_completion_tokens instead of max_tokens
+	if e.provider == "github-copilot" {
+		if v := gjson.GetBytes(translated, "max_tokens"); v.Exists() {
+			translated, _ = sjson.SetBytes(translated, "max_completion_tokens", v.Value())
+			translated, _ = sjson.DeleteBytes(translated, "max_tokens")
+		}
+		translated, _ = sjson.DeleteBytes(translated, "reasoning_effort")
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
@@ -213,6 +224,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+
+	// Copilot GPT models require max_completion_tokens instead of max_tokens
+	if e.provider == "github-copilot" {
+		if v := gjson.GetBytes(translated, "max_tokens"); v.Exists() {
+			translated, _ = sjson.SetBytes(translated, "max_completion_tokens", v.Value())
+			translated, _ = sjson.DeleteBytes(translated, "max_tokens")
+		}
+		// Copilot /chat/completions doesn't support reasoning_effort with tools
+		translated, _ = sjson.DeleteBytes(translated, "reasoning_effort")
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -388,6 +409,14 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
+	// For github-copilot, exchange GitHub OAuth token for Copilot API token
+	if e.provider == "github-copilot" && apiKey != "" && baseURL != "" {
+		if copilotToken, err := exchangeCopilotToken(apiKey); err == nil {
+			apiKey = copilotToken
+		} else {
+			log.Debugf("github-copilot token exchange failed: %v", err)
+		}
+	}
 	return
 }
 
@@ -443,3 +472,38 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// exchangeCopilotToken exchanges a GitHub OAuth token for a short-lived Copilot API token.
+func exchangeCopilotToken(githubToken string) (string, error) {
+	req, err := http.NewRequest("GET", "https://api.github.com/copilot_internal/v2/token", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "token "+githubToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "GithubCopilot/1.300.0")
+	req.Header.Set("Editor-Version", "vscode/1.100.0")
+	req.Header.Set("Editor-Plugin-Version", "copilot/1.300.0")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("copilot token exchange failed: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if result.Token == "" {
+		return "", fmt.Errorf("copilot token exchange returned empty token")
+	}
+	return result.Token, nil
+}
