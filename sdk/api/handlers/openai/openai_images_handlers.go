@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -228,6 +229,10 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	if h.isOpenAICompatImagesModel(imageModel) {
+		h.forwardOpenAICompatImageGeneration(c, imageModel, rawJSON)
+		return
+	}
 	if rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
@@ -284,6 +289,38 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		return
 	}
 	h.collectImagesFromResponses(c, responsesReq, responseFormat)
+}
+
+func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
+	if h == nil || h.BaseAPIHandler == nil || h.BaseAPIHandler.AuthManager == nil {
+		return false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(model) {
+		info := registry.GetGlobalRegistry().GetModelInfo(model, provider)
+		if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *OpenAIAPIHandler) forwardOpenAICompatImageGeneration(c *gin.Context, model string, rawJSON []byte) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), model, rawJSON, "images/generations")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
 }
 
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
