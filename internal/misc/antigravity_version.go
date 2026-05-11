@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	"strings"
 	"sync"
 	"time"
@@ -174,7 +176,8 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		ctx = context.Background()
 	}
 
-	client := &http.Client{Timeout: antigravityFetchTimeout}
+	transport := proxyutil.SetInsecureSkipVerify(nil, true)
+	client := &http.Client{Timeout: antigravityFetchTimeout, Transport: transport}
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityReleasesURL, nil)
 	if errReq != nil {
