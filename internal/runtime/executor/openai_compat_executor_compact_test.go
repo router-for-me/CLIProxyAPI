@@ -155,6 +155,59 @@ func TestOpenAICompatExecutorImagesGenerationPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorImagesEditPassthrough(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"url":"https://example.test/edit.png"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("xai", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"provider_key": "xai",
+		},
+	}
+	payload := []byte(`{"model":"grok-imagine-image-quality","prompt":"edit this","image":{"type":"image_url","url":"data:image/png;base64,AA=="},"size":"1024x1024"}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image-quality",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Alt:          "images/edits",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/images/edits" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/images/edits")
+	}
+	if gjson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("unexpected chat translation in body: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "aspect_ratio").String(); got != "1:1" {
+		t.Fatalf("aspect_ratio = %q, want 1:1; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "resolution").String(); got != "1k" {
+		t.Fatalf("resolution = %q, want 1k; body=%s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "size").Exists() {
+		t.Fatalf("size should be removed for xAI request: %s", string(gotBody))
+	}
+	if string(resp.Payload) != `{"data":[{"url":"https://example.test/edit.png"}]}` {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationLeavesNonXAIProviderPayload(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

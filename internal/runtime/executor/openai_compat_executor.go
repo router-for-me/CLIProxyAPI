@@ -92,8 +92,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		endpoint = "/responses/compact"
 	}
 	imageGeneration := opts.Alt == "images/generations"
+	imageEdit := opts.Alt == "images/edits"
 	if imageGeneration {
 		endpoint = "/images/generations"
+	} else if imageEdit {
+		endpoint = "/images/edits"
 	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -102,7 +105,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := originalPayload
 	translated := req.Payload
-	if !imageGeneration {
+	if !(imageGeneration || imageEdit) {
 		originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 		translated = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 
@@ -119,8 +122,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 				translated = updated
 			}
 		}
-	} else if translated, err = e.prepareImageGenerationPayload(auth, translated); err != nil {
-		return resp, err
+	} else {
+		if translated, err = e.prepareImagePayload(auth, translated); err != nil {
+			return resp, err
+		}
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
@@ -437,7 +442,7 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 	return nil
 }
 
-func (e *OpenAICompatExecutor) prepareImageGenerationPayload(auth *cliproxyauth.Auth, payload []byte) ([]byte, error) {
+func (e *OpenAICompatExecutor) prepareImagePayload(auth *cliproxyauth.Auth, payload []byte) ([]byte, error) {
 	if !e.isXAICompatProvider(auth) {
 		return payload, nil
 	}
