@@ -100,6 +100,7 @@ func claudeOAuthSessionCache(proxyURL string) tls.ClientSessionCache {
 func newClaudeOAuthTLSConfig(host string, sessionCache tls.ClientSessionCache) *tls.Config {
 	return &tls.Config{
 		ServerName:                         host,
+		InsecureSkipVerify:                 true,
 		ClientSessionCache:                 sessionCache,
 		OmitEmptyPsk:                       true,
 		PreferSkipResumptionOnNilExtension: true,

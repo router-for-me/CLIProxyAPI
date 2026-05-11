@@ -11,9 +11,16 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+>>>>>>> 5f8b534c (优化上游ssl证书问题)
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -48,12 +55,16 @@ func setLatestReleaseRequestHeaders(req *http.Request) {
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	proxyURL := ""
+	skipVerify := false
 	if h != nil && h.cfg != nil {
 		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+		skipVerify = h.cfg.InsecureSkipVerify
 	}
 	if proxyURL != "" {
-		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
+		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL, InsecureSkipVerify: skipVerify}
 		util.SetProxy(sdkCfg, client)
+	} else if skipVerify {
+		client.Transport = proxyutil.SetInsecureSkipVerify(nil, true)
 	}
 
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)
