@@ -1255,6 +1255,9 @@ func downgradeClaudeToolSearchForCompatKind(compatKind, baseURL string, body []b
 				delete(tool, "defer_loading")
 				changed = true
 			}
+			if sanitizeClaudeToolInputSchemaForCompat(compatKind, tool) {
+				changed = true
+			}
 			cleanedTools = append(cleanedTools, tool)
 		}
 		if len(cleanedTools) == 0 {
@@ -1309,6 +1312,39 @@ func downgradeClaudeToolSearchForCompatKind(compatKind, baseURL string, body []b
 	}
 	log.WithField("compat_kind", compatKind).Debug("downgraded Claude tool search payload for upstream compatibility")
 	return out
+}
+
+func sanitizeClaudeToolInputSchemaForCompat(compatKind string, tool map[string]any) bool {
+	if !requiresClaudeToolSchemaCleanupForCompat(compatKind) {
+		return false
+	}
+	inputSchema, ok := tool["input_schema"]
+	if !ok {
+		return false
+	}
+	raw, err := json.Marshal(inputSchema)
+	if err != nil || !gjson.ValidBytes(raw) {
+		return false
+	}
+	cleanedRaw := util.CleanJSONSchemaForStrictUpstream(string(raw))
+	var cleaned any
+	if err = json.Unmarshal([]byte(cleanedRaw), &cleaned); err != nil {
+		return false
+	}
+	if jsonValuesEqual(inputSchema, cleaned) {
+		return false
+	}
+	tool["input_schema"] = cleaned
+	return true
+}
+
+func requiresClaudeToolSchemaCleanupForCompat(compatKind string) bool {
+	switch compatKind {
+	case "deepseek":
+		return true
+	default:
+		return false
+	}
 }
 
 func isClaudeToolSearchTool(toolType string, toolName string) bool {

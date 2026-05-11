@@ -3010,6 +3010,38 @@ func TestDowngradeClaudeToolSearchForCompatKind_DeepSeekRemovesUnsupportedBlocks
 	}
 }
 
+func TestDowngradeClaudeToolSearchForCompatKind_DeepSeekSanitizesToolSchema(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"deepseek-v4-flash",
+		"tools":[{
+			"name":"browser_back",
+			"description":"Navigate back in the browser",
+			"input_schema":{
+				"type":"object",
+				"properties":{
+					"sessions":{"type":"array","items":null}
+				},
+				"required":null
+			}
+		}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"go back"}]}]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompatKind("deepseek", "https://api.deepseek.com/anthropic", payload)
+
+	if gjson.GetBytes(out, "tools.0.input_schema.required").Exists() {
+		t.Fatalf("required=null should be removed for DeepSeek: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.properties.sessions.items.type").String(); got == "" {
+		t.Fatalf("array items should be filled for DeepSeek: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("object schema should include additionalProperties=false for DeepSeek: %s", string(out))
+	}
+}
+
 func TestSanitizeClaudeHTTPRequestToolNames_DowngradesDeepSeekAnthropicBody(t *testing.T) {
 	t.Parallel()
 
