@@ -433,6 +433,30 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	case "kiro":
+		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
+	case "kilo":
+		s.coreManager.RegisterExecutor(executor.NewKiloExecutor(s.cfg))
+	case "cursor":
+		s.coreManager.RegisterExecutor(executor.NewCursorExecutor(s.cfg))
+	case "github-copilot":
+		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
+	case "codebuddy":
+		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(s.cfg))
+	case "codebuddy-ai":
+		s.coreManager.RegisterExecutor(executor.NewCodeBuddyAIExecutor(s.cfg))
+	case "codearts":
+		s.coreManager.RegisterExecutor(executor.NewCodeArtsExecutor(s.cfg))
+	case "joycode":
+		s.coreManager.RegisterExecutor(executor.NewJoyCodeExecutor(s.cfg))
+	case "gitlab":
+		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
+	case "bt":
+		s.coreManager.RegisterExecutor(executor.NewBTExecutor(s.cfg))
+	case "qoder":
+		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(s.cfg))
+	case "iflow":
+		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1152,6 +1176,42 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
+		models = applyExcludedModels(models, excluded)
+	case "kiro":
+		models = registry.GetKiroModels()
+		models = applyExcludedModels(models, excluded)
+	case "kilo":
+		models = registry.GetStaticModelDefinitionsByChannel("kilo")
+		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		models = registry.GetCursorModels()
+		models = applyExcludedModels(models, excluded)
+	case "github-copilot":
+		models = registry.GetGitHubCopilotModels()
+		models = applyExcludedModels(models, excluded)
+	case "codebuddy":
+		models = registry.GetCodeBuddyModels()
+		models = applyExcludedModels(models, excluded)
+	case "codebuddy-ai":
+		models = registry.GetCodeBuddyAIModels()
+		models = applyExcludedModels(models, excluded)
+	case "codearts":
+		models = registry.GetStaticModelDefinitionsByChannel("codearts")
+		models = applyExcludedModels(models, excluded)
+	case "joycode":
+		models = registry.GetStaticModelDefinitionsByChannel("joycode")
+		models = applyExcludedModels(models, excluded)
+	case "gitlab":
+		models = registry.GetStaticModelDefinitionsByChannel("gitlab")
+		models = applyExcludedModels(models, excluded)
+	case "bt":
+		models = registry.GetBTModels()
+		models = applyExcludedModels(models, excluded)
+	case "qoder":
+		models = registry.GetQoderModels()
+		models = applyExcludedModels(models, excluded)
+	case "iflow":
+		models = registry.GetStaticModelDefinitionsByChannel("iflow")
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
