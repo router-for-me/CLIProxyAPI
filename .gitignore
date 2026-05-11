@@ -51,3 +51,4 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+.porting/
