@@ -687,6 +687,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+		mgmt.GET("/kiro-quota", s.mgmt.GetKiroQuota)
+		s.mgmt.StartKiroQuotaRefresher()
 	}
 }
 
