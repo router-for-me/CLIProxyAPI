@@ -60,6 +60,30 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 
 CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/)
 
+### クイックインストール
+
+**Go でインストール：**
+
+```bash
+go install github.com/wwwmd5vip/CLIProxyAPI/v7/cmd/server@latest
+```
+
+**Docker で実行：**
+
+```bash
+# サンプル設定をダウンロードして起動
+curl -fsSL -o config.yaml https://raw.githubusercontent.com/wwwmd5vip/CLIProxyAPI/main/config.example.yaml
+docker compose up -d
+```
+
+**ソースからビルド：**
+
+```bash
+git clone https://github.com/wwwmd5vip/CLIProxyAPI.git
+cd CLIProxyAPI
+go build -o cli-proxy-api ./cmd/server
+```
+
 ### Git でのアップグレード
 
 すでにリポジトリをクローンしている場合は、以下のコマンドで最新バージョンにアップグレードできます：
@@ -89,6 +113,14 @@ CLIProxyAPI向けのローカル優先の使用量・クォータダッシュボ
 ### [CPA-Manager](https://github.com/seakee/CPA-Manager)
 
 リクエスト単位の監視とコスト推定を備えたCLIProxyAPI向けのフル管理センターです。CPA-Managerは、収集したリクエストをアカウント、モデル、チャネル、レイテンシ、ステータス、Token使用量ごとに追跡し、編集可能なモデル価格とLiteLLM価格のワンクリック同期でコストを推定します。SQLiteでイベントを永続化し、Codexアカウントプール向けに一括検査、クォータ判定、異常アカウント検出、クリーンアップ提案、ワンクリック実行を提供し、日常的なマルチアカウント運用に適しています。
+
+**ワンクリックインストールスクリプト：**
+
+```bash
+bash scripts/cpa-manager.sh install   # CPA-Manager をインストール
+bash scripts/cpa-manager.sh fix       # CPA-Manager を再起動/修正
+bash scripts/cpa-manager.sh setup     # CLIProxyAPI を設定して CPA-Manager を連携起動
+```
 
 ## Amp CLIサポート
 

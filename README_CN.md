@@ -62,6 +62,30 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### 一键安装
+
+**通过 Go 安装：**
+
+```bash
+go install github.com/wwwmd5vip/CLIProxyAPI/v7/cmd/server@latest
+```
+
+**通过 Docker 运行：**
+
+```bash
+# 下载示例配置并启动
+curl -fsSL -o config.yaml https://raw.githubusercontent.com/wwwmd5vip/CLIProxyAPI/main/config.example.yaml
+docker compose up -d
+```
+
+**从源码编译：**
+
+```bash
+git clone https://github.com/wwwmd5vip/CLIProxyAPI.git
+cd CLIProxyAPI
+go build -o cli-proxy-api ./cmd/server
+```
+
 ### 通过 Git 升级
 
 如果你已通过 Git 克隆本项目，可使用以下命令升级到最新版本：
@@ -91,6 +115,14 @@ go build -o cli-proxy-api ./cmd/server
 ### [CPA-Manager](https://github.com/seakee/CPA-Manager)
 
 面向 CLIProxyAPI 的完整管理中心，提供请求级监控和费用预估。CPA-Manager 可按账号、模型、渠道、延迟、状态和 token 用量追踪采集到的请求；支持可编辑模型价格与一键同步 LiteLLM 价格来估算费用；用 SQLite 持久化事件；并提供面向 Codex 账号池的批量巡检、配额识别、异常账号定位、清理建议与一键执行能力，适合多账号池的日常运维管理。
+
+**一键安装脚本：**
+
+```bash
+bash scripts/cpa-manager.sh install   # 安装 CPA-Manager
+bash scripts/cpa-manager.sh fix       # 重启/修复 CPA-Manager
+bash scripts/cpa-manager.sh setup     # 配置 CLIProxyAPI 并联动启动 CPA-Manager
+```
 
 ## Amp CLI 支持
 

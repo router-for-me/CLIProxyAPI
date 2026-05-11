@@ -62,6 +62,30 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Quick Install
+
+**Install via Go:**
+
+```bash
+go install github.com/wwwmd5vip/CLIProxyAPI/v7/cmd/server@latest
+```
+
+**Run with Docker:**
+
+```bash
+# Download example config and start
+curl -fsSL -o config.yaml https://raw.githubusercontent.com/wwwmd5vip/CLIProxyAPI/main/config.example.yaml
+docker compose up -d
+```
+
+**Build from source:**
+
+```bash
+git clone https://github.com/wwwmd5vip/CLIProxyAPI.git
+cd CLIProxyAPI
+go build -o cli-proxy-api ./cmd/server
+```
+
 ### Upgrade via Git
 
 If you already cloned the repository, upgrade to the latest version with:
@@ -91,6 +115,14 @@ Local-first usage and quota dashboard for CLIProxyAPI. It collects per-request t
 ### [CPA-Manager](https://github.com/seakee/CPA-Manager)
 
 Full CLIProxyAPI management center with request-level monitoring and cost estimates. CPA-Manager tracks collected requests by account, model, channel, latency, status, and token usage; estimates cost with editable model prices and one-click LiteLLM price sync; persists events in SQLite; and provides Codex account-pool operations with batch inspection, quota detection, unhealthy account discovery, cleanup suggestions, and one-click execution for day-to-day multi-account maintenance.
+
+**One-click install script:**
+
+```bash
+bash scripts/cpa-manager.sh install   # Install CPA-Manager
+bash scripts/cpa-manager.sh fix       # Restart / fix CPA-Manager
+bash scripts/cpa-manager.sh setup     # Configure CLIProxyAPI & start CPA-Manager
+```
 
 ## Amp CLI Support
 
