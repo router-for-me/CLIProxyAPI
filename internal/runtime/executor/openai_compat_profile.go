@@ -476,6 +476,7 @@ func repairOpenAICompatToolCallHistory(payload []byte) []byte {
 	repaired := make([]any, 0, len(messages))
 	changed := false
 	var pending map[string]bool
+	seenToolCallIDs := make(map[string]bool)
 	for idx, rawMessage := range messages {
 		message, ok := rawMessage.(map[string]any)
 		if !ok {
@@ -529,12 +530,13 @@ func repairOpenAICompatToolCallHistory(payload []byte) []byte {
 				changed = true
 			}
 			toolCallID := strings.TrimSpace(openAICompatToolCallID(rawToolCall))
-			if toolCallID == "" || !nextToolResults[toolCallID] {
+			if toolCallID == "" || !nextToolResults[toolCallID] || keptIDs[toolCallID] || seenToolCallIDs[toolCallID] {
 				changed = true
 				continue
 			}
 			keptToolCalls = append(keptToolCalls, normalizedToolCall)
 			keptIDs[toolCallID] = true
+			seenToolCallIDs[toolCallID] = true
 		}
 
 		if len(keptToolCalls) == 0 {

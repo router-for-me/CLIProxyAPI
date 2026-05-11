@@ -440,6 +440,46 @@ func TestRepairMiniMaxToolResultAdjacencySplitsMixedUserContent(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeToolAdjacencyForDeepSeekCompat(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type":"tool_use","id":"browser_back","name":"browser_back","input":{}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"text","text":"next user instruction"},
+					{"type":"tool_result","tool_use_id":"browser_back","content":"ok"}
+				]
+			}
+		]
+	}`)
+
+	out, err := repairMiniMaxClaudeToolAdjacencyForCompat("deepseek", body)
+	if err != nil {
+		t.Fatalf("repairMiniMaxClaudeToolAdjacencyForCompat() error = %v", err)
+	}
+	if err := validateMiniMaxToolResultAdjacency(out); err != nil {
+		t.Fatalf("expected repaired DeepSeek sequence to pass, got %v\nbody: %s", err, out)
+	}
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("messages length = %d, want 3: %s", len(msgs), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := msgs[1].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("message 1 content type = %q, want tool_result: %s", got, msgs[1].Raw)
+	}
+	if got := msgs[2].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("message 2 content type = %q, want text: %s", got, msgs[2].Raw)
+	}
+}
+
 func TestRepairMiniMaxToolResultAdjacencyMovesAssistantToolUseLast(t *testing.T) {
 	t.Parallel()
 

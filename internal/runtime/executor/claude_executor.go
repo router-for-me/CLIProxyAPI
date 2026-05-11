@@ -1694,7 +1694,7 @@ func repairMiniMaxClaudeToolAdjacency(baseURL string, body []byte) ([]byte, erro
 }
 
 func repairMiniMaxClaudeToolAdjacencyForCompat(compatKind string, body []byte) ([]byte, error) {
-	if compatKind != "minimax" {
+	if !requiresClaudeToolAdjacencyRepair(compatKind) {
 		return body, nil
 	}
 	repaired, count, err := repairMiniMaxToolResultAdjacency(body)
@@ -1702,9 +1702,21 @@ func repairMiniMaxClaudeToolAdjacencyForCompat(compatKind string, body []byte) (
 		return body, err
 	}
 	if count > 0 {
-		log.WithField("repairs", count).Warn("repaired MiniMax Claude tool_result adjacency")
+		log.WithFields(log.Fields{
+			"compat_kind": compatKind,
+			"repairs":     count,
+		}).Warn("repaired Claude tool_result adjacency")
 	}
 	return repaired, nil
+}
+
+func requiresClaudeToolAdjacencyRepair(compatKind string) bool {
+	switch strings.ToLower(strings.TrimSpace(compatKind)) {
+	case "minimax", "deepseek":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateMiniMaxStructuredOutputCompatibility(body []byte) error {

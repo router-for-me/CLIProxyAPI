@@ -476,6 +476,29 @@ func TestOpenAICompatPayloadDropsMalformedToolCallsAndResults(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatPayloadDropsDuplicateToolCalls(t *testing.T) {
+	payload := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[
+			{"role":"assistant","content":"checking","tool_calls":[
+				{"id":"call_dup","type":"function","function":{"name":"read_file","arguments":"{}"}},
+				{"id":"call_dup","type":"function","function":{"name":"read_file","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_dup","content":"ok"},
+			{"role":"user","content":"next"}
+		]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "gpt-5.5", "https://api.openai.com/v1")
+
+	if got := len(gjson.GetBytes(out, "messages.0.tool_calls").Array()); got != 1 {
+		t.Fatalf("tool_calls length = %d, want 1: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_dup" {
+		t.Fatalf("kept tool result id = %q, want call_dup: %s", got, string(out))
+	}
+}
+
 func TestOpenAICompatPayloadKimiNormalizesToolsAndDisablesStrict(t *testing.T) {
 	payload := []byte(`{
 		"model":"kimi-k2.6",
