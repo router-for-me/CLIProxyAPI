@@ -82,6 +82,11 @@ redis-usage-queue-retention-seconds: 60
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
 
+# When true, disables TLS certificate verification for outbound connections (e.g. Antigravity OAuth).
+# Useful behind corporate proxies that intercept TLS traffic with their own certificates.
+# WARNING: This removes certificate validation — use only in trusted environments.
+# tls-skip-verify: false
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 

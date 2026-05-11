@@ -227,6 +227,12 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	antigravityTransportOnce.Do(initAntigravityTransport)
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+
+	// Apply TLS skip verify if configured, preserving any existing proxy transport.
+	if cfg != nil && cfg.TLSSkipVerify {
+		skipTLSVerifyTransport(client)
+	}
+
 	// If no transport is set, use the shared HTTP/1.1 transport.
 	if client.Transport == nil {
 		client.Transport = antigravityTransport
@@ -238,6 +244,26 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		client.Transport = cloneTransportWithHTTP11(transport)
 	}
 	return client
+}
+
+// skipTLSVerifyTransport sets InsecureSkipVerify on the client's transport.
+// If a transport is already set (e.g. from proxy config), it clones it with TLS skip verify.
+// Otherwise, it creates a new transport with TLS skip verify.
+func skipTLSVerifyTransport(client *http.Client) {
+	if client.Transport == nil {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		return
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		clone := transport.Clone()
+		if clone.TLSClientConfig == nil {
+			clone.TLSClientConfig = &tls.Config{}
+		}
+		clone.TLSClientConfig.InsecureSkipVerify = true
+		client.Transport = clone
+	}
 }
 
 func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
