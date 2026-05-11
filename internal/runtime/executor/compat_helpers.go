@@ -73,7 +73,7 @@ func payloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 }
 
 func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
-	return helps.ApplyPayloadConfigWithRoot(cfg, model, protocol, root, payload, original, requestedModel)
+	return helps.ApplyPayloadConfigWithRoot(cfg, model, protocol, root, payload, original, requestedModel, "")
 }
 
 func summarizeErrorBody(contentType string, body []byte) string {

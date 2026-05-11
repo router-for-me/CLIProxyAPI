@@ -144,3 +144,29 @@ func GetPlatformInfo() map[string]interface{} {
 
 	return info
 }
+
+// incognitoMode controls whether to open URLs in incognito/private mode.
+var incognitoMode bool
+
+// lastBrowserCmd stores the last opened browser process for cleanup.
+var lastBrowserCmd *exec.Cmd
+
+// SetIncognitoMode enables or disables incognito/private browsing mode.
+func SetIncognitoMode(enabled bool) {
+	incognitoMode = enabled
+}
+
+// IsIncognitoMode returns whether incognito mode is enabled.
+func IsIncognitoMode() bool {
+	return incognitoMode
+}
+
+// CloseBrowser closes the last opened browser process.
+func CloseBrowser() error {
+	if lastBrowserCmd == nil || lastBrowserCmd.Process == nil {
+		return nil
+	}
+	err := lastBrowserCmd.Process.Kill()
+	lastBrowserCmd = nil
+	return err
+}

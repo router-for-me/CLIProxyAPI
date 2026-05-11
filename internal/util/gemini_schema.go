@@ -801,3 +801,44 @@ func mergeDescriptionRaw(schemaRaw, parentDesc string) string {
 		return string(updated)
 	}
 }
+
+// --- Helpers ---
+
+// CleanupOrphanedRequiredInTools removes "required" entries from
+// tools[].function.parameters that reference properties not defined in the
+// corresponding "properties" object. Moonshot/Kimi strictly validates that
+// every item in "required" must have a matching entry in "properties".
+func CleanupOrphanedRequiredInTools(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0 {
+		return body
+	}
+
+	out := string(body)
+	changed := false
+
+	tools.ForEach(func(idx, tool gjson.Result) bool {
+		params := tool.Get("function.parameters")
+		if !params.Exists() {
+			return true
+		}
+		cleaned := cleanupRequiredFields(params.Raw)
+		if cleaned != params.Raw {
+			path := fmt.Sprintf("tools.%d.function.parameters", idx.Int())
+			updated, err := sjson.SetRaw(out, path, cleaned)
+			if err == nil {
+				out = updated
+				changed = true
+			}
+		}
+		return true
+	})
+
+	if !changed {
+		return body
+	}
+	return []byte(out)
+}

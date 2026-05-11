@@ -40,6 +40,7 @@ type Handler struct {
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
+	sdkAuthManager      *sdkAuth.Manager
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
@@ -333,3 +334,6 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	set(*body.Value)
 	h.persist(c)
 }
+
+// SetSDKAuthManager sets the SDK auth manager for OAuth provider operations.
+func (h *Handler) SetSDKAuthManager(manager *sdkAuth.Manager) { h.sdkAuthManager = manager }
