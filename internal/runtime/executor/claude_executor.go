@@ -460,6 +460,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					reporter.Publish(ctx, detail)
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+				line = normalizeUpstreamSSELine(line)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -492,6 +493,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				reporter.Publish(ctx, detail)
 			}
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+			line = normalizeUpstreamSSELine(line)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
@@ -1078,6 +1080,28 @@ func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, prefix string, prefi
 		line = stripClaudeToolPrefixFromStreamLine(line, prefix)
 	}
 	return reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+}
+
+// normalizeUpstreamSSELine fixes malformed SSE lines from upstream proxies that
+// wrap every line with "data: " prefix. Some upstream APIs (e.g. JoyCode) return:
+//
+//	data: event: message_start   →  event: message_start
+//	data: data: {"type":...}     →  data: {"type":...}
+//
+// This is a no-op for correctly formatted SSE lines.
+func normalizeUpstreamSSELine(line []byte) []byte {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data: ")) {
+		return line
+	}
+	rest := trimmed[len("data: "):]
+	if bytes.HasPrefix(rest, []byte("event: ")) {
+		return rest
+	}
+	if bytes.HasPrefix(rest, []byte("data: ")) {
+		return rest
+	}
+	return line
 }
 
 // remapOAuthToolNames renames third-party tool names to Claude Code equivalents
