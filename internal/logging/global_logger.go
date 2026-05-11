@@ -47,6 +47,8 @@ var logFieldOrder = []string{
 	"compact_input_tool_output_count",
 	"compact_output_has_evidence",
 	"compact_same_turn_evidence_hit",
+	"compact_same_turn_evidence_skipped",
+	"compact_same_turn_evidence_skip_reason",
 	"compact_response_evidence_augmented",
 	"compact_fail_reason",
 	"compact_output_item_count",
