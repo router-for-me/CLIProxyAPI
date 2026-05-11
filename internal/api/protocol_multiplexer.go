@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -48,6 +49,10 @@ func (s *Server) acceptMuxConnections(listener net.Listener, httpListener *muxLi
 			continue
 		}
 
+		// Guard TLS handshake and protocol peek with a deadline so a client
+		// that connects but never sends data cannot block the accept loop.
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+
 		tlsConn, ok := conn.(*tls.Conn)
 		if ok {
 			if errHandshake := tlsConn.Handshake(); errHandshake != nil {
@@ -58,6 +63,7 @@ func (s *Server) acceptMuxConnections(listener net.Listener, httpListener *muxLi
 			}
 			proto := strings.TrimSpace(tlsConn.ConnectionState().NegotiatedProtocol)
 			if proto == "h2" || proto == "http/1.1" {
+				_ = conn.SetDeadline(time.Time{})
 				if httpListener == nil {
 					if errClose := conn.Close(); errClose != nil {
 						log.Errorf("failed to close connection: %v", errClose)
@@ -75,6 +81,7 @@ func (s *Server) acceptMuxConnections(listener net.Listener, httpListener *muxLi
 
 		reader := bufio.NewReader(conn)
 		prefix, errPeek := reader.Peek(1)
+		_ = conn.SetDeadline(time.Time{})
 		if errPeek != nil {
 			if errClose := conn.Close(); errClose != nil {
 				log.Errorf("failed to close connection after protocol peek failure: %v", errClose)
