@@ -1,6 +1,11 @@
 package auth
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
@@ -76,5 +81,27 @@ func TestExtractAccessToken(t *testing.T) {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreListReadsProxyURL(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "proxy.json"), []byte(`{"type":"claude","proxy_url":" http://proxy.local:8080 "}`), 0o600); err != nil {
+		t.Fatalf("seed auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("len(auths) = %d, want 1", len(auths))
+	}
+	if got := auths[0].ProxyURL; got != "http://proxy.local:8080" {
+		t.Fatalf("ProxyURL = %q, want %q", got, "http://proxy.local:8080")
 	}
 }

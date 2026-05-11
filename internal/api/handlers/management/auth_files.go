@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -233,6 +234,47 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+}
+
+func queryProxyURL(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Query("proxy_url"))
+}
+
+func configWithProxyURL(cfg *config.Config, proxyURL string) *config.Config {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return cfg
+	}
+	if cfg == nil {
+		return &config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxyURL}}
+	}
+	cfgCopy := *cfg
+	sdkCfgCopy := cfgCopy.SDKConfig
+	sdkCfgCopy.ProxyURL = proxyURL
+	cfgCopy.SDKConfig = sdkCfgCopy
+	return &cfgCopy
+}
+
+func applyRequestAuthOverrides(ctx context.Context, record *coreauth.Auth) {
+	if record == nil {
+		return
+	}
+	info := coreauth.GetRequestInfo(ctx)
+	if info == nil || info.Query == nil {
+		return
+	}
+	proxyURL := strings.TrimSpace(info.Query.Get("proxy_url"))
+	if proxyURL == "" {
+		return
+	}
+	record.ProxyURL = proxyURL
+	if record.Metadata == nil {
+		record.Metadata = make(map[string]any)
+	}
+	record.Metadata["proxy_url"] = proxyURL
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -1381,6 +1423,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
+	applyRequestAuthOverrides(ctx, record)
 	if h.postAuthHook != nil {
 		if err := h.postAuthHook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
@@ -1411,8 +1454,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
+	accountProxyURL := queryProxyURL(c)
+
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, accountProxyURL)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -1537,8 +1582,12 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
-	proxyHTTPClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
+	accountProxyURL := queryProxyURL(c)
+	effectiveCfg := configWithProxyURL(h.cfg, accountProxyURL)
+	if effectiveCfg != nil {
+		proxyHTTPClient := util.SetProxy(&effectiveCfg.SDKConfig, &http.Client{})
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
+	}
 
 	// Optional project ID from query
 	projectID := c.Query("project_id")
@@ -1687,7 +1736,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 		// Initialize authenticated HTTP client via GeminiAuth to honor proxy settings
 		gemAuth := geminiAuth.NewGeminiAuth()
-		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, h.cfg, &geminiAuth.WebLoginOptions{
+		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, effectiveCfg, &geminiAuth.WebLoginOptions{
 			NoBrowser: true,
 		})
 		if errGetClient != nil {
@@ -1815,8 +1864,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
+	accountProxyURL := queryProxyURL(c)
+
 	// Initialize Codex auth service
-	openaiAuth := codex.NewCodexAuth(h.cfg)
+	openaiAuth := codex.NewCodexAuthWithProxyURL(h.cfg, accountProxyURL)
 
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
@@ -1945,7 +1996,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuth(h.cfg, nil)
+	accountProxyURL := queryProxyURL(c)
+	effectiveCfg := configWithProxyURL(h.cfg, accountProxyURL)
+	authSvc := antigravity.NewAntigravityAuth(effectiveCfg, nil)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -2111,8 +2164,10 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	fmt.Println("Initializing Kimi authentication...")
 
 	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
+	accountProxyURL := queryProxyURL(c)
+
 	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(h.cfg)
+	kimiAuth := kimi.NewKimiAuthWithProxyURL(h.cfg, accountProxyURL)
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
