@@ -359,18 +359,32 @@ func isNilInterface(value any) bool {
 	}
 }
 
-// AppendVirtualModels appends virtual model entries in OpenAI/Claude format to the given model list.
-func (h *BaseAPIHandler) AppendVirtualModels(models []map[string]any) []map[string]any {
+// AppendVirtualModels appends virtual model entries in the appropriate format for the handler type.
+func (h *BaseAPIHandler) AppendVirtualModels(models []map[string]any, handlerType string) []map[string]any {
 	if h.Cfg == nil || len(h.Cfg.VirtualModels) == 0 {
 		return models
 	}
 	for _, vm := range h.Cfg.VirtualModels {
-		models = append(models, map[string]any{
-			"id":       vm.Name,
-			"object":   "model",
-			"created":  int64(0),
-			"owned_by": "virtual",
-		})
+		var modelEntry map[string]any
+		switch handlerType {
+		case "claude":
+			modelEntry = map[string]any{
+				"id":           vm.Name,
+				"object":       "model",
+				"created_at":   int64(0),
+				"type":         "model",
+				"display_name": vm.Name,
+				"owned_by":     "virtual",
+			}
+		default:
+			modelEntry = map[string]any{
+				"id":       vm.Name,
+				"object":   "model",
+				"created":  int64(0),
+				"owned_by": "virtual",
+			}
+		}
+		models = append(models, modelEntry)
 	}
 	return models
 }
