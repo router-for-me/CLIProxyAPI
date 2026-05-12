@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
@@ -164,6 +165,15 @@ func (h *Handler) APICall(c *gin.Context) {
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
 	}
 
+	if token != "" && isAnthropicAPI(parsedURL) {
+		if _, ok := reqHeaders["x-api-key"]; !ok {
+			reqHeaders["x-api-key"] = token
+		}
+		if _, ok := reqHeaders["anthropic-beta"]; !ok {
+			reqHeaders["anthropic-beta"] = "oauth-2025-04-20"
+		}
+	}
+
 	var requestBody io.Reader
 	if body.Data != "" {
 		requestBody = strings.NewReader(body.Data)
@@ -260,6 +270,10 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 	}
 	if provider == "antigravity" {
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
+		return token, errToken
+	}
+	if provider == "claude" {
+		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
 
@@ -433,6 +447,63 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	}
 
 	return strings.TrimSpace(tokenResp.AccessToken), nil
+}
+
+func (h *Handler) refreshClaudeOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	current := strings.TrimSpace(tokenValueFromMetadata(auth.Metadata))
+	if current != "" && !antigravityTokenNeedsRefresh(auth.Metadata) {
+		return current, nil
+	}
+
+	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		return "", fmt.Errorf("claude oauth refresh token missing")
+	}
+
+	svc := claudeauth.NewClaudeAuthWithProxyURL(h.cfg, auth.ProxyURL)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	if err != nil {
+		return "", err
+	}
+	if td.AccessToken == "" {
+		return "", fmt.Errorf("claude oauth token refresh returned empty access_token")
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = td.AccessToken
+	if td.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = td.RefreshToken
+	}
+	if td.Email != "" {
+		auth.Metadata["email"] = td.Email
+	}
+	if td.Expire != "" {
+		auth.Metadata["expired"] = td.Expire
+	}
+	auth.Metadata["type"] = "claude"
+	now := time.Now()
+	auth.LastRefreshedAt = now
+	auth.UpdatedAt = now
+	if h != nil && h.authManager != nil {
+		_, _ = h.authManager.Update(ctx, auth)
+	}
+	return td.AccessToken, nil
+}
+
+func isAnthropicAPI(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, "api.anthropic.com")
 }
 
 func antigravityTokenNeedsRefresh(metadata map[string]any) bool {
