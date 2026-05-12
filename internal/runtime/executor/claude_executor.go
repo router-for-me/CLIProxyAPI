@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -1719,17 +1720,94 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	return payload
 }
 
-// sanitizeForwardedSystemPrompt reduces forwarded third-party system context to a
-// tiny neutral reminder for Claude OAuth cloaking. The goal is to preserve only
-// the minimum tool/task guidance while removing virtually all client-specific
-// prompt structure that Anthropic may classify as third-party agent traffic.
+// sanitizeForwardedSystemPrompt strips the patterns Anthropic's third-party
+// agent classifier is known to flag (URLs, branded agent introductions,
+// environment-banner XML blocks) while preserving the rest of the user's
+// system text — including explicit tool-use contracts ("MUST call X",
+// `<communication>` blocks, etc.).
+//
+// Previous behavior replaced ANY non-empty input with a fixed 3-line
+// reminder. That was effective against classification but destroyed
+// legitimate BYOK client contracts: e.g. Capy's "MUST call message_user
+// for any user-facing reply" disappeared, and Claude defaulted to plain
+// text. Verified by replay 2026-05-12 (sanitize=no-op → message_user
+// called consistently; sanitize=nuke → text-only end_turn).
+//
+// The selective strips below remove the surface markers that upstream
+// found triggered classification (OpenCode branding, docs URLs, env
+// banners) while leaving tool contracts intact.
+//
+// As a safety net, if the selective strip reduces the text to a very
+// short residue, fall back to the original 3-line generic reminder.
 func sanitizeForwardedSystemPrompt(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
-	return strings.TrimSpace(`Use the available tools when needed to help with software engineering tasks.
+
+	// 1. Strip URLs (http/https). Any URL in a forwarded prompt is a
+	//    clear third-party signal — Anthropic's classifier weighs them
+	//    heavily. Tool contracts don't depend on URLs.
+	text = thirdPartyURLPattern.ReplaceAllString(text, "")
+
+	// 2. Strip environment-banner XML blocks. These are conventional
+	//    wrappers for workspace/sandbox context that third-party agents
+	//    emit (env_context, environment, available_skills, etc.) — they
+	//    rarely carry tool-use semantics, but they look distinctive on
+	//    the wire.
+	for _, p := range thirdPartyEnvBlockPatterns {
+		text = p.ReplaceAllString(text, "")
+	}
+
+	// 3. Strip agent-introduction lines that bake in a third-party brand
+	//    name. Matches "You are <Brand>", "powered by <Brand>", "built by
+	//    <Brand>", "<Brand> web interface" — the pattern Anthropic uses
+	//    to classify a request as originating from a competing agent.
+	text = thirdPartyBrandIntroPattern.ReplaceAllString(text, "")
+
+	// Collapse runs of blank lines created by the strips and trim.
+	text = thirdPartyBlankRunPattern.ReplaceAllString(text, "\n\n")
+	text = strings.TrimSpace(text)
+
+	// Safety net: if the strips ate almost everything (prompt was nearly
+	// pure branding/banners) fall back to the original 3-line generic
+	// reminder so Claude still has *some* task framing.
+	if len(text) < 80 {
+		return strings.TrimSpace(`Use the available tools when needed to help with software engineering tasks.
 Keep responses concise and focused on the user's request.
 Prefer acting on the user's task over describing product-specific workflows.`)
+	}
+
+	return text
+}
+
+// Go's RE2 engine does not support backreferences, so each env-banner tag
+// is matched as its own pattern. The list below covers tags conventionally
+// used by third-party agents to encode workspace context (env paths, MCP
+// inventories, skill catalogues, banners). The set is intentionally narrow
+// — extend it when a new banner-style tag triggers classification.
+var (
+	thirdPartyURLPattern      = regexp.MustCompile(`https?://\S+`)
+	thirdPartyBlankRunPattern = regexp.MustCompile(`\n{3,}`)
+	thirdPartyEnvBlockTags    = []string{
+		"env",
+		"environment",
+		"env_context",
+		"banner",
+		"workspace_status",
+		"available_skills",
+		"available_mcp_servers",
+		"available_integrations",
+	}
+	thirdPartyEnvBlockPatterns  = compileEnvBlockPatterns(thirdPartyEnvBlockTags)
+	thirdPartyBrandIntroPattern = regexp.MustCompile(`(?im)^.*\b(?:you are .{1,80}(?:captain capy|capy\.ai|opencode|cursor|windsurf|devin|cody|continue\.dev)|(?:powered|built|made) by (?:capy|opencode|cursor|windsurf|devin|continue\.dev|anthropic for opencode))\b.*$`)
+)
+
+func compileEnvBlockPatterns(tags []string) []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0, len(tags))
+	for _, tag := range tags {
+		out = append(out, regexp.MustCompile(`(?si)<`+regexp.QuoteMeta(tag)+`\b[^>]*>.*?</`+regexp.QuoteMeta(tag)+`>\s*`))
+	}
+	return out
 }
 
 // buildTextBlock constructs a JSON text block object with proper escaping.
