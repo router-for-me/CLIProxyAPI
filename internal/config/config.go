@@ -146,6 +146,11 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// OAuthProxy configures per-OAuth-account proxy assignment for IP diversity.
+	// Auth files are sorted alphabetically, then assigned to proxies in round-robin fashion.
+	// Validation at startup: len(auth_files) must equal accounts_per_proxy * len(proxies).
+	OAuthProxy OAuthProxy `yaml:"oauth-proxy,omitempty" json:"oauth-proxy,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -344,6 +349,16 @@ type PayloadModelRule struct {
 	Name string `yaml:"name" json:"name"`
 	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
 	Protocol string `yaml:"protocol" json:"protocol"`
+}
+
+// OAuthProxy defines per-OAuth-account proxy assignment for IP diversity.
+type OAuthProxy struct {
+	// Proxies is the list of proxy URLs to assign to OAuth accounts.
+	// Each proxy URL is assigned in round-robin fashion based on sorted auth file order.
+	Proxies []string `yaml:"proxies" json:"proxies"`
+	// AccountsPerProxy defines how many auth files are assigned to each proxy.
+	// Total auth files must equal accounts_per_proxy * len(proxies).
+	AccountsPerProxy int `yaml:"accounts-per-proxy" json:"accounts-per-proxy"`
 }
 
 // CloakConfig configures request cloaking for non-Claude-Code clients.

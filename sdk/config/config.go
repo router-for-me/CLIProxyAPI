@@ -10,6 +10,8 @@ type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
 
+type OAuthProxy = internalconfig.OAuthProxy
+
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
