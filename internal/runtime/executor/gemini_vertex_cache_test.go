@@ -156,7 +156,7 @@ func TestMaybeApplyNativePromptCacheUsesTrimmedRequestBodyOnHit(t *testing.T) {
 	})
 	t.Cleanup(func() { vertexPromptCaches.Delete(key) })
 
-	out := NewGeminiVertexExecutor(nil).maybeApplyNativePromptCache(
+	result := NewGeminiVertexExecutor(nil).maybeApplyNativePromptCache(
 		context.Background(),
 		auth,
 		body,
@@ -167,6 +167,10 @@ func TestMaybeApplyNativePromptCacheUsesTrimmedRequestBodyOnHit(t *testing.T) {
 		"gemini-3-flash-preview",
 		"",
 	)
+	if !result.applied {
+		t.Fatal("expected prompt cache to be applied")
+	}
+	out := result.body
 	if got := gjson.GetBytes(out, "cachedContent").String(); got != "projects/test-project/locations/global/cachedContents/cache-1" {
 		t.Fatalf("cachedContent = %q", got)
 	}
@@ -180,6 +184,50 @@ func TestMaybeApplyNativePromptCacheUsesTrimmedRequestBodyOnHit(t *testing.T) {
 		if gjson.GetBytes(out, path).Exists() {
 			t.Fatalf("%s should be removed from cached request: %s", path, string(out))
 		}
+	}
+}
+
+func TestShouldRetryVertexCachedContentFailureOnlyForCacheErrors(t *testing.T) {
+	applied := vertexPromptCacheApplyResult{applied: true, key: "key"}
+	notApplied := vertexPromptCacheApplyResult{}
+	body := []byte(`{"error":{"message":"CachedContent projects/p/locations/global/cachedContents/1 not found"}}`)
+
+	if !shouldRetryVertexCachedContentFailure(applied, 404, body) {
+		t.Fatal("expected cachedContent 404 to retry")
+	}
+	if !shouldRetryVertexCachedContentFailure(applied, 403, body) {
+		t.Fatal("expected cachedContent 403 to retry")
+	}
+	if !shouldRetryVertexCachedContentFailure(applied, 400, body) {
+		t.Fatal("expected cachedContent 400 to retry")
+	}
+	if shouldRetryVertexCachedContentFailure(applied, 429, body) {
+		t.Fatal("429 should not retry without cache")
+	}
+	if shouldRetryVertexCachedContentFailure(applied, 500, body) {
+		t.Fatal("5xx should not retry without cache")
+	}
+	if shouldRetryVertexCachedContentFailure(notApplied, 404, body) {
+		t.Fatal("non-cache requests should not retry")
+	}
+	if shouldRetryVertexCachedContentFailure(applied, 404, []byte(`{"error":{"message":"model not found"}}`)) {
+		t.Fatal("non-cache 404 should not retry")
+	}
+}
+
+func TestEvictVertexPromptCacheDeletesAppliedKeyOnly(t *testing.T) {
+	key := "test-evict"
+	vertexPromptCaches.Store(key, vertexPromptCacheEntry{name: "name", expiresAt: time.Now().Add(time.Minute)})
+	t.Cleanup(func() { vertexPromptCaches.Delete(key) })
+
+	evictVertexPromptCache(vertexPromptCacheApplyResult{key: key})
+	if _, ok := vertexPromptCaches.Load(key); !ok {
+		t.Fatal("non-applied cache result should not evict")
+	}
+
+	evictVertexPromptCache(vertexPromptCacheApplyResult{key: key, applied: true})
+	if _, ok := vertexPromptCaches.Load(key); ok {
+		t.Fatal("applied cache result should evict cache entry")
 	}
 }
 

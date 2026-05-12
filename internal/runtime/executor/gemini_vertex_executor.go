@@ -53,6 +53,12 @@ type vertexPromptCachePlan struct {
 	requestBody []byte
 }
 
+type vertexPromptCacheApplyResult struct {
+	body    []byte
+	key     string
+	applied bool
+}
+
 var (
 	vertexPromptCaches  sync.Map
 	vertexPromptCacheSF singleflight.Group
@@ -233,23 +239,26 @@ func claudeMessageLastContentHasCacheControl(message gjson.Result) bool {
 	return items[len(items)-1].Get("cache_control").Exists()
 }
 
-func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, auth *cliproxyauth.Auth, body, originalRequest []byte, source sdktranslator.Format, projectID, location, model, token string) []byte {
+func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, auth *cliproxyauth.Auth, body, originalRequest []byte, source sdktranslator.Format, projectID, location, model, token string) vertexPromptCacheApplyResult {
+	result := vertexPromptCacheApplyResult{body: body}
 	if isImagenModel(model) || gjson.GetBytes(body, "cachedContent").Exists() {
-		return body
+		return result
 	}
 	plan, ok := vertexCacheCreateBody(projectID, location, model, body, originalRequest, source)
 	if !ok {
-		return body
+		return result
 	}
 	key := vertexPromptCacheKey(auth, projectID, location, model, plan.createBody)
+	result.key = key
 	if name, ok := loadVertexPromptCacheName(key, time.Now()); ok {
 		if name != "" {
-			return applyVertexCachedContent(plan.requestBody, name)
+			result.body = applyVertexCachedContent(plan.requestBody, name)
+			result.applied = true
 		}
-		return body
+		return result
 	}
 	if strings.TrimSpace(token) == "" {
-		return body
+		return result
 	}
 
 	value, err, _ := vertexPromptCacheSF.Do(key, func() (any, error) {
@@ -259,13 +268,36 @@ func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, 
 		return e.createVertexPromptCache(ctx, auth, plan.createBody, projectID, location, token, key), nil
 	})
 	if err != nil {
-		return body
+		return result
 	}
 	name, _ := value.(string)
 	if name == "" {
-		return body
+		return result
 	}
-	return applyVertexCachedContent(plan.requestBody, name)
+	result.body = applyVertexCachedContent(plan.requestBody, name)
+	result.applied = true
+	return result
+}
+
+func evictVertexPromptCache(result vertexPromptCacheApplyResult) {
+	if result.applied && strings.TrimSpace(result.key) != "" {
+		vertexPromptCaches.Delete(result.key)
+	}
+}
+
+func shouldRetryVertexCachedContentFailure(cacheResult vertexPromptCacheApplyResult, statusCode int, body []byte) bool {
+	if !cacheResult.applied {
+		return false
+	}
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound:
+	default:
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "cachedcontent") ||
+		strings.Contains(lower, "cached content") ||
+		strings.Contains(lower, "cachedcontents")
 }
 
 func loadVertexPromptCacheName(key string, now time.Time) (string, bool) {
@@ -661,8 +693,11 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return resp, statusErr{code: 500, msg: "internal server error"}
 	}
+	uncachedBody := body
+	cacheResult := vertexPromptCacheApplyResult{body: body}
 	if action == "generateContent" {
-		body = e.maybeApplyNativePromptCache(ctx, auth, body, originalPayloadSource, sourceFormat, projectID, location, baseModel, token)
+		cacheResult = e.maybeApplyNativePromptCache(ctx, auth, body, originalPayloadSource, sourceFormat, projectID, location, baseModel, token)
+		body = cacheResult.body
 	}
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
@@ -670,6 +705,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	uncachedBody, _ = sjson.DeleteBytes(uncachedBody, "session_id")
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
@@ -711,8 +747,10 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, errDo
 	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("vertex executor: close response body error: %v", errClose)
+		if httpResp != nil && httpResp.Body != nil {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("vertex executor: close response body error: %v", errClose)
+			}
 		}
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -720,8 +758,51 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
+		if shouldRetryVertexCachedContentFailure(cacheResult, httpResp.StatusCode, b) {
+			evictVertexPromptCache(cacheResult)
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("vertex executor: close response body error: %v", errClose)
+			}
+			httpResp.Body = nil
+			helps.LogWithRequestID(ctx).Debugf("vertex native cache: retrying without cachedContent after status=%d", httpResp.StatusCode)
+			httpReq, errNewReq = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(uncachedBody))
+			if errNewReq != nil {
+				return resp, errNewReq
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			if token != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+token)
+			}
+			applyGeminiHeaders(httpReq, auth)
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+			helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+				URL:       url,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      uncachedBody,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, errDo = httpClient.Do(httpReq)
+			if errDo != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+				return resp, errDo
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ = io.ReadAll(httpResp.Body)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+				helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return resp, err
+			}
+		} else {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			return resp, err
+		}
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
@@ -898,7 +979,9 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return nil, statusErr{code: 500, msg: "internal server error"}
 	}
-	body = e.maybeApplyNativePromptCache(ctx, auth, body, originalPayloadSource, from, projectID, location, baseModel, token)
+	uncachedBody := body
+	cacheResult := e.maybeApplyNativePromptCache(ctx, auth, body, originalPayloadSource, from, projectID, location, baseModel, token)
+	body = cacheResult.body
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
@@ -910,6 +993,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		}
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	uncachedBody, _ = sjson.DeleteBytes(uncachedBody, "session_id")
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
@@ -955,10 +1039,54 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("vertex executor: close response body error: %v", errClose)
+		if shouldRetryVertexCachedContentFailure(cacheResult, httpResp.StatusCode, b) {
+			evictVertexPromptCache(cacheResult)
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("vertex executor: close response body error: %v", errClose)
+			}
+			helps.LogWithRequestID(ctx).Debugf("vertex native cache: retrying stream without cachedContent after status=%d", httpResp.StatusCode)
+			httpReq, errNewReq = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(uncachedBody))
+			if errNewReq != nil {
+				return nil, errNewReq
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			if token != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+token)
+			}
+			applyGeminiHeaders(httpReq, auth)
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+			helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+				URL:       url,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      uncachedBody,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, errDo = httpClient.Do(httpReq)
+			if errDo != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+				return nil, errDo
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ = io.ReadAll(httpResp.Body)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+				helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("vertex executor: close response body error: %v", errClose)
+				}
+				return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
+			}
+		} else {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("vertex executor: close response body error: %v", errClose)
+			}
+			return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 		}
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
