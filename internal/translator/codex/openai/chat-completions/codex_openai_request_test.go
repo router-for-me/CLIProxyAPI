@@ -176,6 +176,182 @@ func TestToolCallWithContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithMultimodalContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Show me the generated result."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_output_1",
+						"type": "function",
+						"function": {"name": "render_output", "arguments": "{}"}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_output_1",
+				"content": [
+					{"type":"text","text":"Rendered result attached."},
+					{"type":"image_url","image_url":{"url":"https://example.com/generated.png","detail":"high"}},
+					{"type":"image_url","image_url":{"file_id":"file-img-123"}},
+					{"type":"file","file":{"file_id":"file-doc-123","filename":"doc.pdf"}},
+					{"type":"file","file":{"file_data":"SGVsbG8=","filename":"inline.txt"}},
+					{"type":"file","file":{"file_url":"https://example.com/report.pdf","filename":"report.pdf"}}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {"name": "render_output", "description": "Render output", "parameters": {"type": "object", "properties": {}}}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	output := gjson.Get(result, "input.2.output")
+	if !output.IsArray() {
+		t.Fatalf("expected tool output to be an array, got: %s", output.Raw)
+	}
+
+	parts := output.Array()
+	if len(parts) != 6 {
+		t.Fatalf("expected 6 output parts, got %d: %s", len(parts), output.Raw)
+	}
+	if parts[0].Get("type").String() != "input_text" || parts[0].Get("text").String() != "Rendered result attached." {
+		t.Fatalf("part 0: expected input_text with rendered text, got %s", parts[0].Raw)
+	}
+	if parts[1].Get("type").String() != "input_image" {
+		t.Fatalf("part 1: expected input_image, got %s", parts[1].Raw)
+	}
+	if parts[1].Get("image_url").String() != "https://example.com/generated.png" {
+		t.Errorf("part 1: unexpected image_url %s", parts[1].Get("image_url").String())
+	}
+	if parts[1].Get("detail").String() != "high" {
+		t.Errorf("part 1: unexpected detail %s", parts[1].Get("detail").String())
+	}
+	if parts[2].Get("type").String() != "input_image" || parts[2].Get("file_id").String() != "file-img-123" {
+		t.Fatalf("part 2: expected file_id-backed input_image, got %s", parts[2].Raw)
+	}
+	if parts[3].Get("type").String() != "input_file" || parts[3].Get("file_id").String() != "file-doc-123" {
+		t.Fatalf("part 3: expected file_id-backed input_file, got %s", parts[3].Raw)
+	}
+	if parts[3].Get("filename").String() != "doc.pdf" {
+		t.Errorf("part 3: unexpected filename %s", parts[3].Get("filename").String())
+	}
+	if parts[4].Get("type").String() != "input_file" || parts[4].Get("file_data").String() != "SGVsbG8=" {
+		t.Fatalf("part 4: expected file_data-backed input_file, got %s", parts[4].Raw)
+	}
+	if parts[5].Get("type").String() != "input_file" || parts[5].Get("file_url").String() != "https://example.com/report.pdf" {
+		t.Fatalf("part 5: expected file_url-backed input_file, got %s", parts[5].Raw)
+	}
+}
+
+func TestToolCallOutputFallsBackForInvalidStructuredParts(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Check tool output."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_invalid_parts", "type": "function", "function": {"name": "inspect", "arguments": "{}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_invalid_parts",
+				"content": [
+					{"type":"image_url","image_url":{"detail":"low"}},
+					{"type":"file","file":{"filename":"orphan.txt"}},
+					{"type":"unknown_type","foo":"bar","nested":{"a":1}}
+				]
+			}
+		],
+		"tools": [
+			{"type": "function", "function": {"name": "inspect", "description": "Inspect", "parameters": {"type": "object", "properties": {}}}}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	parts := gjson.Get(result, "input.2.output").Array()
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 output parts, got %d: %s", len(parts), gjson.Get(result, "input.2.output").Raw)
+	}
+
+	expectedFallbacks := []string{
+		`{"type":"image_url","image_url":{"detail":"low"}}`,
+		`{"type":"file","file":{"filename":"orphan.txt"}}`,
+		`{"type":"unknown_type","foo":"bar","nested":{"a":1}}`,
+	}
+	for i, expectedFallback := range expectedFallbacks {
+		if parts[i].Get("type").String() != "input_text" {
+			t.Fatalf("part %d: expected input_text fallback, got %s", i, parts[i].Raw)
+		}
+		if parts[i].Get("text").String() != expectedFallback {
+			t.Fatalf("part %d: expected fallback %s, got %s", i, expectedFallback, parts[i].Get("text").String())
+		}
+	}
+}
+
+func TestToolCallOutputWithNonStringJSONContent(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		expectedOutput string
+	}{
+		{name: "null", content: `null`, expectedOutput: `null`},
+		{name: "object", content: `{"status":"ok","count":2}`, expectedOutput: `{"status":"ok","count":2}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gpt-4o",
+				"messages": [
+					{"role": "user", "content": "Check tool output."},
+					{
+						"role": "assistant",
+						"content": null,
+						"tool_calls": [
+							{"id": "call_json", "type": "function", "function": {"name": "inspect", "arguments": "{}"}}
+						]
+					},
+					{
+						"role": "tool",
+						"tool_call_id": "call_json",
+						"content": ` + tt.content + `
+					}
+				],
+				"tools": [
+					{"type": "function", "function": {"name": "inspect", "description": "Inspect", "parameters": {"type": "object", "properties": {}}}}
+				]
+			}`)
+
+			out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+			result := string(out)
+
+			output := gjson.Get(result, "input.2.output")
+			if !output.Exists() {
+				t.Fatalf("expected output field to exist: %s", gjson.Get(result, "input.2").Raw)
+			}
+			if output.String() != tt.expectedOutput {
+				t.Fatalf("expected output %s, got %s", tt.expectedOutput, output.String())
+			}
+		})
+	}
+}
+
 // Parallel tool calls: assistant invokes 3 tools at once, all call_ids
 // and outputs must be translated and paired correctly.
 func TestMultipleToolCalls(t *testing.T) {
