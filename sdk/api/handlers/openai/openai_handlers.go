@@ -84,7 +84,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	}
 
 	// Add virtual models from config
-	filteredModels = h.AppendVirtualModels(filteredModels)
+	filteredModels = h.AppendVirtualModels(filteredModels, "openai")
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
