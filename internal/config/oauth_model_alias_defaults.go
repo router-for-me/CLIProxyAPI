@@ -14,6 +14,8 @@ func defaultKiroAliases() []OAuthModelAlias {
 		// Sonnet 4
 		{Name: "kiro-claude-sonnet-4", Alias: "claude-sonnet-4-20250514", Fork: true},
 		{Name: "kiro-claude-sonnet-4", Alias: "claude-sonnet-4", Fork: true},
+		// Opus 4.7
+		{Name: "kiro-claude-opus-4-7", Alias: "claude-opus-4-7", Fork: true},
 		// Opus 4.6
 		{Name: "kiro-claude-opus-4-6", Alias: "claude-opus-4-6", Fork: true},
 		// Opus 4.5

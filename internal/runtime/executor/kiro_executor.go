@@ -1698,6 +1698,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	modelMap := map[string]string{
 		// Amazon Q format (amazonq- prefix) - same API as Kiro
 		"amazonq-auto":                       "auto",
+		"amazonq-claude-opus-4-7":            "claude-opus-4.7",
 		"amazonq-claude-opus-4-6":            "claude-opus-4.6",
 		"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
 		"amazonq-claude-opus-4-5":            "claude-opus-4.5",
@@ -1707,6 +1708,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
 		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
 		// Kiro format (kiro- prefix) - valid model names that should be preserved
+		"kiro-claude-opus-4-7":            "claude-opus-4.7",
 		"kiro-claude-opus-4-6":            "claude-opus-4.6",
 		"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
 		"kiro-claude-opus-4-5":            "claude-opus-4.5",
@@ -1717,6 +1719,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
 		"kiro-auto":                       "auto",
 		// Native format (no prefix) - used by Kiro IDE directly
+		"claude-opus-4-7":            "claude-opus-4.7",
+		"claude-opus-4.7":            "claude-opus-4.7",
 		"claude-opus-4-6":            "claude-opus-4.6",
 		"claude-opus-4.6":            "claude-opus-4.6",
 		"claude-sonnet-4-6":          "claude-sonnet-4.6",
@@ -1732,12 +1736,14 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"claude-sonnet-4-20250514":   "claude-sonnet-4",
 		"auto":                       "auto",
 		// Agentic variants (same backend model IDs, but with special system prompt)
+		"claude-opus-4.7-agentic":        "claude-opus-4.7",
 		"claude-opus-4.6-agentic":        "claude-opus-4.6",
 		"claude-sonnet-4.6-agentic":      "claude-sonnet-4.6",
 		"claude-opus-4.5-agentic":        "claude-opus-4.5",
 		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
 		"claude-sonnet-4-agentic":        "claude-sonnet-4",
 		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
+		"kiro-claude-opus-4-7-agentic":   "claude-opus-4.7",
 		"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
 		"kiro-claude-sonnet-4-6-agentic": "claude-sonnet-4.6",
 		"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
@@ -1780,6 +1786,10 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 
 	// Check for Opus variants
 	if strings.Contains(modelLower, "opus") {
+		if strings.Contains(modelLower, "4-7") || strings.Contains(modelLower, "4.7") {
+			log.Debugf("kiro: unknown Opus 4.7 model '%s', mapping to claude-opus-4.7", model)
+			return "claude-opus-4.7"
+		}
 		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
 			log.Debugf("kiro: unknown Opus 4.6 model '%s', mapping to claude-opus-4.6", model)
 			return "claude-opus-4.6"
