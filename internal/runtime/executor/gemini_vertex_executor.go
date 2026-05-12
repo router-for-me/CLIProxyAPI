@@ -29,6 +29,7 @@ import (
 	"github.com/tidwall/sjson"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -36,14 +37,26 @@ const (
 	vertexAPIVersion           = "v1"
 	vertexTranslatorContextKey = "cliproxy:upstream_provider"
 	vertexTranslatorProvider   = "vertex"
+	vertexPromptCacheTTL       = time.Hour
+	vertexPromptCacheLocalTTL  = 55 * time.Minute
+	vertexPromptCacheBackoff   = 10 * time.Minute
 )
 
 type vertexPromptCacheEntry struct {
 	name      string
 	expiresAt time.Time
+	retryAt   time.Time
 }
 
-var vertexPromptCaches sync.Map
+type vertexPromptCachePlan struct {
+	createBody  []byte
+	requestBody []byte
+}
+
+var (
+	vertexPromptCaches  sync.Map
+	vertexPromptCacheSF singleflight.Group
+)
 
 func vertexCacheModelResource(projectID, location, model string) string {
 	return fmt.Sprintf("projects/%s/locations/%s/publishers/google/models/%s", projectID, location, model)
@@ -65,23 +78,38 @@ func vertexPromptCacheKey(auth *cliproxyauth.Auth, projectID, location, model st
 	return fmt.Sprintf("%s/%s/%s/%x", projectID, location, model, h.Sum(nil))
 }
 
-func vertexCacheCreateBody(projectID, location, model string, body []byte) ([]byte, bool) {
-	out := []byte(`{"ttl":"3600s"}`)
+func vertexCacheCreateBody(projectID, location, model string, body, originalRequest []byte, source sdktranslator.Format) (vertexPromptCachePlan, bool) {
+	out := []byte(`{}`)
+	out, _ = sjson.SetBytes(out, "ttl", fmt.Sprintf("%ds", int(vertexPromptCacheTTL.Seconds())))
 	out, _ = sjson.SetBytes(out, "model", vertexCacheModelResource(projectID, location, model))
+	requestBody := body
 	hasCacheable := false
-	if v := gjson.GetBytes(body, "system_instruction"); v.Exists() {
+
+	if v := vertexSystemInstruction(body); v.Exists() {
 		out, _ = sjson.SetRawBytes(out, "systemInstruction", []byte(v.Raw))
+		requestBody = deleteVertexSystemInstruction(requestBody)
 		hasCacheable = true
 	}
 	if v := gjson.GetBytes(body, "tools"); v.Exists() {
 		out, _ = sjson.SetRawBytes(out, "tools", []byte(v.Raw))
+		requestBody, _ = sjson.DeleteBytes(requestBody, "tools")
 		hasCacheable = true
 	}
 	if v := gjson.GetBytes(body, "toolConfig"); v.Exists() {
 		out, _ = sjson.SetRawBytes(out, "toolConfig", []byte(v.Raw))
+		requestBody, _ = sjson.DeleteBytes(requestBody, "toolConfig")
 		hasCacheable = true
 	}
-	return out, hasCacheable
+
+	if prefixLen := vertexCacheContentPrefixLen(body, originalRequest, source); prefixLen > 0 {
+		var ok bool
+		out, requestBody, ok = setVertexCachedContentsPrefix(out, requestBody, body, prefixLen)
+		if ok {
+			hasCacheable = true
+		}
+	}
+
+	return vertexPromptCachePlan{createBody: out, requestBody: requestBody}, hasCacheable
 }
 
 func applyVertexCachedContent(body []byte, cacheName string) []byte {
@@ -89,36 +117,184 @@ func applyVertexCachedContent(body []byte, cacheName string) []byte {
 		return body
 	}
 	body, _ = sjson.SetBytes(body, "cachedContent", cacheName)
-	body, _ = sjson.DeleteBytes(body, "system_instruction")
+	body = deleteVertexSystemInstruction(body)
 	body, _ = sjson.DeleteBytes(body, "tools")
 	body, _ = sjson.DeleteBytes(body, "toolConfig")
 	return body
 }
 
-func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, auth *cliproxyauth.Auth, body []byte, source sdktranslator.Format, projectID, location, model, token string) []byte {
-	if source.String() != "claude" || isImagenModel(model) || gjson.GetBytes(body, "cachedContent").Exists() {
+func vertexSystemInstruction(body []byte) gjson.Result {
+	if v := gjson.GetBytes(body, "systemInstruction"); v.Exists() {
+		return v
+	}
+	return gjson.GetBytes(body, "system_instruction")
+}
+
+func deleteVertexSystemInstruction(body []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "systemInstruction")
+	body, _ = sjson.DeleteBytes(body, "system_instruction")
+	return body
+}
+
+func setVertexCachedContentsPrefix(createBody, requestBody, fullBody []byte, prefixLen int) ([]byte, []byte, bool) {
+	contents := gjson.GetBytes(fullBody, "contents")
+	if !contents.IsArray() {
+		return createBody, requestBody, false
+	}
+	items := contents.Array()
+	if prefixLen <= 0 || len(items) < 2 {
+		return createBody, requestBody, false
+	}
+	if prefixLen >= len(items) {
+		prefixLen = len(items) - 1
+	}
+	for i := 0; i < prefixLen; i++ {
+		createBody, _ = sjson.SetRawBytes(createBody, "contents.-1", []byte(items[i].Raw))
+	}
+	requestBody, _ = sjson.DeleteBytes(requestBody, "contents")
+	for i := prefixLen; i < len(items); i++ {
+		requestBody, _ = sjson.SetRawBytes(requestBody, "contents.-1", []byte(items[i].Raw))
+	}
+	return createBody, requestBody, true
+}
+
+func vertexCacheContentPrefixLen(body, originalRequest []byte, source sdktranslator.Format) int {
+	contents := gjson.GetBytes(body, "contents")
+	if !contents.IsArray() {
+		return 0
+	}
+	contentCount := len(contents.Array())
+	if contentCount < 2 {
+		return 0
+	}
+	prefixLen := 0
+	if source.String() == "claude" {
+		cacheSource := originalRequest
+		if len(cacheSource) > 0 {
+			hasExplicitCacheControl := countCacheControls(cacheSource) > 0
+			if !hasExplicitCacheControl {
+				cacheSource = ensureCacheControl(cacheSource)
+			}
+			prefixLen = claudeCacheControlContentPrefixLen(cacheSource)
+			if hasExplicitCacheControl {
+				if prefixLen >= contentCount {
+					prefixLen = contentCount - 1
+				}
+				return prefixLen
+			}
+		}
+	}
+	if prefixLen <= 0 && source.String() != "claude" {
+		prefixLen = contentCount - 1
+	}
+	if prefixLen >= contentCount {
+		prefixLen = contentCount - 1
+	}
+	return prefixLen
+}
+
+func claudeCacheControlContentPrefixLen(rawJSON []byte) int {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return 0
+	}
+	prefixLen := 0
+	contentIndex := 0
+	for _, message := range messages.Array() {
+		if !claudeMessageContributesContent(message) {
+			continue
+		}
+		contentIndex++
+		if claudeMessageLastContentHasCacheControl(message) {
+			prefixLen = contentIndex
+		}
+	}
+	return prefixLen
+}
+
+func claudeMessageContributesContent(message gjson.Result) bool {
+	role := strings.TrimSpace(message.Get("role").String())
+	if role == "" {
+		return false
+	}
+	content := message.Get("content")
+	return content.Type == gjson.String || content.IsArray()
+}
+
+func claudeMessageLastContentHasCacheControl(message gjson.Result) bool {
+	content := message.Get("content")
+	if !content.IsArray() {
+		return false
+	}
+	items := content.Array()
+	if len(items) == 0 {
+		return false
+	}
+	return items[len(items)-1].Get("cache_control").Exists()
+}
+
+func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, auth *cliproxyauth.Auth, body, originalRequest []byte, source sdktranslator.Format, projectID, location, model, token string) []byte {
+	if isImagenModel(model) || gjson.GetBytes(body, "cachedContent").Exists() {
 		return body
 	}
-	createBody, ok := vertexCacheCreateBody(projectID, location, model, body)
+	plan, ok := vertexCacheCreateBody(projectID, location, model, body, originalRequest, source)
 	if !ok {
 		return body
 	}
-	key := vertexPromptCacheKey(auth, projectID, location, model, createBody)
-	if cached, ok := vertexPromptCaches.Load(key); ok {
-		if entry, okEntry := cached.(vertexPromptCacheEntry); okEntry && entry.name != "" && time.Now().Before(entry.expiresAt) {
-			return applyVertexCachedContent(body, entry.name)
+	key := vertexPromptCacheKey(auth, projectID, location, model, plan.createBody)
+	if name, ok := loadVertexPromptCacheName(key, time.Now()); ok {
+		if name != "" {
+			return applyVertexCachedContent(plan.requestBody, name)
 		}
-		vertexPromptCaches.Delete(key)
+		return body
 	}
 	if strings.TrimSpace(token) == "" {
 		return body
 	}
 
+	value, err, _ := vertexPromptCacheSF.Do(key, func() (any, error) {
+		if name, ok := loadVertexPromptCacheName(key, time.Now()); ok {
+			return name, nil
+		}
+		return e.createVertexPromptCache(ctx, auth, plan.createBody, projectID, location, token, key), nil
+	})
+	if err != nil {
+		return body
+	}
+	name, _ := value.(string)
+	if name == "" {
+		return body
+	}
+	return applyVertexCachedContent(plan.requestBody, name)
+}
+
+func loadVertexPromptCacheName(key string, now time.Time) (string, bool) {
+	cached, ok := vertexPromptCaches.Load(key)
+	if !ok {
+		return "", false
+	}
+	entry, ok := cached.(vertexPromptCacheEntry)
+	if !ok {
+		vertexPromptCaches.Delete(key)
+		return "", false
+	}
+	if entry.name != "" && now.Before(entry.expiresAt) {
+		return entry.name, true
+	}
+	if entry.name == "" && now.Before(entry.retryAt) {
+		return "", true
+	}
+	vertexPromptCaches.Delete(key)
+	return "", false
+}
+
+func (e *GeminiVertexExecutor) createVertexPromptCache(ctx context.Context, auth *cliproxyauth.Auth, createBody []byte, projectID, location, token, key string) string {
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/cachedContents", vertexBaseURL(location), vertexAPIVersion, projectID, location)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(createBody))
 	if err != nil {
 		helps.LogWithRequestID(ctx).Debugf("vertex native cache: create request error: %v", err)
-		return body
+		vertexPromptCaches.Store(key, vertexPromptCacheEntry{retryAt: time.Now().Add(vertexPromptCacheBackoff)})
+		return ""
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
@@ -133,7 +309,8 @@ func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, 
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.LogWithRequestID(ctx).Debugf("vertex native cache: create error: %v", err)
-		return body
+		vertexPromptCaches.Store(key, vertexPromptCacheEntry{retryAt: time.Now().Add(vertexPromptCacheBackoff)})
+		return ""
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -143,18 +320,21 @@ func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, 
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
 		helps.LogWithRequestID(ctx).Debugf("vertex native cache: read response error: %v", errRead)
-		return body
+		vertexPromptCaches.Store(key, vertexPromptCacheEntry{retryAt: time.Now().Add(vertexPromptCacheBackoff)})
+		return ""
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("vertex native cache: create skipped, status=%d body=%s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return body
+		vertexPromptCaches.Store(key, vertexPromptCacheEntry{retryAt: time.Now().Add(vertexPromptCacheBackoff)})
+		return ""
 	}
 	name := strings.TrimSpace(gjson.GetBytes(data, "name").String())
 	if name == "" {
-		return body
+		vertexPromptCaches.Store(key, vertexPromptCacheEntry{retryAt: time.Now().Add(vertexPromptCacheBackoff)})
+		return ""
 	}
-	vertexPromptCaches.Store(key, vertexPromptCacheEntry{name: name, expiresAt: time.Now().Add(55 * time.Minute)})
-	return applyVertexCachedContent(body, name)
+	vertexPromptCaches.Store(key, vertexPromptCacheEntry{name: name, expiresAt: time.Now().Add(vertexPromptCacheLocalTTL)})
+	return name
 }
 
 // isImagenModel checks if the model name is an Imagen image generation model.
@@ -434,6 +614,10 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 
 	var body []byte
 	sourceFormat := opts.SourceFormat
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
 
 	// Handle Imagen models with special request format
 	if isImagenModel(baseModel) {
@@ -447,10 +631,6 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		from := sourceFormat
 		to := sdktranslator.FromString("gemini")
 
-		originalPayloadSource := req.Payload
-		if len(opts.OriginalRequest) > 0 {
-			originalPayloadSource = opts.OriginalRequest
-		}
 		originalPayload := originalPayloadSource
 		originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 		body = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
@@ -482,7 +662,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, statusErr{code: 500, msg: "internal server error"}
 	}
 	if action == "generateContent" {
-		body = e.maybeApplyNativePromptCache(ctx, auth, body, sourceFormat, projectID, location, baseModel, token)
+		body = e.maybeApplyNativePromptCache(ctx, auth, body, originalPayloadSource, sourceFormat, projectID, location, baseModel, token)
 	}
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
@@ -718,7 +898,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return nil, statusErr{code: 500, msg: "internal server error"}
 	}
-	body = e.maybeApplyNativePromptCache(ctx, auth, body, from, projectID, location, baseModel, token)
+	body = e.maybeApplyNativePromptCache(ctx, auth, body, originalPayloadSource, from, projectID, location, baseModel, token)
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
