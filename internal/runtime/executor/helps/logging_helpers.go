@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -24,6 +24,7 @@ const (
 	apiRequestKey           = "API_REQUEST"
 	apiResponseKey          = "API_RESPONSE"
 	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
+	creditsUsedKey          = "__antigravity_credits_used__"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -567,4 +568,25 @@ func LogWithRequestID(ctx context.Context) *log.Entry {
 		return log.NewEntry(log.StandardLogger())
 	}
 	return log.WithField("request_id", requestID)
+}
+
+// MarkCreditsUsed flags the request as having used AI credits for billing.
+func MarkCreditsUsed(ctx context.Context) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		ginCtx.Set(creditsUsedKey, true)
+	}
+}
+
+// CreditsUsed returns true if the request used AI credits.
+func CreditsUsed(ctx context.Context) bool {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		if val, exists := ginCtx.Get(creditsUsedKey); exists {
+			if b, ok := val.(bool); ok {
+				return b
+			}
+		}
+	}
+	return false
 }

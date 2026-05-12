@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -357,6 +357,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	}
 	if len(cfg.OpenAICompatibility) > 0 {
 		for _, compatConfig := range cfg.OpenAICompatibility {
+			if compatConfig.Disabled {
+				continue
+			}
 			openAICompatCount += len(compatConfig.APIKeyEntries)
 		}
 	}

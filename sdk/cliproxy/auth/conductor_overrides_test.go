@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 const requestScopedNotFoundMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74' not found. Items are not persisted when `store` is set to false. Try again with `store` set to true, or remove this item from your input."
@@ -69,7 +69,7 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(3, 30*time.Second, 0)
 	m.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
-		"iflow": {
+		"kimi": {
 			{Name: "deepseek-v3.1", Alias: "pool-model"},
 		},
 	})
@@ -80,7 +80,7 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 
 	auth := &Auth{
 		ID:       "auth-1",
-		Provider: "iflow",
+		Provider: "kimi",
 		ModelStates: map[string]*ModelState{
 			upstreamModel: {
 				Unavailable:    true,
@@ -99,7 +99,7 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 
 	_, _, maxWait := m.retrySettings()
-	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 429, Message: "quota"}, 0, []string{"iflow"}, routeModel, maxWait)
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 429, Message: "quota"}, 0, []string{"kimi"}, routeModel, maxWait)
 	if !shouldRetry {
 		t.Fatalf("expected shouldRetry=true, got false (wait=%v)", wait)
 	}

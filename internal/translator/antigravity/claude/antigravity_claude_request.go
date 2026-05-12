@@ -8,10 +8,10 @@ package claude
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -101,6 +101,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
+				if strings.HasPrefix(systemPrompt, "x-anthropic-billing-header:") {
+					continue
+				}
 				partJSON := []byte(`{}`)
 				if systemPrompt != "" {
 					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)

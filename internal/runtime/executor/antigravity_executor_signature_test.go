@@ -10,15 +10,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func testGeminiSignaturePayload() string {
 	payload := append([]byte{0x0A}, bytes.Repeat([]byte{0x56}, 48)...)
 	return base64.StdEncoding.EncodeToString(payload)
+}
+
+// testFakeClaudeSignature returns a base64 string starting with 'E' that passes
+// the lightweight hasValidClaudeSignature check but has invalid protobuf content
+// (first decoded byte 0x12 is correct, but no valid protobuf field 2 follows),
+// so it fails deep validation in strict mode.
+func testFakeClaudeSignature() string {
+	return base64.StdEncoding.EncodeToString([]byte{0x12, 0xFF, 0xFE, 0xFD})
 }
 
 func testAntigravityAuth(baseURL string) *cliproxyauth.Auth {
@@ -40,7 +48,7 @@ func invalidClaudeThinkingPayload() []byte {
 			{
 				"role": "assistant",
 				"content": [
-					{"type": "thinking", "thinking": "bad", "signature": "` + testGeminiSignaturePayload() + `"},
+					{"type": "thinking", "thinking": "bad", "signature": "` + testFakeClaudeSignature() + `"},
 					{"type": "text", "text": "hello"}
 				]
 			}
