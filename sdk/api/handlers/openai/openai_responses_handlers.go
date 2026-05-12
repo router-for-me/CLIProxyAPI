@@ -520,7 +520,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				// Stream closed without data? Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
+				_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
 				flusher.Flush()
 				cliCancel(nil)
 				return
