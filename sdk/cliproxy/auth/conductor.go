@@ -2486,6 +2486,40 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+func isUnauthorizedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if statusCodeFromError(err) == http.StatusUnauthorized {
+		return true
+	}
+	raw := strings.ToLower(err.Error())
+	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
+}
+
+func hasUnauthorizedAuthFailure(auth *Auth) bool {
+	if auth == nil || auth.LastError == nil {
+		return false
+	}
+	return auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")
+}
+
+func refreshErrorFromError(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	statusCode := statusCodeFromError(err)
+	if statusCode == 0 && isUnauthorizedError(err) {
+		statusCode = http.StatusUnauthorized
+	}
+	authErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
+	if statusCode == http.StatusUnauthorized {
+		authErr.Code = "unauthorized"
+		authErr.Retryable = false
+	}
+	return authErr
+}
+
 func retryAfterFromError(err error) *time.Duration {
 	if err == nil {
 		return nil
@@ -3680,6 +3714,9 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
+	if hasUnauthorizedAuthFailure(a) {
+		return false
+	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
 	}
@@ -3924,11 +3961,19 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		unauthorized := isUnauthorizedError(err)
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
-			current.LastError = &Error{Message: err.Error()}
+			current.LastError = refreshErrorFromError(err)
+			if unauthorized {
+				current.NextRefreshAfter = time.Time{}
+				current.Unavailable = true
+				current.Status = StatusError
+				current.StatusMessage = "unauthorized"
+			} else {
+				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			}
 			m.auths[id] = current
 			shouldReschedule = true
 			if m.scheduler != nil {

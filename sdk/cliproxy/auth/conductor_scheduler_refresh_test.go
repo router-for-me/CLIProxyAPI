@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -34,6 +35,59 @@ func (e schedulerProviderTestExecutor) CountTokens(ctx context.Context, auth *Au
 
 func (e schedulerProviderTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type unauthorizedRefreshTestExecutor struct {
+	schedulerProviderTestExecutor
+}
+
+func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return nil, errors.New("token refresh failed with status 401: invalid_grant")
+}
+
+func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(unauthorizedRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+	})
+
+	auth := &Auth{
+		ID:       "unauthorized-refresh",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email": "x@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if updated.LastError == nil {
+		t.Fatal("expected unauthorized refresh failure to be recorded")
+	}
+	if got := updated.LastError.StatusCode(); got != http.StatusUnauthorized {
+		t.Fatalf("LastError.StatusCode() = %d, want %d", got, http.StatusUnauthorized)
+	}
+	if updated.LastError.Code != "unauthorized" {
+		t.Fatalf("LastError.Code = %q, want unauthorized", updated.LastError.Code)
+	}
+	if !updated.NextRefreshAfter.IsZero() {
+		t.Fatalf("NextRefreshAfter = %s, want zero for unauthorized refresh failure", updated.NextRefreshAfter)
+	}
+	now := time.Now()
+	if manager.shouldRefresh(updated, now) {
+		t.Fatal("expected unauthorized auth to stop refresh attempts")
+	}
+	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
+		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
 }
 
 func TestManager_RefreshSchedulerEntry_RebuildsSupportedModelSetAfterModelRegistration(t *testing.T) {
