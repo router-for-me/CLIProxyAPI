@@ -169,9 +169,9 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
-	if cfg != nil && cfg.InsecureSkipVerify {
-		standardTransport = proxyutil.SetInsecureSkipVerify(standardTransport.(*http.Transport), true)
-	}
+		if cfg != nil && cfg.InsecureSkipVerify {
+			standardTransport = proxyutil.SetInsecureSkipVerify(standardTransport.(*http.Transport), true)
+		}
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
