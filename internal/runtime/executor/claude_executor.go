@@ -1550,8 +1550,20 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
 // When useCache is false, a new user ID is generated for every call.
+//
+// Three-way fallback when the inbound payload's metadata.user_id is not
+// already in Claude Code format:
+//  1. Non-empty inbound user_id → derive a deterministic Claude-Code-shaped
+//     triplet from it (helps.DeterministicFakeUserID). BYOK clients that
+//     send a stable per-user identifier (e.g. Capy's "user_<base62>") get
+//     a stable cloaked identity across calls, so Anthropic's prompt cache
+//     can attribute consecutive calls to the same end user.
+//  2. Empty user_id + useCache=true → reuse a per-API-key cached random
+//     id (1h TTL) so calls on the same upstream credential land on the
+//     same identity for the cache window.
+//  3. Empty user_id + useCache=false → fresh random id per call.
 func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
-	generateID := func() string {
+	fallbackID := func() string {
 		if useCache {
 			return helps.CachedUserID(apiKey)
 		}
@@ -1560,14 +1572,19 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 
 	metadata := gjson.GetBytes(payload, "metadata")
 	if !metadata.Exists() {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateID())
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", fallbackID())
 		return payload
 	}
 
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if existingUserID == "" || !helps.IsValidUserID(existingUserID) {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateID())
+	if helps.IsValidUserID(existingUserID) {
+		return payload
 	}
+	if existingUserID != "" {
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", helps.DeterministicFakeUserID(existingUserID))
+		return payload
+	}
+	payload, _ = sjson.SetBytes(payload, "metadata.user_id", fallbackID())
 	return payload
 }
 
