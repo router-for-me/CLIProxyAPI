@@ -1379,6 +1379,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
+				} else if status := classifyTransientTransportStatus(errExec); status != 0 {
+					result.Error.HTTPStatus = status
 				}
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -1467,6 +1469,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
+				} else if status := classifyTransientTransportStatus(errExec); status != 0 {
+					result.Error.HTTPStatus = status
 				}
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -2482,6 +2486,23 @@ func statusCodeFromError(err error) int {
 	var sc statusCoder
 	if errors.As(err, &sc) && sc != nil {
 		return sc.StatusCode()
+	}
+	if status := classifyTransientTransportStatus(err); status != 0 {
+		return status
+	}
+	return 0
+}
+
+func classifyTransientTransportStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return http.StatusBadGateway
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	if lower == "eof" || strings.Contains(lower, "unexpected eof") {
+		return http.StatusBadGateway
 	}
 	return 0
 }
