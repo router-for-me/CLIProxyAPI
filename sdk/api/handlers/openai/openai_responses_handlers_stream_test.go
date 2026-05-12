@@ -45,8 +45,8 @@ func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 	body := recorder.Body.String()
 	parts := strings.Split(strings.TrimSpace(body), "\n\n")
-	if len(parts) != 2 {
-		t.Fatalf("expected 2 SSE events, got %d. Body: %q", len(parts), body)
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 SSE events (2 data + [DONE] terminator), got %d. Body: %q", len(parts), body)
 	}
 
 	expectedPart1 := "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"arguments\":\"{}\"}}"
@@ -57,6 +57,10 @@ func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	expectedPart2 := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"function_call\",\"arguments\":\"{}\"}]}}"
 	if parts[1] != expectedPart2 {
 		t.Errorf("unexpected second event.\nGot: %q\nWant: %q", parts[1], expectedPart2)
+	}
+
+	if parts[2] != "data: [DONE]" {
+		t.Errorf("expected final part to be SSE [DONE] terminator, got %q", parts[2])
 	}
 }
 
@@ -74,8 +78,8 @@ func TestForwardResponsesStreamRepairsEmptyCompletedOutputFromDoneItems(t *testi
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	parts := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
-	if len(parts) != 3 {
-		t.Fatalf("expected 3 SSE events, got %d. Body: %q", len(parts), recorder.Body.String())
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 SSE events (3 data + [DONE] terminator), got %d. Body: %q", len(parts), recorder.Body.String())
 	}
 
 	payload := strings.TrimPrefix(parts[2], "data: ")
@@ -88,6 +92,10 @@ func TestForwardResponsesStreamRepairsEmptyCompletedOutputFromDoneItems(t *testi
 	}
 	if got := gjson.Get(payload, "response.output.1.arguments").String(); got != `{"cmd":"pwd"}` {
 		t.Fatalf("expected function_call arguments to be preserved, got %q in %s", got, payload)
+	}
+
+	if parts[3] != "data: [DONE]" {
+		t.Errorf("expected final part to be SSE [DONE] terminator, got %q", parts[3])
 	}
 }
 
@@ -105,8 +113,8 @@ func TestForwardResponsesStreamRepairsMixedIndexedAndUnindexedDoneItems(t *testi
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	parts := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
-	if len(parts) != 3 {
-		t.Fatalf("expected 3 SSE events, got %d. Body: %q", len(parts), recorder.Body.String())
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 SSE events (3 data + [DONE] terminator), got %d. Body: %q", len(parts), recorder.Body.String())
 	}
 
 	payload := strings.TrimPrefix(parts[2], "data: ")
@@ -119,6 +127,10 @@ func TestForwardResponsesStreamRepairsMixedIndexedAndUnindexedDoneItems(t *testi
 	}
 	if got := gjson.Get(payload, "response.output.1.id").String(); got != "msg-1" {
 		t.Fatalf("expected unindexed message to be appended, got %q in %s", got, payload)
+	}
+
+	if parts[3] != "data: [DONE]" {
+		t.Errorf("expected final part to be SSE [DONE] terminator, got %q", parts[3])
 	}
 }
 
@@ -135,8 +147,8 @@ func TestForwardResponsesStreamRepairsMultilineCompletedOutputAsSSEDataLines(t *
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	parts := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
-	if len(parts) != 2 {
-		t.Fatalf("expected 2 SSE events, got %d. Body: %q", len(parts), recorder.Body.String())
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 SSE events (2 data + [DONE] terminator), got %d. Body: %q", len(parts), recorder.Body.String())
 	}
 
 	completedFrame := []byte(parts[1])
@@ -154,6 +166,10 @@ func TestForwardResponsesStreamRepairsMultilineCompletedOutputAsSSEDataLines(t *
 	if !output.IsArray() || len(output.Array()) != 1 {
 		t.Fatalf("expected repaired completed output with 1 item, got %s from %q", output.Raw, payload)
 	}
+
+	if parts[2] != "data: [DONE]" {
+		t.Errorf("expected final part to be SSE [DONE] terminator, got %q", parts[2])
+	}
 }
 
 func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
@@ -170,7 +186,7 @@ func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	got := strings.TrimSuffix(recorder.Body.String(), "\n")
-	want := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"
+	want := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\ndata: [DONE]\n"
 	if got != want {
 		t.Fatalf("unexpected split-event framing.\nGot:  %q\nWant: %q", got, want)
 	}
@@ -189,8 +205,9 @@ func TestForwardResponsesStreamPreservesValidFullSSEEventChunks(t *testing.T) {
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	got := strings.TrimSuffix(recorder.Body.String(), "\n")
-	if got != string(chunk) {
-		t.Fatalf("unexpected full-event framing.\nGot:  %q\nWant: %q", got, string(chunk))
+	want := string(chunk) + "data: [DONE]\n"
+	if got != want {
+		t.Fatalf("unexpected full-event framing.\nGot:  %q\nWant: %q", got, want)
 	}
 }
 
@@ -207,7 +224,7 @@ func TestForwardResponsesStreamBuffersSplitDataPayloadChunks(t *testing.T) {
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
 	got := recorder.Body.String()
-	want := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n\n"
+	want := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\ndata: [DONE]\n\n"
 	if got != want {
 		t.Fatalf("unexpected split-data framing.\nGot:  %q\nWant: %q", got, want)
 	}
@@ -233,7 +250,7 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 
-	if got := recorder.Body.String(); got != "\n" {
-		t.Fatalf("expected incomplete trailing data to be dropped on flush.\nGot: %q", got)
+	if got := recorder.Body.String(); got != "data: [DONE]\n\n" {
+		t.Fatalf("expected incomplete trailing data to be dropped on flush, leaving only the [DONE] terminator.\nGot: %q", got)
 	}
 }
