@@ -1,9 +1,7 @@
 package handlers
 
 import (
-	"net/http"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
