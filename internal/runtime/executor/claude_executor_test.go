@@ -1923,6 +1923,69 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	}
 }
 
+// SanitizeForwardedSystemPrompt: tool-use contracts survive the cloak.
+// Previously this function replaced the entire input with a 3-line generic
+// reminder, which destroyed legitimate BYOK contracts like "MUST call
+// message_user". The smart strip removes only the third-party detection
+// surfaces (URLs, branded agent intros, env XML blocks).
+func TestSanitizeForwardedSystemPrompt_PreservesToolUseContract(t *testing.T) {
+	in := "<communication>\n" +
+		"Visible messages flow through `message_user`. " +
+		"Plain assistant text is treated as a reasoning trace, NOT visible.\n" +
+		"You MUST call message_user for any user-facing reply.\n" +
+		"</communication>"
+	out := sanitizeForwardedSystemPrompt(in)
+	if !strings.Contains(out, "MUST call message_user") {
+		t.Fatalf("smart sanitize must preserve the tool-use contract, got %q", out)
+	}
+	if !strings.Contains(out, "<communication>") {
+		t.Fatalf("smart sanitize must preserve the <communication> wrapper, got %q", out)
+	}
+}
+
+func TestSanitizeForwardedSystemPrompt_StripsThirdPartyMarkers(t *testing.T) {
+	in := "You are Captain Capy, the world's most powerful coding agent built by Capy.\n" +
+		"You work in the Capy web interface at https://capy.ai.\n\n" +
+		"<env_context>\n  cwd=/home/sandbox\n  branch=main\n</env_context>\n\n" +
+		"<communication>\nYou MUST call message_user for any reply.\n</communication>"
+	out := sanitizeForwardedSystemPrompt(in)
+
+	if strings.Contains(out, "https://capy.ai") {
+		t.Fatalf("URLs must be stripped, got %q", out)
+	}
+	if strings.Contains(out, "You are Captain Capy") {
+		t.Fatalf("branded agent intro must be stripped, got %q", out)
+	}
+	if strings.Contains(out, "<env_context>") {
+		t.Fatalf("env_context block must be stripped, got %q", out)
+	}
+	if !strings.Contains(out, "MUST call message_user") {
+		t.Fatalf("the tool-use contract must survive, got %q", out)
+	}
+}
+
+func TestSanitizeForwardedSystemPrompt_FallbackOnPureBranding(t *testing.T) {
+	// Input is entirely branding/banners — after the strips, near-empty
+	// → fall back to the original 3-line generic reminder so Claude
+	// still has *some* task framing.
+	in := "You are Cursor, an AI pair programmer.\n" +
+		"Powered by OpenCode. Visit https://opencode.ai for docs.\n" +
+		"<env_context>cwd=/repo</env_context>"
+	out := sanitizeForwardedSystemPrompt(in)
+	if !strings.Contains(out, "Use the available tools when needed") {
+		t.Fatalf("expected fallback to generic reminder when strips drain the input, got %q", out)
+	}
+}
+
+func TestSanitizeForwardedSystemPrompt_EmptyInputReturnsEmpty(t *testing.T) {
+	if got := sanitizeForwardedSystemPrompt(""); got != "" {
+		t.Fatalf("empty input must yield empty output, got %q", got)
+	}
+	if got := sanitizeForwardedSystemPrompt("   \n\n  "); got != "" {
+		t.Fatalf("whitespace-only input must yield empty output, got %q", got)
+	}
+}
+
 // Test case 5: Special characters in string system prompt survive forwarding
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
