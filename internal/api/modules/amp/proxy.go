@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -108,11 +108,6 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 	// Modify incoming responses to handle gzip without Content-Encoding
 	// This addresses the same issue as inline handler gzip handling, but at the proxy level
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		// Only process successful responses
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil
-		}
-
 		// Skip if already marked as gzip (Content-Encoding set)
 		if resp.Header.Get("Content-Encoding") != "" {
 			return nil

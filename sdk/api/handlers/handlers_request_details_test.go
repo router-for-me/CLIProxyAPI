@@ -1,13 +1,15 @@
 package handlers
 
 import (
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
@@ -114,5 +116,24 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
+	if errMsg == nil {
+		t.Fatalf("expected error for gpt-image-2, got nil")
+	}
+	if errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+	}
+	if errMsg.Error == nil {
+		t.Fatalf("expected error message, got nil")
+	}
+	msg := errMsg.Error.Error()
+	if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
+		t.Fatalf("unexpected error message: %q", msg)
 	}
 }

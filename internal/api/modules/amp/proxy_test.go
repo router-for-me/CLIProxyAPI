@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 // Helper: compress data with gzip
@@ -129,11 +129,11 @@ func TestModifyResponse_GzipScenarios(t *testing.T) {
 			wantCE:   "",
 		},
 		{
-			name:     "skips_non_2xx_status",
+			name:     "decompresses_non_2xx_status_when_gzip_detected",
 			header:   http.Header{},
 			body:     good,
 			status:   404,
-			wantBody: good,
+			wantBody: goodJSON,
 			wantCE:   "",
 		},
 	}

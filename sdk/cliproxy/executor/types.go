@@ -4,11 +4,18 @@ import (
 	"net/http"
 	"net/url"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
+
+// RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
+// It is optional and may be absent for non-HTTP executions.
+const RequestPathMetadataKey = "request_path"
+
+// DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
+const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
