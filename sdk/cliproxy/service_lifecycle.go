@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/compatmodelsync"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -160,6 +161,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
+
+	compatmodelsync.StartOpenAICompatModelSync(ctx, s.configPath)
 
 	s.serverErr = make(chan error, 1)
 	go func() {

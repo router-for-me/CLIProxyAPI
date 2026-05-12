@@ -374,23 +374,12 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-<<<<<<< HEAD
 	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
-=======
-	utlsRT := newUtlsRoundTripper(proxyURL)
-
-	var standardTransport http.RoundTripper = &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-	}
 	if cfg != nil && cfg.InsecureSkipVerify {
-		standardTransport = proxyutil.SetInsecureSkipVerify(standardTransport.(*http.Transport), true)
+		standardTransport = proxyutil.SetInsecureSkipVerify(nil, true)
 	}
->>>>>>> 5f8b534c (优化上游ssl证书问题)
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
