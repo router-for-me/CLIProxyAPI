@@ -73,6 +73,19 @@ func RequestedModelAliasFromContext(ctx context.Context) string {
 	}
 }
 
+// Context keys written to the gin context by the proxy runtime regardless of
+// request logging settings. Plugins can read these to access request data.
+const (
+	// CtxUpstreamURL is the outbound upstream URL for the request.
+	CtxUpstreamURL = "upstream_url"
+	// CtxFirstUserMsg is the text of the first user message (truncated to 2000 chars).
+	CtxFirstUserMsg = "upstream_first_user_msg"
+	// CtxResponseText is the accumulated response text (truncated to 4000 chars).
+	CtxResponseText = "upstream_response_text"
+	// CtxRawUsage holds token counts as map[string]int64 from upstream usage fields.
+	CtxRawUsage = "upstream_raw_usage"
+)
+
 // Plugin consumes usage records emitted by the proxy runtime.
 type Plugin interface {
 	HandleUsage(ctx context.Context, record Record)
