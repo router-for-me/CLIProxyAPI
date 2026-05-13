@@ -917,7 +917,7 @@ func cloneThinkingSupportMap(thinking *ThinkingSupport) map[string]any {
 	return result
 }
 
-func buildThinkingLevelDetails(thinking *ThinkingSupport) ([]string, map[string]int) {
+func buildThinkingLevelDetails(thinking *ThinkingSupport) ([]string, map[string]any) {
 	if thinking == nil {
 		return nil, nil
 	}
@@ -956,7 +956,7 @@ func buildThinkingLevelDetails(thinking *ThinkingSupport) ([]string, map[string]
 		}
 	}
 
-	levelBudgets := make(map[string]int)
+	levelBudgets := make(map[string]any)
 	for _, level := range levels {
 		for _, entry := range standardThinkingLevelBudgets {
 			if level == entry.level {
@@ -1248,19 +1248,19 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
 		if model.InputTokenLimit > 0 {
-			result["inputTokenLimit"] = model.InputTokenLimit
+			result["input_token_limit"] = model.InputTokenLimit
 		}
 		if model.OutputTokenLimit > 0 {
-			result["outputTokenLimit"] = model.OutputTokenLimit
+			result["output_token_limit"] = model.OutputTokenLimit
 		}
 		if len(model.SupportedGenerationMethods) > 0 {
-			result["supportedGenerationMethods"] = append([]string(nil), model.SupportedGenerationMethods...)
+			result["supported_generation_methods"] = append([]string(nil), model.SupportedGenerationMethods...)
 		}
 		if len(model.SupportedInputModalities) > 0 {
-			result["supportedInputModalities"] = append([]string(nil), model.SupportedInputModalities...)
+			result["supported_input_modalities"] = append([]string(nil), model.SupportedInputModalities...)
 		}
 		if len(model.SupportedOutputModalities) > 0 {
-			result["supportedOutputModalities"] = append([]string(nil), model.SupportedOutputModalities...)
+			result["supported_output_modalities"] = append([]string(nil), model.SupportedOutputModalities...)
 		}
 		if thinking := cloneThinkingSupportMap(model.Thinking); thinking != nil {
 			result["thinking"] = thinking

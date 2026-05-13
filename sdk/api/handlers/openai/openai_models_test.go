@@ -77,11 +77,11 @@ func TestOpenAIModelsIncludesModelDetails(t *testing.T) {
 	if got := model["max_completion_tokens"]; got != float64(32768) {
 		t.Fatalf("max_completion_tokens = %#v, want 32768", got)
 	}
-	if got := model["inputTokenLimit"]; got != float64(128000) {
-		t.Fatalf("inputTokenLimit = %#v, want 128000", got)
+	if got := model["input_token_limit"]; got != float64(128000) {
+		t.Fatalf("input_token_limit = %#v, want 128000", got)
 	}
-	if got := model["outputTokenLimit"]; got != float64(32768) {
-		t.Fatalf("outputTokenLimit = %#v, want 32768", got)
+	if got := model["output_token_limit"]; got != float64(32768) {
+		t.Fatalf("output_token_limit = %#v, want 32768", got)
 	}
 
 	thinking, ok := model["thinking"].(map[string]any)

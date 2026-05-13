@@ -170,8 +170,8 @@ func TestGetAvailableModelsOpenAIIncludesModelDetailsAndThinking(t *testing.T) {
 	checks := map[string]any{
 		"context_length":        128000,
 		"max_completion_tokens": 32768,
-		"inputTokenLimit":       128000,
-		"outputTokenLimit":      32768,
+		"input_token_limit":     128000,
+		"output_token_limit":    32768,
 	}
 	for key, want := range checks {
 		if got := model[key]; got != want {
@@ -197,7 +197,7 @@ func TestGetAvailableModelsOpenAIIncludesModelDetailsAndThinking(t *testing.T) {
 	if !ok || len(supportedLevels) != 5 || supportedLevels[0] != "none" || supportedLevels[1] != "auto" || supportedLevels[2] != "low" {
 		t.Fatalf("unexpected supported thinking levels: %#v", thinking["supported_levels"])
 	}
-	levelBudgets, ok := thinking["level_budgets"].(map[string]int)
+	levelBudgets, ok := thinking["level_budgets"].(map[string]any)
 	if !ok || levelBudgets["low"] != 1024 || levelBudgets["high"] != 24576 {
 		t.Fatalf("unexpected thinking level budgets: %#v", thinking["level_budgets"])
 	}
