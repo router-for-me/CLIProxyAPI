@@ -6,10 +6,13 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,12 +20,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // GeminiAPIHandler contains the handlers for Gemini API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type GeminiAPIHandler struct {
 	*handlers.BaseAPIHandler
+	cacheAuthMu sync.RWMutex
+	cacheAuthID map[string]string
 }
 
 // NewGeminiAPIHandler creates a new Gemini API handlers instance.
@@ -30,6 +38,7 @@ type GeminiAPIHandler struct {
 func NewGeminiAPIHandler(apiHandlers *handlers.BaseAPIHandler) *GeminiAPIHandler {
 	return &GeminiAPIHandler{
 		BaseAPIHandler: apiHandlers,
+		cacheAuthID:    make(map[string]string),
 	}
 }
 
@@ -161,6 +170,251 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 	case "countTokens":
 		h.handleCountTokens(c, action[0], rawJSON)
 	}
+}
+
+// GeminiCachedContentsHandler proxies Gemini native cachedContents operations.
+// Cached content is not model-scoped in the URL, so this path cannot use the
+// normal model translation executor that handles generateContent/countTokens.
+func (h *GeminiAPIHandler) GeminiCachedContentsHandler(c *gin.Context) {
+	if h.AuthManager == nil {
+		c.JSON(http.StatusServiceUnavailable, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{Message: "Gemini auth manager is unavailable", Type: "server_error"},
+		})
+		return
+	}
+
+	rawJSON, errRead := c.GetRawData()
+	if errRead != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{Message: fmt.Sprintf("Invalid request body: %v", errRead), Type: "invalid_request_error"},
+		})
+		return
+	}
+
+	cacheName := geminiCachedContentNameFromPath(c.Param("name"))
+	if cacheName == "" {
+		cacheName = strings.TrimSpace(gjson.GetBytes(rawJSON, "name").String())
+	}
+	auth, status, msg := h.selectGeminiCachedContentAuth(cacheName)
+	if auth == nil {
+		c.JSON(status, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{Message: msg, Type: "invalid_request_error"},
+		})
+		return
+	}
+
+	rawJSON = normalizeGeminiCachedContentBodyForAuth(rawJSON, auth)
+	targetURL := h.geminiCachedContentsURL(auth, cacheName, c.Request.URL.RawQuery)
+	var body io.Reader
+	if len(rawJSON) > 0 {
+		body = bytes.NewReader(rawJSON)
+	}
+	upstreamReq, errReq := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, body)
+	if errReq != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{Message: fmt.Sprintf("Invalid request: %v", errReq), Type: "invalid_request_error"},
+		})
+		return
+	}
+	copyGeminiCachedContentRequestHeaders(upstreamReq.Header, c.Request.Header)
+	if upstreamReq.Header.Get("Content-Type") == "" && len(rawJSON) > 0 {
+		upstreamReq.Header.Set("Content-Type", "application/json")
+	}
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	upstreamResp, errDo := h.AuthManager.HttpRequest(cliCtx, auth, upstreamReq)
+	if errDo != nil {
+		cliCancel(errDo)
+		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{Message: errDo.Error(), Type: "server_error"},
+		})
+		return
+	}
+	defer upstreamResp.Body.Close()
+
+	data, errBody := io.ReadAll(upstreamResp.Body)
+	if errBody != nil {
+		cliCancel(errBody)
+		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{Message: errBody.Error(), Type: "server_error"},
+		})
+		return
+	}
+	if upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode < 300 && c.Request.Method == http.MethodPost {
+		if name := strings.TrimSpace(gjson.GetBytes(data, "name").String()); name != "" {
+			h.rememberCachedContentAuth(name, auth.ID)
+		}
+	}
+
+	if filtered := handlers.FilterUpstreamHeaders(upstreamResp.Header); filtered != nil {
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), filtered)
+	}
+	if c.Writer.Header().Get("Content-Type") == "" {
+		c.Header("Content-Type", "application/json")
+	}
+	c.Status(upstreamResp.StatusCode)
+	_, _ = c.Writer.Write(data)
+	cliCancel(data)
+}
+
+func copyGeminiCachedContentRequestHeaders(dst, src http.Header) {
+	for _, key := range []string{
+		"Content-Type",
+		"Accept",
+		"X-Goog-Api-Client",
+		"X-Goog-Request-Params",
+		"User-Agent",
+	} {
+		if values, ok := src[key]; ok {
+			for _, value := range values {
+				dst.Add(key, value)
+			}
+		}
+	}
+}
+
+func geminiCachedContentNameFromPath(raw string) string {
+	raw = strings.TrimSpace(strings.TrimPrefix(raw, "/"))
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "cachedContents/") {
+		return raw
+	}
+	return "cachedContents/" + raw
+}
+
+func (h *GeminiAPIHandler) rememberCachedContentAuth(name, authID string) {
+	name = strings.TrimSpace(name)
+	authID = strings.TrimSpace(authID)
+	if name == "" || authID == "" {
+		return
+	}
+	h.cacheAuthMu.Lock()
+	h.cacheAuthID[name] = authID
+	h.cacheAuthMu.Unlock()
+}
+
+func (h *GeminiAPIHandler) rememberedCachedContentAuth(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	h.cacheAuthMu.RLock()
+	authID := h.cacheAuthID[name]
+	h.cacheAuthMu.RUnlock()
+	return authID
+}
+
+func (h *GeminiAPIHandler) selectGeminiCachedContentAuth(cacheName string) (*cliproxyauth.Auth, int, string) {
+	if authID := h.rememberedCachedContentAuth(cacheName); authID != "" {
+		if auth, ok := h.AuthManager.GetByID(authID); ok && geminiCachedContentAuthUsable(auth) {
+			return auth, 0, ""
+		}
+	}
+
+	var vertexFallback *cliproxyauth.Auth
+	for _, auth := range h.AuthManager.List() {
+		if !geminiCachedContentAuthUsable(auth) {
+			continue
+		}
+		if !vertexCachedContentAuthHasLocation(auth) {
+			continue
+		}
+		if auth.Status == cliproxyauth.StatusActive {
+			return auth, 0, ""
+		}
+		if vertexFallback == nil {
+			vertexFallback = auth
+		}
+	}
+	if vertexFallback != nil {
+		return vertexFallback, 0, ""
+	}
+	return nil, http.StatusServiceUnavailable, "No available Vertex credential for cachedContents"
+}
+
+func geminiCachedContentAuthUsable(auth *cliproxyauth.Auth) bool {
+	return auth != nil &&
+		geminiCachedContentAuthProvider(auth) == "vertex" &&
+		!auth.Disabled &&
+		auth.Status != cliproxyauth.StatusDisabled
+}
+
+func geminiCachedContentAuthProvider(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(auth.Provider))
+}
+
+func vertexCachedContentAuthHasLocation(auth *cliproxyauth.Auth) bool {
+	projectID, location := vertexCachedContentProjectLocation(auth)
+	return projectID != "" && location != ""
+}
+
+func vertexCachedContentProjectLocation(auth *cliproxyauth.Auth) (string, string) {
+	if auth == nil || auth.Metadata == nil {
+		return "", ""
+	}
+	projectID, _ := auth.Metadata["project_id"].(string)
+	if strings.TrimSpace(projectID) == "" {
+		projectID, _ = auth.Metadata["project"].(string)
+	}
+	location, _ := auth.Metadata["location"].(string)
+	if strings.TrimSpace(location) == "" {
+		location = "us-central1"
+	}
+	return strings.TrimSpace(projectID), strings.TrimSpace(location)
+}
+
+func (h *GeminiAPIHandler) geminiCachedContentsURL(auth *cliproxyauth.Auth, cacheName, rawQuery string) string {
+	projectID, location := vertexCachedContentProjectLocation(auth)
+	baseURL := vertexCachedContentBaseURL(location)
+	path := fmt.Sprintf("/v1/projects/%s/locations/%s/cachedContents", projectID, location)
+	if cacheName != "" {
+		if strings.HasPrefix(cacheName, "projects/") {
+			path = "/v1/" + cacheName
+		} else {
+			path += "/" + strings.TrimPrefix(cacheName, "cachedContents/")
+		}
+	}
+	if rawQuery != "" {
+		return baseURL + path + "?" + rawQuery
+	}
+	return baseURL + path
+}
+
+func vertexCachedContentBaseURL(location string) string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		location = "us-central1"
+	}
+	if location == "global" {
+		return "https://aiplatform.googleapis.com"
+	}
+	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", location)
+}
+
+func normalizeGeminiCachedContentBodyForAuth(rawJSON []byte, auth *cliproxyauth.Auth) []byte {
+	if len(rawJSON) == 0 || geminiCachedContentAuthProvider(auth) != "vertex" {
+		return rawJSON
+	}
+	model := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if model == "" || strings.HasPrefix(model, "projects/") {
+		return rawJSON
+	}
+	projectID, location := vertexCachedContentProjectLocation(auth)
+	if projectID == "" || location == "" {
+		return rawJSON
+	}
+	model = strings.TrimPrefix(model, "models/")
+	model = fmt.Sprintf("projects/%s/locations/%s/publishers/google/models/%s", projectID, location, model)
+	out, err := sjson.SetBytes(rawJSON, "model", model)
+	if err != nil {
+		return rawJSON
+	}
+	return out
 }
 
 // handleStreamGenerateContent handles streaming content generation requests for Gemini models.

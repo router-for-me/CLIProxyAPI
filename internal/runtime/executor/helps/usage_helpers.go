@@ -412,6 +412,14 @@ func hasGeminiFamilyUsageTokenFields(node gjson.Result) bool {
 		node.Get("cachedContentTokenCount").Exists()
 }
 
+func hasUsageTokenSignal(detail usage.Detail) bool {
+	return detail.InputTokens != 0 ||
+		detail.OutputTokens != 0 ||
+		detail.ReasoningTokens != 0 ||
+		detail.CachedTokens != 0 ||
+		detail.TotalTokens != 0
+}
+
 func ParseGeminiCLIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data)
 	node := firstExistingUsageNode(usageNode,
@@ -451,6 +459,28 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	return parseGeminiFamilyUsageDetail(node), true
+}
+
+func ParseVertexGeminiStreamUsage(line []byte) (usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+	node := gjson.GetBytes(payload, "usageMetadata")
+	if !node.Exists() {
+		node = gjson.GetBytes(payload, "response.usageMetadata")
+	}
+	if !node.Exists() {
+		node = gjson.GetBytes(payload, "usage_metadata")
+	}
+	if !node.Exists() {
+		return usage.Detail{}, false
+	}
+	detail := parseGeminiFamilyUsageDetail(node)
+	if !hasUsageTokenSignal(detail) {
+		return usage.Detail{}, false
+	}
+	return detail, true
 }
 
 func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {

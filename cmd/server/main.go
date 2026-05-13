@@ -456,6 +456,15 @@ func main() {
 			return
 		}
 		configFilePath = filepath.Join(wd, "config.yaml")
+		if _, errStat := os.Stat(configFilePath); os.IsNotExist(errStat) {
+			if exePath, errExe := os.Executable(); errExe == nil {
+				exeDir := filepath.Dir(exePath)
+				fallbackPath := filepath.Join(exeDir, "config.yaml")
+				if _, errStat2 := os.Stat(fallbackPath); errStat2 == nil {
+					configFilePath = fallbackPath
+				}
+			}
+		}
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 	}
 	if err != nil {
