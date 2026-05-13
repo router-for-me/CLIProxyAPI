@@ -62,7 +62,11 @@ type upstreamAttempt struct {
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
 	// Always-on: store the upstream URL and first user message for plugins.
+	// Response and usage keys are reset here so retried attempts do not mix
+	// data from a failed attempt with the final response.
 	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+		ginCtx.Set(UpstreamResponseTextKey, "")
+		ginCtx.Set(UpstreamRawUsageKey, nil)
 		if info.URL != "" {
 			ginCtx.Set(UpstreamURLKey, info.URL)
 		}
@@ -614,15 +618,20 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
+	const maxLen = 4000
 	// Non-streaming: full JSON body.
 	if bytes.HasPrefix(chunk, []byte("{")) {
 		accumulateUsage(ginCtx, chunk)
+		// Anthropic: content[0].text
 		text := gjson.GetBytes(chunk, "content.0.text").String()
 		if text == "" {
 			text = gjson.GetBytes(chunk, "content.#.text").String()
 		}
+		// OpenAI-compatible: choices[0].message.content
+		if text == "" {
+			text = gjson.GetBytes(chunk, "choices.0.message.content").String()
+		}
 		if text != "" {
-			const maxLen = 4000
 			if len(text) > maxLen {
 				text = text[:maxLen] + "..."
 			}
@@ -631,6 +640,14 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		return
 	}
 	// Streaming SSE: one TCP chunk may carry multiple events.
+	// Read current value once and write back only if changed.
+	var current string
+	if v, ok := ginCtx.Get(UpstreamResponseTextKey); ok {
+		if s, ok := v.(string); ok {
+			current = s
+		}
+	}
+	updated := false
 	for _, line := range bytes.Split(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -641,28 +658,25 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 			continue
 		}
 		accumulateUsage(ginCtx, data)
-		ev := gjson.GetBytes(data, "delta")
-		if !ev.Exists() || ev.Get("type").String() != "text_delta" {
-			continue
+		// Anthropic: delta.type == "text_delta", delta.text
+		delta := gjson.GetBytes(data, "delta.text").String()
+		if delta == "" {
+			// OpenAI-compatible: choices[0].delta.content
+			delta = gjson.GetBytes(data, "choices.0.delta.content").String()
 		}
-		delta := ev.Get("text").String()
 		if delta == "" {
 			continue
 		}
-		var current string
-		if v, ok := ginCtx.Get(UpstreamResponseTextKey); ok {
-			if s, ok := v.(string); ok {
-				current = s
-			}
-		}
-		const maxLen = 4000
 		if len(current) < maxLen {
 			current += delta
 			if len(current) > maxLen {
 				current = current[:maxLen] + "..."
 			}
-			ginCtx.Set(UpstreamResponseTextKey, current)
+			updated = true
 		}
+	}
+	if updated {
+		ginCtx.Set(UpstreamResponseTextKey, current)
 	}
 }
 
@@ -687,14 +701,18 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		}
 	}
 	for _, key := range []string{
+		// Anthropic
 		"input_tokens", "output_tokens",
 		"cache_read_input_tokens", "cache_creation_input_tokens",
 		"reasoning_tokens", "total_tokens",
+		// OpenAI-compatible
+		"prompt_tokens", "completion_tokens",
 	} {
 		setMax(key)
 	}
 	if current["total_tokens"] == 0 {
-		current["total_tokens"] = current["input_tokens"] + current["output_tokens"] + current["reasoning_tokens"]
+		current["total_tokens"] = current["input_tokens"] + current["output_tokens"] +
+			current["prompt_tokens"] + current["completion_tokens"] + current["reasoning_tokens"]
 	}
 	ginCtx.Set(UpstreamRawUsageKey, current)
 }
