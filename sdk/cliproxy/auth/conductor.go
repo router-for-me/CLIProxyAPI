@@ -3231,6 +3231,79 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 	ginCtx.Set("userApiKey", apiKey)
 }
 
+func homeDispatchHeaders(ctx context.Context, headers http.Header) http.Header {
+	apiKey, ok := homeQueryCredentialFromContext(ctx)
+	if !ok {
+		return headers
+	}
+	out := headers.Clone()
+	if out == nil {
+		out = http.Header{}
+	}
+	if out.Get("Authorization") != "" || out.Get("X-Goog-Api-Key") != "" || out.Get("X-Api-Key") != "" {
+		return out
+	}
+	out.Set("X-Goog-Api-Key", apiKey)
+	return out
+}
+
+func homeQueryCredentialFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	if queryCtx, ok := ctx.Value("gin").(interface{ Query(string) string }); ok && queryCtx != nil {
+		if apiKey := strings.TrimSpace(queryCtx.Query("key")); apiKey != "" {
+			return apiKey, true
+		}
+		if apiKey := strings.TrimSpace(queryCtx.Query("auth_token")); apiKey != "" {
+			return apiKey, true
+		}
+	}
+	ginCtx, ok := ctx.Value("gin").(interface{ Get(string) (any, bool) })
+	if !ok || ginCtx == nil {
+		return "", false
+	}
+	rawMetadata, ok := ginCtx.Get("accessMetadata")
+	if !ok {
+		return "", false
+	}
+	source := accessMetadataSource(rawMetadata)
+	if source != "query-key" && source != "query-auth-token" {
+		return "", false
+	}
+	rawAPIKey, ok := ginCtx.Get("userApiKey")
+	if !ok {
+		return "", false
+	}
+	apiKey := contextStringValue(rawAPIKey)
+	if apiKey == "" {
+		return "", false
+	}
+	return apiKey, true
+}
+
+func accessMetadataSource(raw any) string {
+	switch v := raw.(type) {
+	case map[string]string:
+		return strings.TrimSpace(v["source"])
+	case map[string]any:
+		return contextStringValue(v["source"])
+	default:
+		return ""
+	}
+}
+
+func contextStringValue(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
 func homeExecutionSessionIDFromMetadata(meta map[string]any) string {
 	if len(meta) == 0 {
 		return ""
@@ -3352,8 +3425,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 
 	requestedModel := requestedModelFromMetadata(opts.Metadata, model)
 	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
 
-	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, opts.Headers, count)
+	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
 	if err != nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
 	}
