@@ -64,6 +64,7 @@ func main() {
 	var codexLogin bool
 	var codexDeviceLogin bool
 	var claudeLogin bool
+	var claudeLabel string
 	var noBrowser bool
 	var oauthCallbackPort int
 	var antigravityLogin bool
@@ -84,6 +85,7 @@ func main() {
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
+	flag.StringVar(&claudeLabel, "claude-label", "", "Label suffix appended to the auth filename (claude-<email>-<label>.json); allows multiple Claude orgs to coexist in one auth-dir")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
@@ -516,6 +518,7 @@ func main() {
 	options := &cmd.LoginOptions{
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
+		Label:        claudeLabel,
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
