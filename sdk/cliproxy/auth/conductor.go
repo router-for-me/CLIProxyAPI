@@ -3946,13 +3946,10 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 }
 
 func (m *Manager) lazyRefreshAuth(ctx context.Context, id string) {
-	_, err, _ := m.lazyRefreshGroup.Do(id, func() (any, error) {
+	m.lazyRefreshGroup.Do(id, func() (any, error) {
 		m.refreshAuth(ctx, id)
 		return nil, nil
 	})
-	if err != nil {
-		log.Debugf("lazy refresh error for %s: %v", id, err)
-	}
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
