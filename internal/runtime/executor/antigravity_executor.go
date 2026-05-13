@@ -405,6 +405,39 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
 
+// antigravityAuthEnableCredit checks if the auth has enable_credit set to true in its metadata
+// AND the model is a Claude model (credits only apply to Claude models on Antigravity;
+// Gemini models are free and do not consume credits).
+// This implements gcli2api-style per-credential credit control: each auth independently
+// decides whether to consume Google One AI credits via the enable_credit metadata field.
+func antigravityAuthEnableCredit(auth *cliproxyauth.Auth, model string) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	// Credits only apply to Claude models; Gemini models are free.
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(model)), "claude") {
+		return false
+	}
+	for _, key := range []string{"enable_credit", "enable-credit"} {
+		if val, ok := auth.Metadata[key]; ok {
+			switch v := val.(type) {
+			case bool:
+				return v
+			case string:
+				trimmed := strings.TrimSpace(strings.ToLower(v))
+				return trimmed == "true" || trimmed == "1" || trimmed == "yes"
+			case float64:
+				return v != 0
+			case json.Number:
+				if i, err := v.Int64(); err == nil {
+					return i != 0
+				}
+			}
+		}
+	}
+	return false
+}
+
 func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
@@ -524,7 +557,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel, requestPath)
 
-	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	useCredits := antigravityAuthEnableCredit(auth, baseModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -722,7 +755,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel, requestPath)
 
-	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	useCredits := antigravityAuthEnableCredit(auth, baseModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1183,7 +1216,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel, requestPath)
 
-	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	useCredits := antigravityAuthEnableCredit(auth, baseModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1612,7 +1645,27 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 }
 
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
-	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) {
+	if e == nil || auth == nil {
+		return
+	}
+	// Only refresh credits hint if auth has enable_credit set
+	if auth.Metadata == nil {
+		return
+	}
+	hasEnableCredit := false
+	for _, key := range []string{"enable_credit", "enable-credit"} {
+		if val, ok := auth.Metadata[key]; ok {
+			switch v := val.(type) {
+			case bool:
+				hasEnableCredit = v
+			case string:
+				trimmed := strings.TrimSpace(strings.ToLower(v))
+				hasEnableCredit = trimmed == "true" || trimmed == "1" || trimmed == "yes"
+			}
+			break
+		}
+	}
+	if !hasEnableCredit {
 		return
 	}
 	if ctx != nil && ctx.Err() != nil {
@@ -2193,6 +2246,8 @@ func antigravityShouldRetrySoftRateLimit(statusCode int, body []byte) bool {
 }
 
 func antigravityShouldBypassShortCooldown(ctx context.Context, cfg *config.Config) bool {
+	// Keep original behavior: when credits are requested via context AND global config allows it,
+	// bypass short cooldown. This path is still used by the conductor's fallback mechanism.
 	return cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(cfg)
 }
 
