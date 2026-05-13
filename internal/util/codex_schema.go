@@ -67,9 +67,16 @@ func joinCodexSchemaPath(base, suffix string) string {
 	return base + "." + suffix
 }
 
+var codexPathReplacer = strings.NewReplacer(
+	"\\", "\\\\",
+	".", "\\.",
+	"*", "\\*",
+	"?", "\\?",
+)
+
 func escapeCodexSchemaPathKey(key string) string {
-	if !strings.ContainsAny(key, ".*?") {
+	if !strings.ContainsAny(key, "\\.*?") {
 		return key
 	}
-	return strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?").Replace(key)
+	return codexPathReplacer.Replace(key)
 }
