@@ -13,14 +13,14 @@ import (
 	"strings"
 	"time"
 
-	kimiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -108,7 +108,8 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestPath := helps.PayloadRequestPath(opts)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
 	body, err = normalizeKimiToolMessageLinks(body)
 	if err != nil {
 		return resp, err
@@ -217,7 +218,8 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, fmt.Errorf("kimi executor: failed to set stream_options in payload: %w", err)
 	}
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestPath := helps.PayloadRequestPath(opts)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
 	body, err = normalizeKimiToolMessageLinks(body)
 	if err != nil {
 		return nil, err
@@ -288,17 +290,28 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range doneChunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
+			case <-ctx.Done():
+				return
+			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			reporter.PublishFailure(ctx, errScan)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
+			}
 		}
 		reporter.EnsurePublished(ctx)
 	}()
@@ -321,7 +334,17 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		return body, nil
 	}
 
-	out := body
+	msgs := messages.Array()
+	out, dropped, err := filterKimiEmptyAssistantMessages(body, msgs)
+	if err != nil {
+		return body, err
+	}
+	if dropped > 0 {
+		log.WithField("dropped_assistant_messages", dropped).Debug("kimi executor: dropped empty assistant messages")
+	}
+
+	messages = gjson.GetBytes(out, "messages")
+	msgs = messages.Array()
 	pending := make([]string, 0)
 	patched := 0
 	patchedReasoning := 0
@@ -339,7 +362,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		}
 	}
 
-	msgs := messages.Array()
 	for msgIdx := range msgs {
 		msg := msgs[msgIdx]
 		role := strings.TrimSpace(msg.Get("role").String())
@@ -427,6 +449,96 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	return out, nil
 }
 
+func filterKimiEmptyAssistantMessages(body []byte, msgs []gjson.Result) ([]byte, int, error) {
+	kept := make([]string, 0, len(msgs))
+	dropped := 0
+	for _, msg := range msgs {
+		if shouldDropKimiAssistantMessage(msg) {
+			dropped++
+			continue
+		}
+		kept = append(kept, msg.Raw)
+	}
+	if dropped == 0 {
+		return body, 0, nil
+	}
+
+	rawMessages := []byte("[" + strings.Join(kept, ",") + "]")
+	out, err := sjson.SetRawBytes(body, "messages", rawMessages)
+	if err != nil {
+		return body, 0, fmt.Errorf("kimi executor: failed to drop empty assistant messages: %w", err)
+	}
+	return out, dropped, nil
+}
+
+func shouldDropKimiAssistantMessage(msg gjson.Result) bool {
+	if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+		return false
+	}
+	if hasKimiToolCalls(msg) || hasKimiLegacyFunctionCall(msg) || hasKimiAssistantReasoning(msg) {
+		return false
+	}
+	return isKimiAssistantContentEmpty(msg.Get("content"))
+}
+
+func hasKimiToolCalls(msg gjson.Result) bool {
+	toolCalls := msg.Get("tool_calls")
+	return toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0
+}
+
+func hasKimiLegacyFunctionCall(msg gjson.Result) bool {
+	functionCall := msg.Get("function_call")
+	if !functionCall.Exists() || functionCall.Type == gjson.Null {
+		return false
+	}
+	if functionCall.IsObject() && strings.TrimSpace(functionCall.Raw) == "{}" {
+		return false
+	}
+	return strings.TrimSpace(functionCall.Raw) != ""
+}
+
+func hasKimiAssistantReasoning(msg gjson.Result) bool {
+	reasoning := msg.Get("reasoning_content")
+	return reasoning.Exists() && strings.TrimSpace(reasoning.String()) != ""
+}
+
+func isKimiAssistantContentEmpty(content gjson.Result) bool {
+	if !content.Exists() || content.Type == gjson.Null {
+		return true
+	}
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String()) == ""
+	}
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		if !isKimiAssistantContentPartEmpty(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isKimiAssistantContentPartEmpty(part gjson.Result) bool {
+	if !part.Exists() || part.Type == gjson.Null {
+		return true
+	}
+	if part.Type == gjson.String {
+		return strings.TrimSpace(part.String()) == ""
+	}
+	if !part.IsObject() {
+		return false
+	}
+	if text := part.Get("text"); text.Exists() {
+		return strings.TrimSpace(text.String()) == ""
+	}
+	if strings.TrimSpace(part.Get("type").String()) == "text" {
+		return true
+	}
+	return strings.TrimSpace(part.Raw) == "{}"
+}
+
 func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
 	if hasLatest && strings.TrimSpace(latest) != "" {
 		return latest
@@ -458,6 +570,9 @@ func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string)
 // Refresh refreshes the Kimi token using the refresh token.
 func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("kimi executor: refresh called")
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	if auth == nil {
 		return nil, fmt.Errorf("kimi executor: auth is nil")
 	}

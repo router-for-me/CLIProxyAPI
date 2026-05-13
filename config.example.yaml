@@ -11,6 +11,13 @@ tls:
   cert: ""
   key: ""
 
+# Optional "home" control plane integration over Redis protocol.
+home:
+  enabled: false
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+
 # Management API settings
 remote-management:
   # Whether to allow remote (non-localhost) management access.
@@ -66,6 +73,11 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
+# Note: the in-process Redis RESP usage output is disabled when home.enabled is true.
+# Default: 60. Max: 3600.
+redis-usage-queue-retention-seconds: 60
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
@@ -90,6 +102,11 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# disable-image-generation supports: false (default), true, or "chat".
+# - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
+# - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
+disable-image-generation: false
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
@@ -104,8 +121,9 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
-  # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,
-  # metadata.user_id, conversation_id, or first few messages hash.
+  # Session IDs are extracted from: metadata.user_id (Claude Code session format),
+  # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
+  # X-Client-Request-Id (PI), conversation_id, or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
@@ -139,6 +157,7 @@ nonstream-keepalive-interval: 0
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -158,6 +177,7 @@ nonstream-keepalive-interval: 0
 # codex-api-key:
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -177,6 +197,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -232,6 +253,7 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
