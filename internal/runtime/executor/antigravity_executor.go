@@ -192,7 +192,7 @@ var (
 	antigravityTransportOnce sync.Once
 )
 
-func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
+func cloneTransportWithHTTP11(base *http.Transport, skipVerify bool) *http.Transport {
 	if base == nil {
 		return nil
 	}
@@ -208,6 +208,9 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	}
 	// Actively advertise only HTTP/1.1 in the ALPN handshake.
 	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	if skipVerify {
+		clone.TLSClientConfig.InsecureSkipVerify = true
+	}
 	return clone
 }
 
@@ -217,7 +220,7 @@ func initAntigravityTransport() {
 	if !ok {
 		base = &http.Transport{}
 	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
+	antigravityTransport = cloneTransportWithHTTP11(base, false)
 }
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
@@ -228,42 +231,27 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 
-	// Apply TLS skip verify if configured, preserving any existing proxy transport.
-	if cfg != nil && cfg.TLSSkipVerify {
-		skipTLSVerifyTransport(client)
-	}
-
-	// If no transport is set, use the shared HTTP/1.1 transport.
+	// 1. If no transport is set, use the shared HTTP/1.1 transport as the base.
 	if client.Transport == nil {
 		client.Transport = antigravityTransport
+	}
+
+	// 2. Only proceed with specialized cloning if the transport is an *http.Transport.
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
 		return client
 	}
 
-	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = cloneTransportWithHTTP11(transport)
+	// 3. Apply HTTP/1.1 enforcement and InsecureSkipVerify in a single pass.
+	// We MUST clone if:
+	// - We need to skip TLS verification (to avoid mutating the singleton or shared proxy transport)
+	// - OR the current transport is NOT the shared singleton (to ensure HTTP/1.1 on proxy transports)
+	skipVerify := cfg != nil && cfg.TLSSkipVerify
+	if skipVerify || transport != antigravityTransport {
+		client.Transport = cloneTransportWithHTTP11(transport, skipVerify)
 	}
-	return client
-}
 
-// skipTLSVerifyTransport sets InsecureSkipVerify on the client's transport.
-// If a transport is already set (e.g. from proxy config), it clones it with TLS skip verify.
-// Otherwise, it creates a new transport with TLS skip verify.
-func skipTLSVerifyTransport(client *http.Client) {
-	if client.Transport == nil {
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-		return
-	}
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		clone := transport.Clone()
-		if clone.TLSClientConfig == nil {
-			clone.TLSClientConfig = &tls.Config{}
-		}
-		clone.TLSClientConfig.InsecureSkipVerify = true
-		client.Transport = clone
-	}
+	return client
 }
 
 func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
