@@ -24,6 +24,11 @@ func DoClaudeLogin(cfg *config.Config, options *LoginOptions) {
 		options = &LoginOptions{}
 	}
 
+	if err := sdkAuth.ValidateLabel(options.Label); err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	promptFn := options.Prompt
 	if promptFn == nil {
 		promptFn = defaultProjectPrompt()
