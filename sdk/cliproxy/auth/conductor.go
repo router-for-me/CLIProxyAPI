@@ -866,6 +866,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		m.syncAuthMetadata(auth.ID, auth.Metadata)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1371,6 +1372,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			m.syncAuthMetadata(auth.ID, auth.Metadata)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1459,6 +1461,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			m.syncAuthMetadata(auth.ID, auth.Metadata)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -3042,13 +3045,13 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	authCopy := selected
+	authCopy := selected.Clone()
 	m.mu.RUnlock()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
 			current.EnsureIndex()
-			authCopy = current
+			authCopy = current.Clone()
 		}
 		m.mu.Unlock()
 	}
@@ -3131,12 +3134,12 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
-		authCopy := selected
+		authCopy := selected.Clone()
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
 				current.EnsureIndex()
-				authCopy = current
+				authCopy = current.Clone()
 			}
 			m.mu.Unlock()
 		}
@@ -3898,6 +3901,21 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 
 	m.queueRefreshReschedule(id)
 	return true
+}
+
+// syncAuthMetadata copies metadata from an executor-received auth back to the
+// map entry so on-demand token refresh results persist for subsequent calls.
+func (m *Manager) syncAuthMetadata(authID string, metadata map[string]any) {
+	if authID == "" || len(metadata) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if entry, ok := m.auths[authID]; ok && entry != nil {
+		for k, v := range metadata {
+			entry.Metadata[k] = v
+		}
+	}
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
