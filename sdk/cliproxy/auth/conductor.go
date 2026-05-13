@@ -4148,12 +4148,13 @@ func (m *Manager) syncAuthMetadata(authID string, metadata map[string]any) {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if entry, ok := m.auths[authID]; ok && entry != nil {
 		for k, v := range metadata {
 			entry.Metadata[k] = v
 		}
 	}
+	m.mu.Unlock()
+	m.RefreshSchedulerEntry(authID)
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
