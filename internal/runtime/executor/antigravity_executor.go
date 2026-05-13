@@ -185,11 +185,13 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 }
 
 // antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
-// It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
-// (and the goroutines managing it) on every request.
+// antigravitySkipVerifyTransport is a second singleton for requests that skip TLS verification.
+// They are initialized lazily to avoid leaking connection pools on every request.
 var (
-	antigravityTransport     *http.Transport
-	antigravityTransportOnce sync.Once
+	antigravityTransport           *http.Transport
+	antigravityTransportOnce       sync.Once
+	antigravitySkipVerifyTransport *http.Transport
+	antigravitySkipVerifyOnce      sync.Once
 )
 
 func cloneTransportWithHTTP11(base *http.Transport, skipVerify bool) *http.Transport {
@@ -223,17 +225,33 @@ func initAntigravityTransport() {
 	antigravityTransport = cloneTransportWithHTTP11(base, false)
 }
 
+// initAntigravitySkipVerifyTransport creates the shared skip-verify HTTP/1.1 transport exactly once.
+func initAntigravitySkipVerifyTransport() {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	antigravitySkipVerifyTransport = cloneTransportWithHTTP11(base, true)
+}
+
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
 // enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
 // The underlying Transport is a singleton to avoid leaking connection pools.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	antigravityTransportOnce.Do(initAntigravityTransport)
+	skipVerify := cfg != nil && cfg.TLSSkipVerify
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 
-	// 1. If no transport is set, use the shared HTTP/1.1 transport as the base.
+	// 1. If no transport is set, use the appropriate shared HTTP/1.1 singleton.
 	if client.Transport == nil {
-		client.Transport = antigravityTransport
+		if skipVerify {
+			antigravitySkipVerifyOnce.Do(initAntigravitySkipVerifyTransport)
+			client.Transport = antigravitySkipVerifyTransport
+		} else {
+			antigravityTransportOnce.Do(initAntigravityTransport)
+			client.Transport = antigravityTransport
+		}
+		return client
 	}
 
 	// 2. Only proceed with specialized cloning if the transport is an *http.Transport.
@@ -244,11 +262,18 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 
 	// 3. Apply HTTP/1.1 enforcement and InsecureSkipVerify in a single pass.
 	// We MUST clone if:
-	// - We need to skip TLS verification (to avoid mutating the singleton or shared proxy transport)
-	// - OR the current transport is NOT the shared singleton (to ensure HTTP/1.1 on proxy transports)
-	skipVerify := cfg != nil && cfg.TLSSkipVerify
-	if skipVerify || transport != antigravityTransport {
+	// - The current transport is NOT one of our shared singletons (e.g. it's a proxy-aware transport)
+	// - OR it's a singleton but we need to change its InsecureSkipVerify state (not possible if we use the right one above, but for safety)
+	if transport != antigravityTransport && transport != antigravitySkipVerifyTransport {
 		client.Transport = cloneTransportWithHTTP11(transport, skipVerify)
+	} else if skipVerify && transport == antigravityTransport {
+		// Fallback for safety: if we somehow have the standard singleton but need skipVerify
+		antigravitySkipVerifyOnce.Do(initAntigravitySkipVerifyTransport)
+		client.Transport = antigravitySkipVerifyTransport
+	} else if !skipVerify && transport == antigravitySkipVerifyTransport {
+		// Fallback for safety: if we somehow have the skip-verify singleton but don't need it
+		antigravityTransportOnce.Do(initAntigravityTransport)
+		client.Transport = antigravityTransport
 	}
 
 	return client
