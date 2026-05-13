@@ -755,9 +755,16 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 }
 
 func accumulateUsage(ginCtx *gin.Context, data []byte) {
-	usage := gjson.GetBytes(data, "usage")
+	// Responses API: response.completed event carries usage under response.usage.
+	usage := gjson.GetBytes(data, "response.usage")
 	if !usage.Exists() {
-		return
+		usage = gjson.GetBytes(data, "usage")
+	}
+	if !usage.Exists() {
+		// Check Gemini usageMetadata path before giving up.
+		if !gjson.GetBytes(data, "usageMetadata").Exists() {
+			return
+		}
 	}
 	current := map[string]int64{}
 	if v, ok := ginCtx.Get(UpstreamRawUsageKey); ok {
