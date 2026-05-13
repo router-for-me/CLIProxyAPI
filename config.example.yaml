@@ -42,6 +42,14 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# DeepSeek direct auth uses JSON files in auth-dir. Example auth-dir/deepseek.json:
+# {
+#   "type": "deepseek",
+#   "email": "your-email@example.com",
+#   "password": "your-password"
+# }
+# You can also use "mobile" instead of "email", or provide "api_key", "token", or "access_token".
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
@@ -332,7 +340,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, deepseek.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps

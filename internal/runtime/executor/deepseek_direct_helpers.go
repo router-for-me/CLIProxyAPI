@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func observeDeepSeekContinue(chunk map[string]any, state *deepSeekContinueState) {
@@ -96,9 +96,9 @@ func deepSeekModelConfig(model string) (bool, bool) {
 	noThinking := strings.HasSuffix(model, "-nothinking")
 	base := strings.TrimSuffix(model, "-nothinking")
 	switch base {
-	case "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-vision":
+	case "deepseek-v4-flash", "deepseek-v4-pro":
 		return !noThinking, false
-	case "deepseek-v4-flash-search", "deepseek-v4-pro-search", "deepseek-v4-vision-search":
+	case "deepseek-v4-flash-search", "deepseek-v4-pro-search":
 		return !noThinking, true
 	default:
 		return !noThinking, false
@@ -110,8 +110,6 @@ func deepSeekModelType(model string) string {
 	switch base {
 	case "deepseek-v4-pro", "deepseek-v4-pro-search":
 		return "expert"
-	case "deepseek-v4-vision", "deepseek-v4-vision-search":
-		return "vision"
 	default:
 		return "default"
 	}
@@ -124,7 +122,7 @@ func resolveDeepSeekModel(requested string) string {
 	}
 	base := strings.TrimSuffix(model, "-nothinking")
 	switch base {
-	case "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-search", "deepseek-v4-pro-search", "deepseek-v4-vision", "deepseek-v4-vision-search":
+	case "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-search", "deepseek-v4-pro-search":
 		return model
 	case "deepseek-chat":
 		return withNoThinking(model, "deepseek-v4-flash")
