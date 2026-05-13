@@ -203,8 +203,10 @@ func ginCtxFrom(ctx context.Context) *gin.Context {
 }
 
 func requestIDFrom(ctx context.Context, gc *gin.Context) string {
-	if v, ok := ctx.Value("__request_id__").(string); ok && v != "" {
-		return v
+	if ctx != nil {
+		if v, ok := ctx.Value("__request_id__").(string); ok && v != "" {
+			return v
+		}
 	}
 	if gc != nil {
 		if v, ok := gc.Get("__request_id__"); ok {

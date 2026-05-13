@@ -23,6 +23,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/examples/langfuse-plugin/langfuse"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
@@ -32,7 +33,10 @@ import (
 )
 
 func main() {
-	cfg, err := config.LoadConfig("config.yaml")
+	configPath := flag.String("config", "config.yaml", "Path to config file")
+	flag.Parse()
+
+	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
@@ -48,7 +52,7 @@ func main() {
 
 	svc, err := cliproxy.NewBuilder().
 		WithConfig(cfg).
-		WithConfigPath("config.yaml").
+		WithConfigPath(*configPath).
 		Build()
 	if err != nil {
 		log.Fatalf("failed to build service: %v", err)
