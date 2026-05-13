@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
@@ -72,6 +72,10 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 
 	switch {
 	case auth.Storage != nil:
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["disabled"] = auth.Disabled
 		if setter, ok := auth.Storage.(metadataSetter); ok {
 			setter.SetMetadata(auth.Metadata)
 		}

@@ -11,6 +11,13 @@ tls:
   cert: ""
   key: ""
 
+# Optional "home" control plane integration over Redis protocol.
+home:
+  enabled: false
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+
 # Management API settings
 remote-management:
   # Whether to allow remote (non-localhost) management access.
@@ -67,6 +74,7 @@ error-logs-max-files: 10
 usage-statistics-enabled: false
 
 # How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
+# Note: the in-process Redis RESP usage output is disabled when home.enabled is true.
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 
@@ -149,6 +157,7 @@ nonstream-keepalive-interval: 0
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -168,6 +177,7 @@ nonstream-keepalive-interval: 0
 # codex-api-key:
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -187,6 +197,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -242,6 +253,7 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
