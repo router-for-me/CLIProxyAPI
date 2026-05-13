@@ -15,23 +15,7 @@ import (
 )
 
 // GetKiroQuota fetches Kiro (AWS CodeWhisperer) usage quota information.
-//
-// Endpoint:
-//
-//	GET /v0/management/kiro-quota
-//
-// Query Parameters (optional):
-//   - auth_index: The credential "auth_index" from GET /v0/management/auth-files.
-//     If omitted, uses the first available Kiro credential.
-//
-// Response:
-//
-//	Returns the UsageQuotaResponse with usage breakdown and subscription info.
-//
-// Example:
-//
-//	curl -sS -X GET "http://127.0.0.1:8317/v0/management/kiro-quota?auth_index=<AUTH_INDEX>" \
-//	  -H "Authorization: Bearer <MANAGEMENT_KEY>"
+// It will automatically refresh the token if expired before querying quota.
 func (h *Handler) GetKiroQuota(c *gin.Context) {
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
 	if authIndex == "" {
@@ -54,6 +38,13 @@ func (h *Handler) GetKiroQuota(c *gin.Context) {
 		return
 	}
 
+	// Check if token is expired and refresh if needed
+	tokenData = h.ensureKiroTokenFresh(auth, tokenData)
+	if tokenData == nil || tokenData.AccessToken == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "kiro token refresh failed"})
+		return
+	}
+
 	// Create usage checker with proxy-aware HTTP client
 	checker := kiro.NewUsageCheckerWithClient(
 		util.SetProxy(&h.cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second}),
@@ -64,9 +55,19 @@ func (h *Handler) GetKiroQuota(c *gin.Context) {
 
 	usage, err := checker.CheckUsage(ctx, tokenData)
 	if err != nil {
-		log.WithError(err).Debug("kiro quota request failed")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "kiro quota request failed: " + err.Error()})
-		return
+		// If quota check fails with auth error, try refreshing token and retry once
+		if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "invalid") {
+			log.Debug("kiro quota check failed with auth error, attempting token refresh and retry")
+			refreshedToken := h.forceRefreshKiroToken(auth, tokenData)
+			if refreshedToken != nil && refreshedToken.AccessToken != "" {
+				usage, err = checker.CheckUsage(ctx, refreshedToken)
+			}
+		}
+		if err != nil {
+			log.WithError(err).Debug("kiro quota request failed")
+			c.JSON(http.StatusBadGateway, gin.H{"error": "kiro quota request failed: " + err.Error()})
+			return
+		}
 	}
 
 	// Build enriched response
@@ -78,6 +79,90 @@ func (h *Handler) GetKiroQuota(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// ensureKiroTokenFresh checks if the token is expired and refreshes it if needed.
+func (h *Handler) ensureKiroTokenFresh(auth *coreauth.Auth, tokenData *kiro.KiroTokenData) *kiro.KiroTokenData {
+	if tokenData == nil {
+		return nil
+	}
+
+	// Check expiry from metadata
+	if tokenData.ExpiresAt != "" {
+		expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
+		if err == nil && time.Now().After(expiresAt.Add(-2*time.Minute)) {
+			// Token expired or about to expire, refresh it
+			log.Debugf("kiro token expired (expires_at=%s), refreshing before quota check", tokenData.ExpiresAt)
+			refreshed := h.forceRefreshKiroToken(auth, tokenData)
+			if refreshed != nil {
+				return refreshed
+			}
+		}
+	}
+
+	return tokenData
+}
+
+// forceRefreshKiroToken refreshes the Kiro token using SSO OIDC and updates auth metadata in memory.
+func (h *Handler) forceRefreshKiroToken(auth *coreauth.Auth, tokenData *kiro.KiroTokenData) *kiro.KiroTokenData {
+	if tokenData.RefreshToken == "" {
+		log.Debug("kiro: cannot refresh token - no refresh_token available")
+		return nil
+	}
+
+	ssoClient := kiro.NewSSOOIDCClient(h.cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var newToken *kiro.KiroTokenData
+	var err error
+
+	authMethod := strings.ToLower(tokenData.AuthMethod)
+	region := tokenData.Region
+
+	switch authMethod {
+	case "idc":
+		newToken, err = ssoClient.RefreshTokenWithRegion(
+			ctx,
+			tokenData.ClientID,
+			tokenData.ClientSecret,
+			tokenData.RefreshToken,
+			region,
+			tokenData.StartURL,
+		)
+	case "builder-id":
+		newToken, err = ssoClient.RefreshToken(
+			ctx,
+			tokenData.ClientID,
+			tokenData.ClientSecret,
+			tokenData.RefreshToken,
+		)
+	default:
+		// Social auth (Google) - use Kiro social auth service endpoint
+		socialClient := kiro.NewSocialAuthClient(h.cfg)
+		newToken, err = socialClient.RefreshSocialToken(ctx, tokenData.RefreshToken)
+	}
+
+	if err != nil {
+		log.WithError(err).Debug("kiro: token refresh failed during quota check")
+		return nil
+	}
+
+	// Update auth metadata in memory so subsequent calls use the new token
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]interface{})
+	}
+	auth.Metadata["access_token"] = newToken.AccessToken
+	if newToken.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = newToken.RefreshToken
+	}
+	if newToken.ExpiresAt != "" {
+		auth.Metadata["expires_at"] = newToken.ExpiresAt
+	}
+
+	log.Debugf("kiro: token refreshed for quota check, new expires_at=%s", newToken.ExpiresAt)
+	return newToken
 }
 
 // findKiroAuth locates a Kiro credential by auth_index or returns the first available one.
@@ -130,6 +215,8 @@ func extractKiroTokenData(auth *coreauth.Auth) *kiro.KiroTokenData {
 	clientSecret, _ := auth.Metadata["client_secret"].(string)
 	region, _ := auth.Metadata["region"].(string)
 	startURL, _ := auth.Metadata["start_url"].(string)
+	expiresAt, _ := auth.Metadata["expires_at"].(string)
+	authMethod, _ := auth.Metadata["auth_method"].(string)
 
 	if accessToken == "" {
 		return nil
@@ -143,6 +230,8 @@ func extractKiroTokenData(auth *coreauth.Auth) *kiro.KiroTokenData {
 		ClientSecret: clientSecret,
 		Region:       region,
 		StartURL:     startURL,
+		ExpiresAt:    expiresAt,
+		AuthMethod:   authMethod,
 	}
 }
 
