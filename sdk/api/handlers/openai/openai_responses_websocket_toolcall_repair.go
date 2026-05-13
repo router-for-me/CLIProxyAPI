@@ -300,11 +300,6 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 				continue
 			}
 
-			if allowOrphanOutputs {
-				filtered = append(filtered, item)
-				continue
-			}
-
 			if _, ok := callPresent[callID]; ok {
 				filtered = append(filtered, item)
 				continue
@@ -320,6 +315,11 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 					filtered = append(filtered, item)
 					continue
 				}
+			}
+
+			if allowOrphanOutputs {
+				filtered = append(filtered, item)
+				continue
 			}
 
 			// Drop orphaned function_call_output items; upstream rejects transcripts with missing calls.
