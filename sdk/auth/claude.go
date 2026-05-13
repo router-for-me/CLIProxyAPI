@@ -46,6 +46,10 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		opts = &LoginOptions{}
 	}
 
+	if err := ValidateLabel(opts.Label); err != nil {
+		return nil, err
+	}
+
 	callbackPort := a.CallbackPort
 	if opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort
