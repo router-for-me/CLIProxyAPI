@@ -1619,6 +1619,30 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
 }
 
+
+// systemContainsClaudeAgentMarker reports whether any text block in the
+// request's system field contains the "You are a Claude agent" marker used
+// by the Claude Agent SDK. Callers that already cloak via the SDK should not
+// be rewritten again.
+func systemContainsClaudeAgentMarker(system gjson.Result) bool {
+	const marker = "You are a Claude agent"
+	if system.IsArray() {
+		found := false
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" &&
+				strings.Contains(part.Get("text").String(), marker) {
+				found = true
+				return false
+			}
+			return true
+		})
+		return found
+	}
+	if system.Type == gjson.String {
+		return strings.Contains(system.String(), marker)
+	}
+	return false
+}
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
 //
 //	system[0]: billing header (no cache_control)
@@ -1648,6 +1672,13 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	// Skip if already injected
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
 	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+		return payload
+	}
+
+	// Skip if the caller has already cloaked as Claude Agent SDK
+	// (system prompt contains "You are a Claude agent"). This avoids
+	// double-rewriting and discarding the caller's real system prompt.
+	if systemContainsClaudeAgentMarker(system) {
 		return payload
 	}
 
@@ -1690,9 +1721,6 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 		if len(userSystemParts) > 0 {
 			combined := strings.Join(userSystemParts, "\n\n")
-			if oauthMode {
-				combined = sanitizeForwardedSystemPrompt(combined)
-			}
 			if strings.TrimSpace(combined) != "" {
 				payload = prependToFirstUserMessage(payload, combined)
 			}
@@ -1820,6 +1848,12 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
+		return payload
+	}
+	// Bypass cloaking entirely if the caller has already cloaked as Claude
+	// Agent SDK. This avoids double-rewriting the system prompt and dropping
+	// the caller's instructions when both layers try to inject markers.
+	if systemContainsClaudeAgentMarker(gjson.GetBytes(payload, "system")) {
 		return payload
 	}
 
