@@ -25,7 +25,7 @@ func NewClient(baseURL, publicKey, secretKey string) *Client {
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		publicKey:  publicKey,
 		secretKey:  secretKey,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{},
 	}
 }
 

@@ -54,11 +54,9 @@ func New(baseURL, publicKey, secretKey string) *Plugin {
 
 func (p *Plugin) worker() {
 	for gen := range p.queue {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		if err := p.client.SendGeneration(ctx, gen); err != nil {
+		if err := p.client.SendGeneration(context.Background(), gen); err != nil {
 			log.Debugf("langfuse plugin: %v", err)
 		}
-		cancel()
 	}
 }
 
