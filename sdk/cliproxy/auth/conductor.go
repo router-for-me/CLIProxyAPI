@@ -2961,7 +2961,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			continue
 		}
 		selected = m.refreshAuthIfNeeded(ctx, selected)
+		m.mu.RLock()
 		authCopy := selected.Clone()
+		m.mu.RUnlock()
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
