@@ -31,14 +31,35 @@ import (
 // ginContextKey is the key CPA uses to store *gin.Context in request contexts.
 const ginContextKey = "gin"
 
+// workerCount is the number of goroutines sending events to Langfuse.
+const workerCount = 4
+
 // Plugin implements coreusage.Plugin.
 type Plugin struct {
 	client *Client
+	queue  chan GenerationBody
 }
 
 // New creates a Plugin with explicit credentials.
 func New(baseURL, publicKey, secretKey string) *Plugin {
-	return &Plugin{client: NewClient(baseURL, publicKey, secretKey)}
+	p := &Plugin{
+		client: NewClient(baseURL, publicKey, secretKey),
+		queue:  make(chan GenerationBody, 256),
+	}
+	for range workerCount {
+		go p.worker()
+	}
+	return p
+}
+
+func (p *Plugin) worker() {
+	for gen := range p.queue {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		if err := p.client.SendGeneration(ctx, gen); err != nil {
+			log.Debugf("langfuse plugin: %v", err)
+		}
+		cancel()
+	}
 }
 
 // NewFromEnv reads LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY
@@ -109,14 +130,13 @@ func (p *Plugin) HandleUsage(ctx context.Context, rec coreusage.Record) {
 
 	gen.Usage, gen.UsageDetails = buildUsage(gc, rec)
 
-	// Fire-and-forget: do not block the response path.
-	go func() {
-		sendCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		if err := p.client.SendGeneration(sendCtx, gen); err != nil {
-			log.Debugf("langfuse plugin: %v", err)
-		}
-	}()
+	// Non-blocking send: drop the event if the queue is full rather than
+	// letting a slow Langfuse endpoint stall the response path.
+	select {
+	case p.queue <- gen:
+	default:
+		log.Debugf("langfuse plugin: queue full, dropping event for trace %s", gen.TraceID)
+	}
 }
 
 func buildMeta(gc *gin.Context, rec coreusage.Record) map[string]any {
