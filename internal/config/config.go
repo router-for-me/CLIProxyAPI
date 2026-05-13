@@ -105,6 +105,10 @@ type Config struct {
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
+	// AntigravityUseDefaultProjectID skips fetching project ID via loadCodeAssist
+	// and uses the default base URL directly. Set true when you have no project ID.
+	AntigravityUseDefaultProjectID bool `yaml:"antigravity-use-default-project-id" json:"antigravity-use-default-project-id"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
