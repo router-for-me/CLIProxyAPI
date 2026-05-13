@@ -3931,7 +3931,15 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 	if auth == nil || auth.ID == "" {
 		return auth
 	}
-	if !m.shouldRefresh(auth, time.Now()) {
+	// shouldRefresh reads mutable auth fields (NextRefreshAfter,
+	// LastRefreshedAt, Metadata, Runtime). Other paths mutate the
+	// same *Auth stored in m.auths under m.mu.Lock(), so hold the
+	// read lock here to avoid a data race when the caller passed in
+	// a map-backed auth pointer.
+	m.mu.RLock()
+	needs := m.shouldRefresh(auth, time.Now())
+	m.mu.RUnlock()
+	if !needs {
 		return auth
 	}
 	m.lazyRefreshAuth(ctx, auth.ID)
@@ -4130,6 +4138,16 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	}
 	m.mu.RLock()
 	a := m.auths[authID]
+	m.mu.RUnlock()
+	if a == nil {
+		return nil
+	}
+	// Refresh via the manager before cloning so any rotated refresh
+	// token is persisted into the map. Without this, a clone-based
+	// PrepareRequest path would refresh on the clone and discard the
+	// rotated credentials.
+	a = m.refreshAuthIfNeeded(req.Context(), a)
+	m.mu.RLock()
 	var exec ProviderExecutor
 	if a != nil {
 		exec = m.executors[executorKeyFromAuth(a)]
@@ -4170,6 +4188,9 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if !ok || preparer == nil {
 		return &Error{Code: "not_supported", Message: "executor does not support http request preparation"}
 	}
+	// Refresh through the manager so any rotated refresh token is
+	// persisted in the map; a no-op for transient auths not in the map.
+	auth = m.refreshAuthIfNeeded(ctx, auth)
 	return preparer.PrepareRequest(req, auth)
 }
 
