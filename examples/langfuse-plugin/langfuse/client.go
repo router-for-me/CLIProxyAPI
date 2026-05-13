@@ -87,10 +87,27 @@ func (c *Client) ingest(ctx context.Context, events ...ingestionEvent) error {
 		return fmt.Errorf("langfuse: http: %w", err)
 	}
 	defer resp.Body.Close()
+	respBody := make([]byte, 2048)
+	n, _ := resp.Body.Read(respBody)
+	respBody = respBody[:n]
 	if resp.StatusCode >= 300 {
-		body := make([]byte, 512)
-		n, _ := resp.Body.Read(body)
-		return fmt.Errorf("langfuse: status %d: %s", resp.StatusCode, bytes.TrimSpace(body[:n]))
+		return fmt.Errorf("langfuse: status %d: %s", resp.StatusCode, bytes.TrimSpace(respBody))
+	}
+	// Langfuse returns 207 Multi-Status when the batch is accepted but
+	// individual events fail. Check for per-event errors in the response.
+	if resp.StatusCode == http.StatusMultiStatus {
+		var result struct {
+			Errors []struct {
+				ID    string `json:"id"`
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			} `json:"errors"`
+		}
+		if jsonErr := json.Unmarshal(respBody, &result); jsonErr == nil && len(result.Errors) > 0 {
+			return fmt.Errorf("langfuse: %d event(s) rejected: %s: %s",
+				len(result.Errors), result.Errors[0].ID, result.Errors[0].Error.Message)
+		}
 	}
 	return nil
 }

@@ -163,7 +163,7 @@ func buildUsage(gc *gin.Context, rec coreusage.Record) (*GenerationUsage, map[st
 	raw := rawUsage(gc)
 	input := coalesce(raw, "input_tokens", rec.Detail.InputTokens)
 	output := coalesce(raw, "output_tokens", rec.Detail.OutputTokens)
-	cacheRead := coalesce(raw, "cache_read_input_tokens", rec.Detail.CachedTokens)
+	cacheRead := coalesce(raw, "cache_read_input_tokens", rec.Detail.CacheReadTokens)
 	reasoning := coalesce(raw, "reasoning_tokens", rec.Detail.ReasoningTokens)
 	total := coalesce(raw, "total_tokens", rec.Detail.TotalTokens)
 	if total == 0 {

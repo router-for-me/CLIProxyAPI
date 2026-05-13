@@ -24,6 +24,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"os"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/examples/langfuse-plugin/langfuse"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
@@ -33,12 +35,19 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Error(err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	flag.Parse()
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Register the Langfuse plugin if credentials are present in the environment.
@@ -55,13 +64,14 @@ func main() {
 		WithConfigPath(*configPath).
 		Build()
 	if err != nil {
-		log.Fatalf("failed to build service: %v", err)
+		return fmt.Errorf("failed to build service: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err = svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("service error: %v", err)
+		return fmt.Errorf("service error: %w", err)
 	}
+	return nil
 }
