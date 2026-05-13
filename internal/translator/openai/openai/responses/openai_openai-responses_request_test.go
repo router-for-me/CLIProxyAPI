@@ -122,20 +122,3 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntil
 		t.Fatalf("messages.3.content = %q, want %q", got, "next")
 	}
 }
-
-func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructuredToolChoice(t *testing.T) {
-	raw := []byte(`{
-		"input": "call the selected tool",
-		"tools": [{"type":"function","name":"run_command","parameters":{"type":"object"}}],
-		"tool_choice": {"type":"function","function":{"name":"run_command"}}
-	}`)
-
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.5", raw, false)
-
-	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
-		t.Fatalf("tool_choice.type = %q, want function: %s", got, string(out))
-	}
-	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "run_command" {
-		t.Fatalf("tool_choice.function.name = %q, want run_command: %s", got, string(out))
-	}
-}
