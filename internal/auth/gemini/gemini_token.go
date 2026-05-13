@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 // GeminiTokenStorage stores OAuth2 token information for Google Gemini API authentication.
@@ -56,7 +55,7 @@ func (ts *GeminiTokenStorage) SetMetadata(meta map[string]any) {
 //
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
-func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
+func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) (err error) {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "gemini"
 	// Merge metadata using helper
@@ -73,8 +72,8 @@ func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
 	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("failed to close file: %v", errClose)
+		if errClose := f.Close(); errClose != nil && err == nil {
+			err = fmt.Errorf("failed to close token file: %w", errClose)
 		}
 	}()
 	if err := f.Chmod(0o600); err != nil {
@@ -83,7 +82,7 @@ func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
 
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(data); err != nil {
+	if err = enc.Encode(data); err != nil {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil

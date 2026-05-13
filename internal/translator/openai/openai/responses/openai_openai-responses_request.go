@@ -154,9 +154,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
-							if detail := contentItem.Get("detail"); detail.Exists() {
-								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail.String())
-							}
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						}
 						return true
@@ -279,11 +276,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		if toolChoice.IsObject() || toolChoice.IsArray() {
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
-		} else {
-			out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.Value())
-		}
+		out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
 	}
 
 	return out
