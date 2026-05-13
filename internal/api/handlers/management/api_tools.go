@@ -172,6 +172,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		if _, ok := reqHeaders["anthropic-beta"]; !ok {
 			reqHeaders["anthropic-beta"] = "oauth-2025-04-20"
 		}
+		delete(reqHeaders, "Authorization")
 	}
 
 	var requestBody io.Reader
@@ -503,7 +504,7 @@ func isAnthropicAPI(u *url.URL) bool {
 	if u == nil {
 		return false
 	}
-	return strings.EqualFold(u.Host, "api.anthropic.com")
+	return strings.EqualFold(u.Hostname(), "api.anthropic.com")
 }
 
 func antigravityTokenNeedsRefresh(metadata map[string]any) bool {
