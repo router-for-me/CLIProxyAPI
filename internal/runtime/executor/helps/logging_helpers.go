@@ -631,6 +631,10 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		if text == "" {
 			text = gjson.GetBytes(chunk, "choices.0.message.content").String()
 		}
+		// Gemini/Vertex: candidates[0].content.parts[0].text
+		if text == "" {
+			text = gjson.GetBytes(chunk, "candidates.0.content.parts.0.text").String()
+		}
 		if text != "" {
 			if len(text) > maxLen {
 				text = text[:maxLen] + "..."
@@ -658,11 +662,18 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 			continue
 		}
 		accumulateUsage(ginCtx, data)
-		// Anthropic: delta.type == "text_delta", delta.text
+		// Anthropic: delta.text
 		delta := gjson.GetBytes(data, "delta.text").String()
 		if delta == "" {
 			// OpenAI-compatible: choices[0].delta.content
 			delta = gjson.GetBytes(data, "choices.0.delta.content").String()
+		}
+		if delta == "" {
+			// Responses API (Codex): response.output_text.delta
+			delta = gjson.GetBytes(data, "delta").String()
+			if gjson.GetBytes(data, "type").String() != "response.output_text.delta" {
+				delta = ""
+			}
 		}
 		if delta == "" {
 			continue
