@@ -25,6 +25,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -178,6 +179,10 @@ type Manager struct {
 
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
+
+	// On-demand (lazy) refresh uses singleflight to coalesce concurrent refresh
+	// requests for the same auth entry.
+	lazyRefreshGroup singleflight.Group
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
@@ -866,7 +871,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
-		m.syncAuthMetadata(auth.ID, auth.Metadata)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1372,7 +1376,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
-			m.syncAuthMetadata(auth.ID, auth.Metadata)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1461,7 +1464,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
-			m.syncAuthMetadata(auth.ID, auth.Metadata)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2887,6 +2889,15 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
+	authID := selected.ID
+	m.mu.RUnlock()
+
+	selected = m.refreshAuthIfNeeded(ctx, selected)
+
+	m.mu.RLock()
+	if fresh, ok := m.auths[authID]; ok && fresh != nil {
+		selected = fresh
+	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
 	if !selected.indexAssigned {
@@ -2949,6 +2960,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			tried[selected.ID] = struct{}{}
 			continue
 		}
+		selected = m.refreshAuthIfNeeded(ctx, selected)
 		authCopy := selected.Clone()
 		if !selected.indexAssigned {
 			m.mu.Lock()
@@ -3045,6 +3057,15 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
+	authID := selected.ID
+	m.mu.RUnlock()
+
+	selected = m.refreshAuthIfNeeded(ctx, selected)
+
+	m.mu.RLock()
+	if fresh, ok := m.auths[authID]; ok && fresh != nil {
+		selected = fresh
+	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
 	if !selected.indexAssigned {
@@ -3134,6 +3155,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
+		selected = m.refreshAuthIfNeeded(ctx, selected)
 		authCopy := selected.Clone()
 		if !selected.indexAssigned {
 			m.mu.Lock()
@@ -3903,20 +3925,32 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 	return true
 }
 
-// syncAuthMetadata copies metadata from an executor-received auth back to the
-// map entry so on-demand token refresh results persist for subsequent calls.
-func (m *Manager) syncAuthMetadata(authID string, metadata map[string]any) {
-	if authID == "" || len(metadata) == 0 {
-		return
+// refreshAuthIfNeeded checks if the auth needs refresh and lazily refreshes it.
+// It returns the updated auth pointer from the map. Call when no mu lock is held.
+func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
+	if auth == nil || auth.ID == "" {
+		return auth
 	}
-	m.mu.Lock()
-	if entry, ok := m.auths[authID]; ok && entry != nil {
-		for k, v := range metadata {
-			entry.Metadata[k] = v
-		}
+	if !m.shouldRefresh(auth, time.Now()) {
+		return auth
 	}
-	m.mu.Unlock()
-	m.RefreshSchedulerEntry(authID)
+	m.lazyRefreshAuth(ctx, auth.ID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if fresh, ok := m.auths[auth.ID]; ok && fresh != nil {
+		return fresh
+	}
+	return auth
+}
+
+func (m *Manager) lazyRefreshAuth(ctx context.Context, id string) {
+	_, err, _ := m.lazyRefreshGroup.Do(id, func() (any, error) {
+		m.refreshAuth(ctx, id)
+		return nil, nil
+	})
+	if err != nil {
+		log.Debugf("lazy refresh error for %s: %v", id, err)
+	}
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
