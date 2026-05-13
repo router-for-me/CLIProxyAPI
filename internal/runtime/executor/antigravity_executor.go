@@ -815,8 +815,12 @@ attemptLoop:
 					case antigravity429DecisionFullQuotaExhausted:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
+						} else if !useCredits && antigravityCreditsRetryEnabled(e.cfg) {
+							// Free quota exhausted for Claude model: immediately retry same auth with credits
+							log.Debugf("antigravity executor: free quota exhausted for model %s on auth %s, retrying with credits", baseModel, auth.ID)
+							useCredits = true
+							continue attemptLoop
 						}
-						// No credits logic - just fall through to error return below
 					}
 				}
 
@@ -1275,8 +1279,12 @@ attemptLoop:
 					case antigravity429DecisionFullQuotaExhausted:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
+						} else if !useCredits && antigravityCreditsRetryEnabled(e.cfg) && strings.Contains(strings.ToLower(baseModel), "claude") {
+							// Free quota exhausted for Claude model: immediately retry same auth with credits
+							log.Debugf("antigravity executor: free quota exhausted for model %s on auth %s, retrying with credits (stream)", baseModel, auth.ID)
+							useCredits = true
+							continue attemptLoop
 						}
-						// No credits logic - just fall through to error return below
 					}
 				}
 

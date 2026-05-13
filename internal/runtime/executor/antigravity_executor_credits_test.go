@@ -266,7 +266,7 @@ func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 	}
 }
 
-func TestAntigravityExecute_NoCreditsWithoutConductorFlag(t *testing.T) {
+func TestAntigravityExecute_AutoCreditsRetryOnQuotaExhausted(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
@@ -280,16 +280,27 @@ func TestAntigravityExecute_NoCreditsWithoutConductorFlag(t *testing.T) {
 			return
 		}
 		requestBodies = append(requestBodies, string(body))
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
+		if len(requestBodies) == 1 {
+			// First request: no credits, return 429 quota exhausted
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`))
+			return
+		}
+		// Second request: should have credits injected, return success
+		if !strings.Contains(string(body), `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
+			t.Fatalf("retry request missing enabledCreditTypes: %s", string(body))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
 	}))
 	defer server.Close()
 
 	exec := NewAntigravityExecutor(&config.Config{
 		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		RequestRetry:  1,
 	})
 	auth := &cliproxyauth.Auth{
-		ID: "auth-no-conductor-flag",
+		ID: "auth-auto-credits-retry",
 		Attributes: map[string]string{
 			"base_url": server.URL,
 		},
@@ -300,22 +311,25 @@ func TestAntigravityExecute_NoCreditsWithoutConductorFlag(t *testing.T) {
 		},
 	}
 
-	// No conductor credits flag set in context
-	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	// No conductor credits flag in context — executor should auto-retry with credits on 429
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-sonnet-4-6",
 		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatAntigravity,
 	})
-	if err == nil {
-		t.Fatal("Execute() error = nil, want 429")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
-	if len(requestBodies) != 1 {
-		t.Fatalf("request count = %d, want 1", len(requestBodies))
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute() returned empty payload")
 	}
-	// Should NOT contain credits since conductor didn't request them
+	if len(requestBodies) != 2 {
+		t.Fatalf("request count = %d, want 2 (first without credits, second with credits)", len(requestBodies))
+	}
+	// First request should NOT contain credits
 	if strings.Contains(requestBodies[0], `"enabledCreditTypes"`) {
-		t.Fatalf("request should not contain enabledCreditTypes without conductor flag: %s", requestBodies[0])
+		t.Fatalf("first request should not contain enabledCreditTypes: %s", requestBodies[0])
 	}
 }
 
