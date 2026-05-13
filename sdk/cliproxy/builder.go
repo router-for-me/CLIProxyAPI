@@ -240,7 +240,6 @@ func (b *Builder) Build() (*Service, error) {
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
-	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 
@@ -255,6 +254,8 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager:  accessManager,
 		coreManager:    coreManager,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		proxyMapping:   make(map[string]string),
 	}
+	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider(service.GetProxyOverride))
 	return service, nil
 }

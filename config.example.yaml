@@ -112,6 +112,19 @@ routing:
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
 
+# OAuth proxy configuration for round-robin multi-account routing
+# oauth-proxy:
+#   # Number of auth files to assign per proxy entry (determines round-robin grouping)
+#   accounts-per-proxy: 1
+#   # Proxy URLs used in round-robin rotation (order matters)
+#   proxies:
+#     - "http://proxy1.example.com:8080"
+#     - "http://proxy2.example.com:8080"
+#   # Optional: restrict which auth prefixes get proxy assignment
+#   auth-prefixes: []
+#   # Optional: tags to exclude from proxy assignment (e.g. ["codex"])
+#   exclude-tags: []
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 

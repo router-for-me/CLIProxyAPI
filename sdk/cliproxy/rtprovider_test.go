@@ -10,7 +10,7 @@ import (
 func TestRoundTripperForDirectBypassesProxy(t *testing.T) {
 	t.Parallel()
 
-	provider := newDefaultRoundTripperProvider()
+	provider := newDefaultRoundTripperProvider(nil)
 	rt := provider.RoundTripperFor(&coreauth.Auth{ProxyURL: "direct"})
 	transport, ok := rt.(*http.Transport)
 	if !ok {

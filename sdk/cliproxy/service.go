@@ -91,6 +91,10 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// proxyMapping maps auth ID -> proxy URL for runtime-only oauth-proxy assignment.
+	proxyMapping   map[string]string
+	proxyMappingMu sync.RWMutex
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -100,6 +104,15 @@ type Service struct {
 //   - plugin: The usage plugin to register
 func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	usage.RegisterPlugin(plugin)
+}
+
+func (s *Service) GetProxyOverride(authID string) string {
+	if s == nil {
+		return ""
+	}
+	s.proxyMappingMu.RLock()
+	defer s.proxyMappingMu.RUnlock()
+	return s.proxyMapping[authID]
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -356,7 +369,19 @@ func (s *Service) validateOAuthProxyConfig() error {
 		return nil
 	}
 	cfg := s.cfg
-	if len(cfg.OAuthProxy.Proxies) == 0 || cfg.OAuthProxy.AccountsPerProxy <= 0 {
+	hasProxies := len(cfg.OAuthProxy.Proxies) > 0
+	hasAccountsPerProxy := cfg.OAuthProxy.AccountsPerProxy > 0
+
+	if hasProxies && !hasAccountsPerProxy {
+		return fmt.Errorf("oauth-proxy config incomplete: proxies are configured (%d) but accounts_per_proxy is not set (must be > 0)",
+			len(cfg.OAuthProxy.Proxies))
+	}
+	if !hasProxies && hasAccountsPerProxy {
+		return fmt.Errorf("oauth-proxy config incomplete: accounts_per_proxy is set (%d) but no proxies are configured",
+			cfg.OAuthProxy.AccountsPerProxy)
+	}
+
+	if !hasProxies && !hasAccountsPerProxy {
 		return nil
 	}
 
@@ -367,7 +392,7 @@ func (s *Service) validateOAuthProxyConfig() error {
 	expected := accountsPerProxy * numProxies
 
 	if numAuths != expected {
-		return fmt.Errorf("oauth-proxy config mismatch: have %d auth files, %d proxies * %d accounts_per_proxy = %d expected. "+
+		return fmt.Errorf("oauth-proxy config mismatch: have %d auth files, %d proxies * %d accounts-per-proxy = %d expected. "+
 			"Please adjust auth files or proxy configuration", numAuths, numProxies, accountsPerProxy, expected)
 	}
 	return nil
@@ -394,23 +419,25 @@ func (s *Service) applyOAuthProxyAssignment(ctx context.Context) {
 		if auths[j] == nil {
 			return true
 		}
-		return strings.Compare(auths[i].ID, auths[j].ID) < 0
+		return strings.Compare(auths[i].FileName, auths[j].FileName) < 0
 	})
 
 	proxies := cfg.OAuthProxy.Proxies
 	accountsPerProxy := cfg.OAuthProxy.AccountsPerProxy
 
+	newMapping := make(map[string]string)
 	for i, auth := range auths {
 		if auth == nil {
 			continue
 		}
 		proxyIndex := i / accountsPerProxy
-		auth.ProxyURL = proxies[proxyIndex]
-		if _, err := s.coreManager.Update(ctx, auth); err != nil {
-			log.Warnf("failed to update auth %s with proxy assignment: %v", auth.ID, err)
-		}
+		newMapping[auth.ID] = proxies[proxyIndex]
 		log.Infof("oauth-proxy assignment: %s -> [redacted]", auth.ID)
 	}
+
+	s.proxyMappingMu.Lock()
+	s.proxyMapping = newMapping
+	s.proxyMappingMu.Unlock()
 }
 
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {

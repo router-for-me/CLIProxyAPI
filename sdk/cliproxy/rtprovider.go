@@ -10,23 +10,29 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// defaultRoundTripperProvider returns a per-auth HTTP RoundTripper based on
-// the Auth.ProxyURL value. It caches transports per proxy URL string.
+type proxyLookupFunc func(authID string) string
+
 type defaultRoundTripperProvider struct {
-	mu    sync.RWMutex
-	cache map[string]http.RoundTripper
+	mu          sync.RWMutex
+	cache       map[string]http.RoundTripper
+	proxyLookup proxyLookupFunc
 }
 
-func newDefaultRoundTripperProvider() *defaultRoundTripperProvider {
-	return &defaultRoundTripperProvider{cache: make(map[string]http.RoundTripper)}
+func newDefaultRoundTripperProvider(lookup proxyLookupFunc) *defaultRoundTripperProvider {
+	return &defaultRoundTripperProvider{cache: make(map[string]http.RoundTripper), proxyLookup: lookup}
 }
 
-// RoundTripperFor implements coreauth.RoundTripperProvider.
 func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.RoundTripper {
 	if auth == nil {
 		return nil
 	}
-	proxyStr := strings.TrimSpace(auth.ProxyURL)
+	var proxyStr string
+	if p.proxyLookup != nil {
+		proxyStr = p.proxyLookup(auth.ID)
+	}
+	if proxyStr == "" {
+		proxyStr = strings.TrimSpace(auth.ProxyURL)
+	}
 	if proxyStr == "" {
 		return nil
 	}
