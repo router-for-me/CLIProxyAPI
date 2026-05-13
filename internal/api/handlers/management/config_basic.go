@@ -28,7 +28,9 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
+	h.mu.Lock()
 	cfg := *h.cfg
+	h.mu.Unlock()
 	c.JSON(200, &cfg)
 }
 
