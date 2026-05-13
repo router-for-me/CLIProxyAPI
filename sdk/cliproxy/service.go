@@ -922,13 +922,6 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Info("file watcher started for config and auth directory changes")
 	}
 
-	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil && !homeEnabled {
-		interval := 15 * time.Minute
-		s.coreManager.StartAutoRefresh(context.Background(), interval)
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
-	}
-
 	select {
 	case <-ctx.Done():
 		log.Debug("service context cancelled, shutting down...")
