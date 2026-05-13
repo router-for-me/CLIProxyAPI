@@ -3947,7 +3947,7 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 
 func (m *Manager) lazyRefreshAuth(ctx context.Context, id string) {
 	m.lazyRefreshGroup.Do(id, func() (any, error) {
-		m.refreshAuth(ctx, id)
+		m.refreshAuth(context.Background(), id)
 		return nil, nil
 	})
 }
