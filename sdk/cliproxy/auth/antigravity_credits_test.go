@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 type antigravityCreditsFallbackExecutor struct {
@@ -46,6 +48,43 @@ func (e *antigravityCreditsFallbackExecutor) CountTokens(context.Context, *Auth,
 
 func (e *antigravityCreditsFallbackExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "HttpRequest not implemented"}
+}
+
+type codexOnlyFailureExecutor struct{}
+
+func (codexOnlyFailureExecutor) Identifier() string { return "codex" }
+
+func (codexOnlyFailureExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusTooManyRequests, Message: "codex quota exhausted"}
+}
+
+func (codexOnlyFailureExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusTooManyRequests, Message: "codex quota exhausted"}
+}
+
+func (codexOnlyFailureExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (codexOnlyFailureExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusTooManyRequests, Message: "codex quota exhausted"}
+}
+
+func (codexOnlyFailureExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusTooManyRequests, Message: "codex quota exhausted"}
+}
+
+type captureLogHook struct {
+	messages []string
+}
+
+func (h *captureLogHook) Levels() []log.Level {
+	return log.AllLevels
+}
+
+func (h *captureLogHook) Fire(entry *log.Entry) error {
+	h.messages = append(h.messages, entry.Message)
+	return nil
 }
 
 func TestManagerExecuteStream_AntigravityCreditsFallbackAfterBootstrap429(t *testing.T) {
@@ -85,6 +124,51 @@ func TestManagerExecuteStream_AntigravityCreditsFallbackAfterBootstrap429(t *tes
 	}
 	if executor.streamCreditsRequested[0] || !executor.streamCreditsRequested[1] {
 		t.Fatalf("credits flags = %v, want [false true]", executor.streamCreditsRequested)
+	}
+}
+
+func TestManagerExecuteStream_CodexOnlyDoesNotEnterAntigravityCreditsFallback(t *testing.T) {
+	const model = "gpt-5.5"
+	logger := log.StandardLogger()
+	oldLevel := logger.GetLevel()
+	oldHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	hook := &captureLogHook{}
+	logger.SetLevel(log.DebugLevel)
+	logger.AddHook(hook)
+	t.Cleanup(func() {
+		logger.SetLevel(oldLevel)
+		logger.ReplaceHooks(oldHooks)
+	})
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		QuotaExceeded: internalconfig.QuotaExceeded{AntigravityCredits: true},
+	})
+	manager.RegisterExecutor(codexOnlyFailureExecutor{})
+	manager.RegisterExecutor(&antigravityCreditsFallbackExecutor{})
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("codex-only", "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient("ag-unrelated", "antigravity", []*registry.ModelInfo{{ID: "gemini-3-flash"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("codex-only")
+		reg.UnregisterClient("ag-unrelated")
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-only", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register codex auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "ag-unrelated", Provider: "antigravity"}); errRegister != nil {
+		t.Fatalf("register antigravity auth: %v", errRegister)
+	}
+
+	_, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected codex execution failure")
+	}
+
+	for _, message := range hook.messages {
+		if strings.Contains(message, "shouldAttemptAntigravityCreditsFallback") {
+			t.Fatalf("codex-only request entered antigravity credits fallback gate; messages=%v", hook.messages)
+		}
 	}
 }
 
