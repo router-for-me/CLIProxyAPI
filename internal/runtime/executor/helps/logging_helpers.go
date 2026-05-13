@@ -605,6 +605,37 @@ func extractFirstUserText(body []byte) string {
 		}
 	}
 
+	// Responses API (Codex): input as string or input[].content[].text
+	if input := gjson.GetBytes(body, "input"); input.Exists() {
+		var text string
+		if input.Type == gjson.String {
+			text = strings.TrimSpace(input.String())
+		} else if input.IsArray() {
+			input.ForEach(func(_, item gjson.Result) bool {
+				if role := item.Get("role").String(); role != "" && role != "user" {
+					return true
+				}
+				item.Get("content").ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "input_text" {
+						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+							text = t
+							return false
+						}
+					}
+					return true
+				})
+				return text == ""
+			})
+		}
+		if text != "" {
+			const maxLen = 2000
+			if len(text) > maxLen {
+				text = text[:maxLen] + "..."
+			}
+			return text
+		}
+	}
+
 	// Anthropic/OpenAI: messages[].content
 	messages := gjson.GetBytes(body, "messages")
 	if !messages.Exists() || !messages.IsArray() {
@@ -702,6 +733,10 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 			if gjson.GetBytes(data, "type").String() != "response.output_text.delta" {
 				delta = ""
 			}
+		}
+		if delta == "" {
+			// Gemini streaming: response.candidates[0].content.parts[0].text
+			delta = gjson.GetBytes(data, "response.candidates.0.content.parts.0.text").String()
 		}
 		if delta == "" {
 			continue
