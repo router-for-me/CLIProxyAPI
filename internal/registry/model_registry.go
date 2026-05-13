@@ -869,6 +869,112 @@ func cloneModelMapValue(value any) any {
 	}
 }
 
+var standardThinkingLevelBudgets = []struct {
+	level  string
+	budget int
+}{
+	{level: "minimal", budget: 512},
+	{level: "low", budget: 1024},
+	{level: "medium", budget: 8192},
+	{level: "high", budget: 24576},
+	{level: "xhigh", budget: 32768},
+	{level: "max", budget: 128000},
+}
+
+func cloneThinkingSupportMap(thinking *ThinkingSupport) map[string]any {
+	if thinking == nil {
+		return nil
+	}
+
+	result := make(map[string]any)
+	if thinking.Min > 0 {
+		result["min"] = thinking.Min
+	}
+	if thinking.Max > 0 {
+		result["max"] = thinking.Max
+	}
+	if thinking.ZeroAllowed {
+		result["zero_allowed"] = thinking.ZeroAllowed
+	}
+	if thinking.DynamicAllowed {
+		result["dynamic_allowed"] = thinking.DynamicAllowed
+	}
+	if len(thinking.Levels) > 0 {
+		result["levels"] = append([]string(nil), thinking.Levels...)
+	}
+
+	supportedLevels, levelBudgets := buildThinkingLevelDetails(thinking)
+	if len(supportedLevels) > 0 {
+		result["supported_levels"] = supportedLevels
+	}
+	if len(levelBudgets) > 0 {
+		result["level_budgets"] = levelBudgets
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func buildThinkingLevelDetails(thinking *ThinkingSupport) ([]string, map[string]int) {
+	if thinking == nil {
+		return nil, nil
+	}
+
+	levels := make([]string, 0, len(thinking.Levels)+2+len(standardThinkingLevelBudgets))
+	seen := make(map[string]struct{})
+	addLevel := func(level string) {
+		if level == "" {
+			return
+		}
+		if _, ok := seen[level]; ok {
+			return
+		}
+		seen[level] = struct{}{}
+		levels = append(levels, level)
+	}
+
+	if thinking.ZeroAllowed {
+		addLevel("none")
+	}
+	if thinking.DynamicAllowed {
+		addLevel("auto")
+	}
+	for _, level := range thinking.Levels {
+		addLevel(level)
+	}
+	if len(thinking.Levels) == 0 && (thinking.Min > 0 || thinking.Max > 0) {
+		for _, entry := range standardThinkingLevelBudgets {
+			if thinking.Min > 0 && entry.budget < thinking.Min {
+				continue
+			}
+			if thinking.Max > 0 && entry.budget > thinking.Max {
+				continue
+			}
+			addLevel(entry.level)
+		}
+	}
+
+	levelBudgets := make(map[string]int)
+	for _, level := range levels {
+		for _, entry := range standardThinkingLevelBudgets {
+			if level == entry.level {
+				if thinking.Min > 0 && entry.budget < thinking.Min {
+					break
+				}
+				if thinking.Max > 0 && entry.budget > thinking.Max {
+					break
+				}
+				levelBudgets[level] = entry.budget
+				break
+			}
+		}
+	}
+
+	return levels, levelBudgets
+}
+
 // GetAvailableModelsByProvider returns models available for the given provider identifier.
 // Parameters:
 //   - provider: Provider identifier (e.g., "codex", "gemini", "antigravity")
@@ -1140,6 +1246,24 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
+		}
+		if model.InputTokenLimit > 0 {
+			result["inputTokenLimit"] = model.InputTokenLimit
+		}
+		if model.OutputTokenLimit > 0 {
+			result["outputTokenLimit"] = model.OutputTokenLimit
+		}
+		if len(model.SupportedGenerationMethods) > 0 {
+			result["supportedGenerationMethods"] = append([]string(nil), model.SupportedGenerationMethods...)
+		}
+		if len(model.SupportedInputModalities) > 0 {
+			result["supportedInputModalities"] = append([]string(nil), model.SupportedInputModalities...)
+		}
+		if len(model.SupportedOutputModalities) > 0 {
+			result["supportedOutputModalities"] = append([]string(nil), model.SupportedOutputModalities...)
+		}
+		if thinking := cloneThinkingSupportMap(model.Thinking); thinking != nil {
+			result["thinking"] = thinking
 		}
 		return result
 

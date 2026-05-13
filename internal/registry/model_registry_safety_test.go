@@ -135,6 +135,87 @@ func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsOpenAIIncludesModelDetailsAndThinking(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{
+		ID:                         "m1",
+		OwnedBy:                    "team-a",
+		Type:                       "openai",
+		DisplayName:                "Model One",
+		Version:                    "v1",
+		Description:                "Detailed model",
+		ContextLength:              128000,
+		MaxCompletionTokens:        32768,
+		InputTokenLimit:            128000,
+		OutputTokenLimit:           32768,
+		SupportedParameters:        []string{"tools"},
+		SupportedGenerationMethods: []string{"generateContent"},
+		SupportedInputModalities:   []string{"TEXT", "IMAGE"},
+		SupportedOutputModalities:  []string{"TEXT"},
+		Thinking: &ThinkingSupport{
+			Min:            128,
+			Max:            32768,
+			ZeroAllowed:    true,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+	}})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected one model, got %d", len(models))
+	}
+	model := models[0]
+
+	checks := map[string]any{
+		"context_length":        128000,
+		"max_completion_tokens": 32768,
+		"inputTokenLimit":       128000,
+		"outputTokenLimit":      32768,
+	}
+	for key, want := range checks {
+		if got := model[key]; got != want {
+			t.Fatalf("expected %s=%v, got %#v", key, want, got)
+		}
+	}
+
+	thinking, ok := model["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinking map, got %#v", model["thinking"])
+	}
+	if thinking["min"] != 128 || thinking["max"] != 32768 {
+		t.Fatalf("unexpected thinking range: %#v", thinking)
+	}
+	if thinking["zero_allowed"] != true || thinking["dynamic_allowed"] != true {
+		t.Fatalf("unexpected thinking flags: %#v", thinking)
+	}
+	levels, ok := thinking["levels"].([]string)
+	if !ok || len(levels) != 3 || levels[0] != "low" {
+		t.Fatalf("unexpected thinking levels: %#v", thinking["levels"])
+	}
+	supportedLevels, ok := thinking["supported_levels"].([]string)
+	if !ok || len(supportedLevels) != 5 || supportedLevels[0] != "none" || supportedLevels[1] != "auto" || supportedLevels[2] != "low" {
+		t.Fatalf("unexpected supported thinking levels: %#v", thinking["supported_levels"])
+	}
+	levelBudgets, ok := thinking["level_budgets"].(map[string]int)
+	if !ok || levelBudgets["low"] != 1024 || levelBudgets["high"] != 24576 {
+		t.Fatalf("unexpected thinking level budgets: %#v", thinking["level_budgets"])
+	}
+
+	levels[0] = "mutated"
+	supportedLevels[0] = "mutated"
+	second := r.GetAvailableModels("openai")
+	secondThinking := second[0]["thinking"].(map[string]any)
+	secondLevels := secondThinking["levels"].([]string)
+	if secondLevels[0] != "low" {
+		t.Fatalf("expected cloned thinking levels, got %#v", secondLevels)
+	}
+	secondSupportedLevels := secondThinking["supported_levels"].([]string)
+	if secondSupportedLevels[0] != "none" {
+		t.Fatalf("expected cloned supported thinking levels, got %#v", secondSupportedLevels)
+	}
+}
+
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	first := LookupModelInfo("claude-sonnet-4-6")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
