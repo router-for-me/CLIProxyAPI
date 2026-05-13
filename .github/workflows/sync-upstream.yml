@@ -1,0 +1,40 @@
+name: Sync from router-for-me/CLIProxyAPI
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch upstream --prune
+      - name: Mirror branches
+        run: |
+          for branch in dev; do
+            if git rev-parse --verify upstream/$branch >/dev/null 2>&1; then
+              git checkout -B $branch upstream/$branch
+              git push origin $branch --force
+            fi
+          done
+      - name: Alert on divergence
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[auto-sync] Mirror failed on run ${{ github.run_id }}`,
+              body: 'Upstream may have force-pushed or rebased — manual reconciliation needed.'
+            })
