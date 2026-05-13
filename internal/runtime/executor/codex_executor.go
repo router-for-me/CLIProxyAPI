@@ -953,6 +953,45 @@ func codexImageGenerationToolModel(body []byte) string {
 	return codexDefaultImageToolModel
 }
 
+func codexModelSupportsImageGeneration(model string) bool {
+	return strings.HasPrefix(strings.TrimSpace(model), "gpt-5.4")
+}
+
+func removeImageGenerationTool(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+
+	toolArray := tools.Array()
+	kept := make([]gjson.Result, 0, len(toolArray))
+	for _, tool := range toolArray {
+		if tool.Get("type").String() == "image_generation" {
+			continue
+		}
+		kept = append(kept, tool)
+	}
+	if len(kept) == len(toolArray) {
+		return body
+	}
+	if len(kept) == 0 {
+		body, _ = sjson.DeleteBytes(body, "tools")
+		return body
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, tool := range kept {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(tool.Raw)
+	}
+	buf.WriteByte(']')
+	body, _ = sjson.SetRawBytes(body, "tools", buf.Bytes())
+	return body
+}
+
 func isCodexModelCapacityError(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false

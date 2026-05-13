@@ -116,3 +116,19 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
+
+func TestCodexImageGenerationToolModel_UsesConfiguredModel(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"f1"},{"type":"image_generation","model":"gpt-image-3","output_format":"webp"}]}`)
+
+	if got := codexImageGenerationToolModel(body); got != "gpt-image-3" {
+		t.Fatalf("expected configured image model, got %s", got)
+	}
+}
+
+func TestCodexImageGenerationToolModel_DefaultsWhenMissing(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"image_generation","output_format":"png"}]}`)
+
+	if got := codexImageGenerationToolModel(body); got != codexDefaultImageToolModel {
+		t.Fatalf("expected default image model %s, got %s", codexDefaultImageToolModel, got)
+	}
+}
