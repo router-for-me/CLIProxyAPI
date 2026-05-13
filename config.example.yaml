@@ -122,6 +122,10 @@ quota-exceeded:
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to use credits as last-resort fallback when all free-tier auths are exhausted for Claude models
 
+# Skips fetching project ID via loadCodeAssist and uses the default base URL directly.
+# Set to true when you don't have a project ID.
+# antigravity-use-default-project-id: false
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
