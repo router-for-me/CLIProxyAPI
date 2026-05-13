@@ -78,7 +78,7 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		if msg == "" {
 			msg = "home returned error"
 		}
-		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: msg}
+		return nil, true, homeStatusErr{code: statusFromHomeErrorCode(code), msg: msg}
 	}
 
 	var updated cliproxyauth.Auth
@@ -88,4 +88,15 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 	updated.Index = authIndex
 	updated.EnsureIndex()
 	return &updated, true, nil
+}
+
+func statusFromHomeErrorCode(code string) int {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "authentication_error", "unauthorized":
+		return http.StatusUnauthorized
+	case "model_not_found":
+		return http.StatusNotFound
+	default:
+		return http.StatusBadGateway
+	}
 }
