@@ -241,13 +241,6 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		return
 	}
 
-	// Antigravity uses lazy on-demand OAuth in ensureAccessToken during
-	// Execute, so its tokens are never refreshed by the background loop.
-	if strings.EqualFold(auth.Provider, "antigravity") {
-		l.upsert(authID, next)
-		return
-	}
-
 	if !shouldRefresh {
 		l.upsert(authID, next)
 		return
@@ -349,6 +342,14 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 
 	accountType, _ := auth.AccountInfo()
 	if accountType == "api_key" {
+		return time.Time{}, false
+	}
+
+	// Antigravity uses lazy on-demand OAuth in ensureAccessToken during
+	// Execute, so its tokens are never refreshed by the background loop.
+	// Keeping it out of the scheduler avoids a tight reschedule loop when
+	// no valid expiry exists yet.
+	if strings.EqualFold(auth.Provider, "antigravity") {
 		return time.Time{}, false
 	}
 
