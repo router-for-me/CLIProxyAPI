@@ -3042,13 +3042,13 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	authCopy := selected.Clone()
+	authCopy := selected
 	m.mu.RUnlock()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
 			current.EnsureIndex()
-			authCopy = current.Clone()
+			authCopy = current
 		}
 		m.mu.Unlock()
 	}
@@ -3131,12 +3131,12 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
-		authCopy := selected.Clone()
+		authCopy := selected
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
 				current.EnsureIndex()
-				authCopy = current.Clone()
+				authCopy = current
 			}
 			m.mu.Unlock()
 		}
