@@ -409,7 +409,7 @@ func (s *Server) setupRoutes() {
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
-		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 	}
 
 	// Root endpoint
@@ -851,6 +851,17 @@ func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin
 	}
 }
 
+func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			s.handleHomeGeminiModel(c)
+			return
+		}
+
+		geminiHandler.GeminiGetHandler(c)
+	}
+}
+
 type homeModelEntry struct {
 	id          string
 	created     int64
@@ -933,6 +944,29 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleHomeGeminiModel(c *gin.Context) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return
+	}
+
+	action := strings.TrimPrefix(c.Param("action"), "/")
+	action = strings.TrimSpace(action)
+	for _, entry := range entries {
+		if homeGeminiModelMatches(entry, action) {
+			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{
+			Message: "Not Found",
+			Type:    "not_found",
+		},
+	})
+}
+
 func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 	if s == nil || c == nil || c.Request == nil {
 		return nil, false
@@ -976,22 +1010,36 @@ func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 func formatHomeGeminiModels(entries []homeModelEntry) []map[string]any {
 	out := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		name := entry.id
-		if !strings.HasPrefix(name, "models/") {
-			name = "models/" + name
-		}
-		displayName := entry.displayName
-		if displayName == "" {
-			displayName = entry.id
-		}
-		out = append(out, map[string]any{
-			"name":                       name,
-			"displayName":                displayName,
-			"description":                displayName,
-			"supportedGenerationMethods": []string{"generateContent"},
-		})
+		out = append(out, formatHomeGeminiModel(entry))
 	}
 	return out
+}
+
+func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
+	name := entry.id
+	if !strings.HasPrefix(name, "models/") {
+		name = "models/" + name
+	}
+	displayName := entry.displayName
+	if displayName == "" {
+		displayName = entry.id
+	}
+	return map[string]any{
+		"name":                       name,
+		"displayName":                displayName,
+		"description":                displayName,
+		"supportedGenerationMethods": []string{"generateContent"},
+	}
+}
+
+func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
+	id := strings.TrimSpace(entry.id)
+	if id == "" || action == "" {
+		return false
+	}
+	normalizedAction := strings.TrimPrefix(action, "models/")
+	normalizedID := strings.TrimPrefix(id, "models/")
+	return action == id || action == "models/"+id || normalizedAction == normalizedID
 }
 
 func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
