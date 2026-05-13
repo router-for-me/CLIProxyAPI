@@ -54,10 +54,12 @@ func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *Antigravit
 			}
 			clone.TLSClientConfig.InsecureSkipVerify = true
 			client.Transport = clone
-		} else if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
-			clone := defaultTransport.Clone()
-			clone.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-			client.Transport = clone
+		} else if client.Transport == nil {
+			if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+				clone := defaultTransport.Clone()
+				clone.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+				client.Transport = clone
+			}
 		}
 	}
 	return &AntigravityAuth{
