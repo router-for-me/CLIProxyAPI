@@ -350,7 +350,11 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
-	return parseOpenAIStyleUsageNode(usageNode), true
+	detail := parseOpenAIStyleUsageNode(usageNode)
+	if !hasNonZeroTokenUsage(detail) {
+		return usage.Detail{}, false
+	}
+	return detail, true
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
