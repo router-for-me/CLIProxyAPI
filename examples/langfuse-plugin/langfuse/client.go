@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -18,10 +19,10 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient constructs a Client. baseURL should not have a trailing slash.
+// NewClient constructs a Client. Any trailing slash in baseURL is stripped.
 func NewClient(baseURL, publicKey, secretKey string) *Client {
 	return &Client{
-		baseURL:    baseURL,
+		baseURL:    strings.TrimRight(baseURL, "/"),
 		publicKey:  publicKey,
 		secretKey:  secretKey,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
@@ -87,7 +88,9 @@ func (c *Client) ingest(ctx context.Context, events ...ingestionEvent) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("langfuse: status %d", resp.StatusCode)
+		body := make([]byte, 512)
+		n, _ := resp.Body.Read(body)
+		return fmt.Errorf("langfuse: status %d: %s", resp.StatusCode, bytes.TrimSpace(body[:n]))
 	}
 	return nil
 }

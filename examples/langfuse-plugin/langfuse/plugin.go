@@ -108,7 +108,7 @@ func (p *Plugin) HandleUsage(ctx context.Context, rec coreusage.Record) {
 	}
 
 	gen := GenerationBody{
-		ID:        fmt.Sprintf("cpa-%s", traceID),
+		ID:        uuid.New().String(),
 		TraceID:   traceID,
 		Name:      "cpa.upstream",
 		StartTime: startTime,
