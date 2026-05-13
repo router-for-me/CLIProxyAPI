@@ -3916,6 +3916,14 @@ func (m *Manager) syncAuthMetadata(authID string, metadata map[string]any) {
 		}
 	}
 	m.mu.Unlock()
+	log.Debugf("syncAuthMetadata: auth=%q metadata_keys=%v", authID, func() []string {
+		var keys []string
+		for k := range metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}())
 	m.RefreshSchedulerEntry(authID)
 }
 

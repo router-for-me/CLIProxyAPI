@@ -1621,7 +1621,10 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 	}
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	expiry := tokenExpiry(auth.Metadata)
-	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
+	willRefresh := accessToken == "" || !expiry.After(time.Now().Add(refreshSkew))
+	log.Debugf("antigravity ensureAccessToken: auth=%q accessToken=%q expiry=%v now=%v skew=%v willRefresh=%v",
+		auth.ID, accessToken, expiry, time.Now(), refreshSkew, willRefresh)
+	if !willRefresh {
 		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)
 		return accessToken, nil, nil
 	}
@@ -1779,8 +1782,10 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	auth.Metadata["timestamp"] = now.UnixMilli()
 	auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	auth.Metadata["type"] = antigravityAuthType
-	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
-		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
+	if e.cfg != nil && !e.cfg.AntigravityUseDefaultProjectID {
+		if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
+			log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
+		}
 	}
 	if antigravityCreditsRetryEnabled(e.cfg) {
 		e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
