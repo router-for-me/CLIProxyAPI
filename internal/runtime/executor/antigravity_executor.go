@@ -1784,7 +1784,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 			log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
 		}
 	}
-	if antigravityCreditsRetryEnabled(e.cfg) {
+	if e.cfg != nil && antigravityCreditsRetryEnabled(e.cfg) {
 		e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
 	}
 	return auth, nil
