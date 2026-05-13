@@ -213,6 +213,7 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	default:
 		log.Debugf("received unknown auth update action: %v", update.Action)
 	}
+	s.applyOAuthProxyAssignment(context.Background())
 }
 
 func (s *Service) ensureWebsocketGateway() {
@@ -377,7 +378,7 @@ func (s *Service) validateOAuthProxyConfig() error {
 			len(cfg.OAuthProxy.Proxies))
 	}
 	if !hasProxies && hasAccountsPerProxy {
-		return fmt.Errorf("oauth-proxy config incomplete: accounts_per_proxy is set (%d) but no proxies are configured",
+		return fmt.Errorf("oauth-proxy config incomplete: accounts-per-proxy is set (%d) but no proxies are configured",
 			cfg.OAuthProxy.AccountsPerProxy)
 	}
 
@@ -782,6 +783,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
+		s.applyOAuthProxyAssignment(context.Background())
 		s.rebindExecutors()
 	}
 
