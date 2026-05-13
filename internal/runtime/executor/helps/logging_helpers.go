@@ -690,9 +690,13 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		if text == "" {
 			text = gjson.GetBytes(chunk, "choices.0.message.content").String()
 		}
-		// Gemini/Vertex: candidates[0].content.parts[0].text
+		// Gemini/Vertex non-streaming: candidates[0].content.parts[0].text
 		if text == "" {
 			text = gjson.GetBytes(chunk, "candidates.0.content.parts.0.text").String()
+		}
+		// Antigravity wrapper: response.candidates[0].content.parts[0].text
+		if text == "" {
+			text = gjson.GetBytes(chunk, "response.candidates.0.content.parts.0.text").String()
 		}
 		if text != "" {
 			if len(text) > maxLen {
@@ -735,7 +739,11 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 			}
 		}
 		if delta == "" {
-			// Gemini streaming: response.candidates[0].content.parts[0].text
+			// Gemini SSE (native): candidates[0].content.parts[0].text
+			delta = gjson.GetBytes(data, "candidates.0.content.parts.0.text").String()
+		}
+		if delta == "" {
+			// Gemini SSE (Antigravity wrapper): response.candidates[0].content.parts[0].text
 			delta = gjson.GetBytes(data, "response.candidates.0.content.parts.0.text").String()
 		}
 		if delta == "" {
