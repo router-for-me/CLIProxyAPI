@@ -112,10 +112,6 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 		}
 		return updates
 	}
-	if w.authQueue == nil {
-		w.currentAuths = newState
-		return nil
-	}
 	updates := make([]AuthUpdate, 0, len(newState)+len(w.currentAuths))
 	for id, auth := range newState {
 		if existing, ok := w.currentAuths[id]; !ok {
