@@ -407,7 +407,7 @@ func (s *Server) setupRoutes() {
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
 	{
-		v1beta.GET("/models", geminiHandlers.GeminiModels)
+		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
@@ -840,6 +840,17 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 	}
 }
 
+func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			s.handleHomeGeminiModels(c)
+			return
+		}
+
+		geminiHandler.GeminiModels(c)
+	}
+}
+
 type homeModelEntry struct {
 	id          string
 	created     int64
@@ -848,39 +859,8 @@ type homeModelEntry struct {
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
-	if s == nil || c == nil || c.Request == nil {
-		return
-	}
-	client := home.Current()
-	if client == nil {
-		c.JSON(http.StatusServiceUnavailable, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: "home control center unavailable",
-				Type:    "server_error",
-			},
-		})
-		return
-	}
-
-	raw, errGet := client.GetModels(c.Request.Context())
-	if errGet != nil {
-		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: errGet.Error(),
-				Type:    "server_error",
-			},
-		})
-		return
-	}
-
-	entries, errDecode := decodeHomeModels(raw)
-	if errDecode != nil {
-		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: errDecode.Error(),
-				Type:    "server_error",
-			},
-		})
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
 		return
 	}
 
@@ -906,10 +886,10 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		firstID := ""
 		lastID := ""
 		if len(out) > 0 {
-			if id, ok := out[0]["id"].(string); ok {
+			if id, okID := out[0]["id"].(string); okID {
 				firstID = id
 			}
-			if id, ok := out[len(out)-1]["id"].(string); ok {
+			if id, okID := out[len(out)-1]["id"].(string); okID {
 				lastID = id
 			}
 		}
@@ -942,6 +922,78 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleHomeGeminiModels(c *gin.Context) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"models": formatHomeGeminiModels(entries),
+	})
+}
+
+func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
+	if s == nil || c == nil || c.Request == nil {
+		return nil, false
+	}
+	client := home.Current()
+	if client == nil {
+		c.JSON(http.StatusServiceUnavailable, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "home control center unavailable",
+				Type:    "server_error",
+			},
+		})
+		return nil, false
+	}
+
+	raw, errGet := client.GetModels(c.Request.Context())
+	if errGet != nil {
+		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: errGet.Error(),
+				Type:    "server_error",
+			},
+		})
+		return nil, false
+	}
+
+	entries, errDecode := decodeHomeModels(raw)
+	if errDecode != nil {
+		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: errDecode.Error(),
+				Type:    "server_error",
+			},
+		})
+		return nil, false
+	}
+
+	return entries, true
+}
+
+func formatHomeGeminiModels(entries []homeModelEntry) []map[string]any {
+	out := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.id
+		if !strings.HasPrefix(name, "models/") {
+			name = "models/" + name
+		}
+		displayName := entry.displayName
+		if displayName == "" {
+			displayName = entry.id
+		}
+		out = append(out, map[string]any{
+			"name":                       name,
+			"displayName":                displayName,
+			"description":                displayName,
+			"supportedGenerationMethods": []string{"generateContent"},
+		})
+	}
+	return out
+}
+
 func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("home models payload is empty")
@@ -961,6 +1013,11 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		for _, model := range models {
 			id, _ := model["id"].(string)
 			id = strings.TrimSpace(id)
+			if id == "" {
+				name, _ := model["name"].(string)
+				name = strings.TrimSpace(name)
+				id = strings.TrimPrefix(name, "models/")
+			}
 			if id == "" {
 				continue
 			}
@@ -987,6 +1044,10 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			ownedBy = strings.TrimSpace(ownedBy)
 			displayName, _ := model["display_name"].(string)
 			displayName = strings.TrimSpace(displayName)
+			if displayName == "" {
+				displayName, _ = model["displayName"].(string)
+				displayName = strings.TrimSpace(displayName)
+			}
 
 			out = append(out, homeModelEntry{
 				id:          id,
