@@ -113,15 +113,42 @@ func (c *Client) ingest(ctx context.Context, events ...ingestionEvent) error {
 }
 
 // SendGeneration sends a single generation event.
+// traceBody is the minimal payload to anchor a generation in Langfuse v3+.
+type traceBody struct {
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
 func (c *Client) SendGeneration(ctx context.Context, gen GenerationBody) error {
 	body, err := json.Marshal(gen)
 	if err != nil {
 		return err
 	}
-	return c.ingest(ctx, ingestionEvent{
-		ID:        gen.ID + "-create",
-		Type:      "generation-create",
-		Timestamp: time.Now(),
-		Body:      body,
+	now := time.Now()
+	// Send trace-create in the same batch so Langfuse has a parent trace
+	// to attach the generation to. Idempotent: re-sending the same ID is
+	// a no-op on the Langfuse side.
+	traceJSON, err := json.Marshal(traceBody{
+		ID:        gen.TraceID,
+		Name:      "cpa.request",
+		Timestamp: gen.StartTime.UTC().Format(time.RFC3339Nano),
 	})
+	if err != nil {
+		return err
+	}
+	return c.ingest(ctx,
+		ingestionEvent{
+			ID:        gen.TraceID + "-trace",
+			Type:      "trace-create",
+			Timestamp: now,
+			Body:      traceJSON,
+		},
+		ingestionEvent{
+			ID:        gen.ID + "-create",
+			Type:      "generation-create",
+			Timestamp: now,
+			Body:      body,
+		},
+	)
 }
