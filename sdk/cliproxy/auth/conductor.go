@@ -2960,10 +2960,8 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			tried[selected.ID] = struct{}{}
 			continue
 		}
-		m.mu.RLock()
+		selected = m.refreshAuthIfNeeded(ctx, selected)
 		authCopy := selected.Clone()
-		m.mu.RUnlock()
-		selected = m.refreshAuthIfNeeded(ctx, authCopy)
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
