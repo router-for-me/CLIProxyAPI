@@ -19,6 +19,11 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+
+	// Label, when set, is appended to the auth filename so multiple accounts
+	// for the same provider can coexist in one auth-dir without overwriting
+	// each other. For Claude the file becomes claude-<email>-<label>.json.
+	Label string
 }
 
 // Authenticator manages login and optional refresh flows for a provider.

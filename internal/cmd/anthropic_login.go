@@ -36,6 +36,7 @@ func DoClaudeLogin(cfg *config.Config, options *LoginOptions) {
 		CallbackPort: options.CallbackPort,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
+		Label:        options.Label,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "claude", cfg, authOpts)

@@ -201,6 +201,9 @@ waitForCallback:
 	}
 
 	fileName := fmt.Sprintf("claude-%s.json", tokenStorage.Email)
+	if opts.Label != "" {
+		fileName = fmt.Sprintf("claude-%s-%s.json", tokenStorage.Email, opts.Label)
+	}
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
