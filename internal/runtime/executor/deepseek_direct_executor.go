@@ -110,7 +110,6 @@ func (e *DeepSeekProxyExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			for i := range chunks {
 				select {
 				case <-ctx.Done():
-					out <- cliproxyexecutor.StreamChunk{Err: ctx.Err()}
 					return false
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				}
@@ -120,7 +119,10 @@ func (e *DeepSeekProxyExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		if errStream := e.streamDeepSeekAsOpenAI(ctx, auth, dsAuth, upstream, sessionID, request, emit); errStream != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errStream)
 			reporter.PublishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errStream}
+			select {
+			case <-ctx.Done():
+			case out <- cliproxyexecutor.StreamChunk{Err: errStream}:
+			}
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: upstream.Header.Clone(), Chunks: out}, nil
