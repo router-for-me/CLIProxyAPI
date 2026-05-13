@@ -4141,7 +4141,7 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return nil
 	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		return p.PrepareRequest(req, a)
+		return p.PrepareRequest(req, a.Clone())
 	}
 	return nil
 }
