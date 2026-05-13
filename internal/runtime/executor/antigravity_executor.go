@@ -1643,7 +1643,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return token, refreshed, nil
 	}
 
-	updated, errRefresh := e.refreshToken(refreshCtx, auth)
+	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone())
 	if errRefresh != nil {
 		return "", nil, errRefresh
 	}
