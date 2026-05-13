@@ -9,6 +9,12 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
+var blockedSampleAPIKeys = map[string]struct{}{
+	"your-api-key-1": {},
+	"your-api-key-2": {},
+	"your-api-key-3": {},
+}
+
 // Register ensures the config-access provider is available to the access manager.
 func Register(cfg *sdkconfig.SDKConfig) {
 	if cfg == nil {
@@ -89,6 +95,9 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
+		if isBlockedSampleAPIKey(candidate.value) {
+			return nil, sdkaccess.NewInvalidCredentialError()
+		}
 		if _, ok := p.keys[candidate.value]; ok {
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
@@ -115,6 +124,11 @@ func extractBearerToken(header string) string {
 		return header
 	}
 	return strings.TrimSpace(parts[1])
+}
+
+func isBlockedSampleAPIKey(key string) bool {
+	_, blocked := blockedSampleAPIKeys[strings.TrimSpace(key)]
+	return blocked
 }
 
 func normalizeKeys(keys []string) []string {

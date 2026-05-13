@@ -43,10 +43,11 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
+# Generate and set real private keys before exposing port 8317 publicly; the sample keys below are rejected.
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  # - "your-api-key-1"
+  # - "your-api-key-2"
+  # - "your-api-key-3"
 
 # Enable debug logging
 debug: false
