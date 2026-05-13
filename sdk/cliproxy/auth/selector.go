@@ -197,24 +197,49 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+// collectAvailableByPriority partitions auths into ready (by priority) and
+// counts every auth that is blocked with a known future retry time. The
+// caller treats the count uniformly: 401/403/404/503 cooldowns are counted
+// alongside 429 quota cooldowns so the user-facing error remains a proper
+// `model_cooldown` with a retry hint regardless of the underlying reason.
+// probeCandidates are blocked auths whose BlockedSince timestamp is at least
+// allBlockedProbeWindow in the past, ordered by oldest BlockedSince first.
+func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time, probeCandidates []*Auth) {
 	available = make(map[int][]*Auth)
+	threshold := now.Add(-allBlockedProbeWindow)
+	type probeEntry struct {
+		auth      *Auth
+		blockedAt time.Time
+	}
+	var probes []probeEntry
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
-		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
+		blocked, _, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
 			priority := authPriority(candidate)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
-		if reason == blockReasonCooldown {
-			cooldownCount++
-			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
-				earliest = next
-			}
+		if next.IsZero() {
+			continue
+		}
+		cooldownCount++
+		if earliest.IsZero() || next.Before(earliest) {
+			earliest = next
+		}
+		blockedAt := modelBlockedSince(candidate, model, now)
+		if !blockedAt.IsZero() && !blockedAt.After(threshold) {
+			probes = append(probes, probeEntry{auth: candidate, blockedAt: blockedAt})
 		}
 	}
-	return available, cooldownCount, earliest
+	if len(probes) > 0 {
+		sort.Slice(probes, func(i, j int) bool { return probes[i].blockedAt.Before(probes[j].blockedAt) })
+		probeCandidates = make([]*Auth, len(probes))
+		for i, p := range probes {
+			probeCandidates[i] = p.auth
+		}
+	}
+	return available, cooldownCount, earliest, probeCandidates
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
@@ -222,9 +247,12 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	availableByPriority, cooldownCount, earliest, probeCandidates := collectAvailableByPriority(auths, model, now)
 	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
+		if len(probeCandidates) > 0 {
+			return probeCandidates, nil
+		}
+		if cooldownCount > 0 && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
 				providerForError = ""
