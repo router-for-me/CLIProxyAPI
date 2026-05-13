@@ -105,11 +105,139 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	if len(h.cfg.APIKeyPolicies) == 0 {
+		c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys})
+		return
+	}
+	c.JSON(200, gin.H{
+		"api-keys":         h.cfg.APIKeys,
+		"api-key-policies": h.cfg.APIKeyPolicies,
+	})
+}
+
+// PutAPIKeys accepts either:
+//
+//	["sk-aaa", "sk-bbb"]                           (legacy plain list)
+//	{"items": ["sk-aaa", "sk-bbb"]}                (legacy wrapped list)
+//	[{"key":"sk-aaa","allowedModels":["gpt-4o*"]}, {"key":"sk-bbb"}]
+//	[{"key":"sk-aaa","allowed-models":["gpt-4o*"]}]
+//
+// The structured form is unwound into APIKeys (the flat list of accepted bearer
+// values, used by the auth provider) plus APIKeyPolicies (the per-key policy
+// rows, consumed by the model-ACL middleware).
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+
+	keys, policies, ok := parseAPIKeysPayload(data)
+	if !ok {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.cfg.APIKeys = append([]string(nil), keys...)
+	h.cfg.APIKeyPolicies = append([]config.APIKeyPolicy(nil), policies...)
+	h.persist(c)
+}
+
+// parseAPIKeysPayload accepts both the legacy plain-string formats and the
+// structured form described on PutAPIKeys. It returns the bearer values, the
+// matching policy entries (only for keys that supplied a non-empty
+// AllowedModels list), and ok=false on parse failure.
+func parseAPIKeysPayload(data []byte) (keys []string, policies []config.APIKeyPolicy, ok bool) {
+	// Try plain []string first.
+	var plain []string
+	if err := json.Unmarshal(data, &plain); err == nil {
+		return dedupeKeyList(plain), nil, true
+	}
+
+	// Try {items: []string}.
+	var wrapped struct {
+		Items []string `json:"items"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err == nil && len(wrapped.Items) > 0 {
+		return dedupeKeyList(wrapped.Items), nil, true
+	}
+
+	// Try the structured form: []{key, allowedModels|allowed-models}.
+	type structuredEntry struct {
+		Key                  string   `json:"key"`
+		AllowedModelsCamel   []string `json:"allowedModels"`
+		AllowedModelsHyphen  []string `json:"allowed-models"`
+		AllowedModelsSnake   []string `json:"allowed_models"`
+	}
+	var entries []structuredEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		// Try {items: [...]} of structured entries.
+		var wrappedStruct struct {
+			Items []structuredEntry `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrappedStruct); err2 != nil || len(wrappedStruct.Items) == 0 {
+			return nil, nil, false
+		}
+		entries = wrappedStruct.Items
+	}
+
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		key := strings.TrimSpace(entry.Key)
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+
+		allowed := entry.AllowedModelsCamel
+		if len(allowed) == 0 {
+			allowed = entry.AllowedModelsHyphen
+		}
+		if len(allowed) == 0 {
+			allowed = entry.AllowedModelsSnake
+		}
+		normalized := make([]string, 0, len(allowed))
+		for _, pattern := range allowed {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			normalized = append(normalized, pattern)
+		}
+		if len(normalized) > 0 {
+			policies = append(policies, config.APIKeyPolicy{
+				Key:           key,
+				AllowedModels: normalized,
+			})
+		}
+	}
+	if len(keys) == 0 {
+		return nil, nil, false
+	}
+	return keys, policies, true
+}
+
+// dedupeKeyList trims and de-duplicates raw key strings while preserving order.
+func dedupeKeyList(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, raw := range in {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
 	h.patchStringList(c, &h.cfg.APIKeys, func() {})
