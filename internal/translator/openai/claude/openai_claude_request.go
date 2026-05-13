@@ -218,13 +218,17 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					if hasContent || hasReasoning || hasToolCalls {
 						msgJSON := []byte(`{"role":"assistant"}`)
 
-						// Add content (as array if we have items, empty string if reasoning-only)
+						// OpenAI spec: assistant content must be string (not array).
+						// Concatenate text parts; skip non-text items (images not valid in assistant content).
 						if hasContent {
-							contentArrayJSON := []byte(`[]`)
+							var textParts []string
 							for _, contentItem := range contentItems {
-								contentArrayJSON, _ = sjson.SetRawBytes(contentArrayJSON, "-1", contentItem)
+								item := gjson.ParseBytes(contentItem)
+								if item.Get("type").String() == "text" {
+									textParts = append(textParts, item.Get("text").String())
+								}
 							}
-							msgJSON, _ = sjson.SetRawBytes(msgJSON, "content", contentArrayJSON)
+							msgJSON, _ = sjson.SetBytes(msgJSON, "content", strings.Join(textParts, "\n"))
 						} else {
 							// Ensure content field exists for OpenAI compatibility
 							msgJSON, _ = sjson.SetBytes(msgJSON, "content", "")

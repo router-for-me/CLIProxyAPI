@@ -228,9 +228,10 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 				t.Errorf("content existence = %v, want %v", gotHasContent, tt.wantHasContent)
 			}
 
-			if tt.wantHasContent && tt.wantContentText != "" {
-				// Find text content
-				var foundText string
+			// For assistant messages, content is a string (OpenAI spec).
+			var foundText string
+			switch {
+			case content.IsArray():
 				content.ForEach(func(_, v gjson.Result) bool {
 					if v.Get("type").String() == "text" {
 						foundText = v.Get("text").String()
@@ -238,9 +239,11 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					}
 					return true
 				})
-				if foundText != tt.wantContentText {
-					t.Errorf("content text = %q, want %q", foundText, tt.wantContentText)
-				}
+			case content.Type == gjson.String:
+				foundText = content.String()
+			}
+			if foundText != tt.wantContentText {
+				t.Errorf("content text = %q, want %q", foundText, tt.wantContentText)
 			}
 		})
 	}
@@ -637,14 +640,16 @@ func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T
 		t.Fatalf("Expected tool_call name %q, got %q", "do_work", got)
 	}
 
-	// Content should have both pre and post text
-	if got := assistantMsg.Get("content.0.text").String(); got != "pre" {
-		t.Fatalf("Expected content[0] text %q, got %q", "pre", got)
+	// Content should be a string with both pre and post text (OpenAI spec: assistant content is string)
+	if assistantMsg.Get("content").Type != gjson.String {
+		t.Fatalf("Expected assistant content to be string, got %s", assistantMsg.Get("content").Type)
 	}
-	if got := assistantMsg.Get("content.1.text").String(); got != "post" {
-		t.Fatalf("Expected content[1] text %q, got %q", "post", got)
+	// Both "pre" and "post" should be in the content string
+	contentStr := assistantMsg.Get("content").String()
+	if contentStr != "pre\npost" {
+		t.Fatalf("Expected content %q, got %q", "pre\npost", contentStr)
 	}
-}
+	}
 
 func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *testing.T) {
 	inputJSON := `{
@@ -678,12 +683,12 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected messages[0] to be assistant, got %s", assistantMsg.Get("role").String())
 	}
 
-	// Should have content with both pre and post
-	if got := assistantMsg.Get("content.0.text").String(); got != "pre" {
-		t.Fatalf("Expected content[0] text %q, got %q", "pre", got)
+	// Content should be a string with both pre and post (OpenAI spec: assistant content is string)
+	if assistantMsg.Get("content").Type != gjson.String {
+		t.Fatalf("Expected assistant content to be string, got %s", assistantMsg.Get("content").Type)
 	}
-	if got := assistantMsg.Get("content.1.text").String(); got != "post" {
-		t.Fatalf("Expected content[1] text %q, got %q", "post", got)
+	if got := assistantMsg.Get("content").String(); got != "pre\npost" {
+		t.Fatalf("Expected content %q, got %q", "pre\npost", got)
 	}
 
 	// Should have tool_calls
