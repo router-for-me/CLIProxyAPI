@@ -25,6 +25,12 @@ const (
 	apiResponseKey          = "API_RESPONSE"
 	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
 	creditsUsedKey          = "__antigravity_credits_used__"
+
+	// Context keys written regardless of RequestLog; available to plugins and middleware.
+	UpstreamURLKey          = "upstream_url"
+	UpstreamFirstUserMsgKey = "upstream_first_user_msg"
+	UpstreamResponseTextKey = "upstream_response_text"
+	UpstreamRawUsageKey     = "upstream_raw_usage"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -55,6 +61,18 @@ type upstreamAttempt struct {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	// Always-on: store the upstream URL and first user message for plugins.
+	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+		if info.URL != "" {
+			ginCtx.Set(UpstreamURLKey, info.URL)
+		}
+		if len(info.Body) > 0 {
+			if msg := extractFirstUserText(info.Body); msg != "" {
+				ginCtx.Set(UpstreamFirstUserMsgKey, msg)
+			}
+		}
+	}
+
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -153,6 +171,11 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	// Always-on: accumulate response text for plugins.
+	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+		accumulateResponseText(ginCtx, chunk)
+	}
+
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -546,6 +569,134 @@ func extractHTMLTitle(body []byte) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(title), " ")
+}
+
+// extractFirstUserText returns the text of the first user message in an
+// Anthropic /v1/messages JSON body. Returns empty string on any parse error.
+func extractFirstUserText(body []byte) string {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return ""
+	}
+	var text string
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "user" {
+			return true
+		}
+		content := msg.Get("content")
+		if content.IsArray() {
+			content.ForEach(func(_, block gjson.Result) bool {
+				if block.Get("type").String() == "text" {
+					t := strings.TrimSpace(block.Get("text").String())
+					if t != "" {
+						text = t
+						return false
+					}
+				}
+				return true
+			})
+		} else if content.Type == gjson.String {
+			text = strings.TrimSpace(content.String())
+		}
+		return false
+	})
+	const maxLen = 2000
+	if len(text) > maxLen {
+		text = text[:maxLen] + "..."
+	}
+	return text
+}
+
+// accumulateResponseText appends text content from SSE chunks or a full JSON
+// body into UpstreamResponseTextKey and usage counters into UpstreamRawUsageKey.
+func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
+	chunk = bytes.TrimSpace(chunk)
+	if len(chunk) == 0 {
+		return
+	}
+	// Non-streaming: full JSON body.
+	if bytes.HasPrefix(chunk, []byte("{")) {
+		accumulateUsage(ginCtx, chunk)
+		text := gjson.GetBytes(chunk, "content.0.text").String()
+		if text == "" {
+			text = gjson.GetBytes(chunk, "content.#.text").String()
+		}
+		if text != "" {
+			const maxLen = 4000
+			if len(text) > maxLen {
+				text = text[:maxLen] + "..."
+			}
+			ginCtx.Set(UpstreamResponseTextKey, text)
+		}
+		return
+	}
+	// Streaming SSE: one TCP chunk may carry multiple events.
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		accumulateUsage(ginCtx, data)
+		ev := gjson.GetBytes(data, "delta")
+		if !ev.Exists() || ev.Get("type").String() != "text_delta" {
+			continue
+		}
+		delta := ev.Get("text").String()
+		if delta == "" {
+			continue
+		}
+		var current string
+		if v, ok := ginCtx.Get(UpstreamResponseTextKey); ok {
+			if s, ok := v.(string); ok {
+				current = s
+			}
+		}
+		const maxLen = 4000
+		if len(current) < maxLen {
+			current += delta
+			if len(current) > maxLen {
+				current = current[:maxLen] + "..."
+			}
+			ginCtx.Set(UpstreamResponseTextKey, current)
+		}
+	}
+}
+
+func accumulateUsage(ginCtx *gin.Context, data []byte) {
+	usage := gjson.GetBytes(data, "usage")
+	if !usage.Exists() {
+		return
+	}
+	current := map[string]int64{}
+	if v, ok := ginCtx.Get(UpstreamRawUsageKey); ok {
+		if m, ok := v.(map[string]int64); ok {
+			for k, val := range m {
+				current[k] = val
+			}
+		}
+	}
+	setMax := func(key string) {
+		if r := usage.Get(key); r.Exists() {
+			if v := r.Int(); v > current[key] {
+				current[key] = v
+			}
+		}
+	}
+	for _, key := range []string{
+		"input_tokens", "output_tokens",
+		"cache_read_input_tokens", "cache_creation_input_tokens",
+		"reasoning_tokens", "total_tokens",
+	} {
+		setMax(key)
+	}
+	if current["total_tokens"] == 0 {
+		current["total_tokens"] = current["input_tokens"] + current["output_tokens"] + current["reasoning_tokens"]
+	}
+	ginCtx.Set(UpstreamRawUsageKey, current)
 }
 
 // extractJSONErrorMessage attempts to extract error.message from JSON error responses
