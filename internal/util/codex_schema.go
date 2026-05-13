@@ -96,8 +96,25 @@ var codexPathReplacer = strings.NewReplacer(
 )
 
 func escapeCodexSchemaPathKey(key string) string {
-	if !strings.ContainsAny(key, "\\.*?:") {
+	forceObjectKey := isCodexNumericPathKey(key)
+	if !forceObjectKey && !strings.ContainsAny(key, "\\.*?:") {
 		return key
 	}
-	return codexPathReplacer.Replace(key)
+	escaped := codexPathReplacer.Replace(key)
+	if forceObjectKey {
+		return ":" + escaped
+	}
+	return escaped
+}
+
+func isCodexNumericPathKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < '0' || key[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
