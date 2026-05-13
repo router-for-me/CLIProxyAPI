@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -536,8 +537,8 @@ func normalizeToolParameters(raw string) string {
 	if raw == "" || raw == "null" || !gjson.Valid(raw) {
 		return `{"type":"object","properties":{}}`
 	}
-	result := gjson.Parse(raw)
-	schema := []byte(raw)
+	schema := util.NormalizeCodexToolSchema(raw)
+	result := gjson.ParseBytes(schema)
 	schemaType := result.Get("type").String()
 	if schemaType == "" {
 		schema, _ = sjson.SetBytes(schema, "type", "object")

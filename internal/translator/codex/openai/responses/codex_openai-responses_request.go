@@ -3,6 +3,7 @@ package responses
 import (
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -41,6 +42,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
+	rawJSON = normalizeCodexResponsesToolSchemas(rawJSON)
 
 	return rawJSON
 }
@@ -110,6 +112,27 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 		}
 	}
 
+	return result
+}
+
+func normalizeCodexResponsesToolSchemas(rawJSON []byte) []byte {
+	result := rawJSON
+	tools := gjson.GetBytes(result, "tools")
+	if !tools.IsArray() {
+		return result
+	}
+
+	for i, tool := range tools.Array() {
+		if tool.Get("type").String() != "function" {
+			continue
+		}
+		parameters := tool.Get("parameters")
+		if !parameters.Exists() {
+			continue
+		}
+		path := fmt.Sprintf("tools.%d.parameters", i)
+		result, _ = sjson.SetRawBytes(result, path, util.NormalizeCodexToolSchema(parameters.Raw))
+	}
 	return result
 }
 

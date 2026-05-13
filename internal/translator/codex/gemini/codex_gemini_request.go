@@ -221,13 +221,13 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				}
 				if prm := fn.Get("parameters"); prm.Exists() {
 					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
+					cleaned := util.NormalizeCodexToolSchema(prm.Raw)
 					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
 					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
 					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
 				} else if prm = fn.Get("parametersJsonSchema"); prm.Exists() {
 					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
+					cleaned := util.NormalizeCodexToolSchema(prm.Raw)
 					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
 					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
 					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
