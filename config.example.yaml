@@ -116,6 +116,7 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to use credits as last-resort fallback when all free-tier auths are exhausted for Claude models
+  antigravity-credits-stick-seconds: 0 # How long (seconds) credits mode stays active after first successful credits request. 0 = disabled, -1 = always use credits
 
 # Routing strategy for selecting credentials when multiple match.
 routing:

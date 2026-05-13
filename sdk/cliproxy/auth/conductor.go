@@ -1220,6 +1220,12 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
+	if m.antigravityCreditsSticky(normalized, req.Model) {
+		if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
+			return resp, nil
+		}
+	}
+
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -1284,6 +1290,12 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+
+	if m.antigravityCreditsSticky(normalized, req.Model) {
+		if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
+			return result, nil
+		}
 	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
@@ -3513,6 +3525,30 @@ type creditsCandidateEntry struct {
 	provider string
 }
 
+func (m *Manager) antigravityCreditsSticky(providers []string, model string) bool {
+	if m == nil {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits || cfg.QuotaExceeded.AntigravityCreditsStickSeconds == 0 {
+		return false
+	}
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(model)), "claude") {
+		return false
+	}
+	hasAntigravity := false
+	for _, p := range providers {
+		if strings.EqualFold(strings.TrimSpace(p), "antigravity") {
+			hasAntigravity = true
+			break
+		}
+	}
+	if !hasAntigravity {
+		return false
+	}
+	return HasAnyAntigravityCreditsSticky(cfg.QuotaExceeded.AntigravityCreditsStickSeconds)
+}
+
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
 	status := statusCodeFromError(lastErr)
 	log.WithFields(log.Fields{
@@ -3594,6 +3630,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				continue
 			}
 			m.MarkResult(creditsCtx, result)
+			MarkAntigravityCreditsStick(c.auth.ID)
 			return resp, true
 		}
 	}
@@ -3622,6 +3659,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if errStream != nil {
 			continue
 		}
+		MarkAntigravityCreditsStick(c.auth.ID)
 		return result, true
 	}
 	return nil, false
