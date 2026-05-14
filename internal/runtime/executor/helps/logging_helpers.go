@@ -681,11 +681,19 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 	// Non-streaming: full JSON body.
 	if bytes.HasPrefix(chunk, []byte("{")) {
 		accumulateUsage(ginCtx, chunk)
-		// Anthropic: content[0].text
-		text := gjson.GetBytes(chunk, "content.0.text").String()
-		if text == "" {
-			text = gjson.GetBytes(chunk, "content.#.text").String()
-		}
+		// Anthropic: walk content blocks to find the first text block.
+		// content[0].text misses responses where a thinking/tool block
+		// comes first; content.#.text returns a JSON array, not a string.
+		var text string
+		gjson.GetBytes(chunk, "content").ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "text" {
+				if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+					text = t
+					return false
+				}
+			}
+			return true
+		})
 		// OpenAI-compatible: choices[0].message.content
 		if text == "" {
 			text = gjson.GetBytes(chunk, "choices.0.message.content").String()
@@ -799,9 +807,11 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 	} {
 		setMax(key)
 	}
-	if current["total_tokens"] == 0 {
-		current["total_tokens"] = current["input_tokens"] + current["output_tokens"] +
-			current["prompt_tokens"] + current["completion_tokens"] + current["reasoning_tokens"]
+	// Always recompute derived total so late-arriving output_tokens events
+	// don't leave total_tokens stale from an earlier partial usage event.
+	if derived := current["input_tokens"] + current["output_tokens"] +
+		current["prompt_tokens"] + current["completion_tokens"] + current["reasoning_tokens"]; derived > current["total_tokens"] {
+		current["total_tokens"] = derived
 	}
 
 	// Gemini usageMetadata lives at the top level, not under "usage".
