@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/joho/godotenv"
 	"github.com/router-for-me/CLIProxyAPI/v7/examples/langfuse-plugin/langfuse"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -44,6 +45,11 @@ func main() {
 func run() error {
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	flag.Parse()
+
+	// Load .env if present so credentials can be supplied via a dotenv file
+	// rather than the shell environment. Errors are silently ignored because
+	// the file is optional.
+	_ = godotenv.Load()
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
