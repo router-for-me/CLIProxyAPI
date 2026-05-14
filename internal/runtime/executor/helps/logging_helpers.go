@@ -579,6 +579,32 @@ func extractHTMLTitle(body []byte) string {
 // request body. Supports Anthropic /v1/messages and Gemini /generateContent
 // formats. Returns empty string on any parse error.
 func extractFirstUserText(body []byte) string {
+	// Antigravity: request.contents[].parts[].text
+	if contents := gjson.GetBytes(body, "request.contents"); contents.Exists() && contents.IsArray() {
+		var text string
+		contents.ForEach(func(_, item gjson.Result) bool {
+			role := item.Get("role").String()
+			if role != "" && role != "user" {
+				return true
+			}
+			item.Get("parts").ForEach(func(_, part gjson.Result) bool {
+				if t := strings.TrimSpace(part.Get("text").String()); t != "" {
+					text = t
+					return false
+				}
+				return true
+			})
+			return text == ""
+		})
+		if text != "" {
+			const maxLen = 2000
+			if len(text) > maxLen {
+				text = text[:maxLen] + "..."
+			}
+			return text
+		}
+	}
+
 	// Gemini: contents[].parts[].text (role=user or no role)
 	if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() {
 		var text string
@@ -826,6 +852,20 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 	if derived := current["input_tokens"] + current["output_tokens"] +
 		current["prompt_tokens"] + current["completion_tokens"] + current["reasoning_tokens"]; derived > current["total_tokens"] {
 		current["total_tokens"] = derived
+	}
+
+	// Antigravity wrapper: response.usageMetadata
+	if meta := gjson.GetBytes(data, "response.usageMetadata"); meta.Exists() {
+		setFromPath := func(key, path string) {
+			if r := meta.Get(path); r.Exists() {
+				if v := r.Int(); v > current[key] {
+					current[key] = v
+				}
+			}
+		}
+		setFromPath("prompt_tokens", "promptTokenCount")
+		setFromPath("completion_tokens", "candidatesTokenCount")
+		setFromPath("total_tokens", "totalTokenCount")
 	}
 
 	// Gemini usageMetadata lives at the top level, not under "usage".
