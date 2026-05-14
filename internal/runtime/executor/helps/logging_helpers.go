@@ -323,14 +323,18 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(payload)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		// Always-on: accumulate response text and usage for plugins.
+		accumulateResponseText(ginCtx, data)
+	}
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
 	if ginCtx == nil {
 		return
 	}
