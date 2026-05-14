@@ -1220,6 +1220,25 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
+	stickyAttempted := false
+	if ss := m.antigravityCreditsStickSeconds(normalized, req.Model); ss != 0 {
+		var candidates []creditsCandidateEntry
+		if ss < 0 {
+			candidates = m.findAllAntigravityCreditsCandidateAuths(req.Model, opts)
+		} else {
+			candidates = m.findStickyAntigravityCreditsCandidateAuths(req.Model, opts, ss)
+		}
+		if len(candidates) > 0 {
+			stickyAttempted = true
+			if resp, ok := m.creditsExecuteWith(ctx, req, opts, candidates); ok {
+				return resp, nil
+			}
+			if ss < 0 {
+				return cliproxyexecutor.Response{}, &Error{Code: "credits_exhausted", Message: "credits-only mode active but all credits candidates failed"}
+			}
+		}
+	}
+
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -1238,7 +1257,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 	}
 	if lastErr != nil {
-		if shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+		if !stickyAttempted && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
 				return resp, nil
 			}
@@ -1286,6 +1305,25 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
+	stickyAttempted := false
+	if ss := m.antigravityCreditsStickSeconds(normalized, req.Model); ss != 0 {
+		var candidates []creditsCandidateEntry
+		if ss < 0 {
+			candidates = m.findAllAntigravityCreditsCandidateAuths(req.Model, opts)
+		} else {
+			candidates = m.findStickyAntigravityCreditsCandidateAuths(req.Model, opts, ss)
+		}
+		if len(candidates) > 0 {
+			stickyAttempted = true
+			if result, ok := m.creditsExecuteStreamWith(ctx, req, opts, candidates); ok {
+				return result, nil
+			}
+			if ss < 0 {
+				return nil, &Error{Code: "credits_exhausted", Message: "credits-only mode active but all credits candidates failed"}
+			}
+		}
+	}
+
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -1304,7 +1342,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
-		if shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+		if !stickyAttempted && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
 				return result, nil
 			}
@@ -3632,8 +3670,17 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 }
 
 func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool) {
+	candidates := m.findAllAntigravityCreditsCandidateAuths(req.Model, opts)
+	return m.creditsExecuteWith(ctx, req, opts, candidates)
+}
+
+func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool) {
+	candidates := m.findAllAntigravityCreditsCandidateAuths(req.Model, opts)
+	return m.creditsExecuteStreamWith(ctx, req, opts, candidates)
+}
+
+func (m *Manager) creditsExecuteWith(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []creditsCandidateEntry) (cliproxyexecutor.Response, bool) {
 	routeModel := req.Model
-	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return cliproxyexecutor.Response{}, false
@@ -3668,15 +3715,15 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				continue
 			}
 			m.MarkResult(creditsCtx, result)
+			MarkAntigravityCreditsStick(c.auth.ID)
 			return resp, true
 		}
 	}
 	return cliproxyexecutor.Response{}, false
 }
 
-func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool) {
+func (m *Manager) creditsExecuteStreamWith(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []creditsCandidateEntry) (*cliproxyexecutor.StreamResult, bool) {
 	routeModel := req.Model
-	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return nil, false
@@ -3696,9 +3743,75 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if errStream != nil {
 			continue
 		}
-		return result, true
+		return wrapCreditsStreamForStickyMark(result, c.auth.ID), true
 	}
 	return nil, false
+}
+
+// wrapCreditsStreamForStickyMark wraps a stream result so that
+// MarkAntigravityCreditsStick is called only after the stream completes
+// without any error chunks, preventing premature sticky marking on
+// mid-stream failures.
+func wrapCreditsStreamForStickyMark(sr *cliproxyexecutor.StreamResult, authID string) *cliproxyexecutor.StreamResult {
+	origChunks := sr.Chunks
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		hadError := false
+		for chunk := range origChunks {
+			if chunk.Err != nil {
+				hadError = true
+			}
+			out <- chunk
+		}
+		if !hadError {
+			MarkAntigravityCreditsStick(authID)
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: sr.Headers, Chunks: out}
+}
+
+// antigravityCreditsStickSeconds returns the configured stick duration when the
+// sticky credits path should be considered. Returns 0 when disabled or
+// preconditions are not met (non-Claude model, no antigravity provider).
+func (m *Manager) antigravityCreditsStickSeconds(providers []string, model string) int {
+	if m == nil {
+		return 0
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits || cfg.QuotaExceeded.AntigravityCreditsStickSeconds == 0 {
+		return 0
+	}
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(model)), "claude") {
+		return 0
+	}
+	hasAntigravity := false
+	for _, p := range providers {
+		if strings.EqualFold(strings.TrimSpace(p), "antigravity") {
+			hasAntigravity = true
+			break
+		}
+	}
+	if !hasAntigravity {
+		return 0
+	}
+	return cfg.QuotaExceeded.AntigravityCreditsStickSeconds
+}
+
+// findStickyAntigravityCreditsCandidateAuths returns only the candidates whose
+// auth has an active per-auth sticky window (stickSeconds > 0).
+func (m *Manager) findStickyAntigravityCreditsCandidateAuths(routeModel string, opts cliproxyexecutor.Options, stickSeconds int) []creditsCandidateEntry {
+	all := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
+	if stickSeconds <= 0 {
+		return all
+	}
+	var sticky []creditsCandidateEntry
+	for _, c := range all {
+		if IsAntigravityCreditsSticky(c.auth.ID, stickSeconds) {
+			sticky = append(sticky, c)
+		}
+	}
+	return sticky
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {

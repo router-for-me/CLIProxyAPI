@@ -72,6 +72,57 @@ func HasKnownAntigravityCreditsHint(authID string) bool {
 	return ok && hint.Known
 }
 
+var antigravityCreditsStickByAuth sync.Map // auth ID → time.Time (first successful credits usage)
+
+// MarkAntigravityCreditsStick records the first successful credits-based request
+// for the given auth. Subsequent calls are no-ops — the window is never renewed.
+func MarkAntigravityCreditsStick(authID string) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	antigravityCreditsStickByAuth.LoadOrStore(authID, time.Now())
+}
+
+// ClearAntigravityCreditsStick removes the sticky credits state for the given auth.
+func ClearAntigravityCreditsStick(authID string) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	antigravityCreditsStickByAuth.Delete(authID)
+}
+
+// IsAntigravityCreditsSticky reports whether the given auth is within an active
+// sticky credits window.
+// stickSeconds == 0: disabled. stickSeconds < 0 (-1): permanently sticky.
+func IsAntigravityCreditsSticky(authID string, stickSeconds int) bool {
+	if stickSeconds == 0 {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+	if stickSeconds < 0 {
+		return true
+	}
+	val, ok := antigravityCreditsStickByAuth.Load(authID)
+	if !ok {
+		return false
+	}
+	t, ok := val.(time.Time)
+	if !ok {
+		antigravityCreditsStickByAuth.Delete(authID)
+		return false
+	}
+	if time.Since(t) > time.Duration(stickSeconds)*time.Second {
+		antigravityCreditsStickByAuth.Delete(authID)
+		return false
+	}
+	return true
+}
+
 func antigravityCreditsAvailableForModel(auth *Auth, model string) bool {
 	if auth == nil {
 		return false
