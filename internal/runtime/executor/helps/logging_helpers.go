@@ -747,6 +747,20 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 			}
 		}
 		if delta == "" {
+			// Responses API (Codex): response.output_item.done - final text in item.content[].text
+			if gjson.GetBytes(data, "type").String() == "response.output_item.done" {
+				gjson.GetBytes(data, "item.content").ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "output_text" {
+						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+							delta = t
+							return false
+						}
+					}
+					return true
+				})
+			}
+		}
+		if delta == "" {
 			// Gemini SSE (native): candidates[0].content.parts[0].text
 			delta = gjson.GetBytes(data, "candidates.0.content.parts.0.text").String()
 		}
