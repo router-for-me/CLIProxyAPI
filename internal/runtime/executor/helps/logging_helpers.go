@@ -222,10 +222,22 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		// Always-on: populate context keys for plugins regardless of RequestLog.
+		ginCtx.Set(UpstreamRawUsageKey, nil)
+		if info.URL != "" {
+			ginCtx.Set(UpstreamURLKey, info.URL)
+		}
+		if len(info.Body) > 0 {
+			if msg := extractFirstUserText(info.Body); msg != "" {
+				ginCtx.Set(UpstreamFirstUserMsgKey, msg)
+			}
+		}
+	}
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
