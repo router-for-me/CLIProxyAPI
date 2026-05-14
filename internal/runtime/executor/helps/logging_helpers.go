@@ -816,9 +816,14 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 	if !usage.Exists() {
 		usage = gjson.GetBytes(data, "usage")
 	}
+	// Claude streaming: message_start event carries usage under message.usage.
+	if !usage.Exists() {
+		usage = gjson.GetBytes(data, "message.usage")
+	}
 	if !usage.Exists() {
 		// Check Gemini usageMetadata path before giving up.
-		if !gjson.GetBytes(data, "usageMetadata").Exists() {
+		if !gjson.GetBytes(data, "usageMetadata").Exists() &&
+			!gjson.GetBytes(data, "response.usageMetadata").Exists() {
 			return
 		}
 	}
@@ -846,6 +851,18 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		"prompt_tokens", "completion_tokens",
 	} {
 		setMax(key)
+	}
+	// OpenAI nested details: prompt_tokens_details.cached_tokens,
+	// output_tokens_details.reasoning_tokens, etc.
+	if r := usage.Get("prompt_tokens_details.cached_tokens"); r.Exists() {
+		if v := r.Int(); v > current["cache_read_input_tokens"] {
+			current["cache_read_input_tokens"] = v
+		}
+	}
+	if r := usage.Get("output_tokens_details.reasoning_tokens"); r.Exists() {
+		if v := r.Int(); v > current["reasoning_tokens"] {
+			current["reasoning_tokens"] = v
+		}
 	}
 	// Always recompute derived total so late-arriving output_tokens events
 	// don't leave total_tokens stale from an earlier partial usage event.
