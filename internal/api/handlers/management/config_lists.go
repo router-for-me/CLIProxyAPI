@@ -483,13 +483,7 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 
 // provider: returns all provider configurations aggregated
 func (h *Handler) GetProvider(c *gin.Context) {
-	c.JSON(200, gin.H{
-		"gemini-api-key":       h.geminiKeysWithAuthIndex(),
-		"claude-api-key":       h.claudeKeysWithAuthIndex(),
-		"codex-api-key":        h.codexKeysWithAuthIndex(),
-		"openai-compatibility": h.openAICompatibilityWithAuthIndex(),
-		"vertex-api-key":       h.vertexCompatKeysWithAuthIndex(),
-	})
+	c.JSON(200, h.allProvidersWithAuthIndex())
 }
 
 // openai-compatibility: []OpenAICompatibility
