@@ -56,9 +56,11 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	// allowClampUnsupported determines whether to clamp unsupported levels instead of returning an error.
 	// This applies when crossing provider families (e.g., openai→gemini, claude→gemini) and the target
 	// model supports discrete levels. Same-family conversions require strict validation.
+	// OpenAI-compatibility models also use clamping because the upstream provider may support
+	// levels beyond what is declared in the local config (e.g., xhigh on a provider that added it).
 	toCapability := detectModelCapability(modelInfo)
 	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
-	allowClampUnsupported := toHasLevelSupport && !isSameProviderFamily(fromFormat, toFormat)
+	allowClampUnsupported := toHasLevelSupport && (!isSameProviderFamily(fromFormat, toFormat) || isOpenAICompatModel(modelInfo))
 
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,
@@ -362,6 +364,16 @@ func isOpenAIFamily(provider string) bool {
 	default:
 		return false
 	}
+}
+
+// isOpenAICompatModel reports whether the model is an openai-compatibility type model.
+// These models proxy to external OpenAI-compatible providers that may support more
+// thinking levels than declared locally, so clamping is preferred over rejection.
+func isOpenAICompatModel(modelInfo *registry.ModelInfo) bool {
+	if modelInfo == nil {
+		return false
+	}
+	return strings.EqualFold(modelInfo.Type, "openai-compatibility")
 }
 
 func isSameProviderFamily(from, to string) bool {
