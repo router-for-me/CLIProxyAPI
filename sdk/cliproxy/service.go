@@ -1223,6 +1223,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							Thinking:    thinking,
 						})
 					}
+					// Apply excluded-models for OpenAI-compatibility providers
+					if authKind == "apikey" {
+						excluded = compat.ExcludedModels
+					}
+					ms = applyExcludedModels(ms, excluded)
 					// Register and return
 					if len(ms) > 0 {
 						if providerKey == "" {

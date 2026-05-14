@@ -9,6 +9,30 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
+// parseRawItemsForDisabledCheck parses the request body to extract raw items
+// for disabled field detection. Supports both direct array format:
+//
+//	[{"api-key": "...", "disabled": true}, ...]
+//
+// and {"items": [...]} wrapper format (used by some SDK callers):
+//
+//	{"items": [{"api-key": "...", "disabled": true}, ...]}
+//
+// Returns nil if neither format can be parsed.
+func parseRawItemsForDisabledCheck(data []byte) []map[string]any {
+	var raw []map[string]any
+	if err := json.Unmarshal(data, &raw); err == nil {
+		return raw
+	}
+	var obj struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(data, &obj); err == nil {
+		return obj.Items
+	}
+	return nil
+}
+
 // Generic helpers for list[string]
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
 	data, err := c.GetRawData()
@@ -138,6 +162,23 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 			return
 		}
 		arr = obj.Items
+	}
+	// Check if "disabled" field was explicitly provided in raw JSON.
+	// Supports both direct array and {"items": [...]} wrapper format.
+	rawItems := parseRawItemsForDisabledCheck(data)
+	for i := range arr {
+		normalizeGeminiKey(&arr[i])
+		// If excluded-models is ["*"] and "disabled" was not explicitly set,
+		// auto-enable disabled to maintain backward compatibility.
+		disabledProvided := false
+		if rawItems != nil && i < len(rawItems) {
+			if _, ok := rawItems[i]["disabled"]; ok {
+				disabledProvided = true
+			}
+		}
+		if !disabledProvided && len(arr[i].ExcludedModels) == 1 && arr[i].ExcludedModels[0] == "*" {
+			arr[i].Disabled = true
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -296,8 +337,22 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	// Check if "disabled" field was explicitly provided in raw JSON.
+	// Supports both direct array and {"items": [...]} wrapper format.
+	rawItems := parseRawItemsForDisabledCheck(data)
 	for i := range arr {
 		normalizeClaudeKey(&arr[i])
+		// If excluded-models is ["*"] and "disabled" was not explicitly set,
+		// auto-enable disabled to maintain backward compatibility.
+		disabledProvided := false
+		if rawItems != nil && i < len(rawItems) {
+			if _, ok := rawItems[i]["disabled"]; ok {
+				disabledProvided = true
+			}
+		}
+		if !disabledProvided && len(arr[i].ExcludedModels) == 1 && arr[i].ExcludedModels[0] == "*" {
+			arr[i].Disabled = true
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -426,6 +481,11 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// provider: returns all provider configurations aggregated
+func (h *Handler) GetProvider(c *gin.Context) {
+	c.JSON(200, h.allProvidersWithAuthIndex())
+}
+
 // openai-compatibility: []OpenAICompatibility
 func (h *Handler) GetOpenAICompat(c *gin.Context) {
 	c.JSON(200, gin.H{"openai-compatibility": h.openAICompatibilityWithAuthIndex()})
@@ -447,9 +507,23 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	// Check if "disabled" field was explicitly provided in raw JSON.
+	// Supports both direct array and {"items": [...]} wrapper format.
+	rawItems := parseRawItemsForDisabledCheck(data)
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
+		// If excluded-models is ["*"] and "disabled" was not explicitly set,
+		// auto-enable disabled to maintain backward compatibility.
+		disabledProvided := false
+		if rawItems != nil && i < len(rawItems) {
+			if _, ok := rawItems[i]["disabled"]; ok {
+				disabledProvided = true
+			}
+		}
+		if !disabledProvided && len(arr[i].ExcludedModels) == 1 && arr[i].ExcludedModels[0] == "*" {
+			arr[i].Disabled = true
+		}
 		if strings.TrimSpace(arr[i].BaseURL) != "" {
 			filtered = append(filtered, arr[i])
 		}
@@ -584,8 +658,22 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	// Check if "disabled" field was explicitly provided in raw JSON.
+	// Supports both direct array and {"items": [...]} wrapper format.
+	rawItems := parseRawItemsForDisabledCheck(data)
 	for i := range arr {
 		normalizeVertexCompatKey(&arr[i])
+		// If excluded-models is ["*"] and "disabled" was not explicitly set,
+		// auto-enable disabled to maintain backward compatibility.
+		disabledProvided := false
+		if rawItems != nil && i < len(rawItems) {
+			if _, ok := rawItems[i]["disabled"]; ok {
+				disabledProvided = true
+			}
+		}
+		if !disabledProvided && len(arr[i].ExcludedModels) == 1 && arr[i].ExcludedModels[0] == "*" {
+			arr[i].Disabled = true
+		}
 		if arr[i].APIKey == "" {
 			c.JSON(400, gin.H{"error": fmt.Sprintf("vertex-api-key[%d].api-key is required", i)})
 			return
@@ -937,11 +1025,25 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	// Check if "disabled" field was explicitly provided in raw JSON.
+	// Supports both direct array and {"items": [...]} wrapper format.
+	rawItems := parseRawItemsForDisabledCheck(data)
 	// Filter out codex entries with empty base-url (treat as removed)
 	filtered := make([]config.CodexKey, 0, len(arr))
 	for i := range arr {
 		entry := arr[i]
 		normalizeCodexKey(&entry)
+		// If excluded-models is ["*"] and "disabled" was not explicitly set,
+		// auto-enable disabled to maintain backward compatibility.
+		disabledProvided := false
+		if rawItems != nil && i < len(rawItems) {
+			if _, ok := rawItems[i]["disabled"]; ok {
+				disabledProvided = true
+			}
+		}
+		if !disabledProvided && len(entry.ExcludedModels) == 1 && entry.ExcludedModels[0] == "*" {
+			entry.Disabled = true
+		}
 		if entry.BaseURL == "" {
 			continue
 		}
@@ -1088,6 +1190,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
@@ -1127,6 +1230,32 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	normalized := make([]config.ClaudeModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
+// normalizeGeminiKey normalizes a Gemini key entry.
+func normalizeGeminiKey(entry *config.GeminiKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.GeminiModel, 0, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)
