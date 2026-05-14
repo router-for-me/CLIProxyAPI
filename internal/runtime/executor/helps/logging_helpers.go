@@ -749,6 +749,7 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		}
 	}
 	updated := false
+	sawOutputTextDelta := false
 	for _, line := range bytes.Split(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -767,13 +768,17 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		}
 		if delta == "" {
 			// Responses API (Codex): response.output_text.delta
-			delta = gjson.GetBytes(data, "delta").String()
-			if gjson.GetBytes(data, "type").String() != "response.output_text.delta" {
-				delta = ""
+			if gjson.GetBytes(data, "type").String() == "response.output_text.delta" {
+				delta = gjson.GetBytes(data, "delta").String()
+				if delta != "" {
+					sawOutputTextDelta = true
+				}
 			}
 		}
-		if delta == "" {
-			// Responses API (Codex): response.output_item.done - final text in item.content[].text
+		if delta == "" && !sawOutputTextDelta {
+			// Responses API (Codex): response.output_item.done - final text in item.content[].text.
+			// Only use when no output_text.delta events were seen; otherwise the
+			// full text is already accumulated from deltas and this would duplicate it.
 			if gjson.GetBytes(data, "type").String() == "response.output_item.done" {
 				gjson.GetBytes(data, "item.content").ForEach(func(_, block gjson.Result) bool {
 					if block.Get("type").String() == "output_text" {
@@ -864,10 +869,12 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 			current["reasoning_tokens"] = v
 		}
 	}
-	// Always recompute derived total so late-arriving output_tokens events
-	// don't leave total_tokens stale from an earlier partial usage event.
+	// Derive total_tokens from input + output when the upstream omits it or
+	// when a late SSE event raises output_tokens without updating total_tokens.
+	// reasoning_tokens is a subset of output_tokens/completion_tokens, so it
+	// must NOT be added again here lest we double-count it.
 	if derived := current["input_tokens"] + current["output_tokens"] +
-		current["prompt_tokens"] + current["completion_tokens"] + current["reasoning_tokens"]; derived > current["total_tokens"] {
+		current["prompt_tokens"] + current["completion_tokens"]; derived > current["total_tokens"] {
 		current["total_tokens"] = derived
 	}
 
