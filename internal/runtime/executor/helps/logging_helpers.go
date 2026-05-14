@@ -732,6 +732,21 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		if text == "" {
 			text = gjson.GetBytes(chunk, "response.candidates.0.content.parts.0.text").String()
 		}
+		// Codex Responses API: top-level output[].content[].text (compact/non-streaming)
+		if text == "" {
+			gjson.GetBytes(chunk, "output").ForEach(func(_, item gjson.Result) bool {
+				item.Get("content").ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "output_text" {
+						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+							text = t
+							return false
+						}
+					}
+					return true
+				})
+				return text == ""
+			})
+		}
 		// Codex Responses API: response.completed event - response.output[].content[].text
 		if text == "" {
 			gjson.GetBytes(chunk, "response.output").ForEach(func(_, item gjson.Result) bool {
