@@ -888,15 +888,21 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		setMax(key)
 	}
 	// OpenAI nested details: prompt_tokens_details.cached_tokens,
-	// output_tokens_details.reasoning_tokens, etc.
+	// output_tokens_details.reasoning_tokens (Responses API),
+	// completion_tokens_details.reasoning_tokens (chat completions).
 	if r := usage.Get("prompt_tokens_details.cached_tokens"); r.Exists() {
 		if v := r.Int(); v > current["cache_read_input_tokens"] {
 			current["cache_read_input_tokens"] = v
 		}
 	}
-	if r := usage.Get("output_tokens_details.reasoning_tokens"); r.Exists() {
-		if v := r.Int(); v > current["reasoning_tokens"] {
-			current["reasoning_tokens"] = v
+	for _, path := range []string{
+		"output_tokens_details.reasoning_tokens",
+		"completion_tokens_details.reasoning_tokens",
+	} {
+		if r := usage.Get(path); r.Exists() {
+			if v := r.Int(); v > current["reasoning_tokens"] {
+				current["reasoning_tokens"] = v
+			}
 		}
 	}
 	// Derive total_tokens from input + output when the upstream omits it or
