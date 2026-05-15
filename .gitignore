@@ -1,3 +1,7 @@
+# 非原版代码新增逻辑, 排序按照字母顺序，新增忽略文件，都加在最头上，避免和原版社区的代码合并冲突
+.cli-proxy-api
+target
+
 # Binaries
 cli-proxy-api
 *.exe
