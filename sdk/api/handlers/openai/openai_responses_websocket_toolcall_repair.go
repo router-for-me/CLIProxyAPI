@@ -1,8 +1,11 @@
 package openai
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -417,4 +420,135 @@ func isResponsesToolCallOutputType(itemType string) bool {
 	default:
 		return false
 	}
+}
+
+// httpResponsesSessionKey derives a session key for HTTP requests.
+// It mirrors the WebSocket session key derivation by preferring request-level
+// identity headers (X-Client-Request-Id), then falling back to a hash of
+// model + previous_response_id.
+//
+// SECURITY: When no request-level identity is available (no headers and no
+// previous_response_id), we call repairResponsesHTTPNoCache which performs
+// reordering without any shared cache to avoid cross-user cache pollution.
+func httpResponsesSessionKey(req *http.Request, payload []byte) string {
+	// Prefer an explicit request ID header if present (mirrors WebSocket behavior).
+	if sessionKey := websocketDownstreamSessionKey(req); sessionKey != "" {
+		return "http:" + sessionKey
+	}
+	// Fall back to a hash of model + previous_response_id.
+	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	prevRespID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+	// If previous_response_id is empty AND no request header is present,
+	// return empty so callers fall back to repairResponsesHTTPNoCache
+	// (no shared cache to prevent cross-user pollution on first-turn requests).
+	if prevRespID == "" {
+		return ""
+	}
+	composite := model + "|" + prevRespID
+	hash := sha256.Sum256([]byte(composite))
+	return "http:" + hex.EncodeToString(hash[:16])
+}
+
+// repairResponsesHTTPNoCache performs tool call reordering without using any session
+// cache. Use this when sessionKey is empty (no request-level identity available
+// and previous_response_id is absent) to still fix out-of-order tool calls while
+// avoiding cross-user cache pollution.
+func repairResponsesHTTPNoCache(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return payload
+	}
+	updatedRaw := reorderResponsesToolCallsNoCache(input.Raw)
+	if updatedRaw == "" || updatedRaw == input.Raw {
+		return payload
+	}
+	updated, errSet := sjson.SetRawBytes(payload, "input", []byte(updatedRaw))
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+// reorderResponsesToolCallsNoCache reorders function_call / function_call_output items
+// so that each output immediately follows its corresponding call, without using any
+// shared session cache.
+// Algorithm:
+//  1. Collect all output items keyed by call_id.
+//  2. Iterate original items in order; add non-output items directly.
+//     For each call, add the call then immediately append its outputs from the map.
+//     Remove appended outputs from the map so they are not processed again.
+//  3. Append any orphaned outputs (those whose call_id was not found) at the end.
+//
+// This handles both correct-order and reversed-order (output before call) cases.
+func reorderResponsesToolCallsNoCache(rawArray string) string {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]"
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(rawArray), &items); err != nil {
+		return ""
+	}
+
+	// Collect all output items keyed by call_id.
+	outputsByCallID := make(map[string][]json.RawMessage, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesToolCallOutputType(itemType) {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID != "" {
+				outputsByCallID[callID] = append(outputsByCallID[callID], item)
+			}
+		}
+	}
+
+	// Iterate: add non-outputs as-is, add calls + their outputs.
+	result := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesToolCallOutputType(itemType) {
+			continue // outputs handled when we hit their call
+		}
+		if isResponsesToolCallType(itemType) {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID == "" {
+				// Drop tool calls without call_id (upstream rejects them).
+				continue
+			}
+			result = append(result, item)
+			outputs := outputsByCallID[callID]
+			for i := range outputs {
+				result = append(result, outputs[i])
+			}
+			delete(outputsByCallID, callID)
+			continue
+		}
+		// Non-tool items: add as-is.
+		result = append(result, item)
+	}
+
+	// Append orphaned outputs in sorted order for stable output.
+	orphanOrder := make([]string, 0, len(outputsByCallID))
+	for callID := range outputsByCallID {
+		orphanOrder = append(orphanOrder, callID)
+	}
+	sort.Strings(orphanOrder)
+	for _, callID := range orphanOrder {
+		result = append(result, outputsByCallID[callID]...)
+	}
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
