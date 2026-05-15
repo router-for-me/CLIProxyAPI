@@ -172,6 +172,14 @@ func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
 	}
 }
 
+func TestOAuthModelAliasChannel_DeepSeek(t *testing.T) {
+	t.Parallel()
+
+	if got := OAuthModelAliasChannel("deepseek", "oauth"); got != "deepseek" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "deepseek")
+	}
+}
+
 func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 
