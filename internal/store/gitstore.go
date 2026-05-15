@@ -858,7 +858,16 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
 	}
-	s.maybeRunGC(repo)
+	// Repack loose objects written by rewriteHeadAsSingleCommit before pushing.
+	// On ephemeral filesystems (e.g. Render free tier), the repo is freshly cloned
+	// on every restart so all existing objects live in packfiles. The squashed orphan
+	// commit is written as a loose object; without repacking, go-git cannot locate it
+	// during push and returns "packfile not found".
+	if err := repo.RepackObjects(&git.RepackConfig{}); err != nil {
+		return fmt.Errorf("git token store: repack: %w", err)
+	}
+	// Skip repack inside maybeRunGC since we just repacked above.
+	s.maybeRunGC(repo, true)
 	pushOpts := &git.PushOptions{Auth: s.gitAuth(), Force: true}
 	if s.branch != "" {
 		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec("refs/heads/" + s.branch + ":refs/heads/" + s.branch)}
@@ -907,7 +916,7 @@ func (s *GitTokenStore) rewriteHeadAsSingleCommit(repo *git.Repository, branch p
 	return nil
 }
 
-func (s *GitTokenStore) maybeRunGC(repo *git.Repository) {
+func (s *GitTokenStore) maybeRunGC(repo *git.Repository, skipRepack bool) {
 	now := time.Now()
 	if now.Sub(s.lastGC) < gcInterval {
 		return
@@ -921,7 +930,9 @@ func (s *GitTokenStore) maybeRunGC(repo *git.Repository) {
 	if err := repo.Prune(pruneOpts); err != nil && !errors.Is(err, git.ErrLooseObjectsNotSupported) {
 		return
 	}
-	_ = repo.RepackObjects(&git.RepackConfig{})
+	if !skipRepack {
+		_ = repo.RepackObjects(&git.RepackConfig{})
+	}
 }
 
 // PersistConfig commits and pushes configuration changes to git.
