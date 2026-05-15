@@ -74,6 +74,17 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	// transientBackoffBase is the initial cooldown applied for transient
+	// upstream errors (408/500/502/503/504). The ladder doubles up to
+	// transientBackoffMax. Far shorter than the quota ladder because these
+	// errors are typically transient flakes, not exhausted resources.
+	transientBackoffBase = 5 * time.Second
+	transientBackoffMax  = 5 * time.Minute
+	// allBlockedProbeWindow allows the picker to surface one blocked auth
+	// when no candidates are ready. Without this, a brief storm of upstream
+	// failures locks every auth for the configured cooldown duration with
+	// no probe budget against the same model+auth.
+	allBlockedProbeWindow = 10 * time.Second
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -118,6 +129,13 @@ type Selector interface {
 type StoppableSelector interface {
 	Selector
 	Stop()
+}
+
+// AuthInvalidator is implemented by selectors that keep per-auth session
+// bindings. It lets the manager drop affinity for an auth that failed this
+// request without marking the auth itself unhealthy.
+type AuthInvalidator interface {
+	InvalidateAuth(authID string)
 }
 
 // Hook captures lifecycle callbacks for observing auth changes.
@@ -353,6 +371,18 @@ func (m *Manager) SetSelector(selector Selector) {
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+func (m *Manager) invalidateSessionAffinity(authID string) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	if invalidator, ok := selector.(AuthInvalidator); ok && invalidator != nil {
+		invalidator.InvalidateAuth(authID)
 	}
 }
 
@@ -2145,6 +2175,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	clearAffinityOnly := !result.Success && isClaudeOutOfExtraUsageResultError(result.Error)
 	var authSnapshot *Auth
 
 	m.mu.Lock()
@@ -2173,7 +2204,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
-		} else {
+		} else if !clearAffinityOnly {
 			if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
@@ -2250,17 +2281,33 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								setModelQuota = true
 							}
 						case 408, 500, 502, 503, 504:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
+							var next time.Time
+							backoffLevel := state.TransientBackoffLevel
+							if !disableCooling {
+								if result.RetryAfter != nil && *result.RetryAfter > 0 {
+									next = now.Add(*result.RetryAfter)
+								} else {
+									cooldown, nextLevel := nextTransientCooldown(backoffLevel, disableCooling)
+									if cooldown > 0 {
+										next = now.Add(cooldown)
+									}
+									backoffLevel = nextLevel
+								}
 							}
+							state.NextRetryAfter = next
+							state.TransientBackoffLevel = backoffLevel
 						default:
 							state.NextRetryAfter = time.Time{}
 						}
 					}
 
+					if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+						if state.BlockedSince.IsZero() {
+							state.BlockedSince = now
+						}
+					} else {
+						state.BlockedSince = time.Time{}
+					}
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
@@ -2270,8 +2317,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
-		authSnapshot = auth.Clone()
+		if !clearAffinityOnly {
+			_ = m.persist(ctx, auth)
+			authSnapshot = auth.Clone()
+		}
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
@@ -2289,7 +2338,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
-
+	if clearAffinityOnly {
+		m.invalidateSessionAffinity(result.AuthID)
+		return
+	}
 	m.hook.OnResult(ctx, result)
 }
 
@@ -2318,6 +2370,8 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	state.Quota = QuotaState{}
+	state.BlockedSince = time.Time{}
+	state.TransientBackoffLevel = 0
 	state.UpdatedAt = now
 }
 
@@ -2332,6 +2386,9 @@ func modelStateIsClean(state *ModelState) bool {
 		return false
 	}
 	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+		return false
+	}
+	if !state.BlockedSince.IsZero() || state.TransientBackoffLevel != 0 {
 		return false
 	}
 	return true
@@ -2610,6 +2667,29 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isClaudeOutOfExtraUsageMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "out of extra usage") ||
+		strings.Contains(lower, "claude.ai/settings/usage")
+}
+
+func isClaudeOutOfExtraUsageError(err error) bool {
+	if err == nil || statusCodeFromError(err) != http.StatusBadRequest {
+		return false
+	}
+	return isClaudeOutOfExtraUsageMessage(err.Error())
+}
+
+func isClaudeOutOfExtraUsageResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusBadRequest {
+		return false
+	}
+	return isClaudeOutOfExtraUsageMessage(err.Message)
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
@@ -2618,6 +2698,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // routing can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isClaudeOutOfExtraUsageError(err) {
 		return false
 	}
 	if isModelSupportError(err) {
@@ -2729,6 +2812,30 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 	}
 	if cooldown >= quotaBackoffMax {
 		return quotaBackoffMax, prevLevel
+	}
+	return cooldown, prevLevel + 1
+}
+
+// nextTransientCooldown returns the next cooldown duration and updated
+// backoff level for repeated transient upstream errors (408/500/502/503/504).
+// The level is bounded by overflow protection (1<<31) which we never approach
+// in practice given the cap, but matches the quota helper's contract.
+func nextTransientCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
+	if prevLevel < 0 {
+		prevLevel = 0
+	}
+	if disableCooling {
+		return 0, prevLevel
+	}
+	if prevLevel > 30 {
+		prevLevel = 30
+	}
+	cooldown := transientBackoffBase * time.Duration(1<<prevLevel)
+	if cooldown < transientBackoffBase {
+		cooldown = transientBackoffBase
+	}
+	if cooldown >= transientBackoffMax {
+		return transientBackoffMax, prevLevel
 	}
 	return cooldown, prevLevel + 1
 }

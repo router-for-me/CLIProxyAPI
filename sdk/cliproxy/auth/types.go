@@ -147,6 +147,15 @@ type ModelState struct {
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
 	Quota QuotaState `json:"quota"`
+	// BlockedSince records when this model state most recently entered an
+	// unavailable-with-future-retry condition. It is set on the transition
+	// from ready→blocked and cleared on success. Used to gate the
+	// "all-blocked → probe" fallback in selectors.
+	BlockedSince time.Time `json:"blocked_since,omitempty"`
+	// TransientBackoffLevel stores the progressive cooldown exponent used
+	// for transient upstream errors (408/500/502/503/504), mirroring the
+	// QuotaState.BackoffLevel ladder used for 429 responses.
+	TransientBackoffLevel int `json:"transient_backoff,omitempty"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
 }

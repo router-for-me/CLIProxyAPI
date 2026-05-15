@@ -71,6 +71,10 @@ type scheduledAuth struct {
 	auth        *Auth
 	state       scheduledState
 	nextRetryAt time.Time
+	// blockedAt mirrors ModelState.BlockedSince so the picker can decide
+	// whether enough time has elapsed to probe a blocked auth when no
+	// ready candidates remain.
+	blockedAt time.Time
 }
 
 // readyBucket keeps the ready views for one priority level.
@@ -273,6 +277,9 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
 		return picked, nil
 	}
+	if picked := shard.pickProbeLocked(predicate, time.Now()); picked != nil {
+		return picked, nil
+	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
 }
 
@@ -326,6 +333,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
+		if picked := shard.pickProbeLocked(predicate, time.Now()); picked != nil {
+			return picked, providerKey, nil
+		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
@@ -354,6 +364,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		}
 	}
 	if !hasCandidate {
+		if probeAuth, probeProvider := s.mixedProbeLocked(normalized, modelKey, predicate, now); probeAuth != nil {
+			return probeAuth, probeProvider, nil
+		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
@@ -367,6 +380,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			if picked != nil {
 				return picked, providerKey, nil
 			}
+		}
+		if probeAuth, probeProvider := s.mixedProbeLocked(normalized, modelKey, predicate, time.Now()); probeAuth != nil {
+			return probeAuth, probeProvider, nil
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
@@ -385,6 +401,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		segmentEnds[providerIndex] = totalWeight
 	}
 	if totalWeight == 0 {
+		if probeAuth, probeProvider := s.mixedProbeLocked(normalized, modelKey, predicate, time.Now()); probeAuth != nil {
+			return probeAuth, probeProvider, nil
+		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
@@ -400,6 +419,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		}
 	}
 	if startProviderIndex < 0 {
+		if probeAuth, probeProvider := s.mixedProbeLocked(normalized, modelKey, predicate, time.Now()); probeAuth != nil {
+			return probeAuth, probeProvider, nil
+		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
@@ -424,7 +446,52 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		s.mixedCursors[cursorKey] = slot + 1
 		return picked, providerKey, nil
 	}
+	if probeAuth, probeProvider := s.mixedProbeLocked(normalized, modelKey, predicate, time.Now()); probeAuth != nil {
+		return probeAuth, probeProvider, nil
+	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+// mixedProbeLocked finds the longest-blocked entry across the given providers'
+// shards for modelKey that has spent at least allBlockedProbeWindow in a
+// non-ready state. Returns nil when nothing qualifies.
+func (s *authScheduler) mixedProbeLocked(providers []string, modelKey string, predicate func(*scheduledAuth) bool, now time.Time) (*Auth, string) {
+	threshold := now.Add(-allBlockedProbeWindow)
+	var pickedAuth *Auth
+	var pickedProvider string
+	var pickedAt time.Time
+	for _, providerKey := range providers {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.modelShards[modelKey]
+		if shard == nil {
+			continue
+		}
+		for _, entry := range shard.entries {
+			if entry == nil || entry.auth == nil {
+				continue
+			}
+			switch entry.state {
+			case scheduledStateCooldown, scheduledStateBlocked:
+			default:
+				continue
+			}
+			if entry.blockedAt.IsZero() || entry.blockedAt.After(threshold) {
+				continue
+			}
+			if predicate != nil && !predicate(entry) {
+				continue
+			}
+			if pickedAuth == nil || entry.blockedAt.Before(pickedAt) {
+				pickedAuth = entry.auth.Clone()
+				pickedProvider = providerKey
+				pickedAt = entry.blockedAt
+			}
+		}
+	}
+	return pickedAuth, pickedProvider
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -572,6 +639,26 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 	}
 }
 
+// modelBlockedSince returns the BlockedSince timestamp recorded on the auth's
+// per-model state for modelKey, or fallback when none is set. The fallback
+// represents "we noticed this auth is blocked just now"; it ensures the
+// probe timer is well-defined even when state was loaded from disk without
+// the BlockedSince field populated.
+func modelBlockedSince(auth *Auth, modelKey string, fallback time.Time) time.Time {
+	if auth == nil {
+		return fallback
+	}
+	if state, ok := auth.ModelStates[modelKey]; ok && state != nil && !state.BlockedSince.IsZero() {
+		return state.BlockedSince
+	}
+	if canonical := canonicalModelKey(modelKey); canonical != modelKey {
+		if state, ok := auth.ModelStates[canonical]; ok && state != nil && !state.BlockedSince.IsZero() {
+			return state.BlockedSince
+		}
+	}
+	return fallback
+}
+
 // supportedModelSetForAuth snapshots the registry models currently registered for an auth.
 func supportedModelSetForAuth(authID string) map[string]struct{} {
 	authID = strings.TrimSpace(authID)
@@ -677,6 +764,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	}
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
+	previousBlockedAt := entry.blockedAt
 	previousPriority := 0
 	previousParent := ""
 	previousWebsocketEnabled := false
@@ -689,6 +777,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	entry.meta = meta
 	entry.auth = meta.auth
 	entry.nextRetryAt = time.Time{}
+	entry.blockedAt = time.Time{}
 	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
 	switch {
 	case !blocked:
@@ -696,14 +785,16 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	case reason == blockReasonCooldown:
 		entry.state = scheduledStateCooldown
 		entry.nextRetryAt = next
+		entry.blockedAt = modelBlockedSince(meta.auth, m.modelKey, now)
 	case reason == blockReasonDisabled:
 		entry.state = scheduledStateDisabled
 	default:
 		entry.state = scheduledStateBlocked
 		entry.nextRetryAt = next
+		entry.blockedAt = modelBlockedSince(meta.auth, m.modelKey, now)
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousBlockedAt.Equal(entry.blockedAt) && previousPriority == meta.priority && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -739,15 +830,19 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 		case !blocked:
 			entry.state = scheduledStateReady
 			entry.nextRetryAt = time.Time{}
+			entry.blockedAt = time.Time{}
 		case reason == blockReasonCooldown:
 			entry.state = scheduledStateCooldown
 			entry.nextRetryAt = next
+			entry.blockedAt = modelBlockedSince(entry.auth, m.modelKey, now)
 		case reason == blockReasonDisabled:
 			entry.state = scheduledStateDisabled
 			entry.nextRetryAt = time.Time{}
+			entry.blockedAt = time.Time{}
 		default:
 			entry.state = scheduledStateBlocked
 			entry.nextRetryAt = next
+			entry.blockedAt = modelBlockedSince(entry.auth, m.modelKey, now)
 		}
 		changed = true
 	}
@@ -861,7 +956,11 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
+// availabilitySummaryLocked summarizes total candidates, the count of those
+// blocked with a known retry time, and the earliest such retry time.
+// All cooldown and blocked entries with a future nextRetryAt count toward the
+// "cooldown" total — distinguishing 401/403/503 from quota 429 in the
+// user-facing error label is noise.
 func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
 	if m == nil {
 		return 0, 0, time.Time{}
@@ -877,15 +976,56 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state != scheduledStateCooldown {
+		switch entry.state {
+		case scheduledStateCooldown, scheduledStateBlocked:
+		default:
+			continue
+		}
+		if entry.nextRetryAt.IsZero() {
 			continue
 		}
 		cooldownCount++
-		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
+		if earliest.IsZero() || entry.nextRetryAt.Before(earliest) {
 			earliest = entry.nextRetryAt
 		}
 	}
 	return total, cooldownCount, earliest
+}
+
+// pickProbeLocked selects the longest-blocked entry that has spent at least
+// allBlockedProbeWindow in a non-ready state. Returns nil if nothing
+// qualifies. This is the "all blocked → probe" fallback used when no ready
+// auth is available; it lets a single request retry through stale cooldowns
+// instead of surfacing the configured wait time to the caller.
+func (m *modelScheduler) pickProbeLocked(predicate func(*scheduledAuth) bool, now time.Time) *Auth {
+	if m == nil {
+		return nil
+	}
+	threshold := now.Add(-allBlockedProbeWindow)
+	var picked *scheduledAuth
+	for _, entry := range m.entries {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		switch entry.state {
+		case scheduledStateCooldown, scheduledStateBlocked:
+		default:
+			continue
+		}
+		if entry.blockedAt.IsZero() || entry.blockedAt.After(threshold) {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if picked == nil || entry.blockedAt.Before(picked.blockedAt) {
+			picked = entry
+		}
+	}
+	if picked == nil || picked.auth == nil {
+		return nil
+	}
+	return picked.auth.Clone()
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

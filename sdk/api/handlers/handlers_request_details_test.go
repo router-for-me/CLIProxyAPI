@@ -26,12 +26,14 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-5", Created: now + 5},
 	})
+	modelRegistry.RegisterClient("test-request-details-codex", "codex", registry.GetCodexFreeModels())
 
 	// Ensure cleanup of all test registrations.
 	clientIDs := []string{
 		"test-request-details-gemini",
 		"test-request-details-openai",
 		"test-request-details-claude",
+		"test-request-details-codex",
 	}
 	for _, clientID := range clientIDs {
 		id := clientID
@@ -59,7 +61,7 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 		{
 			name:          "level suffix preserved",
 			inputModel:    "gpt-5.2(high)",
-			wantProviders: []string{"openai"},
+			wantProviders: []string{"codex", "openai"},
 			wantModel:     "gpt-5.2(high)",
 			wantErr:       false,
 		},
@@ -96,6 +98,13 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			inputModel:    "claude-sonnet-4-5(auto)",
 			wantProviders: []string{"claude"},
 			wantModel:     "claude-sonnet-4-5(auto)",
+			wantErr:       false,
+		},
+		{
+			name:          "codex spark routes through codex",
+			inputModel:    "gpt-5.3-codex-spark",
+			wantProviders: []string{"codex"},
+			wantModel:     "gpt-5.3-codex-spark",
 			wantErr:       false,
 		},
 	}

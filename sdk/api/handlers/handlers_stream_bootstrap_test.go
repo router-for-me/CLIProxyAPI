@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -466,7 +465,14 @@ func TestExecuteStreamWithAuthManager_DoesNotRetryAfterFirstByte(t *testing.T) {
 	}
 }
 
-func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError(t *testing.T) {
+// TestExecuteStreamWithAuthManager_BootstrapRetrySurfacesModelCooldown verifies that
+// when the only available auth is exhausted by an upstream 401 during the
+// bootstrap retry path, the picker surfaces a `model_cooldown` error (HTTP 429
+// with retry-time hint) rather than an opaque `auth_unavailable` (HTTP 503).
+// All non-quota cooldowns (401/403/404/503) are now treated uniformly as
+// "blocked with future retry" by the selector, so the retry hint is always
+// available regardless of the underlying status code.
+func TestExecuteStreamWithAuthManager_BootstrapRetrySurfacesModelCooldown(t *testing.T) {
 	executor := &failOnceStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -513,22 +519,18 @@ func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError
 	if gotErr == nil {
 		t.Fatalf("expected terminal error")
 	}
-	if gotErr.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", gotErr.StatusCode, http.StatusServiceUnavailable)
+	if gotErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d (model_cooldown)", gotErr.StatusCode, http.StatusTooManyRequests)
 	}
-
-	var authErr *coreauth.Error
-	if !errors.As(gotErr.Error, &authErr) || authErr == nil {
-		t.Fatalf("expected coreauth.Error, got %T", gotErr.Error)
+	body := gotErr.Error.Error()
+	if !strings.Contains(body, "\"code\":\"model_cooldown\"") {
+		t.Fatalf("body missing model_cooldown code: %q", body)
 	}
-	if authErr.Code != "auth_unavailable" {
-		t.Fatalf("code = %q, want %q", authErr.Code, "auth_unavailable")
+	if !strings.Contains(body, "test-model") {
+		t.Fatalf("body missing model context: %q", body)
 	}
-	if !strings.Contains(authErr.Message, "providers=codex") {
-		t.Fatalf("message missing provider context: %q", authErr.Message)
-	}
-	if !strings.Contains(authErr.Message, "model=test-model") {
-		t.Fatalf("message missing model context: %q", authErr.Message)
+	if !strings.Contains(body, "codex") {
+		t.Fatalf("body missing provider context: %q", body)
 	}
 
 	if executor.Calls() != 1 {
