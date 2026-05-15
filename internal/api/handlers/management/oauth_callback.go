@@ -79,7 +79,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 	if sessionStatus != "" {
-		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": sessionStatus})
 		return
 	}
 	if !strings.EqualFold(sessionProvider, canonicalProvider) {
@@ -89,6 +89,11 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 
 	if _, errWrite := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, canonicalProvider, state, code, errMsg); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
+			_, status, okSession := GetOAuthSession(state)
+			if okSession && status != "" {
+				c.JSON(http.StatusConflict, gin.H{"status": "error", "error": status})
+				return
+			}
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 			return
 		}
