@@ -29,6 +29,9 @@ remote-management:
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
   secret-key: ""
 
+  # External base URL for remote management clients when the server is accessed behind a proxy or public domain.
+  external-base-url: ""
+
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
