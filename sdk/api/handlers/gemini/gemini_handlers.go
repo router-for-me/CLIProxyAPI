@@ -151,7 +151,16 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 	}
 
 	method := action[1]
-	rawJSON, _ := c.GetRawData()
+	rawJSON, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
 
 	switch method {
 	case "generateContent":
@@ -160,6 +169,13 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		h.handleStreamGenerateContent(c, action[0], rawJSON)
 	case "countTokens":
 		h.handleCountTokens(c, action[0], rawJSON)
+	default:
+		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("%s not found.", c.Request.URL.Path),
+				Type:    "invalid_request_error",
+			},
+		})
 	}
 }
 

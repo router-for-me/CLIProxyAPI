@@ -1,6 +1,12 @@
 package auth
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
@@ -76,5 +82,29 @@ func TestExtractAccessToken(t *testing.T) {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreListReturnsAuthFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "valid.json"), []byte(`{"type":"custom"}`), 0o600); err != nil {
+		t.Fatalf("write valid auth: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte(`{"type":`), 0o600); err != nil {
+		t.Fatalf("write broken auth: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+
+	entries, err := store.List(context.Background())
+	if err == nil {
+		t.Fatal("List succeeded, want error for broken auth file")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %#v, want nil on error", entries)
+	}
+	if !strings.Contains(err.Error(), "broken.json") {
+		t.Fatalf("error = %q, want broken file path", err.Error())
 	}
 }

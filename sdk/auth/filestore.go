@@ -145,7 +145,7 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		}
 		auth, err := s.readAuthFile(path, dir)
 		if err != nil {
-			return nil
+			return fmt.Errorf("auth filestore: read auth file %q: %w", path, err)
 		}
 		if auth != nil {
 			entries = append(entries, auth)

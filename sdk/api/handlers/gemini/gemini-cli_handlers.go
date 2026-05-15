@@ -76,7 +76,16 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		return
 	}
 
-	rawJSON, _ := c.GetRawData()
+	rawJSON, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
 	requestRawURI := c.Request.URL.Path
 
 	if requestRawURI == "/v1internal:generateContent" {
@@ -130,7 +139,9 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		}
 
 		defer func() {
-			_ = resp.Body.Close()
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.WithError(errClose).Warn("failed to close response body")
+			}
 		}()
 
 		for key, value := range resp.Header {
@@ -138,7 +149,13 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		}
 		output, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Errorf("Failed to read response body: %v", err)
+			log.WithError(err).Error("failed to read response body")
+			c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "failed to read upstream response body",
+					Type:    "upstream_error",
+				},
+			})
 			return
 		}
 		c.Set("API_RESPONSE_TIMESTAMP", time.Now())
