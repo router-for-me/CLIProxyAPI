@@ -239,6 +239,40 @@ func TestEnsureRepositoryResetsToRemoteDefaultWhenBranchUnset(t *testing.T) {
 	assertRemoteBranchContents(t, remoteDir, "master", "local master update\n")
 }
 
+func TestCommitAndPushLockedPushesBeforeRunningGC(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+
+	workspaceDir := filepath.Join(root, "workspace")
+	updates := []string{
+		"local master update one\n",
+		"local master update two\n",
+	}
+	for _, contents := range updates {
+		if err := os.WriteFile(filepath.Join(workspaceDir, "branch.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatalf("write local master marker: %v", err)
+		}
+
+		store.lastGC = time.Now().Add(-gcInterval)
+		store.mu.Lock()
+		err := store.commitAndPushLocked("Update master marker", "branch.txt")
+		store.mu.Unlock()
+		if err != nil {
+			t.Fatalf("commitAndPushLocked with forced GC: %v", err)
+		}
+
+		assertRemoteBranchContents(t, remoteDir, "master", contents)
+	}
+}
+
 func TestEnsureRepositoryFollowsRenamedRemoteDefaultBranchWhenAvailable(t *testing.T) {
 	root := t.TempDir()
 	remoteDir := setupGitRemoteRepository(t, root, "master",
