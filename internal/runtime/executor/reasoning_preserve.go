@@ -20,6 +20,14 @@ import (
 // assistant messages by their ordinal position within the assistant-only sequence.
 // This is robust because translation never reorders or drops assistant messages —
 // it only inserts non-assistant messages (tool, system) around them.
+//
+// When both original and translated carry reasoning_content at the same assistant ordinal,
+// the original value always wins — it is the authoritative source the provider expects
+// to receive back verbatim.
+//
+// Error contract: on sjson.SetBytes failure, the function discards any partial writes
+// and returns the unmodified translated input along with the error, so the caller never
+// receives a partially-patched payload.
 func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 	if len(original) == 0 || len(translated) == 0 {
 		return translated, nil
@@ -71,7 +79,7 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 // keyed by their ordinal position in the assistant-only sequence (0, 1, 2, ...).
 // Empty-string reasoning_content is preserved because DeepSeek requires it.
 func collectAssistantReasoning(messages []gjson.Result) map[int]string {
-	reasoning := make(map[int]string, len(messages))
+	reasoning := make(map[int]string)
 	ordinal := 0
 	for _, msg := range messages {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {

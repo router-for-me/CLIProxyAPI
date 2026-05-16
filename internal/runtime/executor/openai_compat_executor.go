@@ -89,20 +89,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
-	originalPayloadSource := req.Payload
+	originalPayload := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
+		originalPayload = opts.OriginalRequest
 	}
-	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return resp, err
-	}
-
-	translated, err = preserveReasoningContent(originalTranslated, translated)
 	if err != nil {
 		return resp, err
 	}
@@ -209,20 +203,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
-	originalPayloadSource := req.Payload
+	originalPayload := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
+		originalPayload = opts.OriginalRequest
 	}
-	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return nil, err
-	}
-
-	translated, err = preserveReasoningContent(originalTranslated, translated)
 	if err != nil {
 		return nil, err
 	}

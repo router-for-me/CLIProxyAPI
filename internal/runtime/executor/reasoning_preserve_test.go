@@ -310,3 +310,28 @@ func TestPreserveReasoningContent_PartialAssistantReasoning(t *testing.T) {
 		t.Fatalf("second assistant should not have reasoning_content when original had none")
 	}
 }
+
+func TestPreserveReasoningContent_OriginalWinsOverTranslated(t *testing.T) {
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"original reasoning"}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"stale translated reasoning"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if got != "original reasoning" {
+		t.Fatalf("original must win over translated: got %q, want %q", got, "original reasoning")
+	}
+}
