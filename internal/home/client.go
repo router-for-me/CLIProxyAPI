@@ -265,7 +265,23 @@ func (c *Client) Ping(ctx context.Context) error {
 	return cmd.Ping(ctx).Err()
 }
 
+func (c *Client) clusterDiscoveryEnabled() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clusterDiscoveryEnabledLocked()
+}
+
+func (c *Client) clusterDiscoveryEnabledLocked() bool {
+	return !c.homeCfg.DisableClusterDiscovery
+}
+
 func (c *Client) refreshBestClusterNode(ctx context.Context) {
+	if !c.clusterDiscoveryEnabled() {
+		return
+	}
 	switched, errRefresh := c.refreshClusterNodes(ctx)
 	if errRefresh != nil {
 		log.Debugf("home cluster nodes unavailable: %v", errRefresh)
@@ -279,6 +295,9 @@ func (c *Client) refreshBestClusterNode(ctx context.Context) {
 }
 
 func (c *Client) refreshClusterNodes(ctx context.Context) (bool, error) {
+	if !c.clusterDiscoveryEnabled() {
+		return false, nil
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -353,6 +372,10 @@ func (c *Client) failoverAfterReconnectFailure() (bool, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if !c.clusterDiscoveryEnabledLocked() {
+		c.reconnectFailures = 0
+		return false, ""
+	}
 	c.reconnectFailures++
 	if c.reconnectFailures < homeReconnectFailoverThreshold {
 		return false, ""

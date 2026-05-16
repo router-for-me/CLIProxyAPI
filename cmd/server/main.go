@@ -73,6 +73,7 @@ func main() {
 	var password string
 	var homeAddr string
 	var homePassword string
+	var homeDisableClusterDiscovery bool
 	var tuiMode bool
 	var standalone bool
 	var localModel bool
@@ -93,6 +94,7 @@ func main() {
 	flag.StringVar(&password, "password", "", "")
 	flag.StringVar(&homeAddr, "home", "", "Home control plane address in host:port, redis://host:port, or rediss://host:port format (loads config from home and skips local config file)")
 	flag.StringVar(&homePassword, "home-password", "", "Home control plane password (Redis AUTH)")
+	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
@@ -249,6 +251,9 @@ func main() {
 		if errHomeCfg != nil {
 			log.Errorf("invalid -home address %q: %v", homeAddr, errHomeCfg)
 			return
+		}
+		if homeDisableClusterDiscovery {
+			homeCfg.DisableClusterDiscovery = true
 		}
 		homeClient := home.New(homeCfg)
 		defer homeClient.Close()

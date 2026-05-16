@@ -2,11 +2,12 @@ package config
 
 // HomeConfig configures the optional "home" control plane integration over Redis protocol.
 type HomeConfig struct {
-	Enabled  bool          `yaml:"enabled" json:"enabled"`
-	Host     string        `yaml:"host" json:"-"`
-	Port     int           `yaml:"port" json:"-"`
-	Password string        `yaml:"password" json:"-"`
-	TLS      HomeTLSConfig `yaml:"tls" json:"-"`
+	Enabled                 bool          `yaml:"enabled" json:"enabled"`
+	Host                    string        `yaml:"host" json:"-"`
+	Port                    int           `yaml:"port" json:"-"`
+	Password                string        `yaml:"password" json:"-"`
+	DisableClusterDiscovery bool          `yaml:"disable-cluster-discovery" json:"-"`
+	TLS                     HomeTLSConfig `yaml:"tls" json:"-"`
 }
 
 // HomeTLSConfig configures client-side TLS for the home Redis connection.

@@ -76,10 +76,11 @@ func parseHomeURLConfig(rawAddr string, password string) (config.HomeConfig, err
 		Port:     port,
 		Password: password,
 	}
+	query := parsed.Query()
+	homeCfg.DisableClusterDiscovery = parseHomeBoolQuery(query, "disable-cluster-discovery", "disable_cluster_discovery")
 
 	if scheme == "rediss" {
 		homeCfg.TLS.Enable = true
-		query := parsed.Query()
 		homeCfg.TLS.ServerName = strings.TrimSpace(firstHomeQueryValue(query, "server-name", "server_name"))
 		homeCfg.TLS.InsecureSkipVerify = parseHomeBoolQuery(query, "insecure-skip-verify", "insecure_skip_verify", "skip_verify")
 		homeCfg.TLS.CACert = strings.TrimSpace(firstHomeQueryValue(query, "ca-cert", "ca_cert"))

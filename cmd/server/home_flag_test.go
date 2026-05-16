@@ -64,3 +64,14 @@ func TestParseHomeFlagConfigPasswordFlagOverridesURLPassword(t *testing.T) {
 		t.Fatalf("Password = %q, want flag-secret", cfg.Password)
 	}
 }
+
+func TestParseHomeFlagConfigDisableClusterDiscovery(t *testing.T) {
+	cfg, err := parseHomeFlagConfig("redis://home.example.com:8327?disable-cluster-discovery=true", "")
+	if err != nil {
+		t.Fatalf("parseHomeFlagConfig() error = %v", err)
+	}
+
+	if !cfg.DisableClusterDiscovery {
+		t.Fatal("DisableClusterDiscovery = false, want true")
+	}
+}

@@ -9,6 +9,7 @@ home:
   host: home.example.com
   port: 444
   password: secret
+  disable-cluster-discovery: true
   tls:
     enable: true
     server-name: home.example.com
@@ -30,6 +31,9 @@ home:
 	}
 	if cfg.Home.Password != "secret" {
 		t.Fatalf("Home.Password = %q, want secret", cfg.Home.Password)
+	}
+	if !cfg.Home.DisableClusterDiscovery {
+		t.Fatal("Home.DisableClusterDiscovery = false, want true")
 	}
 	if !cfg.Home.TLS.Enable {
 		t.Fatal("Home.TLS.Enable = false, want true")

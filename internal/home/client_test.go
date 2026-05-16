@@ -1,6 +1,7 @@
 package home
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"net/http"
@@ -113,5 +114,46 @@ func TestRedisOptionsHomeTLSEnabledUsesExplicitServerName(t *testing.T) {
 	}
 	if !options.TLSConfig.InsecureSkipVerify {
 		t.Fatal("InsecureSkipVerify = false, want true")
+	}
+}
+
+func TestRefreshClusterNodesDisabledSkipsRedisCommand(t *testing.T) {
+	client := New(config.HomeConfig{
+		Enabled:                 true,
+		Host:                    "127.0.0.1",
+		Port:                    1,
+		DisableClusterDiscovery: true,
+	})
+
+	switched, err := client.refreshClusterNodes(context.Background())
+	if err != nil {
+		t.Fatalf("refreshClusterNodes() error = %v", err)
+	}
+	if switched {
+		t.Fatal("refreshClusterNodes() switched = true, want false")
+	}
+	if client.cmd != nil || client.sub != nil {
+		t.Fatalf("redis clients were initialized when cluster discovery was disabled")
+	}
+}
+
+func TestFailoverAfterReconnectFailureDisabledDoesNotSwitchToClusterNode(t *testing.T) {
+	client := New(config.HomeConfig{
+		Enabled:                 true,
+		Host:                    "seed.example.com",
+		Port:                    8327,
+		DisableClusterDiscovery: true,
+	})
+	client.mu.Lock()
+	client.clusterNodes = []clusterNode{{IP: "other.example.com", Port: 8327}}
+	client.reconnectFailures = homeReconnectFailoverThreshold - 1
+	client.mu.Unlock()
+
+	switched, addr := client.failoverAfterReconnectFailure()
+	if switched {
+		t.Fatalf("failoverAfterReconnectFailure() switched to %s, want no switch", addr)
+	}
+	if got, _ := client.addr(); got != "seed.example.com:8327" {
+		t.Fatalf("addr() = %q, want seed.example.com:8327", got)
 	}
 }
