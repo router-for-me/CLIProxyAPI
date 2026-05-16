@@ -10,11 +10,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -93,7 +91,7 @@ func main() {
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
-	flag.StringVar(&homeAddr, "home", "", "Home control plane address in host:port format (loads config from home and skips local config file)")
+	flag.StringVar(&homeAddr, "home", "", "Home control plane address in host:port, redis://host:port, or rediss://host:port format (loads config from home and skips local config file)")
 	flag.StringVar(&homePassword, "home-password", "", "Home control plane password (Redis AUTH)")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
@@ -247,27 +245,10 @@ func main() {
 	if strings.TrimSpace(homeAddr) != "" {
 		configLoadedFromHome = true
 		trimmedHomePassword := strings.TrimSpace(homePassword)
-		host, portStr, errSplit := net.SplitHostPort(strings.TrimSpace(homeAddr))
-		if errSplit != nil {
-			log.Errorf("invalid -home address %q (expected host:port): %v", homeAddr, errSplit)
+		homeCfg, errHomeCfg := parseHomeFlagConfig(homeAddr, trimmedHomePassword)
+		if errHomeCfg != nil {
+			log.Errorf("invalid -home address %q: %v", homeAddr, errHomeCfg)
 			return
-		}
-		host = strings.TrimSpace(host)
-		if host == "" {
-			log.Errorf("invalid -home address %q: host is empty", homeAddr)
-			return
-		}
-		port, errPort := strconv.Atoi(strings.TrimSpace(portStr))
-		if errPort != nil || port <= 0 {
-			log.Errorf("invalid -home address %q: invalid port %q", homeAddr, portStr)
-			return
-		}
-
-		homeCfg := config.HomeConfig{
-			Enabled:  true,
-			Host:     host,
-			Port:     port,
-			Password: trimmedHomePassword,
 		}
 		homeClient := home.New(homeCfg)
 		defer homeClient.Close()

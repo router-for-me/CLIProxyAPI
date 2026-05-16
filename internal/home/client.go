@@ -2,11 +2,14 @@ package home
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,18 +154,81 @@ func (c *Client) ensureClients() error {
 	}
 
 	if c.cmd == nil {
-		c.cmd = redis.NewClient(&redis.Options{
-			Addr:     addr,
-			Password: c.homeCfg.Password,
-		})
+		options, errOptions := c.redisOptionsLocked(addr)
+		if errOptions != nil {
+			return errOptions
+		}
+		c.cmd = redis.NewClient(options)
 	}
 	if c.sub == nil {
-		c.sub = redis.NewClient(&redis.Options{
-			Addr:     addr,
-			Password: c.homeCfg.Password,
-		})
+		options, errOptions := c.redisOptionsLocked(addr)
+		if errOptions != nil {
+			return errOptions
+		}
+		c.sub = redis.NewClient(options)
 	}
 	return nil
+}
+
+func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
+	tlsConfig, errTLS := c.homeTLSConfigLocked()
+	if errTLS != nil {
+		return nil, errTLS
+	}
+	return &redis.Options{
+		Addr:      addr,
+		Password:  c.homeCfg.Password,
+		TLSConfig: tlsConfig,
+	}, nil
+}
+
+func (c *Client) homeTLSConfigLocked() (*tls.Config, error) {
+	serverName := strings.TrimSpace(c.homeCfg.TLS.ServerName)
+	if serverName == "" {
+		serverName = strings.TrimSpace(c.seedHost)
+	}
+	if serverName == "" {
+		serverName = strings.TrimSpace(c.homeCfg.Host)
+	}
+	return newHomeTLSConfig(c.homeCfg.TLS, serverName)
+}
+
+func newHomeTLSConfig(cfg config.HomeTLSConfig, fallbackServerName string) (*tls.Config, error) {
+	if !cfg.Enable {
+		return nil, nil
+	}
+
+	serverName := strings.TrimSpace(cfg.ServerName)
+	if serverName == "" {
+		serverName = strings.TrimSpace(fallbackServerName)
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         serverName,
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+	}
+
+	caCertPath := strings.TrimSpace(cfg.CACert)
+	if caCertPath == "" {
+		return tlsConfig, nil
+	}
+
+	caCertPEM, errRead := os.ReadFile(caCertPath)
+	if errRead != nil {
+		return nil, fmt.Errorf("home tls: read ca-cert: %w", errRead)
+	}
+
+	certPool, errPool := x509.SystemCertPool()
+	if errPool != nil || certPool == nil {
+		certPool = x509.NewCertPool()
+	}
+	if !certPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("home tls: ca-cert contains no PEM certificates")
+	}
+	tlsConfig.RootCAs = certPool
+
+	return tlsConfig, nil
 }
 
 func (c *Client) commandClient() (*redis.Client, error) {
