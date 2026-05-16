@@ -1215,6 +1215,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							OwnedBy:     compat.Name,
 							Type:        "openai-compatibility",
 							DisplayName: modelID,
+							// Keep compatibility models validated against explicit or inherited
+							// capability metadata instead of treating them as passthrough aliases.
 							UserDefined: false,
 							Thinking:    resolveOpenAICompatibilityThinking(m),
 						})
@@ -1600,25 +1602,34 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			DisplayName: display,
 			UserDefined: true,
 		}
-		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-				info.Thinking = upstream.Thinking
-			}
+		if thinking, ok := lookupStaticThinkingSupport(name); ok {
+			info.Thinking = thinking
 		}
 		out = append(out, info)
 	}
 	return out
 }
 
+func lookupStaticThinkingSupport(name string) (*registry.ThinkingSupport, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+	upstream := registry.LookupStaticModelInfo(name)
+	if upstream == nil {
+		return nil, false
+	}
+	return upstream.Thinking, true
+}
+
 func resolveOpenAICompatibilityThinking(model config.OpenAICompatibilityModel) *registry.ThinkingSupport {
 	if model.Thinking != nil {
 		return model.Thinking
 	}
-	name := strings.TrimSpace(model.Name)
-	if name != "" {
-		if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-			return upstream.Thinking
-		}
+	if thinking, ok := lookupStaticThinkingSupport(model.Name); ok {
+		// Treat a known static model as authoritative even when it intentionally
+		// declares no thinking support.
+		return thinking
 	}
 	return &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 }
