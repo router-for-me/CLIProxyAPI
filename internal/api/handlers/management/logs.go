@@ -18,6 +18,8 @@ import (
 
 const (
 	defaultLogFileName      = "main.log"
+	defaultLogLimit         = 200
+	maxLogLimit             = 5000
 	logScannerInitialBuffer = 64 * 1024
 	logScannerMaxBuffer     = 8 * 1024 * 1024
 )
@@ -58,15 +60,36 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		return
 	}
 
-	limit, errLimit := parseLimit(c.Query("limit"))
+	limit, limitProvided, errLimit := parseLimit(c.Query("limit"))
 	if errLimit != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid limit: %v", errLimit)})
 		return
 	}
 
 	cutoff := parseCutoff(c.Query("after"))
-	acc := newLogAccumulator(cutoff, limit)
+	if cutoff == 0 {
+		lines, total, latest, errRecent := readRecentLogLines(files, limit)
+		if errRecent != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errRecent)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"lines":            lines,
+			"line-count":       total,
+			"latest-timestamp": latest,
+		})
+		return
+	}
+
+	incrementalLimit := limit
+	if !limitProvided {
+		incrementalLimit = 0
+	}
+	acc := newLogAccumulator(cutoff, incrementalLimit)
 	for i := range files {
+		if !logFileMayContainAfter(files[i], cutoff) {
+			continue
+		}
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
 			return
@@ -419,6 +442,12 @@ func newLogAccumulator(cutoff int64, limit int) *logAccumulator {
 }
 
 func (acc *logAccumulator) consumeFile(path string) error {
+	return scanLogFile(path, func(line string) {
+		acc.addLine(line)
+	})
+}
+
+func scanLogFile(path string, visit func(string)) error {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -434,12 +463,59 @@ func (acc *logAccumulator) consumeFile(path string) error {
 	buf := make([]byte, 0, logScannerInitialBuffer)
 	scanner.Buffer(buf, logScannerMaxBuffer)
 	for scanner.Scan() {
-		acc.addLine(scanner.Text())
+		visit(strings.TrimRight(scanner.Text(), "\r"))
 	}
 	if errScan := scanner.Err(); errScan != nil {
 		return errScan
 	}
 	return nil
+}
+
+func readRecentLogLines(files []string, limit int) ([]string, int, int64, error) {
+	if limit <= 0 {
+		limit = defaultLogLimit
+	}
+	lines := make([]string, 0, limit)
+	latest := int64(0)
+	for i := len(files) - 1; i >= 0 && len(lines) < limit; i-- {
+		remaining := limit - len(lines)
+		fileLines := make([]string, 0, remaining)
+		if err := scanLogFile(files[i], func(line string) {
+			if ts := parseTimestamp(line); ts > latest {
+				latest = ts
+			}
+			fileLines = append(fileLines, line)
+			if len(fileLines) > remaining {
+				copy(fileLines, fileLines[1:])
+				fileLines = fileLines[:remaining]
+			}
+		}); err != nil {
+			return nil, 0, 0, err
+		}
+		if len(fileLines) == 0 {
+			continue
+		}
+		combined := make([]string, 0, len(fileLines)+len(lines))
+		combined = append(combined, fileLines...)
+		combined = append(combined, lines...)
+		lines = combined
+	}
+
+	if lines == nil {
+		lines = []string{}
+	}
+	return lines, len(lines), latest, nil
+}
+
+func logFileMayContainAfter(path string, cutoff int64) bool {
+	if cutoff <= 0 {
+		return true
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	return info.ModTime().Unix() >= cutoff
 }
 
 func (acc *logAccumulator) addLine(raw string) {
@@ -487,19 +563,22 @@ func parseCutoff(raw string) int64 {
 	return ts
 }
 
-func parseLimit(raw string) (int, error) {
+func parseLimit(raw string) (int, bool, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return 0, nil
+		return defaultLogLimit, false, nil
 	}
 	limit, err := strconv.Atoi(value)
 	if err != nil {
-		return 0, fmt.Errorf("must be a positive integer")
+		return 0, true, fmt.Errorf("must be a positive integer")
 	}
 	if limit <= 0 {
-		return 0, fmt.Errorf("must be greater than zero")
+		return 0, true, fmt.Errorf("must be greater than zero")
 	}
-	return limit, nil
+	if limit > maxLogLimit {
+		return maxLogLimit, true, nil
+	}
+	return limit, true, nil
 }
 
 func parseTimestamp(line string) int64 {
