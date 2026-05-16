@@ -22,3 +22,8 @@ func shouldSkipPersist(ctx context.Context) bool {
 	enabled, ok := v.(bool)
 	return ok && enabled
 }
+
+// IsSkipPersist reports whether the context disables manager persistence.
+func IsSkipPersist(ctx context.Context) bool {
+	return shouldSkipPersist(ctx)
+}

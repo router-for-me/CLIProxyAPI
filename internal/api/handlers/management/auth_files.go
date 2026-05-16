@@ -1042,6 +1042,13 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		"path":   path,
 		"source": path,
 	}
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		if idTokenRaw, ok := metadata["id_token"].(string); ok {
+			if planType := codex.PlanTypeFromIDToken(idTokenRaw); planType != "" {
+				attr["plan_type"] = planType
+			}
+		}
+	}
 	auth := &coreauth.Auth{
 		ID:         authID,
 		Provider:   provider,
