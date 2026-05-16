@@ -114,6 +114,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		if toolType != "function" && toolType != "web_search" {
 			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
 		}
+		if toolType == "function" && !tool.Get("parameters").Exists() {
+			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
+		}
 		if got := tool.Get("name").String(); got == "apply_patch" {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
@@ -242,6 +245,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 		}
 		if toolType != "function" && toolType != "web_search" {
 			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		}
+		if toolType == "function" && !tool.Get("parameters").Exists() {
+			t.Fatalf("tools.%d.parameters missing for xAI function tool; body=%s", i, string(gotBody))
 		}
 		if got := tool.Get("name").String(); got == "apply_patch" {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))

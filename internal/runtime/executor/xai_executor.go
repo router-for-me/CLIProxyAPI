@@ -726,11 +726,20 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 			return nil, false, false
 		}
 		raw = updatedTool
+		toolType = xaiFunctionToolType
 		changed = true
 	}
 	if toolType == xaiWebSearchToolType && tool.Get("external_web_access").Exists() {
 		updatedTool, errDel := sjson.DeleteBytes(raw, "external_web_access")
 		if errDel != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
+	}
+	if toolType == xaiFunctionToolType && !tool.Get("parameters").Exists() {
+		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))
+		if errSet != nil {
 			return nil, false, false
 		}
 		raw = updatedTool
