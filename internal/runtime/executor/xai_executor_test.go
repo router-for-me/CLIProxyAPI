@@ -55,7 +55,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","input":"hello","include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:       false,
@@ -90,6 +90,15 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 	if gjson.GetBytes(gotBody, "reasoning.effort").String() != "high" {
 		t.Fatalf("reasoning.effort = %q, want high; body=%s", gjson.GetBytes(gotBody, "reasoning.effort").String(), string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
+		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
+		t.Fatalf("input.0.encrypted_content exists, want removed; body=%s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.summary.0.text").String(); got != "test" {
+		t.Fatalf("input.0.summary.0.text = %q, want test; body=%s", got, string(gotBody))
 	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
 	if len(tools) != 3 {
@@ -183,7 +192,7 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 
 	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","input":"hello","tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"role":"user","content":"hello"}],"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:       true,
@@ -200,6 +209,15 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	tools := gjson.GetBytes(gotBody, "tools").Array()
 	if len(tools) != 3 {
 		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
+		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
+		t.Fatalf("input.0.encrypted_content exists, want removed; body=%s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.summary.0.text").String(); got != "test" {
+		t.Fatalf("input.0.summary.0.text = %q, want test; body=%s", got, string(gotBody))
 	}
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()

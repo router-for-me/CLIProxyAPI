@@ -500,6 +500,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
+	body = normalizeXAIInputReasoningItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
@@ -700,6 +701,37 @@ func normalizeXAITools(body []byte) []byte {
 	updated, errSet := sjson.SetRawBytes(body, "tools", filtered)
 	if errSet != nil {
 		return body
+	}
+	return updated
+}
+
+func normalizeXAIInputReasoningItems(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	updated := body
+	for i, item := range input.Array() {
+		if item.Get("type").String() != "reasoning" {
+			continue
+		}
+		contentPath := fmt.Sprintf("input.%d.content", i)
+		if content := gjson.GetBytes(updated, contentPath); content.Exists() && content.Type == gjson.Null {
+			updatedBody, errDel := sjson.DeleteBytes(updated, contentPath)
+			if errDel != nil {
+				return body
+			}
+			updated = updatedBody
+		}
+		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", i)
+		if encryptedContent := gjson.GetBytes(updated, encryptedContentPath); encryptedContent.Exists() && encryptedContent.Type == gjson.Null {
+			updatedBody, errDel := sjson.DeleteBytes(updated, encryptedContentPath)
+			if errDel != nil {
+				return body
+			}
+			updated = updatedBody
+		}
 	}
 	return updated
 }
