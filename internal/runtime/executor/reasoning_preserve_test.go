@@ -321,7 +321,7 @@ func TestPreserveReasoningContent_OriginalWinsOverTranslated(t *testing.T) {
 	translated := []byte(`{
 		"messages":[
 			{"role":"user","content":"hello"},
-			{"role":"assistant","content":"answer","reasoning_content":"stale translated reasoning"}
+			{"role":"assistant","content":"answer"}
 		]
 	}`)
 
@@ -332,6 +332,65 @@ func TestPreserveReasoningContent_OriginalWinsOverTranslated(t *testing.T) {
 
 	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
 	if got != "original reasoning" {
-		t.Fatalf("original must win over translated: got %q, want %q", got, "original reasoning")
+		t.Fatalf("original must fill in when translated lacks reasoning_content: got %q, want %q", got, "original reasoning")
+	}
+}
+
+func TestPreserveReasoningContent_TranslatedOverrideTakesPrecedence(t *testing.T) {
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"original reasoning"}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"override reasoning"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if got != "override reasoning" {
+		t.Fatalf("translated override must take precedence over original: got %q, want %q", got, "override reasoning")
+	}
+}
+
+func TestPreserveReasoningContent_FilterRemovalIsRespected(t *testing.T) {
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"original reasoning"},
+			{"role":"user","content":"follow up"},
+			{"role":"assistant","content":"answer2","reasoning_content":"original reasoning2"}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer"},
+			{"role":"user","content":"follow up"},
+			{"role":"assistant","content":"answer2","reasoning_content":"filtered replacement"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	rc1 := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if rc1 != "original reasoning" {
+		t.Fatalf("first assistant: original fills in when translated lacks reasoning_content: got %q, want %q", rc1, "original reasoning")
+	}
+
+	rc2 := gjson.GetBytes(out, "messages.3.reasoning_content").String()
+	if rc2 != "filtered replacement" {
+		t.Fatalf("second assistant: translated override takes precedence: got %q, want %q", rc2, "filtered replacement")
 	}
 }

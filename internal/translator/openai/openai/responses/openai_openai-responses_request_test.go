@@ -164,3 +164,87 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningContentOn
 		t.Fatalf("assistant message should not have reasoning_content when original had none")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningItemSummary(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_abc","summary":[{"type":"summary_text","text":"thinking step by step"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"follow up"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, true)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist from reasoning item summary")
+	}
+	if rc.String() != "thinking step by step" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc.String(), "thinking step by step")
+	}
+
+	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
+		t.Fatalf("user message should not have reasoning_content")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningItemEncryptedContent(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_abc","encrypted_content":"encrypted_reasoning_data"},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, false)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist from reasoning item encrypted_content")
+	}
+	if rc.String() != "encrypted_reasoning_data" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc.String(), "encrypted_reasoning_data")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningItemSummaryMultipleParts(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_abc","summary":[{"type":"summary_text","text":"part1"},{"type":"summary_text","text":"part2"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, true)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist from reasoning item summary")
+	}
+	if rc.String() != "part1part2" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc.String(), "part1part2")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningItemFallsBackToMessageRC(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}],"reasoning_content":"from message rc"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, true)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist from message reasoning_content")
+	}
+	if rc.String() != "from message rc" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc.String(), "from message rc")
+	}
+}

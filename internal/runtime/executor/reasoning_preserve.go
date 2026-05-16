@@ -21,9 +21,10 @@ import (
 // This is robust because translation never reorders or drops assistant messages —
 // it only inserts non-assistant messages (tool, system) around them.
 //
-// When both original and translated carry reasoning_content at the same assistant ordinal,
-// the original value always wins — it is the authoritative source the provider expects
-// to receive back verbatim.
+// When the translated payload already carries reasoning_content at a given assistant
+// ordinal (e.g. from a payload override or from translation), that value is preserved —
+// the user or translator has explicitly set it and their intent takes precedence.
+// Only when reasoning_content is missing do we fall back to the original value.
 //
 // Error contract: on sjson.SetBytes failure, the function discards any partial writes
 // and returns the unmodified translated input along with the error, so the caller never
@@ -60,10 +61,11 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 			continue
 		}
 
-		text, ok := origReasoning[assistantOrdinal]
-		if ok {
+		origText, origOK := origReasoning[assistantOrdinal]
+		transRC := msg.Get("reasoning_content")
+		if origOK && !transRC.Exists() {
 			path := fmt.Sprintf("messages.%d.reasoning_content", i)
-			next, err := sjson.SetBytes(out, path, text)
+			next, err := sjson.SetBytes(out, path, origText)
 			if err != nil {
 				return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
 			}

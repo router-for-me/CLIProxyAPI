@@ -74,6 +74,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		pendingToolCallIDs := make([]string, 0)
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
+		pendingReasoningContent := ""
 
 		flushPendingToolCalls := func() {
 			if len(pendingToolCalls) == 0 {
@@ -173,6 +174,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if role == "assistant" {
 					if rc := item.Get("reasoning_content"); rc.Exists() {
 						message, _ = sjson.SetBytes(message, "reasoning_content", rc.String())
+					} else if pendingReasoningContent != "" {
+						message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
+						pendingReasoningContent = ""
 					}
 				}
 
@@ -218,6 +222,22 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
+				}
+
+			case "reasoning":
+				if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+					var textParts []string
+					summary.ForEach(func(_, s gjson.Result) bool {
+						if t := s.Get("text"); t.Exists() {
+							textParts = append(textParts, t.String())
+						}
+						return true
+					})
+					if len(textParts) > 0 {
+						pendingReasoningContent = strings.Join(textParts, "")
+					}
+				} else if ec := item.Get("encrypted_content"); ec.Exists() && ec.String() != "" {
+					pendingReasoningContent = ec.String()
 				}
 			}
 
