@@ -110,7 +110,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							funcName = toolCallID
 						}
 						funcName = util.SanitizeFunctionName(funcName)
-						responseData := contentResult.Get("content").Raw
+						responseData := util.FlattenClaudeToolResultContent(contentResult.Get("content"))
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
 						part, _ = sjson.SetBytes(part, "functionResponse.response.result", responseData)
