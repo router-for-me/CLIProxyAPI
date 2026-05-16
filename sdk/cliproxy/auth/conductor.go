@@ -1230,11 +1230,22 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 		if len(candidates) > 0 {
 			stickyAttempted = true
-			if resp, ok := m.creditsExecuteWith(ctx, req, opts, candidates); ok {
-				return resp, nil
-			}
-			if ss < 0 {
-				return cliproxyexecutor.Response{}, &Error{Code: "credits_exhausted", Message: "credits-only mode active but all credits candidates failed"}
+			_, _, maxWaitCredits := m.retrySettings()
+			for creditsAttempt := 0; ; creditsAttempt++ {
+				resp, ok, lastCreditsErr := m.creditsExecuteWith(ctx, req, opts, candidates)
+				if ok {
+					return resp, nil
+				}
+				if lastCreditsErr == nil {
+					break
+				}
+				wait, shouldRetry := m.shouldRetryAfterError(lastCreditsErr, creditsAttempt, normalized, req.Model, maxWaitCredits)
+				if !shouldRetry {
+					break
+				}
+				if errWait := waitForCooldown(ctx, wait); errWait != nil {
+					return cliproxyexecutor.Response{}, errWait
+				}
 			}
 		}
 	}
@@ -1315,11 +1326,22 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		if len(candidates) > 0 {
 			stickyAttempted = true
-			if result, ok := m.creditsExecuteStreamWith(ctx, req, opts, candidates); ok {
-				return result, nil
-			}
-			if ss < 0 {
-				return nil, &Error{Code: "credits_exhausted", Message: "credits-only mode active but all credits candidates failed"}
+			_, _, maxWaitCredits := m.retrySettings()
+			for creditsAttempt := 0; ; creditsAttempt++ {
+				result, ok, lastCreditsErr := m.creditsExecuteStreamWith(ctx, req, opts, candidates)
+				if ok {
+					return result, nil
+				}
+				if lastCreditsErr == nil {
+					break
+				}
+				wait, shouldRetry := m.shouldRetryAfterError(lastCreditsErr, creditsAttempt, normalized, req.Model, maxWaitCredits)
+				if !shouldRetry {
+					break
+				}
+				if errWait := waitForCooldown(ctx, wait); errWait != nil {
+					return nil, errWait
+				}
 			}
 		}
 	}
@@ -3671,19 +3693,22 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 
 func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool) {
 	candidates := m.findAllAntigravityCreditsCandidateAuths(req.Model, opts)
-	return m.creditsExecuteWith(ctx, req, opts, candidates)
+	resp, ok, _ := m.creditsExecuteWith(ctx, req, opts, candidates)
+	return resp, ok
 }
 
 func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool) {
 	candidates := m.findAllAntigravityCreditsCandidateAuths(req.Model, opts)
-	return m.creditsExecuteStreamWith(ctx, req, opts, candidates)
+	result, ok, _ := m.creditsExecuteStreamWith(ctx, req, opts, candidates)
+	return result, ok
 }
 
-func (m *Manager) creditsExecuteWith(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []creditsCandidateEntry) (cliproxyexecutor.Response, bool) {
+func (m *Manager) creditsExecuteWith(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []creditsCandidateEntry) (cliproxyexecutor.Response, bool, error) {
 	routeModel := req.Model
+	var lastErr error
 	for _, c := range candidates {
 		if ctx.Err() != nil {
-			return cliproxyexecutor.Response{}, false
+			return cliproxyexecutor.Response{}, false, ctx.Err()
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
@@ -3704,6 +3729,7 @@ func (m *Manager) creditsExecuteWith(ctx context.Context, req cliproxyexecutor.R
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
+				lastErr = errExec
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
@@ -3716,17 +3742,18 @@ func (m *Manager) creditsExecuteWith(ctx context.Context, req cliproxyexecutor.R
 			}
 			m.MarkResult(creditsCtx, result)
 			MarkAntigravityCreditsStick(c.auth.ID)
-			return resp, true
+			return resp, true, nil
 		}
 	}
-	return cliproxyexecutor.Response{}, false
+	return cliproxyexecutor.Response{}, false, lastErr
 }
 
-func (m *Manager) creditsExecuteStreamWith(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []creditsCandidateEntry) (*cliproxyexecutor.StreamResult, bool) {
+func (m *Manager) creditsExecuteStreamWith(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []creditsCandidateEntry) (*cliproxyexecutor.StreamResult, bool, error) {
 	routeModel := req.Model
+	var lastErr error
 	for _, c := range candidates {
 		if ctx.Err() != nil {
-			return nil, false
+			return nil, false, ctx.Err()
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
@@ -3741,11 +3768,12 @@ func (m *Manager) creditsExecuteStreamWith(ctx context.Context, req cliproxyexec
 		}
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, len(models) > 1)
 		if errStream != nil {
+			lastErr = errStream
 			continue
 		}
-		return wrapCreditsStreamForStickyMark(result, c.auth.ID), true
+		return wrapCreditsStreamForStickyMark(result, c.auth.ID), true, nil
 	}
-	return nil, false
+	return nil, false, lastErr
 }
 
 // wrapCreditsStreamForStickyMark wraps a stream result so that
