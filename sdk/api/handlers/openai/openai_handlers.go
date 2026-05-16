@@ -8,7 +8,6 @@ package openai
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -29,9 +28,6 @@ import (
 type OpenAIAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
-
-//go:embed codex_client_models.json
-var codexClientModelsJSON []byte
 
 // NewOpenAIAPIHandler creates a new OpenAI API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an OpenAIAPIHandler.

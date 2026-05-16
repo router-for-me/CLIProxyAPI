@@ -346,6 +346,12 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if _, ok := custom["apply_patch_tool_type"]; ok {
 		t.Fatal("expected custom model to omit apply_patch_tool_type")
 	}
+	if _, ok := custom["upgrade"]; ok {
+		t.Fatal("expected custom model to omit upgrade")
+	}
+	if _, ok := custom["availability_nux"]; ok {
+		t.Fatal("expected custom model to omit availability_nux")
+	}
 
 	hiddenModels := map[string]bool{
 		"grok-imagine-image-quality": false,

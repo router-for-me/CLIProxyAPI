@@ -66,7 +66,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any, error) {
 	codexClientModelTemplatesOnce.Do(func() {
 		var payload codexClientModelsPayload
-		codexClientModelTemplatesErr = json.Unmarshal(codexClientModelsJSON, &payload)
+		codexClientModelTemplatesErr = json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload)
 		if codexClientModelTemplatesErr != nil {
 			return
 		}
@@ -120,6 +120,8 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["priority"] = 100
 	entry["prefer_websockets"] = false
 	delete(entry, "apply_patch_tool_type")
+	delete(entry, "upgrade")
+	delete(entry, "availability_nux")
 
 	if contextWindow > 0 {
 		entry["context_window"] = contextWindow
