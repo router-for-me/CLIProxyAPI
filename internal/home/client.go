@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,7 +132,7 @@ func (c *Client) addrLocked() (string, bool) {
 	if c.homeCfg.Port <= 0 {
 		return "", false
 	}
-	return fmt.Sprintf("%s:%d", host, c.homeCfg.Port), true
+	return net.JoinHostPort(host, strconv.Itoa(c.homeCfg.Port)), true
 }
 
 func (c *Client) ensureClients() error {
