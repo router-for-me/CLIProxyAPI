@@ -34,6 +34,7 @@ const (
 	xaiCustomToolType           = "custom"
 	xaiFunctionToolType         = "function"
 	xaiImageGenerationToolType  = "image_generation"
+	xaiNamespaceToolType        = "namespace"
 	xaiToolSearchType           = "tool_search"
 	xaiWebSearchToolType        = "web_search"
 	xaiImagesGenerationsPath    = "/images/generations"
@@ -664,30 +665,34 @@ func normalizeXAITools(body []byte) []byte {
 	filtered := []byte(`[]`)
 	for _, tool := range tools.Array() {
 		toolType := tool.Get("type").String()
-		if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
+		if toolType == xaiNamespaceToolType {
 			changed = true
+			if namespaceTools := tool.Get("tools"); namespaceTools.IsArray() {
+				for _, nestedTool := range namespaceTools.Array() {
+					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool)
+					if !ok {
+						return body
+					}
+					changed = changed || nestedChanged
+					if len(nestedRaw) == 0 {
+						continue
+					}
+					updated, errSet := sjson.SetRawBytes(filtered, "-1", nestedRaw)
+					if errSet != nil {
+						return body
+					}
+					filtered = updated
+				}
+			}
 			continue
 		}
-		raw := []byte(tool.Raw)
-		if toolType == xaiCustomToolType {
-			if tool.Get("name").String() == "apply_patch" {
-				changed = true
-				continue
-			}
-			updatedTool, errSet := sjson.SetBytes(raw, "type", xaiFunctionToolType)
-			if errSet != nil {
-				return body
-			}
-			raw = updatedTool
-			changed = true
+		raw, toolChanged, ok := normalizeXAITool(tool)
+		if !ok {
+			return body
 		}
-		if toolType == xaiWebSearchToolType && tool.Get("external_web_access").Exists() {
-			updatedTool, errDel := sjson.DeleteBytes(raw, "external_web_access")
-			if errDel != nil {
-				return body
-			}
-			raw = updatedTool
-			changed = true
+		changed = changed || toolChanged
+		if len(raw) == 0 {
+			continue
 		}
 		updated, errSet := sjson.SetRawBytes(filtered, "-1", raw)
 		if errSet != nil {
@@ -703,6 +708,35 @@ func normalizeXAITools(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
+	toolType := tool.Get("type").String()
+	changed := false
+	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
+		return nil, true, true
+	}
+	raw := []byte(tool.Raw)
+	if toolType == xaiCustomToolType {
+		if tool.Get("name").String() == "apply_patch" {
+			return nil, true, true
+		}
+		updatedTool, errSet := sjson.SetBytes(raw, "type", xaiFunctionToolType)
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
+	}
+	if toolType == xaiWebSearchToolType && tool.Get("external_web_access").Exists() {
+		updatedTool, errDel := sjson.DeleteBytes(raw, "external_web_access")
+		if errDel != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
+	}
+	return raw, changed, true
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {

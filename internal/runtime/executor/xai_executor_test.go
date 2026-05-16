@@ -55,7 +55,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]},{"type":"namespace","name":"codex_app","description":"Tools in the codex_app namespace.","tools":[{"type":"function","name":"automation_update"},{"type":"custom","name":"namespace_custom"},{"type":"tool_search"}]}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:       false,
@@ -101,9 +101,11 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		t.Fatalf("input.0.summary.0.text = %q, want test; body=%s", got, string(gotBody))
 	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 3 {
-		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(gotBody))
+	if len(tools) != 5 {
+		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
 	}
+	foundAutomationUpdate := false
+	foundNamespaceCustom := false
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()
 		if toolType == "image_generation" {
@@ -115,6 +117,12 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		if got := tool.Get("name").String(); got == "apply_patch" {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
+		switch tool.Get("name").String() {
+		case "automation_update":
+			foundAutomationUpdate = true
+		case "namespace_custom":
+			foundNamespaceCustom = true
+		}
 		if toolType == "web_search" {
 			if tool.Get("external_web_access").Exists() {
 				t.Fatalf("tools.%d.external_web_access exists, want removed; body=%s", i, string(gotBody))
@@ -123,6 +131,12 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 				t.Fatalf("tools.%d.search_content_types missing image entry; body=%s", i, string(gotBody))
 			}
 		}
+	}
+	if !foundAutomationUpdate {
+		t.Fatalf("namespace function tool was not moved to top-level tools; body=%s", string(gotBody))
+	}
+	if !foundNamespaceCustom {
+		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
 	}
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
 		if include.String() == "reasoning.encrypted_content" {
@@ -192,7 +206,7 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 
 	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"role":"user","content":"hello"}],"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"role":"user","content":"hello"}],"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]},{"type":"namespace","name":"codex_app","description":"Tools in the codex_app namespace.","tools":[{"type":"function","name":"automation_update"},{"type":"custom","name":"namespace_custom"},{"type":"tool_search"}]}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:       true,
@@ -207,8 +221,8 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 3 {
-		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(gotBody))
+	if len(tools) != 5 {
+		t.Fatalf("tools length = %d, want 5; body=%s", len(tools), string(gotBody))
 	}
 	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
 		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))
@@ -219,6 +233,8 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "input.0.summary.0.text").String(); got != "test" {
 		t.Fatalf("input.0.summary.0.text = %q, want test; body=%s", got, string(gotBody))
 	}
+	foundAutomationUpdate := false
+	foundNamespaceCustom := false
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()
 		if toolType == "image_generation" {
@@ -230,6 +246,12 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 		if got := tool.Get("name").String(); got == "apply_patch" {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
+		switch tool.Get("name").String() {
+		case "automation_update":
+			foundAutomationUpdate = true
+		case "namespace_custom":
+			foundNamespaceCustom = true
+		}
 		if toolType == "web_search" {
 			if tool.Get("external_web_access").Exists() {
 				t.Fatalf("tools.%d.external_web_access exists, want removed; body=%s", i, string(gotBody))
@@ -238,6 +260,12 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 				t.Fatalf("tools.%d.search_content_types missing image entry; body=%s", i, string(gotBody))
 			}
 		}
+	}
+	if !foundAutomationUpdate {
+		t.Fatalf("namespace function tool was not moved to top-level tools; body=%s", string(gotBody))
+	}
+	if !foundNamespaceCustom {
+		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
 	}
 }
 
