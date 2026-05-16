@@ -1602,7 +1602,7 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			DisplayName: display,
 			UserDefined: true,
 		}
-		if thinking, ok := lookupStaticThinkingSupport(name); ok {
+		if thinking, ok := lookupStaticThinkingSupport(name, alias); ok {
 			info.Thinking = thinking
 		}
 		out = append(out, info)
@@ -1610,12 +1610,17 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 	return out
 }
 
-func lookupStaticThinkingSupport(name string) (*registry.ThinkingSupport, bool) {
+func lookupStaticThinkingSupport(name, alias string) (*registry.ThinkingSupport, bool) {
 	name = strings.TrimSpace(name)
-	if name == "" {
+	alias = strings.TrimSpace(alias)
+	lookupID := name
+	if lookupID == "" {
+		lookupID = alias
+	}
+	if lookupID == "" {
 		return nil, false
 	}
-	upstream := registry.LookupStaticModelInfo(name)
+	upstream := registry.LookupStaticModelInfo(lookupID)
 	if upstream == nil {
 		return nil, false
 	}
@@ -1626,7 +1631,7 @@ func resolveOpenAICompatibilityThinking(model config.OpenAICompatibilityModel) *
 	if model.Thinking != nil {
 		return model.Thinking
 	}
-	if thinking, ok := lookupStaticThinkingSupport(model.Name); ok {
+	if thinking, ok := lookupStaticThinkingSupport(model.Name, model.Alias); ok {
 		// Treat a known static model as authoritative even when it intentionally
 		// declares no thinking support.
 		return thinking

@@ -57,6 +57,22 @@ func TestResolveOpenAICompatibilityThinking_KnownModelWithoutThinkingRemainsNil(
 	}
 }
 
+func TestResolveOpenAICompatibilityThinking_UsesAliasWhenNameIsEmpty(t *testing.T) {
+	upstream := registry.LookupStaticModelInfo("gpt-5.5")
+	if upstream == nil || upstream.Thinking == nil {
+		t.Fatal("expected gpt-5.5 static model definition with thinking support")
+	}
+
+	model := config.OpenAICompatibilityModel{
+		Alias: "gpt-5.5",
+	}
+
+	got := resolveOpenAICompatibilityThinking(model)
+	if !reflect.DeepEqual(got, upstream.Thinking) {
+		t.Fatalf("thinking mismatch: got %+v, want %+v", got, upstream.Thinking)
+	}
+}
+
 func TestResolveOpenAICompatibilityThinking_FallsBackToDefaultLevels(t *testing.T) {
 	model := config.OpenAICompatibilityModel{
 		Name:  "custom-openai-model",
