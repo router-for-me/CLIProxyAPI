@@ -46,7 +46,8 @@
         "levels": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh"
         ]
       }
     },
@@ -2058,6 +2059,110 @@
         "dynamic_allowed": true,
         "levels": [
           "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ],
+  "xai": [
+    {
+      "id": "grok-4.3",
+      "object": "model",
+      "created": 1775606400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.3",
+      "name": "grok-4.3",
+      "description": "xAI Grok 4.3 model for the Responses API.",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.20-0309-reasoning",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 0309 Reasoning",
+      "name": "grok-4.20-0309-reasoning",
+      "description": "xAI Grok 4.20 0309 reasoning model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-0309-non-reasoning",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 0309 Non Reasoning",
+      "name": "grok-4.20-0309-non-reasoning",
+      "description": "xAI Grok 4.20 0309 non-reasoning model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-multi-agent-0309",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Multi Agent 0309",
+      "name": "grok-4.20-multi-agent-0309",
+      "description": "xAI Grok 4.20 multi-agent model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-3-mini",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 3 Mini",
+      "name": "grok-3-mini",
+      "description": "xAI Grok 3 Mini model for the Responses API.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-3-mini-fast",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 3 Mini Fast",
+      "name": "grok-3-mini-fast",
+      "description": "xAI Grok 3 Mini Fast model for the Responses API.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
           "low",
           "medium",
           "high"
