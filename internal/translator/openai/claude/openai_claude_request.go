@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -103,7 +104,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	hasSystemContent := false
 	if system := root.Get("system"); system.Exists() {
 		if system.Type == gjson.String {
-			if system.String() != "" {
+			if system.String() != "" && !util.IsClaudeCodeAttributionSystemText(system.String()) {
 				oldSystem := `{"type":"text","text":""}`
 				oldSystem, _ = sjson.Set(oldSystem, "text", system.String())
 				systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", oldSystem)
@@ -334,7 +335,7 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	switch partType {
 	case "text":
 		text := part.Get("text").String()
-		if strings.TrimSpace(text) == "" {
+		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) {
 			return "", false
 		}
 		textContent := `{"type":"text","text":""}`
