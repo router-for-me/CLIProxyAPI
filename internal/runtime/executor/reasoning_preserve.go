@@ -26,10 +26,24 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 	if !origMsgs.Exists() || !origMsgs.IsArray() {
 		return translated, nil
 	}
+	origMsgArr := origMsgs.Array()
+
+	transMsgs := gjson.GetBytes(translated, "messages")
+	if !transMsgs.Exists() || !transMsgs.IsArray() {
+		return translated, nil
+	}
+	transMsgArr := transMsgs.Array()
+
+	// Index-based matching is only safe when message counts align.
+	// When translation changes message count (e.g. Claude→OpenAI merges blocks),
+	// skip preservation — those formats don't use reasoning_content anyway.
+	if len(origMsgArr) != len(transMsgArr) {
+		return translated, nil
+	}
 
 	// Build a lookup of reasoning_content from original assistant messages.
-	origReasoning := make(map[int]string)
-	for i, msg := range origMsgs.Array() {
+	origReasoning := make(map[int]string, len(origMsgArr))
+	for i, msg := range origMsgArr {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
@@ -42,20 +56,8 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 		return translated, nil
 	}
 
-	transMsgs := gjson.GetBytes(translated, "messages")
-	if !transMsgs.Exists() || !transMsgs.IsArray() {
-		return translated, nil
-	}
-
-	// Index-based matching is only safe when message counts align.
-	// When translation changes message count (e.g. Claude→OpenAI merges blocks),
-	// skip preservation — those formats don't use reasoning_content anyway.
-	if len(origMsgs.Array()) != len(transMsgs.Array()) {
-		return translated, nil
-	}
-
 	out := translated
-	for i, msg := range transMsgs.Array() {
+	for i, msg := range transMsgArr {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
