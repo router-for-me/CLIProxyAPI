@@ -13,9 +13,11 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -31,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/tray"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -76,6 +79,7 @@ func main() {
 	var homeAddr string
 	var homePassword string
 	var tuiMode bool
+	var trayMode bool
 	var standalone bool
 	var localModel bool
 
@@ -96,6 +100,7 @@ func main() {
 	flag.StringVar(&homeAddr, "home", "", "Home control plane address in host:port format (loads config from home and skips local config file)")
 	flag.StringVar(&homePassword, "home-password", "", "Home control plane password (Redis AUTH)")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
+	flag.BoolVar(&trayMode, "tray", false, "Start embedded local server with a macOS menu bar tray")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
 
@@ -561,19 +566,90 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
-		if localModel && (!tuiMode || standalone) {
+		if localModel && (!tuiMode || standalone || trayMode) {
 			log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 		}
-		if tuiMode {
+		startBackgroundTasks := func() {
+			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			misc.StartAntigravityVersionUpdater(context.Background())
+			if !localModel && !cfg.Home.Enabled {
+				registry.StartModelsUpdater(context.Background())
+			} else if cfg.Home.Enabled {
+				log.Info("Home mode: remote model updates disabled")
+			}
+		}
+
+		if trayMode {
+			startBackgroundTasks()
+
+			localMgmtPassword := fmt.Sprintf("tray-%d-%d", os.Getpid(), time.Now().UnixNano())
+			if password == "" {
+				password = localMgmtPassword
+			}
+
+			cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+
+			client := tui.NewClient(cfg.Port, password)
+			ready := false
+			serverExited := false
+			backoff := 100 * time.Millisecond
+			for i := 0; i < 30; i++ {
+				if _, errGetConfig := client.GetConfig(); errGetConfig == nil {
+					ready = true
+					break
+				}
+				select {
+				case <-done:
+					serverExited = true
+				default:
+				}
+				if serverExited {
+					break
+				}
+				time.Sleep(backoff)
+				if backoff < time.Second {
+					backoff = time.Duration(float64(backoff) * 1.5)
+				}
+			}
+
+			if !ready {
+				cancel()
+				<-done
+				fmt.Fprintf(os.Stderr, "Tray error: embedded server is not ready\n")
+				return
+			}
+
+			trayCtx, trayCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			executablePath, errExecutable := os.Executable()
+			if errExecutable != nil {
+				log.WithError(errExecutable).Warn("failed to resolve executable path for tray auto-start")
+			}
+			if errRun := tray.Run(trayCtx, tray.Options{
+				Port:                cfg.Port,
+				ManagementPassword:  password,
+				ManagementAssetPath: managementasset.FilePath(configFilePath),
+				AutoStart: tray.AutoStartOptions{
+					ExecutablePath: executablePath,
+					ConfigPath:     configFilePath,
+					LocalModel:     localModel,
+					HomeAddr:       homeAddr,
+					HomePassword:   homePassword,
+				},
+			}); errRun != nil {
+				trayCancel()
+				cancel()
+				<-done
+				fmt.Fprintf(os.Stderr, "Tray error: %v\n", errRun)
+				return
+			}
+
+			trayCancel()
+			cancel()
+			<-done
+		} else if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
-				managementasset.StartAutoUpdater(context.Background(), configFilePath)
-				misc.StartAntigravityVersionUpdater(context.Background())
-				if !localModel && !cfg.Home.Enabled {
-					registry.StartModelsUpdater(context.Background())
-				} else if cfg.Home.Enabled {
-					log.Info("Home mode: remote model updates disabled")
-				}
+				startBackgroundTasks()
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -645,13 +721,7 @@ func main() {
 			}
 		} else {
 			// Start the main proxy service
-			managementasset.StartAutoUpdater(context.Background(), configFilePath)
-			misc.StartAntigravityVersionUpdater(context.Background())
-			if !localModel && !cfg.Home.Enabled {
-				registry.StartModelsUpdater(context.Background())
-			} else if cfg.Home.Enabled {
-				log.Info("Home mode: remote model updates disabled")
-			}
+			startBackgroundTasks()
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
