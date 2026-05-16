@@ -14,6 +14,12 @@ import (
 // DeepSeek and other providers that support thinking mode require reasoning_content
 // to be passed back verbatim in multi-turn conversations. Without this, the API returns
 // a 400 error: "The reasoning_content in the thinking mode must be passed back to the API."
+//
+// Matching strategy: instead of requiring identical message counts (which breaks when
+// translation inserts/splits messages like Claude tool_result → tool role), we match
+// assistant messages by their ordinal position within the assistant-only sequence.
+// This is robust because translation never reorders or drops assistant messages —
+// it only inserts non-assistant messages (tool, system) around them.
 func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 	if len(original) == 0 || len(translated) == 0 {
 		return translated, nil
@@ -34,48 +40,47 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 	}
 	transMsgArr := transMsgs.Array()
 
-	// Index-based matching is only safe when message counts align.
-	// When translation changes message count (e.g. Claude→OpenAI merges blocks),
-	// skip preservation — those formats don't use reasoning_content anyway.
-	if len(origMsgArr) != len(transMsgArr) {
-		return translated, nil
-	}
-
-	// Build a lookup of reasoning_content from original assistant messages.
-	origReasoning := make(map[int]string, len(origMsgArr))
-	for i, msg := range origMsgArr {
-		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
-			continue
-		}
-		if rc := msg.Get("reasoning_content"); rc.Exists() {
-			origReasoning[i] = rc.String()
-		}
-	}
-
+	origReasoning := collectAssistantReasoning(origMsgArr)
 	if len(origReasoning) == 0 {
 		return translated, nil
 	}
 
 	out := translated
+	assistantOrdinal := 0
 	for i, msg := range transMsgArr {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
 
-		text, ok := origReasoning[i]
-		if !ok {
-			// No reasoning_content in original — leave translated as-is.
-			continue
+		text, ok := origReasoning[assistantOrdinal]
+		if ok {
+			path := fmt.Sprintf("messages.%d.reasoning_content", i)
+			next, err := sjson.SetBytes(out, path, text)
+			if err != nil {
+				return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
+			}
+			out = next
 		}
-
-		// Original had reasoning_content — preserve it exactly (including empty string).
-		path := fmt.Sprintf("messages.%d.reasoning_content", i)
-		next, err := sjson.SetBytes(out, path, text)
-		if err != nil {
-			return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
-		}
-		out = next
+		assistantOrdinal++
 	}
 
 	return out, nil
+}
+
+// collectAssistantReasoning extracts reasoning_content from assistant messages,
+// keyed by their ordinal position in the assistant-only sequence (0, 1, 2, ...).
+// Empty-string reasoning_content is preserved because DeepSeek requires it.
+func collectAssistantReasoning(messages []gjson.Result) map[int]string {
+	reasoning := make(map[int]string, len(messages))
+	ordinal := 0
+	for _, msg := range messages {
+		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+			continue
+		}
+		if rc := msg.Get("reasoning_content"); rc.Exists() {
+			reasoning[ordinal] = rc.String()
+		}
+		ordinal++
+	}
+	return reasoning
 }

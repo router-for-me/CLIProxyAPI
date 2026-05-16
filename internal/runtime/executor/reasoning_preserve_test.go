@@ -37,8 +37,6 @@ func TestPreserveReasoningContent_PreservesEmptyStringReasoning(t *testing.T) {
 }
 
 func TestPreserveReasoningContent_DoesNotInheritReasoningForMissingMessages(t *testing.T) {
-	// Multi-turn tool call chain: assistant with reasoning → tool → assistant without reasoning.
-	// The second assistant originally had no reasoning_content, so it must not get one fabricated.
 	original := []byte(`{
 		"messages":[
 			{"role":"user","content":"list files"},
@@ -61,13 +59,11 @@ func TestPreserveReasoningContent_DoesNotInheritReasoningForMissingMessages(t *t
 		t.Fatalf("preserveReasoningContent() error = %v", err)
 	}
 
-	// First assistant (index 1) should get the original reasoning
 	rc1 := gjson.GetBytes(out, "messages.1.reasoning_content").String()
 	if rc1 != "let me check the directory" {
 		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc1, "let me check the directory")
 	}
 
-	// Second assistant (index 3) originally had no reasoning — must remain absent
 	if gjson.GetBytes(out, "messages.3.reasoning_content").Exists() {
 		t.Fatalf("messages.3.reasoning_content should not exist when original had none")
 	}
@@ -120,7 +116,6 @@ func TestPreserveReasoningContent_IgnoresNonAssistantMessages(t *testing.T) {
 		t.Fatalf("preserveReasoningContent() error = %v", err)
 	}
 
-	// Only assistant at index 2 should be affected
 	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
 		t.Fatalf("system message should not get reasoning_content")
 	}
@@ -161,7 +156,6 @@ func TestPreserveReasoningContent_KeepsExistingNonEmptyReasoning(t *testing.T) {
 }
 
 func TestPreserveReasoningContent_KeepsTranslatedReasoningWhenOriginalLacksIt(t *testing.T) {
-	// Original has no reasoning_content, but translated already has one — keep it.
 	original := []byte(`{
 		"messages":[
 			{"role":"user","content":"hello"},
@@ -186,9 +180,7 @@ func TestPreserveReasoningContent_KeepsTranslatedReasoningWhenOriginalLacksIt(t 
 	}
 }
 
-func TestPreserveReasoningContent_SkipsWhenMessageCountMismatch(t *testing.T) {
-	// Claude→OpenAI translation can merge content blocks, changing message count.
-	// In this case the function should skip to avoid incorrect index-based matching.
+func TestPreserveReasoningContent_OrdinalMatchingAcrossMessageCountMismatch(t *testing.T) {
 	original := []byte(`{
 		"messages":[
 			{"role":"user","content":"hello"},
@@ -208,12 +200,113 @@ func TestPreserveReasoningContent_SkipsWhenMessageCountMismatch(t *testing.T) {
 		t.Fatalf("preserveReasoningContent() error = %v", err)
 	}
 
-	// Should not inject reasoning into a wrong index
-	if gjson.GetBytes(out, "messages.1.reasoning_content").Exists() {
-		t.Fatalf("user message at index 1 should not get reasoning_content from mismatched index")
+	rc := gjson.GetBytes(out, "messages.2.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("assistant message (ordinal 0) should have reasoning_content preserved despite message count mismatch")
 	}
-	// Translated assistant (index 2) should not get original's reasoning (index 1)
-	if gjson.GetBytes(out, "messages.2.reasoning_content").Exists() {
-		t.Fatalf("assistant should not get reasoning from mismatched index")
+	if rc.String() != "thinking..." {
+		t.Fatalf("messages.2.reasoning_content = %q, want %q", rc.String(), "thinking...")
+	}
+}
+
+func TestPreserveReasoningContent_OrdinalMatchingMultipleAssistants(t *testing.T) {
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer1","reasoning_content":"think1"},
+			{"role":"user","content":"more"},
+			{"role":"assistant","content":"answer2","reasoning_content":"think2"}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"system","content":"system"},
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer1"},
+			{"role":"user","content":"more"},
+			{"role":"assistant","content":"answer2"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	rc1 := gjson.GetBytes(out, "messages.2.reasoning_content")
+	if !rc1.Exists() || rc1.String() != "think1" {
+		t.Fatalf("first assistant (ordinal 0): got %q, want %q", rc1.String(), "think1")
+	}
+
+	rc2 := gjson.GetBytes(out, "messages.4.reasoning_content")
+	if !rc2.Exists() || rc2.String() != "think2" {
+		t.Fatalf("second assistant (ordinal 1): got %q, want %q", rc2.String(), "think2")
+	}
+}
+
+func TestPreserveReasoningContent_OrdinalMatchingWithToolCalls(t *testing.T) {
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"list files"},
+			{"role":"assistant","content":"I'll check","reasoning_content":"need to ls","tool_calls":[{"id":"c1","type":"function","function":{"name":"ls","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"c1","content":"file1.txt"},
+			{"role":"assistant","content":"Here are the files","reasoning_content":"got the list"}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"user","content":"list files"},
+			{"role":"assistant","content":"I'll check","tool_calls":[{"id":"c1","type":"function","function":{"name":"ls","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"c1","content":"file1.txt"},
+			{"role":"assistant","content":"Here are the files"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	rc1 := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if rc1 != "need to ls" {
+		t.Fatalf("first assistant reasoning = %q, want %q", rc1, "need to ls")
+	}
+
+	rc2 := gjson.GetBytes(out, "messages.3.reasoning_content").String()
+	if rc2 != "got the list" {
+		t.Fatalf("second assistant reasoning = %q, want %q", rc2, "got the list")
+	}
+}
+
+func TestPreserveReasoningContent_PartialAssistantReasoning(t *testing.T) {
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer1","reasoning_content":"thinking..."},
+			{"role":"user","content":"more"},
+			{"role":"assistant","content":"answer2"}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer1"},
+			{"role":"user","content":"more"},
+			{"role":"assistant","content":"answer2"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	rc1 := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if rc1 != "thinking..." {
+		t.Fatalf("first assistant reasoning = %q, want %q", rc1, "thinking...")
+	}
+
+	if gjson.GetBytes(out, "messages.3.reasoning_content").Exists() {
+		t.Fatalf("second assistant should not have reasoning_content when original had none")
 	}
 }

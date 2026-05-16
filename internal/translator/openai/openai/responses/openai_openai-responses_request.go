@@ -170,6 +170,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
+				if role == "assistant" {
+					if rc := item.Get("reasoning_content"); rc.Exists() {
+						message, _ = sjson.SetBytes(message, "reasoning_content", rc.String())
+					}
+				}
+
 				appendRegularMessage(message)
 
 			case "function_call":

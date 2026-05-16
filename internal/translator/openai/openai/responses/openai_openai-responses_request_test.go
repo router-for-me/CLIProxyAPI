@@ -122,3 +122,45 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntil
 		t.Fatalf("messages.3.content = %q, want %q", got, "next")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningContentPreserved(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}],"reasoning_content":"thinking step by step"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"follow up"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, true)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist")
+	}
+	if rc.String() != "thinking step by step" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc.String(), "thinking step by step")
+	}
+
+	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
+		t.Fatalf("user message should not have reasoning_content")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningContentOnlyOnAssistant(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}],"reasoning_content":"should not transfer"},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, false)
+
+	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
+		t.Fatalf("user message should not have reasoning_content even if original had it")
+	}
+	if gjson.GetBytes(out, "messages.1.reasoning_content").Exists() {
+		t.Fatalf("assistant message should not have reasoning_content when original had none")
+	}
+}

@@ -102,7 +102,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
-	translated, err = preserveReasoningContent(originalPayload, translated)
+	translated, err = preserveReasoningContent(originalTranslated, translated)
 	if err != nil {
 		return resp, err
 	}
@@ -110,6 +110,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, requestPath)
+
+	translated, err = preserveReasoningContent(originalTranslated, translated)
+	if err != nil {
+		return resp, err
+	}
+
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -198,6 +204,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	endpoint := "/chat/completions"
+	if opts.Alt == "responses/compact" {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/responses/compact"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -211,7 +222,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	translated, err = preserveReasoningContent(originalPayload, translated)
+	translated, err = preserveReasoningContent(originalTranslated, translated)
 	if err != nil {
 		return nil, err
 	}
@@ -220,11 +231,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, requestPath)
 
+	translated, err = preserveReasoningContent(originalTranslated, translated)
+	if err != nil {
+		return nil, err
+	}
+
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
