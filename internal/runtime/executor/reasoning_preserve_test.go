@@ -36,8 +36,9 @@ func TestPreserveReasoningContent_PreservesEmptyStringReasoning(t *testing.T) {
 	}
 }
 
-func TestPreserveReasoningContent_InheritsReasoningForMissingMessages(t *testing.T) {
-	// Multi-turn tool call chain: assistant with reasoning → tool → assistant without reasoning
+func TestPreserveReasoningContent_DoesNotInheritReasoningForMissingMessages(t *testing.T) {
+	// Multi-turn tool call chain: assistant with reasoning → tool → assistant without reasoning.
+	// The second assistant originally had no reasoning_content, so it must not get one fabricated.
 	original := []byte(`{
 		"messages":[
 			{"role":"user","content":"list files"},
@@ -66,10 +67,9 @@ func TestPreserveReasoningContent_InheritsReasoningForMissingMessages(t *testing
 		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc1, "let me check the directory")
 	}
 
-	// Second assistant (index 3) should inherit the last reasoning
-	rc3 := gjson.GetBytes(out, "messages.3.reasoning_content").String()
-	if rc3 != "let me check the directory" {
-		t.Fatalf("messages.3.reasoning_content = %q, want %q", rc3, "let me check the directory")
+	// Second assistant (index 3) originally had no reasoning — must remain absent
+	if gjson.GetBytes(out, "messages.3.reasoning_content").Exists() {
+		t.Fatalf("messages.3.reasoning_content should not exist when original had none")
 	}
 }
 

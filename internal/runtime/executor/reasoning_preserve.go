@@ -55,41 +55,24 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 	}
 
 	out := translated
-	lastReasoning := ""
 	for i, msg := range transMsgs.Array() {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
 
-		if text, ok := origReasoning[i]; ok {
-			// Original had reasoning_content — preserve it exactly (including empty string).
-			path := fmt.Sprintf("messages.%d.reasoning_content", i)
-			next, err := sjson.SetBytes(out, path, text)
-			if err != nil {
-				return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
-			}
-			out = next
-			if strings.TrimSpace(text) != "" {
-				lastReasoning = text
-			}
+		text, ok := origReasoning[i]
+		if !ok {
+			// No reasoning_content in original — leave translated as-is.
 			continue
 		}
 
-		// No reasoning_content in original for this index.
-		// If the translated payload already has one, keep it.
-		if msg.Get("reasoning_content").Exists() {
-			continue
+		// Original had reasoning_content — preserve it exactly (including empty string).
+		path := fmt.Sprintf("messages.%d.reasoning_content", i)
+		next, err := sjson.SetBytes(out, path, text)
+		if err != nil {
+			return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
 		}
-
-		// Inherit from the most recent reasoning if available.
-		if lastReasoning != "" {
-			path := fmt.Sprintf("messages.%d.reasoning_content", i)
-			next, err := sjson.SetBytes(out, path, lastReasoning)
-			if err != nil {
-				return translated, fmt.Errorf("preserveReasoningContent: failed to set inherited reasoning_content at index %d: %w", i, err)
-			}
-			out = next
-		}
+		out = next
 	}
 
 	return out, nil
