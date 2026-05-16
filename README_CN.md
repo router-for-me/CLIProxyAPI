@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
-一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
+一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
 
@@ -42,19 +42,21 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 ## 功能特性
 
-- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
+- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex/Grok 兼容的 API 端点
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
+- 新增 Grok Build 支持（OAuth 登录）
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
-- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude）
-- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude）
+- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Grok）
+- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Grok）
 - 支持 Gemini AIStudio API 密钥
 - 支持 AI Studio Build 多账户轮询
 - 支持 Gemini CLI 多账户轮询
 - 支持 Claude Code 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
+- 支持 Grok Build 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 

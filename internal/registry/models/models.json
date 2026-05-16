@@ -46,8 +46,7 @@
         "levels": [
           "low",
           "medium",
-          "high",
-          "xhigh"
+          "high"
         ]
       }
     },
@@ -459,6 +458,30 @@
       "name": "models/gemini-2.5-flash",
       "version": "001",
       "description": "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-image",
+      "object": "model",
+      "created": 1763596800,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash Image",
+      "name": "models/gemini-2.5-flash-image",
+      "version": "001",
+      "description": "Our state-of-the-art image generation and editing model.",
       "inputTokenLimit": 1048576,
       "outputTokenLimit": 65536,
       "supportedGenerationMethods": [
@@ -1990,12 +2013,12 @@
       }
     },
     {
-      "id": "gemini-3.1-pro-high",
+      "id": "gemini-pro-agent",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
       "display_name": "Gemini 3.1 Pro (High)",
-      "name": "gemini-3.1-pro-high",
+      "name": "gemini-pro-agent",
       "description": "Gemini 3.1 Pro (High)",
       "context_length": 1048576,
       "max_completion_tokens": 65535,
