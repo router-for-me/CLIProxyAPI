@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -228,6 +229,10 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	if h.isOpenAICompatImagesModel(imageModel) {
+		h.forwardOpenAICompatImageGeneration(c, imageModel, rawJSON)
+		return
+	}
 	if rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
@@ -286,6 +291,53 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	h.collectImagesFromResponses(c, responsesReq, responseFormat)
 }
 
+func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
+	if h == nil || h.BaseAPIHandler == nil || h.BaseAPIHandler.AuthManager == nil {
+		return false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(model) {
+		info := registry.GetGlobalRegistry().GetModelInfo(model, provider)
+		if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *OpenAIAPIHandler) forwardOpenAICompatImageGeneration(c *gin.Context, model string, rawJSON []byte) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), model, rawJSON, "images/generations")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
+func (h *OpenAIAPIHandler) forwardOpenAICompatImageEdit(c *gin.Context, model string, rawJSON []byte) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), model, rawJSON, "images/edits")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
 	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
 		c.AbortWithStatus(http.StatusNotFound)
@@ -326,7 +378,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	if rejectUnsupportedImagesModel(c, imageModel) {
+	openAICompatImageModel := h.isOpenAICompatImagesModel(imageModel)
+	if !openAICompatImageModel && rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
 
@@ -392,6 +445,21 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
+
+	if openAICompatImageModel {
+		rawJSON, err := buildOpenAICompatImageEditRequest(imageModel, prompt, images, strings.TrimSpace(c.PostForm("size")))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		h.forwardOpenAICompatImageEdit(c, imageModel, rawJSON)
+		return
+	}
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -459,7 +527,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	if rejectUnsupportedImagesModel(c, imageModel) {
+	openAICompatImageModel := h.isOpenAICompatImagesModel(imageModel)
+	if !openAICompatImageModel && rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
 
@@ -517,6 +586,25 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
+	if openAICompatImageModel {
+		editJSON, err := buildOpenAICompatImageEditRequest(
+			imageModel,
+			prompt,
+			images,
+			strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String()),
+		)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		h.forwardOpenAICompatImageEdit(c, imageModel, editJSON)
+		return
+	}
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
 
@@ -578,6 +666,46 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
 	}
 	return req
+}
+
+func buildOpenAICompatImageEditRequest(model string, prompt string, images []string, size string) ([]byte, error) {
+	if strings.TrimSpace(model) == "" {
+		return nil, fmt.Errorf("model is required")
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	cleanImages := make([]string, 0, len(images))
+	for _, image := range images {
+		if trimmed := strings.TrimSpace(image); trimmed != "" {
+			cleanImages = append(cleanImages, trimmed)
+		}
+	}
+	if len(cleanImages) == 0 {
+		return nil, fmt.Errorf("image is required")
+	}
+
+	req := []byte(`{"model":"","prompt":""}`)
+	req, _ = sjson.SetBytes(req, "model", strings.TrimSpace(model))
+	req, _ = sjson.SetBytes(req, "prompt", strings.TrimSpace(prompt))
+	if trimmedSize := strings.TrimSpace(size); trimmedSize != "" {
+		req, _ = sjson.SetBytes(req, "size", trimmedSize)
+	}
+
+	if len(cleanImages) == 1 {
+		image := []byte(`{"type":"image_url","url":""}`)
+		image, _ = sjson.SetBytes(image, "url", cleanImages[0])
+		req, _ = sjson.SetRawBytes(req, "image", image)
+		return req, nil
+	}
+
+	req, _ = sjson.SetRawBytes(req, "images", []byte(`[]`))
+	for _, imageURL := range cleanImages {
+		image := []byte(`{"type":"image_url","url":""}`)
+		image, _ = sjson.SetBytes(image, "url", imageURL)
+		req, _ = sjson.SetRawBytes(req, "images.-1", image)
+	}
+	return req, nil
 }
 
 func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesReq []byte, responseFormat string) {

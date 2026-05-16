@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -89,25 +91,40 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
+	imageGeneration := opts.Alt == "images/generations"
+	imageEdit := opts.Alt == "images/edits"
+	if imageGeneration {
+		endpoint = "/images/generations"
+	} else if imageEdit {
+		endpoint = "/images/edits"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	originalTranslated := originalPayload
+	translated := req.Payload
+	if !(imageGeneration || imageEdit) {
+		originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
+		translated = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return resp, err
-	}
+		translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return resp, err
+		}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, requestPath)
-	if opts.Alt == "responses/compact" {
-		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
-			translated = updated
+		requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+		requestPath := helps.PayloadRequestPath(opts)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, requestPath)
+		if opts.Alt == "responses/compact" {
+			if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
+				translated = updated
+			}
+		}
+	} else {
+		if translated, err = e.prepareImagePayload(auth, translated); err != nil {
+			return resp, err
 		}
 	}
 
@@ -172,6 +189,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
+	if imageGeneration {
+		resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
+		return resp, nil
+	}
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
@@ -419,6 +440,89 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+func (e *OpenAICompatExecutor) prepareImagePayload(auth *cliproxyauth.Auth, payload []byte) ([]byte, error) {
+	if !e.isXAICompatProvider(auth) {
+		return payload, nil
+	}
+
+	size := strings.TrimSpace(gjson.GetBytes(payload, "size").String())
+	if size == "" {
+		return payload, nil
+	}
+
+	aspectRatio, resolution, ok := xAIImageSizeMapping(size)
+	if !ok {
+		return nil, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("unsupported xAI image size %q; use aspect_ratio/resolution or a supported OpenAI size", size)}
+	}
+
+	updated, err := sjson.DeleteBytes(payload, "size")
+	if err != nil {
+		return nil, err
+	}
+	updated, err = sjson.SetBytes(updated, "aspect_ratio", aspectRatio)
+	if err != nil {
+		return nil, err
+	}
+	updated, err = sjson.SetBytes(updated, "resolution", resolution)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (e *OpenAICompatExecutor) isXAICompatProvider(auth *cliproxyauth.Auth) bool {
+	if auth != nil {
+		if strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+			return true
+		}
+		if auth.Attributes != nil {
+			for _, key := range []string{"provider_key", "compat_name", "base_url"} {
+				v := strings.ToLower(strings.TrimSpace(auth.Attributes[key]))
+				if v == "xai" || strings.Contains(v, "api.x.ai") {
+					return true
+				}
+			}
+		}
+	}
+	if compat := e.resolveCompatConfig(auth); compat != nil {
+		name := strings.ToLower(strings.TrimSpace(compat.Name))
+		baseURL := strings.ToLower(strings.TrimSpace(compat.BaseURL))
+		return name == "xai" || strings.Contains(baseURL, "api.x.ai")
+	}
+	return false
+}
+
+func xAIImageSizeMapping(size string) (aspectRatio, resolution string, ok bool) {
+	size = strings.TrimSpace(size)
+	switch size {
+	case "1024x1024":
+		return "1:1", "1k", true
+	case "1792x1024":
+		return "16:9", "1k", true
+	case "1024x1792":
+		return "9:16", "1k", true
+	case "2048x2048":
+		return "1:1", "2k", true
+	}
+
+	parts := strings.Split(size, "x")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	width, errWidth := strconv.Atoi(strings.TrimSpace(parts[0]))
+	height, errHeight := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errWidth != nil || errHeight != nil || width <= 0 || height <= 0 || width != height {
+		return "", "", false
+	}
+	if width <= 1024 {
+		return "1:1", "1k", true
+	}
+	if width <= 2048 {
+		return "1:1", "2k", true
+	}
+	return "", "", false
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

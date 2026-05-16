@@ -277,6 +277,14 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#
+#   - name: "xai" # xAI image generation through the OpenAI-compatible provider path.
+#     base-url: "https://api.x.ai/v1"
+#     api-key-entries:
+#       - api-key: "xai-dummy-replace-me"
+#     models:
+#       - name: "grok-imagine-image-quality"
+#         alias: "grok-imagine-image-quality"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
