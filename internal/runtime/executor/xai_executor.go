@@ -31,6 +31,11 @@ var xaiDataTag = []byte("data:")
 const (
 	xaiImageHandlerType         = "openai-image"
 	xaiVideoHandlerType         = "openai-video"
+	xaiCustomToolType           = "custom"
+	xaiFunctionToolType         = "function"
+	xaiImageGenerationToolType  = "image_generation"
+	xaiToolSearchType           = "tool_search"
+	xaiWebSearchToolType        = "web_search"
 	xaiImagesGenerationsPath    = "/images/generations"
 	xaiImagesEditsPath          = "/images/edits"
 	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
@@ -494,6 +499,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
+	body = normalizeXAITools(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
@@ -645,6 +651,57 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 		body, _ = sjson.DeleteBytes(body, "reasoning")
 	}
 	return body
+}
+
+func normalizeXAITools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+
+	changed := false
+	filtered := []byte(`[]`)
+	for _, tool := range tools.Array() {
+		toolType := tool.Get("type").String()
+		if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
+			changed = true
+			continue
+		}
+		raw := []byte(tool.Raw)
+		if toolType == xaiCustomToolType {
+			if tool.Get("name").String() == "apply_patch" {
+				changed = true
+				continue
+			}
+			updatedTool, errSet := sjson.SetBytes(raw, "type", xaiFunctionToolType)
+			if errSet != nil {
+				return body
+			}
+			raw = updatedTool
+			changed = true
+		}
+		if toolType == xaiWebSearchToolType && tool.Get("external_web_access").Exists() {
+			updatedTool, errDel := sjson.DeleteBytes(raw, "external_web_access")
+			if errDel != nil {
+				return body
+			}
+			raw = updatedTool
+			changed = true
+		}
+		updated, errSet := sjson.SetRawBytes(filtered, "-1", raw)
+		if errSet != nil {
+			return body
+		}
+		filtered = updated
+	}
+	if !changed {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "tools", filtered)
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 func removeXAIEncryptedReasoningInclude(body []byte) []byte {

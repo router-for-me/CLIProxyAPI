@@ -55,7 +55,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","input":"hello","include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"}}`),
+		Payload: []byte(`{"model":"grok-4.3","input":"hello","include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:       false,
@@ -90,6 +90,30 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 	if gjson.GetBytes(gotBody, "reasoning.effort").String() != "high" {
 		t.Fatalf("reasoning.effort = %q, want high; body=%s", gjson.GetBytes(gotBody, "reasoning.effort").String(), string(gotBody))
+	}
+	tools := gjson.GetBytes(gotBody, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(gotBody))
+	}
+	for i, tool := range tools {
+		toolType := tool.Get("type").String()
+		if toolType == "image_generation" {
+			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
+		}
+		if toolType != "function" && toolType != "web_search" {
+			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		}
+		if got := tool.Get("name").String(); got == "apply_patch" {
+			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
+		}
+		if toolType == "web_search" {
+			if tool.Get("external_web_access").Exists() {
+				t.Fatalf("tools.%d.external_web_access exists, want removed; body=%s", i, string(gotBody))
+			}
+			if got := tool.Get("search_content_types.1").String(); got != "image" {
+				t.Fatalf("tools.%d.search_content_types missing image entry; body=%s", i, string(gotBody))
+			}
+		}
 	}
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
 		if include.String() == "reasoning.encrypted_content" {
@@ -134,6 +158,68 @@ func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
 
 	if gjson.GetBytes(gotBody, "reasoning").Exists() {
 		t.Fatalf("unsupported xAI model must omit reasoning key: %s", string(gotBody))
+	}
+}
+
+func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":"hello","tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	tools := gjson.GetBytes(gotBody, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3; body=%s", len(tools), string(gotBody))
+	}
+	for i, tool := range tools {
+		toolType := tool.Get("type").String()
+		if toolType == "image_generation" {
+			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
+		}
+		if toolType != "function" && toolType != "web_search" {
+			t.Fatalf("tools.%d.type = %q, want function or web_search; body=%s", i, toolType, string(gotBody))
+		}
+		if got := tool.Get("name").String(); got == "apply_patch" {
+			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
+		}
+		if toolType == "web_search" {
+			if tool.Get("external_web_access").Exists() {
+				t.Fatalf("tools.%d.external_web_access exists, want removed; body=%s", i, string(gotBody))
+			}
+			if got := tool.Get("search_content_types.1").String(); got != "image" {
+				t.Fatalf("tools.%d.search_content_types missing image entry; body=%s", i, string(gotBody))
+			}
+		}
 	}
 }
 
