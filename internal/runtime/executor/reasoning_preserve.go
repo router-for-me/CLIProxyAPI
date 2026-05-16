@@ -28,17 +28,13 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 	}
 
 	// Build a lookup of reasoning_content from original assistant messages.
-	type reasonEntry struct {
-		text    string
-		isEmpty bool // true if field existed but was empty
-	}
-	origReasoning := make(map[int]reasonEntry)
+	origReasoning := make(map[int]string)
 	for i, msg := range origMsgs.Array() {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
 		if rc := msg.Get("reasoning_content"); rc.Exists() {
-			origReasoning[i] = reasonEntry{text: rc.String(), isEmpty: false}
+			origReasoning[i] = rc.String()
 		}
 	}
 
@@ -51,6 +47,13 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 		return translated, nil
 	}
 
+	// Index-based matching is only safe when message counts align.
+	// When translation changes message count (e.g. Claude→OpenAI merges blocks),
+	// skip preservation — those formats don't use reasoning_content anyway.
+	if len(origMsgs.Array()) != len(transMsgs.Array()) {
+		return translated, nil
+	}
+
 	out := translated
 	lastReasoning := ""
 	for i, msg := range transMsgs.Array() {
@@ -58,16 +61,16 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 			continue
 		}
 
-		if entry, ok := origReasoning[i]; ok {
+		if text, ok := origReasoning[i]; ok {
 			// Original had reasoning_content — preserve it exactly (including empty string).
 			path := fmt.Sprintf("messages.%d.reasoning_content", i)
-			next, err := sjson.SetBytes(out, path, entry.text)
+			next, err := sjson.SetBytes(out, path, text)
 			if err != nil {
 				return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
 			}
 			out = next
-			if strings.TrimSpace(entry.text) != "" {
-				lastReasoning = entry.text
+			if strings.TrimSpace(text) != "" {
+				lastReasoning = text
 			}
 			continue
 		}

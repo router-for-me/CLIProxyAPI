@@ -159,3 +159,35 @@ func TestPreserveReasoningContent_KeepsExistingNonEmptyReasoning(t *testing.T) {
 		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "let me think...")
 	}
 }
+
+func TestPreserveReasoningContent_SkipsWhenMessageCountMismatch(t *testing.T) {
+	// Claude→OpenAI translation can merge content blocks, changing message count.
+	// In this case the function should skip to avoid incorrect index-based matching.
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"thinking..."}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"system","content":"you are helpful"},
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	// Should not inject reasoning into a wrong index
+	if gjson.GetBytes(out, "messages.1.reasoning_content").Exists() {
+		t.Fatalf("user message at index 1 should not get reasoning_content from mismatched index")
+	}
+	// Translated assistant (index 2) should not get original's reasoning (index 1)
+	if gjson.GetBytes(out, "messages.2.reasoning_content").Exists() {
+		t.Fatalf("assistant should not get reasoning from mismatched index")
+	}
+}
