@@ -1208,10 +1208,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						if modelID == "" {
 							modelID = m.Name
 						}
-						thinking := m.Thinking
-						if thinking == nil {
-							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
-						}
 						ms = append(ms, &ModelInfo{
 							ID:          modelID,
 							Object:      "model",
@@ -1220,7 +1216,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							Type:        "openai-compatibility",
 							DisplayName: modelID,
 							UserDefined: false,
-							Thinking:    thinking,
+							Thinking:    resolveOpenAICompatibilityThinking(m),
 						})
 					}
 					// Register and return
@@ -1612,6 +1608,19 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		out = append(out, info)
 	}
 	return out
+}
+
+func resolveOpenAICompatibilityThinking(model config.OpenAICompatibilityModel) *registry.ThinkingSupport {
+	if model.Thinking != nil {
+		return model.Thinking
+	}
+	name := strings.TrimSpace(model.Name)
+	if name != "" {
+		if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
+			return upstream.Thinking
+		}
+	}
+	return &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 }
 
 func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
