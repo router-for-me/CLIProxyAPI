@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -29,9 +30,15 @@ var xaiDataTag = []byte("data:")
 
 const (
 	xaiImageHandlerType         = "openai-image"
+	xaiVideoHandlerType         = "openai-video"
 	xaiImagesGenerationsPath    = "/images/generations"
 	xaiImagesEditsPath          = "/images/edits"
 	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
+	xaiVideosGenerationsPath    = "/videos/generations"
+	xaiVideosEditsPath          = "/videos/edits"
+	xaiVideosExtensionsPath     = "/videos/extensions"
+	xaiVideosPath               = "/videos"
+	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -85,6 +92,9 @@ func (e *XAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, 
 func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if endpointPath := xaiImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, endpointPath)
+	}
+	if xaiIsVideoRequest(opts) {
+		return e.executeVideos(ctx, auth, req, opts)
 	}
 
 	token, baseURL := xaiCreds(auth)
@@ -178,6 +188,71 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	applyXAIHeaders(httpReq, auth, token, false, "")
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("xai executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+
+	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+}
+
+func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	token, baseURL := xaiCreds(auth)
+	if baseURL == "" {
+		baseURL = xaiauth.DefaultAPIBaseURL
+	}
+
+	method := http.MethodPost
+	endpointPath := xaiVideosGenerationsPath
+	var body io.Reader = bytes.NewReader(req.Payload)
+
+	switch path := xaiVideoEndpointPath(opts); path {
+	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
+		endpointPath = path
+	default:
+		if requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String()); requestID != "" {
+			method = http.MethodGet
+			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
+			body = nil
+		}
+	}
+	requestURL := strings.TrimSuffix(baseURL, "/") + endpointPath
+	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, body)
+	if err != nil {
+		return resp, err
+	}
+	applyXAIHeaders(httpReq, auth, token, false, "")
+	if method == http.MethodPost {
+		key := xaiMetadataString(opts.Metadata, xaiIdempotencyKeyMetaKey)
+		if key == "" && opts.Headers != nil {
+			key = strings.TrimSpace(opts.Headers.Get("x-idempotency-key"))
+		}
+		if key != "" {
+			httpReq.Header.Set("x-idempotency-key", key)
+		}
+	}
+	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), req.Payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -523,6 +598,27 @@ func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
 		return xaiImagesGenerationsPath
 	}
 	return xaiDefaultImageEndpointPath
+}
+
+func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {
+	return opts.SourceFormat.String() == xaiVideoHandlerType
+}
+
+func xaiVideoEndpointPath(opts cliproxyexecutor.Options) string {
+	if !xaiIsVideoRequest(opts) {
+		return ""
+	}
+	path := xaiMetadataString(opts.Metadata, cliproxyexecutor.RequestPathMetadataKey)
+	if strings.HasSuffix(path, "/videos/edits") {
+		return xaiVideosEditsPath
+	}
+	if strings.HasSuffix(path, "/videos/extensions") {
+		return xaiVideosExtensionsPath
+	}
+	if strings.HasSuffix(path, "/videos/generations") {
+		return xaiVideosGenerationsPath
+	}
+	return ""
 }
 
 func xaiMetadataString(meta map[string]any, key string) string {

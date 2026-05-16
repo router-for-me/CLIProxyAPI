@@ -33,6 +33,22 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 	assertGPT55ModelInfo(t, "lookup", model)
 }
 
+func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	found := false
+	for _, model := range models {
+		if model != nil && model.ID == xaiBuiltinVideoModelID {
+			found = true
+			if model.OwnedBy != "xai" {
+				t.Fatalf("OwnedBy = %q, want xai", model.OwnedBy)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected %s builtin model", xaiBuiltinVideoModelID)
+	}
+}
+
 func findModelInfo(models []*ModelInfo, id string) *ModelInfo {
 	for _, model := range models {
 		if model != nil && model.ID == id {

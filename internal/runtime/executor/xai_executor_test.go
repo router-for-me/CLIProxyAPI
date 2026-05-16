@@ -229,3 +229,168 @@ func TestXAIExecutorExecuteImagesUsesEditsEndpoint(t *testing.T) {
 		t.Fatalf("path = %q, want /images/edits", gotPath)
 	}
 }
+
+func TestXAIExecutorExecuteVideosCreate(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	var gotAuth string
+	var gotIdempotencyKey string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotIdempotencyKey = r.Header.Get("x-idempotency-key")
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"request_id":"vid_123"}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-video",
+		Payload: []byte(`{"model":"grok-imagine-video","prompt":"animate","duration":4}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-video"),
+		Metadata: map[string]any{
+			"idempotency_key": "idem-123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/videos/generations" {
+		t.Fatalf("path = %q, want /videos/generations", gotPath)
+	}
+	if gotAuth != "Bearer xai-token" {
+		t.Fatalf("Authorization = %q, want Bearer xai-token", gotAuth)
+	}
+	if gotIdempotencyKey != "idem-123" {
+		t.Fatalf("x-idempotency-key = %q, want idem-123", gotIdempotencyKey)
+	}
+	if string(gotBody) != `{"model":"grok-imagine-video","prompt":"animate","duration":4}` {
+		t.Fatalf("body = %s", string(gotBody))
+	}
+	if gjson.GetBytes(resp.Payload, "request_id").String() != "vid_123" {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestXAIExecutorExecuteVideosRetrieve(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"done","video":{"url":"https://vidgen.x.ai/video.mp4","duration":6},"model":"grok-imagine-video","progress":100}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-video",
+		Payload: []byte(`{"request_id":"vid_123"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-video"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %q, want GET", gotMethod)
+	}
+	if gotPath != "/videos/vid_123" {
+		t.Fatalf("path = %q, want /videos/vid_123", gotPath)
+	}
+	if gjson.GetBytes(resp.Payload, "video.url").String() != "https://vidgen.x.ai/video.mp4" {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestPath string
+		wantPath    string
+	}{
+		{
+			name:        "generations",
+			requestPath: "/v1/videos/generations",
+			wantPath:    "/videos/generations",
+		},
+		{
+			name:        "edits",
+			requestPath: "/v1/videos/edits",
+			wantPath:    "/videos/edits",
+		},
+		{
+			name:        "extensions",
+			requestPath: "/v1/videos/extensions",
+			wantPath:    "/videos/extensions",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			var gotMethod string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotMethod = r.Method
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"request_id":"vid_123"}`))
+			}))
+			defer server.Close()
+
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{"base_url": server.URL},
+				Metadata:   map[string]any{"access_token": "xai-token"},
+			}
+
+			_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "grok-imagine-video",
+				Payload: []byte(`{"model":"grok-imagine-video","prompt":"animate"}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-video"),
+				Metadata: map[string]any{
+					cliproxyexecutor.RequestPathMetadataKey: tt.requestPath,
+				},
+			})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+
+			if gotMethod != http.MethodPost {
+				t.Fatalf("method = %q, want POST", gotMethod)
+			}
+			if gotPath != tt.wantPath {
+				t.Fatalf("path = %q, want %s", gotPath, tt.wantPath)
+			}
+		})
+	}
+}

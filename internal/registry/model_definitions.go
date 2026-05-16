@@ -10,6 +10,7 @@ const (
 	codexBuiltinImageModelID      = "gpt-image-2"
 	xaiBuiltinImageModelID        = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID        = "grok-imagine-video"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -95,10 +96,10 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImageModelInfo())
 }
 
-// WithXAIBuiltins injects hard-coded xAI image model definitions that should
+// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo())
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
@@ -136,6 +137,19 @@ func xaiBuiltinImageQualityModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Image Quality",
 		Name:        xaiBuiltinImageQualityModelID,
 		Description: "xAI Grok higher-fidelity image generation model.",
+	}
+}
+
+func xaiBuiltinVideoModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinVideoModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Video",
+		Name:        xaiBuiltinVideoModelID,
+		Description: "xAI Grok video generation model.",
 	}
 }
 
