@@ -22,6 +22,52 @@ func TestGetAvailableModelsReturnsClonedSnapshots(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsOpenAIPreservesMetadata(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{{
+		ID:                  "m1",
+		Object:              "model",
+		Created:             1776902400,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "Model One",
+		Version:             "m1",
+		Description:         "Model with metadata.",
+		ContextLength:       272000,
+		MaxCompletionTokens: 128000,
+		SupportedParameters: []string{"tools"},
+	}})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	model := models[0]
+
+	want := map[string]any{
+		"id":                    "m1",
+		"object":                "model",
+		"created":               int64(1776902400),
+		"owned_by":              "openai",
+		"type":                  "openai",
+		"display_name":          "Model One",
+		"version":               "m1",
+		"description":           "Model with metadata.",
+		"context_length":        272000,
+		"max_completion_tokens": 128000,
+	}
+	for key, expected := range want {
+		if got := model[key]; got != expected {
+			t.Fatalf("expected %s=%#v, got %#v", key, expected, got)
+		}
+	}
+
+	params, ok := model["supported_parameters"].([]string)
+	if !ok || len(params) != 1 || params[0] != "tools" {
+		t.Fatalf("expected supported_parameters [tools], got %#v", model["supported_parameters"])
+	}
+}
+
 func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{{ID: "m1", OwnedBy: "team-a", DisplayName: "Model One"}})
