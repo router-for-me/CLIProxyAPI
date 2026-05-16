@@ -93,6 +93,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}
+	if !reflect.DeepEqual(oldCfg.Payload, newCfg.Payload) {
+		changes = appendPayloadConfigChanges(changes, oldCfg.Payload, newCfg.Payload)
+	}
 
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
@@ -336,6 +339,29 @@ func trimStrings(in []string) []string {
 		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
+}
+
+func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.PayloadConfig) []string {
+	changes = appendPayloadRuleChanges(changes, "default", oldPayload.Default, newPayload.Default)
+	changes = appendPayloadRuleChanges(changes, "default-raw", oldPayload.DefaultRaw, newPayload.DefaultRaw)
+	changes = appendPayloadRuleChanges(changes, "override", oldPayload.Override, newPayload.Override)
+	changes = appendPayloadRuleChanges(changes, "override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
+	changes = appendPayloadFilterRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
+	return changes
+}
+
+func appendPayloadRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadRule) []string {
+	if reflect.DeepEqual(oldRules, newRules) {
+		return changes
+	}
+	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
+}
+
+func appendPayloadFilterRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadFilterRule) []string {
+	if reflect.DeepEqual(oldRules, newRules) {
+		return changes
+	}
+	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
 }
 
 func equalStringMap(a, b map[string]string) bool {
