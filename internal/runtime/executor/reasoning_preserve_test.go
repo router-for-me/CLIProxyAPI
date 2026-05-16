@@ -160,6 +160,32 @@ func TestPreserveReasoningContent_KeepsExistingNonEmptyReasoning(t *testing.T) {
 	}
 }
 
+func TestPreserveReasoningContent_KeepsTranslatedReasoningWhenOriginalLacksIt(t *testing.T) {
+	// Original has no reasoning_content, but translated already has one — keep it.
+	original := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer"}
+		]
+	}`)
+	translated := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"from upstream"}
+		]
+	}`)
+
+	out, err := preserveReasoningContent(original, translated)
+	if err != nil {
+		t.Fatalf("preserveReasoningContent() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if got != "from upstream" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "from upstream")
+	}
+}
+
 func TestPreserveReasoningContent_SkipsWhenMessageCountMismatch(t *testing.T) {
 	// Claude→OpenAI translation can merge content blocks, changing message count.
 	// In this case the function should skip to avoid incorrect index-based matching.
