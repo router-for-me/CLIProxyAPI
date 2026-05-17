@@ -1689,10 +1689,10 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		}
 
 		if len(userSystemParts) > 0 {
-			combined := strings.Join(userSystemParts, "\n\n")
 			if oauthMode {
-				combined = sanitizeForwardedSystemPrompt(combined)
+				userSystemParts[0] = sanitizeForwardedSystemPrompt(userSystemParts[0])
 			}
+			combined := strings.Join(userSystemParts, "\n\n")
 			if strings.TrimSpace(combined) != "" {
 				payload = prependToFirstUserMessage(payload, combined)
 			}
