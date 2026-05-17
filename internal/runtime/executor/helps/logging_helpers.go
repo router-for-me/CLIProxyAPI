@@ -975,23 +975,6 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 			}
 		}
 	}
-	// Derive total_tokens when the upstream omits it or a late SSE event
-	// updates a component without updating the total.
-	// Use max(input_tokens, prompt_tokens) + max(output_tokens, completion_tokens)
-	// to avoid double-counting when a provider reports both Anthropic-style and
-	// OpenAI-style fields (e.g. after usageMetadata mapping).
-	inputSide := current["input_tokens"]
-	if current["prompt_tokens"] > inputSide {
-		inputSide = current["prompt_tokens"]
-	}
-	outputSide := current["output_tokens"]
-	if current["completion_tokens"] > outputSide {
-		outputSide = current["completion_tokens"]
-	}
-	if derived := inputSide + outputSide; derived > current["total_tokens"] {
-		current["total_tokens"] = derived
-	}
-
 	// Antigravity wrapper: response.usageMetadata / response.usage_metadata
 	for _, metaKey := range []string{"response.usageMetadata", "response.usage_metadata"} {
 		if meta := gjson.GetBytes(data, metaKey); meta.Exists() {
@@ -1028,6 +1011,31 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 			setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
 			break
 		}
+	}
+
+	// Derive total_tokens after all fields (including Gemini metadata) are
+	// mapped. Use max(input, prompt) + max(output, completion) + reasoning
+	// to handle Gemini responses that omit totalTokenCount but report
+	// thoughtsTokenCount separately.
+	inputSide := current["input_tokens"]
+	if current["prompt_tokens"] > inputSide {
+		inputSide = current["prompt_tokens"]
+	}
+	outputSide := current["output_tokens"]
+	if current["completion_tokens"] > outputSide {
+		outputSide = current["completion_tokens"]
+	}
+	// For Gemini, reasoning_tokens (thoughtsTokenCount) is separate from
+	// candidatesTokenCount and must be included. For OpenAI, reasoning_tokens
+	// is already a subset of output/completion and must not be added again.
+	// Heuristic: include it only when there are no output/completion tokens
+	// (pure Gemini metadata path where only prompt+candidates+thoughts exist).
+	reasoningSide := int64(0)
+	if outputSide == 0 {
+		reasoningSide = current["reasoning_tokens"]
+	}
+	if derived := inputSide + outputSide + reasoningSide; derived > current["total_tokens"] {
+		current["total_tokens"] = derived
 	}
 
 	ginCtx.Set(UpstreamRawUsageKey, current)
