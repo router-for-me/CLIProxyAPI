@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -313,7 +314,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 						item, _ = sjson.SetBytes(item, "description", v.Value())
 					}
 					if v := fn.Get("parameters"); v.Exists() {
-						item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
+						item, _ = sjson.SetRawBytes(item, "parameters", util.NormalizeCodexToolSchema(v.Raw))
 					}
 					if v := fn.Get("strict"); v.Exists() {
 						item, _ = sjson.SetBytes(item, "strict", v.Value())
