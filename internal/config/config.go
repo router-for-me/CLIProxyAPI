@@ -379,6 +379,15 @@ type CloakConfig struct {
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
+
+	// PassthroughSystem, when true, suppresses the OAuth-mode sanitization that
+	// replaces the caller's forwarded system prompt with a generic stub. The
+	// canonical Claude Code system field (billing/agent/static blocks) is still
+	// injected so the request body remains recognizable to Anthropic; only the
+	// caller-supplied system message survives verbatim into the first user
+	// message. Can also be enabled per-request via the X-CPA-Passthrough-System
+	// header (value "true"/"1").
+	PassthroughSystem bool `yaml:"passthrough-system,omitempty" json:"passthrough-system,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

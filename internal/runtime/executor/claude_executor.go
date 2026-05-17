@@ -1043,7 +1043,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, false, "2.1.63", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1521,11 +1521,22 @@ func getWorkloadFromContext(ctx context.Context) string {
 	return ""
 }
 
+// getPassthroughSystemFromContext reads X-CPA-Passthrough-System from the
+// inbound HTTP request. Values "true" or "1" enable passthrough; anything else
+// (including missing header) leaves the decision to config/auth attributes.
+func getPassthroughSystemFromContext(ctx context.Context) bool {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		v := strings.ToLower(strings.TrimSpace(ginCtx.GetHeader("X-CPA-Passthrough-System")))
+		return v == "true" || v == "1"
+	}
+	return false
+}
+
 // getCloakConfigFromAuth extracts cloak configuration from auth attributes.
-// Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
+// Returns (cloakMode, strictMode, sensitiveWords, cacheUserID, passthroughSystem).
+func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool, bool) {
 	if auth == nil || auth.Attributes == nil {
-		return "auto", false, nil, false
+		return "auto", false, nil, false, false
 	}
 
 	cloakMode := auth.Attributes["cloak_mode"]
@@ -1544,8 +1555,9 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 	}
 
 	cacheUserID := strings.EqualFold(strings.TrimSpace(auth.Attributes["cloak_cache_user_id"]), "true")
+	passthroughSystem := strings.EqualFold(strings.TrimSpace(auth.Attributes["cloak_passthrough_system"]), "true")
 
-	return cloakMode, strictMode, sensitiveWords, cacheUserID
+	return cloakMode, strictMode, sensitiveWords, cacheUserID, passthroughSystem
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
@@ -1616,7 +1628,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, false, "2.1.63", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1627,7 +1639,12 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //	system[3]: system instructions (no cache_control)
 //	system[4]: doing tasks (no cache_control)
 //	system[5]: user system messages moved to first user message
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
+//
+// When passthroughSystem is true, the OAuth-mode sanitize step is skipped and
+// the caller's forwarded system prompt is prepended to the first user message
+// verbatim. The canonical Claude Code system field is still injected so the
+// outbound request looks recognizable to Anthropic.
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, passthroughSystem bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
@@ -1690,7 +1707,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 		if len(userSystemParts) > 0 {
 			combined := strings.Join(userSystemParts, "\n\n")
-			if oauthMode {
+			if oauthMode && !passthroughSystem {
 				combined = sanitizeForwardedSystemPrompt(combined)
 			}
 			if strings.TrimSpace(combined) != "" {
@@ -1795,13 +1812,14 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	attrMode, attrStrict, attrWords, attrCache, attrPassthrough := getCloakConfigFromAuth(auth)
 
 	// Determine cloak settings
 	cloakMode := attrMode
 	strictMode := attrStrict
 	sensitiveWords := attrWords
 	cacheUserID := attrCache
+	passthroughSystem := attrPassthrough
 
 	if cloakCfg != nil {
 		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
@@ -1816,6 +1834,15 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		if cloakCfg.CacheUserID != nil {
 			cacheUserID = *cloakCfg.CacheUserID
 		}
+		if cloakCfg.PassthroughSystem {
+			passthroughSystem = true
+		}
+	}
+
+	// Per-request header takes highest precedence so callers can opt in without
+	// needing config-side state. Header missing/false leaves config decision intact.
+	if getPassthroughSystemFromContext(ctx) {
+		passthroughSystem = true
 	}
 
 	// Determine if cloaking should be applied
@@ -1828,7 +1855,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, passthroughSystem, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID
