@@ -450,6 +450,9 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}
+	if !hasGeminiFamilyUsageTokenFields(node) {
+		return usage.Detail{}, false
+	}
 	return parseGeminiFamilyUsageDetail(node), true
 }
 
