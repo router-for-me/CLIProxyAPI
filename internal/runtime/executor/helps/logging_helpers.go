@@ -928,12 +928,15 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 	} {
 		setMax(key)
 	}
-	// OpenAI nested details: prompt_tokens_details.cached_tokens,
-	// output_tokens_details.reasoning_tokens (Responses API),
-	// completion_tokens_details.reasoning_tokens (chat completions).
-	if r := usage.Get("prompt_tokens_details.cached_tokens"); r.Exists() {
-		if v := r.Int(); v > current["cache_read_input_tokens"] {
-			current["cache_read_input_tokens"] = v
+	// OpenAI/Codex nested details.
+	for _, path := range []string{
+		"prompt_tokens_details.cached_tokens",  // chat completions
+		"input_tokens_details.cached_tokens",   // Responses API
+	} {
+		if r := usage.Get(path); r.Exists() {
+			if v := r.Int(); v > current["cache_read_input_tokens"] {
+				current["cache_read_input_tokens"] = v
+			}
 		}
 	}
 	for _, path := range []string{
@@ -975,6 +978,8 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		setFromPath("prompt_tokens", "promptTokenCount")
 		setFromPath("completion_tokens", "candidatesTokenCount")
 		setFromPath("total_tokens", "totalTokenCount")
+		setFromPath("reasoning_tokens", "thoughtsTokenCount")
+		setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
 	}
 
 	// Gemini usageMetadata lives at the top level, not under "usage".
@@ -989,6 +994,8 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		setFromPath("prompt_tokens", "promptTokenCount")
 		setFromPath("completion_tokens", "candidatesTokenCount")
 		setFromPath("total_tokens", "totalTokenCount")
+		setFromPath("reasoning_tokens", "thoughtsTokenCount")
+		setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
 	}
 
 	ginCtx.Set(UpstreamRawUsageKey, current)
