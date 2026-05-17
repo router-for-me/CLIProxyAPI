@@ -28,7 +28,8 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, new(*h.cfg))
+	cfg := *h.cfg
+	c.JSON(200, &cfg)
 }
 
 type releaseInfo struct {

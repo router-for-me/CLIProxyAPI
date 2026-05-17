@@ -3,6 +3,7 @@ package antigravity
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,8 +44,24 @@ func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *Antigravit
 	if httpClient != nil {
 		return &AntigravityAuth{httpClient: httpClient}
 	}
+	// Apply proxy first, then TLS skip verify on top (order matters: SetProxy replaces the transport).
+	client := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	if cfg.TLSSkipVerify {
+		if transport, ok := client.Transport.(*http.Transport); ok {
+			clone := transport.Clone()
+			if clone.TLSClientConfig == nil {
+				clone.TLSClientConfig = &tls.Config{}
+			}
+			clone.TLSClientConfig.InsecureSkipVerify = true
+			client.Transport = clone
+        } else if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+            clone := defaultTransport.Clone()
+            clone.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+            client.Transport = clone
+        }
+	}
 	return &AntigravityAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: client,
 	}
 }
 
