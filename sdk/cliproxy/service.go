@@ -925,7 +925,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errStart := watcherWrapper.Start(watcherCtx); errStart != nil {
 			return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
 		}
-		log.Info("file watcher started for config and auth directory changes")
+log.Info("file watcher started for config and auth directory changes")
 	}
 
 	// Prefer core auth manager auto refresh if available.
