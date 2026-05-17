@@ -31,6 +31,10 @@ const (
 	UpstreamFirstUserMsgKey = "upstream_first_user_msg"
 	UpstreamResponseTextKey = "upstream_response_text"
 	UpstreamRawUsageKey     = "upstream_raw_usage"
+
+	// Private keys used by accumulateResponseText; reset alongside public keys on retry.
+	responseTextBuilderKey  = "upstream_response_text_builder"
+	sawOutputTextDeltaKey   = "upstream_saw_output_text_delta"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -67,6 +71,9 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
 		ginCtx.Set(UpstreamResponseTextKey, "")
 		ginCtx.Set(UpstreamRawUsageKey, nil)
+		// Reset private streaming accumulators so a retry starts clean.
+		ginCtx.Set(responseTextBuilderKey, nil)
+		ginCtx.Set(sawOutputTextDeltaKey, false)
 		if info.URL != "" {
 			ginCtx.Set(UpstreamURLKey, info.URL)
 		}
@@ -331,7 +338,12 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx != nil {
 		// Always-on: accumulate response text and usage for plugins.
-		accumulateResponseText(ginCtx, data)
+		// Websocket frames are raw JSON objects, not SSE lines. Wrap in
+		// SSE format so accumulateResponseText takes the streaming path
+		// and correctly handles Codex delta/done event types.
+		sse := append([]byte("data: "), data...)
+		sse = append(sse, '\n', '\n')
+		accumulateResponseText(ginCtx, sse)
 	}
 	if cfg == nil || !cfg.RequestLog {
 		return
@@ -790,19 +802,17 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 	// Streaming SSE: one TCP chunk may carry multiple events.
 	// Use a *strings.Builder stored in the gin context to avoid O(n²)
 	// allocations from repeated string concatenation across chunks.
-	const builderKey = "upstream_response_text_builder"
 	var sb *strings.Builder
-	if v, ok := ginCtx.Get(builderKey); ok {
+	if v, ok := ginCtx.Get(responseTextBuilderKey); ok {
 		sb, _ = v.(*strings.Builder)
 	}
 	if sb == nil {
 		sb = &strings.Builder{}
-		ginCtx.Set(builderKey, sb)
+		ginCtx.Set(responseTextBuilderKey, sb)
 	}
 	updated := false
-	const sawDeltaKey = "upstream_saw_output_text_delta"
 	sawOutputTextDelta := false
-	if v, ok := ginCtx.Get(sawDeltaKey); ok {
+	if v, ok := ginCtx.Get(sawOutputTextDeltaKey); ok {
 		sawOutputTextDelta, _ = v.(bool)
 	}
 	for _, line := range bytes.Split(chunk, []byte("\n")) {
@@ -831,7 +841,7 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 				delta = gjson.GetBytes(data, "delta").String()
 				if delta != "" {
 					sawOutputTextDelta = true
-					ginCtx.Set(sawDeltaKey, true)
+					ginCtx.Set(sawOutputTextDeltaKey, true)
 				}
 			}
 		}
