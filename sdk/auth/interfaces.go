@@ -37,6 +37,9 @@ func ValidateLabel(label string) error {
 	if label == "" {
 		return nil
 	}
+	if len(label) > 32 {
+		return fmt.Errorf("label %q is too long: maximum 32 characters", label)
+	}
 	if !labelRe.MatchString(label) {
 		return fmt.Errorf("label %q contains invalid characters: only letters, digits, hyphens and underscores are allowed", label)
 	}

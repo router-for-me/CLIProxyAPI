@@ -25,7 +25,7 @@ func DoClaudeLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	if err := sdkAuth.ValidateLabel(options.Label); err != nil {
-		fmt.Println(err)
+		log.Errorf("invalid claude-label: %v", err)
 		return
 	}
 
