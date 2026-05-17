@@ -86,8 +86,12 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	}
 
 	for _, candidate := range candidates {
+		candidate.value = strings.TrimSpace(candidate.value)
 		if candidate.value == "" {
 			continue
+		}
+		if isBlockedSampleAPIKey(candidate.value) {
+			return nil, sdkaccess.NewInvalidCredentialError()
 		}
 		if _, ok := p.keys[candidate.value]; ok {
 			return &sdkaccess.Result{
@@ -115,6 +119,14 @@ func extractBearerToken(header string) string {
 		return header
 	}
 	return strings.TrimSpace(parts[1])
+}
+
+func isBlockedSampleAPIKey(key string) bool {
+	switch key {
+	case "your-api-key-1", "your-api-key-2", "your-api-key-3":
+		return true
+	}
+	return false
 }
 
 func normalizeKeys(keys []string) []string {
