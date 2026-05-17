@@ -19,6 +19,8 @@ import (
 )
 
 const openAICompatAccountQuotaRetryWait = 24 * time.Hour
+const deepSeekThinkingBudgetMin = 100
+const deepSeekThinkingBudgetMax = 32768
 
 type openAICompatProfile struct {
 	Kind                     string
@@ -239,6 +241,7 @@ func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfil
 	payload = scrubOpenAICompatPayload(payload, profile)
 	payload = repairOpenAICompatToolCallHistory(payload)
 	payload = sanitizeOpenAICompatToolSchemas(payload)
+	payload = scrubDeepSeekThinkingBudgetForCompat(payload, model, baseURL, profile.Kind)
 	if config.NormalizeOpenAICompatibilityKind(profile.Kind) == "kimi" {
 		if normalized, err := normalizeKimiToolMessageLinks(payload); err == nil {
 			payload = normalized
@@ -255,6 +258,106 @@ func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfil
 		payload = scrubDeepSeekToolPayload(payload, baseURL)
 	}
 	return payload
+}
+
+func scrubDeepSeekThinkingBudgetForCompat(payload []byte, model string, baseURL string, compatKind string) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) || !requiresDeepSeekThinkingBudgetCompatibility(model, baseURL, compatKind) {
+		return payload
+	}
+
+	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "thinking.type").String()), "disabled") {
+		payload = deleteDeepSeekThinkingBudgetPaths(payload)
+		return payload
+	}
+
+	for _, path := range []string{"thinking_budget", "thinking.budget_tokens"} {
+		payload = normalizeDeepSeekThinkingBudgetPath(payload, path)
+	}
+
+	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()))
+	switch effort {
+	case "none", "disabled", "off":
+		payload, _ = sjson.SetBytes(payload, "thinking.type", "disabled")
+		payload, _ = sjson.DeleteBytes(payload, "reasoning_effort")
+		payload = deleteDeepSeekThinkingBudgetPaths(payload)
+	case "minimal", "low", "medium":
+		payload, _ = sjson.SetBytes(payload, "reasoning_effort", "high")
+	case "xhigh":
+		payload, _ = sjson.SetBytes(payload, "reasoning_effort", "max")
+	}
+
+	return payload
+}
+
+func requiresDeepSeekThinkingBudgetCompatibility(model string, baseURL string, compatKind string) bool {
+	switch config.NormalizeOpenAICompatibilityKind(compatKind) {
+	case "deepseek":
+		return true
+	case "kimi", "minimax", "xiaomi", "zhipu", "xfyun", "maas", "langengyun", "newapi":
+		return false
+	}
+	switch config.InferCompatKindFromBaseURL(baseURL) {
+	case "deepseek":
+		return true
+	case "kimi", "minimax", "xiaomi", "zhipu", "xfyun", "maas", "langengyun", "newapi":
+		return false
+	}
+	modelName := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(modelName, "deepseek-v4") || strings.Contains(modelName, "deepseek-reasoner")
+}
+
+func deleteDeepSeekThinkingBudgetPaths(payload []byte) []byte {
+	for _, path := range []string{"thinking_budget", "thinking.budget_tokens"} {
+		if updated, err := sjson.DeleteBytes(payload, path); err == nil {
+			payload = updated
+		}
+	}
+	return payload
+}
+
+func normalizeDeepSeekThinkingBudgetPath(payload []byte, path string) []byte {
+	value := gjson.GetBytes(payload, path)
+	if !value.Exists() {
+		return payload
+	}
+
+	budget, ok := deepSeekThinkingBudgetValue(value)
+	if !ok || budget <= 0 {
+		updated, err := sjson.DeleteBytes(payload, path)
+		if err != nil {
+			return payload
+		}
+		return updated
+	}
+	if budget < deepSeekThinkingBudgetMin {
+		budget = deepSeekThinkingBudgetMin
+	} else if budget > deepSeekThinkingBudgetMax {
+		budget = deepSeekThinkingBudgetMax
+	}
+	updated, err := sjson.SetBytes(payload, path, budget)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func deepSeekThinkingBudgetValue(value gjson.Result) (int, bool) {
+	switch value.Type {
+	case gjson.Number:
+		return int(value.Int()), true
+	case gjson.String:
+		raw := strings.TrimSpace(value.String())
+		if raw == "" {
+			return 0, false
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
 }
 
 func scrubZhipuImageURLDataURLs(payload []byte) []byte {

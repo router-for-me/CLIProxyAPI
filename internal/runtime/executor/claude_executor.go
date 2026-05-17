@@ -179,6 +179,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
+	body = scrubDeepSeekThinkingBudgetForCompat(body, baseModel, baseURL, compatKind)
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
@@ -380,6 +381,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, requestPath)
+	body = scrubDeepSeekThinkingBudgetForCompat(body, baseModel, baseURL, compatKind)
 	body = ensureModelMaxTokens(body, baseModel)
 	body = applyMiniMaxStreamingThinkingDefaultForCompat(compatKind, body, true)
 
@@ -2281,6 +2283,7 @@ func sanitizeClaudeHTTPRequestToolNames(req *http.Request) (*claudeToolNameSanit
 		compatKind = config.InferCompatKindFromBaseURL(req.URL.String())
 	}
 	body = downgradeClaudeToolSearchForCompatKind(compatKind, requestURLString(req), body)
+	body = scrubDeepSeekThinkingBudgetForCompat(body, gjson.GetBytes(body, "model").String(), requestURLString(req), compatKind)
 	body = applyMiniMaxStreamingThinkingDefaultForCompat(compatKind, body, gjson.GetBytes(body, "stream").Bool())
 	updated, mapping := sanitizeClaudeToolNamesForUpstream(body)
 	req.Body = io.NopCloser(bytes.NewReader(updated))

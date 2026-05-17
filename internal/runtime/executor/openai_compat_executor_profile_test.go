@@ -876,6 +876,80 @@ func TestOpenAICompatPayloadDeepSeekSanitizesLooseSchemaValues(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatPayloadDeepSeekNormalizesThinkingBudget(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking_budget":50,
+		"thinking":{"type":"enabled","budget_tokens":99999},
+		"reasoning_effort":"xhigh"
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "deepseek-v4-pro", "https://api.deepseek.com/v1")
+
+	if got := gjson.GetBytes(out, "thinking_budget").Int(); got != 100 {
+		t.Fatalf("thinking_budget = %d, want 100: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "thinking.budget_tokens").Int(); got != 32768 {
+		t.Fatalf("thinking.budget_tokens = %d, want 32768: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "max" {
+		t.Fatalf("reasoning_effort = %q, want max: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadDeepSeekRemovesBudgetWhenThinkingDisabled(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking_budget":50,
+		"thinking":{"type":"disabled","budget_tokens":50}
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "deepseek-v4-pro", "https://api.deepseek.com/v1")
+
+	for _, path := range []string{"thinking_budget", "thinking.budget_tokens"} {
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("%s should be removed when thinking is disabled: %s", path, string(out))
+		}
+	}
+}
+
+func TestOpenAICompatPayloadDeepSeekReasoningNoneDisablesThinking(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking_budget":50,
+		"reasoning_effort":"none"
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "deepseek-v4-pro", "https://api.deepseek.com/v1")
+
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "disabled" {
+		t.Fatalf("thinking.type = %q, want disabled: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "reasoning_effort").Exists() {
+		t.Fatalf("reasoning_effort should be removed when disabling DeepSeek thinking: %s", string(out))
+	}
+	if gjson.GetBytes(out, "thinking_budget").Exists() {
+		t.Fatalf("thinking_budget should be removed when disabling DeepSeek thinking: %s", string(out))
+	}
+}
+
+func TestOpenAICompatPayloadDeepSeekBudgetScrubSkipsOtherCompatProfiles(t *testing.T) {
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking_budget":50
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "deepseek-v4-pro", "https://api.kimi.com/coding/v1")
+
+	if got := gjson.GetBytes(out, "thinking_budget").Int(); got != 50 {
+		t.Fatalf("thinking_budget = %d, want unchanged 50 for kimi compat: %s", got, string(out))
+	}
+}
+
 func TestOpenAICompatPayloadGenericSanitizesFunctionSchemaWithoutDroppingStrict(t *testing.T) {
 	payload := []byte(`{
 		"model":"gpt-5",

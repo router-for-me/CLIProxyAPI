@@ -3082,6 +3082,22 @@ func TestDowngradeClaudeToolSearchForCompatKind_DeepSeekSanitizesToolSchema(t *t
 	}
 }
 
+func TestDeepSeekClaudeCompatNormalizesThinkingBudgetByModelName(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"deepseek-v4-pro",
+		"thinking":{"type":"enabled","budget_tokens":50},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	out := scrubDeepSeekThinkingBudgetForCompat(payload, "deepseek-v4-pro", "https://tokenrai.com", "")
+
+	if got := gjson.GetBytes(out, "thinking.budget_tokens").Int(); got != 100 {
+		t.Fatalf("thinking.budget_tokens = %d, want 100: %s", got, string(out))
+	}
+}
+
 func TestSanitizeClaudeHTTPRequestToolNames_DowngradesDeepSeekAnthropicBody(t *testing.T) {
 	t.Parallel()
 
@@ -3100,6 +3116,24 @@ func TestSanitizeClaudeHTTPRequestToolNames_DowngradesDeepSeekAnthropicBody(t *t
 	}
 	if !hasClaudeText(gjson.GetBytes(body, "messages.0.content").Array(), "hi") {
 		t.Fatalf("text should be preserved: %s", string(body))
+	}
+}
+
+func TestSanitizeClaudeHTTPRequestToolNames_NormalizesDeepSeekThinkingBudget(t *testing.T) {
+	t.Parallel()
+
+	payload := `{"model":"deepseek-v4-pro","thinking":{"type":"enabled","budget_tokens":"50"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "https://api.deepseek.com/anthropic/v1/messages?beta=true", strings.NewReader(payload))
+
+	if _, err := sanitizeClaudeHTTPRequestToolNames(req); err != nil {
+		t.Fatalf("sanitizeClaudeHTTPRequestToolNames() error = %v", err)
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "thinking.budget_tokens").Int(); got != 100 {
+		t.Fatalf("thinking.budget_tokens = %d, want 100: %s", got, string(body))
 	}
 }
 
