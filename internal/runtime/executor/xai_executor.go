@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -767,7 +768,77 @@ func normalizeXAIInputReasoningItems(body []byte) []byte {
 			updated = updatedBody
 		}
 	}
+	return mergeAdjacentXAIInputReasoningSummaries(updated)
+}
+
+func mergeAdjacentXAIInputReasoningSummaries(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		if len(items) > 0 && canMergeXAIReasoningSummary(items[len(items)-1], item) {
+			merged, ok := appendXAIReasoningSummary(items[len(items)-1], item.Get("summary").Array())
+			if ok {
+				items[len(items)-1] = json.RawMessage(merged)
+				changed = true
+				continue
+			}
+		}
+		items = append(items, json.RawMessage(item.Raw))
+	}
+	if !changed {
+		return body
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
 	return updated
+}
+
+func canMergeXAIReasoningSummary(previous json.RawMessage, current gjson.Result) bool {
+	previousItem := gjson.ParseBytes(previous)
+	if previousItem.Get("type").String() != "reasoning" || current.Get("type").String() != "reasoning" {
+		return false
+	}
+	if !previousItem.Get("summary").IsArray() || !current.Get("summary").IsArray() {
+		return false
+	}
+	if len(current.Get("summary").Array()) == 0 {
+		return false
+	}
+	for name := range current.Map() {
+		if name != "type" && name != "summary" {
+			return false
+		}
+	}
+	return true
+}
+
+func appendXAIReasoningSummary(previous json.RawMessage, currentSummary []gjson.Result) ([]byte, bool) {
+	updated := []byte(previous)
+	summary := gjson.GetBytes(updated, "summary")
+	if !summary.IsArray() {
+		return previous, false
+	}
+	nextIndex := len(summary.Array())
+	for i, item := range currentSummary {
+		updatedItem, errSet := sjson.SetRawBytes(updated, fmt.Sprintf("summary.%d", nextIndex+i), []byte(item.Raw))
+		if errSet != nil {
+			return previous, false
+		}
+		updated = updatedItem
+	}
+	return updated, true
 }
 
 func removeXAIEncryptedReasoningInclude(body []byte) []byte {
