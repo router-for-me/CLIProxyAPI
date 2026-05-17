@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -189,7 +190,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+	httpClient.Transport = h.apiCallTransport(auth, parsedURL.Host)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -318,7 +319,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	ctxToken := ctx
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -377,7 +378,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -631,7 +632,128 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
+// defaultNoProxyCIDRs are RFC 1918 / RFC 4193 private ranges, loopback,
+// and link-local. These destinations are unreachable through a typical
+// external HTTP proxy, so management requests targeting them short-circuit
+// straight to a direct transport.
+var defaultNoProxyCIDRs = []string{
+	"127.0.0.0/8",
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"169.254.0.0/16",
+	"::1/128",
+	"fc00::/7",
+	"fe80::/10",
+}
+
+// isNoProxyHost returns true when targetHost should bypass the proxy.
+// It accepts:
+//   - literal IPv4/IPv6 addresses ("10.0.0.5", "::1")
+//   - bracketed IPv6 literals ("[::1]", "[fe80::1%eth0]")
+//   - host:port forms ("nas.lan:8080", "[::1]:443")
+//   - hostnames ("localhost", "nas.lan", "printer.local")
+//
+// Hostnames are resolved via the default resolver using a short timeout.
+// Every address the hostname resolves to must fall inside the configured
+// no-proxy CIDRs; a single public address disables the bypass to avoid
+// leaking LAN DNS poisoning into external traffic. Resolution failures
+// leave the bypass disabled so the proxy still has a chance to reach the
+// target.
+func (h *Handler) isNoProxyHost(targetHost string) bool {
+	host := strings.TrimSpace(targetHost)
+	if host == "" {
+		return false
+	}
+	// Strip port if present. SplitHostPort handles "host:port" and
+	// "[ipv6]:port"; for bare hosts it errors out and we keep host as-is.
+	if stripped, _, errSplit := net.SplitHostPort(host); errSplit == nil {
+		host = stripped
+	}
+	// Strip IPv6 brackets for bare "[::1]" form (no port).
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	// Trim IPv6 zone identifier ("fe80::1%eth0") before parsing.
+	if idx := strings.IndexByte(host, '%'); idx >= 0 {
+		host = host[:idx]
+	}
+	if host == "" {
+		return false
+	}
+
+	cidrs := defaultNoProxyCIDRs
+	if h != nil && h.cfg != nil && len(h.cfg.NoProxyCIDRs) > 0 {
+		cidrs = h.cfg.NoProxyCIDRs
+	}
+
+	// Case 1: literal IP.
+	if ip := net.ParseIP(host); ip != nil {
+		return ipInNoProxyRanges(ip, cidrs)
+	}
+
+	// Case 2: "localhost" is a universally understood loopback alias.
+	// Treat it as no-proxy regardless of DNS (some resolvers map it to
+	// 127.0.0.1 but CI/test environments may not).
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+
+	// Case 3: hostname. Resolve with a short timeout so a slow or missing
+	// DNS entry does not block the management request.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	ips, errResolve := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if errResolve != nil || len(ips) == 0 {
+		// Unresolvable hostname — let the proxy handle it.
+		return false
+	}
+	for _, addr := range ips {
+		if !ipInNoProxyRanges(addr.IP, cidrs) {
+			// Any public address disables the bypass.
+			return false
+		}
+	}
+	return true
+}
+
+// ipInNoProxyRanges reports whether ip matches any entry in cidrs. Entries
+// that are not valid CIDRs are compared as literal IP strings.
+func ipInNoProxyRanges(ip net.IP, cidrs []string) bool {
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			if cidr == ip.String() {
+				return true
+			}
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) apiCallTransport(auth *coreauth.Auth, targetHost string) http.RoundTripper {
+	// Short-circuit: any target host that falls inside the configured
+	// no-proxy ranges goes out directly, regardless of per-auth or
+	// per-API-key proxy settings. This keeps management Pick-Models
+	// requests to LAN targets (e.g. LM Studio on 172.20.0.0/12) from
+	// timing out through a global proxy that cannot reach the LAN.
+	if h.isNoProxyHost(targetHost) {
+		transport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok || transport == nil {
+			return &http.Transport{Proxy: nil}
+		}
+		clone := transport.Clone()
+		clone.Proxy = nil
+		return clone
+	}
+
 	var proxyCandidates []string
 	if auth != nil {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
