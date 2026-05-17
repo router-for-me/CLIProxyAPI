@@ -338,12 +338,17 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx != nil {
 		// Always-on: accumulate response text and usage for plugins.
-		// Websocket frames are raw JSON objects, not SSE lines. Wrap in
-		// SSE format so accumulateResponseText takes the streaming path
-		// and correctly handles Codex delta/done event types.
-		sse := append([]byte("data: "), data...)
-		sse = append(sse, '\n', '\n')
-		accumulateResponseText(ginCtx, sse)
+		// Websocket frames are raw JSON objects. First try the non-streaming
+		// path (handles response.completed with response.output[]) then wrap
+		// as SSE so delta/done event types reach the streaming branch.
+		accumulateResponseText(ginCtx, data)
+		// Only wrap as SSE if no text was captured by the non-streaming pass,
+		// to avoid double-accumulation for completed frames.
+		if s, _ := ginCtx.Get(UpstreamResponseTextKey); s == "" || s == nil {
+			sse := append([]byte("data: "), data...)
+			sse = append(sse, '\n', '\n')
+			accumulateResponseText(ginCtx, sse)
+		}
 	}
 	if cfg == nil || !cfg.RequestLog {
 		return
