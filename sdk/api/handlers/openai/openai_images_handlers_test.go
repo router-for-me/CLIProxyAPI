@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
@@ -60,6 +61,19 @@ func TestImagesModelValidationAllowsGPTImage2AndXAIModels(t *testing.T) {
 	}
 	if isSupportedImagesModel("codex/grok-imagine-image") {
 		t.Fatal("expected codex/grok-imagine-image to be rejected")
+	}
+}
+
+func TestShouldPassthroughOpenAICompatImages(t *testing.T) {
+	r := registry.GetGlobalRegistry()
+	r.RegisterClient("test-openai-compat-image", "openai-compatibility", []*registry.ModelInfo{{ID: defaultImagesToolModel}})
+	t.Cleanup(func() { r.UnregisterClient("test-openai-compat-image") })
+
+	if !shouldPassthroughOpenAICompatImages(defaultImagesToolModel) {
+		t.Fatalf("expected %s to prefer openai-compatible passthrough when registered", defaultImagesToolModel)
+	}
+	if shouldPassthroughOpenAICompatImages(defaultXAIImagesModel) {
+		t.Fatalf("xAI image models must stay on the xAI image handler")
 	}
 }
 

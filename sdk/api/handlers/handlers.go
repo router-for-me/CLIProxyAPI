@@ -534,7 +534,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -582,7 +582,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -631,7 +631,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -846,7 +846,7 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -871,7 +871,7 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(baseModel, "gpt-image-2") {
+	if strings.EqualFold(baseModel, "gpt-image-2") && !strings.EqualFold(strings.TrimSpace(handlerType), "openai-image") {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
@@ -892,6 +892,10 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 		providers = util.GetProviderName(resolvedModelName)
 	}
 
+	if strings.EqualFold(strings.TrimSpace(handlerType), "openai-image") && strings.EqualFold(baseModel, "gpt-image-2") {
+		providers = preferNonCodexProviders(providers)
+	}
+
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
@@ -899,6 +903,23 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func preferNonCodexProviders(providers []string) []string {
+	if len(providers) == 0 {
+		return providers
+	}
+	filtered := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+			continue
+		}
+		filtered = append(filtered, provider)
+	}
+	if len(filtered) == 0 {
+		return providers
+	}
+	return filtered
 }
 
 func cloneBytes(src []byte) []byte {
