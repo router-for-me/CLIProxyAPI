@@ -225,6 +225,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx != nil {
 		// Always-on: populate context keys for plugins regardless of RequestLog.
+		ginCtx.Set(UpstreamResponseTextKey, "")
 		ginCtx.Set(UpstreamRawUsageKey, nil)
 		if info.URL != "" {
 			ginCtx.Set(UpstreamURLKey, info.URL)
@@ -814,8 +815,12 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 			continue
 		}
 		accumulateUsage(ginCtx, data)
-		// Anthropic: delta.text
-		delta := gjson.GetBytes(data, "delta.text").String()
+		// Anthropic: delta.text, only when delta.type is text_delta to avoid
+		// capturing non-text deltas such as input_json_delta.
+		var delta string
+		if dt := gjson.GetBytes(data, "delta.type").String(); dt == "" || dt == "text_delta" {
+			delta = gjson.GetBytes(data, "delta.text").String()
+		}
 		if delta == "" {
 			// OpenAI-compatible: choices[0].delta.content
 			delta = gjson.GetBytes(data, "choices.0.delta.content").String()
