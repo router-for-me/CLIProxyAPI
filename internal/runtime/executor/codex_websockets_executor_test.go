@@ -93,7 +93,7 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
-func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
+func TestCodexWebsocketsUpstreamDisconnectChanIgnoresRetryableInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -136,7 +136,30 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	sess.connMu.Unlock()
 
 	upstreamErr := errors.New("upstream gone")
-	exec.invalidateUpstreamConn(sess, conn, "test_invalidate", upstreamErr)
+	exec.invalidateUpstreamConn(sess, conn, "test_invalidate", upstreamErr, false)
+
+	select {
+	case errRead, ok := <-disconnectCh:
+		t.Fatalf("unexpected disconnect signal ok=%v err=%v", ok, errRead)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestCodexWebsocketsUpstreamDisconnectChanSignalsAndResets(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "sess-reset"
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	if disconnectCh == nil {
+		t.Fatal("expected disconnect channel")
+	}
+
+	sess := exec.getOrCreateSession(sessionID)
+	if sess == nil {
+		t.Fatal("expected session")
+	}
+
+	upstreamErr := errors.New("upstream gone")
+	sess.notifyUpstreamDisconnect(upstreamErr)
 
 	select {
 	case errRead, ok := <-disconnectCh:
@@ -148,6 +171,48 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for disconnect signal")
+	}
+	if _, ok := <-disconnectCh; ok {
+		t.Fatal("expected first disconnect channel to close")
+	}
+
+	nextCh := exec.UpstreamDisconnectChan(sessionID)
+	if nextCh == nil {
+		t.Fatal("expected replacement disconnect channel")
+	}
+	if nextCh == disconnectCh {
+		t.Fatal("expected replacement disconnect channel after prior close")
+	}
+	select {
+	case errRead, ok := <-nextCh:
+		t.Fatalf("replacement channel was already closed or signaled ok=%v err=%v", ok, errRead)
+	default:
+	}
+}
+
+func TestCodexWebsocketsCloseExecutionSessionSignalsDisconnect(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "sess-close"
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	if disconnectCh == nil {
+		t.Fatal("expected disconnect channel")
+	}
+
+	exec.CloseExecutionSession(sessionID)
+
+	select {
+	case errRead, ok := <-disconnectCh:
+		if !ok {
+			t.Fatal("expected disconnect channel to deliver error before closing")
+		}
+		if errRead == nil || !strings.Contains(errRead.Error(), "session_closed") {
+			t.Fatalf("disconnect error = %v, want session_closed", errRead)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for disconnect signal")
+	}
+	if _, ok := <-disconnectCh; ok {
+		t.Fatal("expected disconnect channel to close")
 	}
 }
 

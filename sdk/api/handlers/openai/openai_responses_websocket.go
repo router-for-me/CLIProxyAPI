@@ -57,30 +57,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
 
-	wsDone := make(chan struct{})
-	defer close(wsDone)
-
-	if h != nil && h.AuthManager != nil {
-		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
-			type upstreamDisconnectSubscriber interface {
-				UpstreamDisconnectChan(sessionID string) <-chan error
-			}
-			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
-				disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
-				if disconnectCh != nil {
-					go func() {
-						select {
-						case <-wsDone:
-							return
-						case <-disconnectCh:
-							_ = conn.Close()
-						}
-					}()
-				}
-			}
-		}
-	}
-
 	var wsTerminateErr error
 	var wsTimelineLog strings.Builder
 	defer func() {
