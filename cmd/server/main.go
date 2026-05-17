@@ -247,6 +247,18 @@ func main() {
 	// Parse the command-line flags.
 	flag.Parse()
 
+	// Allow env var fallback for home flags so they can be configured without command args.
+	if strings.TrimSpace(homeAddr) == "" {
+		if v, ok := os.LookupEnv("HOME_ADDR"); ok {
+			homeAddr = strings.TrimSpace(v)
+		}
+	}
+	if strings.TrimSpace(homePassword) == "" {
+		if v, ok := os.LookupEnv("HOME_PASSWORD"); ok {
+			homePassword = strings.TrimSpace(v)
+		}
+	}
+
 	// Core application variables.
 	var err error
 	var cfg *config.Config
