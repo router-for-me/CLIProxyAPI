@@ -346,8 +346,8 @@ type PayloadModelRule struct {
 	Protocol string `yaml:"protocol" json:"protocol"`
 	// Headers restricts the rule to requests whose headers match all configured wildcard patterns.
 	Headers map[string]string `yaml:"headers" json:"headers"`
-	// FormProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
-	FormProtocol string `yaml:"form-protocol" json:"form-protocol"`
+	// FromProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
+	FromProtocol string `yaml:"from-protocol" json:"from-protocol"`
 	// Match requires payload JSON paths to equal the configured values.
 	Match []map[string]any `yaml:"match" json:"match"`
 	// NotMatch requires payload JSON paths to not equal the configured values.

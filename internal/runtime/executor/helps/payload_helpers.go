@@ -25,7 +25,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 }
 
 // ApplyPayloadConfigWithRequest applies payload config using source protocol and request header gates.
-func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, formProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
+func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
@@ -55,7 +55,7 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, formProt
 			// Apply default rules: first write wins per field across all matching rules.
 			for i := range rules.Default {
 				rule := &rules.Default[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, formProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -82,7 +82,7 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, formProt
 			// Apply default raw rules: first write wins per field across all matching rules.
 			for i := range rules.DefaultRaw {
 				rule := &rules.DefaultRaw[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, formProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -113,7 +113,7 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, formProt
 			// Apply override rules: last write wins per field across all matching rules.
 			for i := range rules.Override {
 				rule := &rules.Override[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, formProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -133,7 +133,7 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, formProt
 			// Apply override raw rules: last write wins per field across all matching rules.
 			for i := range rules.OverrideRaw {
 				rule := &rules.OverrideRaw[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, formProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -157,7 +157,7 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, formProt
 			// Apply filter rules: remove matching paths from payload.
 			for i := range rules.Filter {
 				rule := &rules.Filter[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, formProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
 					continue
 				}
 				for _, path := range rule.Params {
@@ -199,7 +199,7 @@ func isImagesEndpointRequestPath(path string) bool {
 	return false
 }
 
-func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, formProtocol string, headers http.Header, payload []byte, root string, models []string) bool {
+func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fromProtocol string, headers http.Header, payload []byte, root string, models []string) bool {
 	if len(rules) == 0 || len(models) == 0 {
 		return false
 	}
@@ -212,7 +212,7 @@ func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fo
 			if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" && !strings.EqualFold(ep, protocol) {
 				continue
 			}
-			if !payloadFormProtocolMatches(entry.FormProtocol, formProtocol) {
+			if !payloadFromProtocolMatches(entry.FromProtocol, fromProtocol) {
 				continue
 			}
 			if !payloadHeadersMatch(headers, entry.Headers) {
@@ -366,19 +366,19 @@ func normalizedPayloadJSON(data []byte) (any, bool) {
 	return out, true
 }
 
-func payloadFormProtocolMatches(pattern, formProtocol string) bool {
-	pattern = normalizePayloadFormProtocol(pattern)
+func payloadFromProtocolMatches(pattern, fromProtocol string) bool {
+	pattern = normalizePayloadFromProtocol(pattern)
 	if pattern == "" {
 		return true
 	}
-	formProtocol = normalizePayloadFormProtocol(formProtocol)
-	if formProtocol == "" {
+	fromProtocol = normalizePayloadFromProtocol(fromProtocol)
+	if fromProtocol == "" {
 		return false
 	}
-	return strings.EqualFold(pattern, formProtocol)
+	return strings.EqualFold(pattern, fromProtocol)
 }
 
-func normalizePayloadFormProtocol(protocol string) string {
+func normalizePayloadFromProtocol(protocol string) string {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	switch protocol {
 	case "openai-response", "openai-responses", "response":

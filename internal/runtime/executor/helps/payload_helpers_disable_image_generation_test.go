@@ -171,13 +171,13 @@ func TestApplyPayloadConfigWithRequest_HeaderGateRequiresWildcardMatch(t *testin
 	}
 }
 
-func TestApplyPayloadConfigWithRequest_FormProtocolGateUsesSourceProtocol(t *testing.T) {
+func TestApplyPayloadConfigWithRequest_FromProtocolGateUsesSourceProtocol(t *testing.T) {
 	cfg := &config.Config{
 		Payload: config.PayloadConfig{
 			Override: []config.PayloadRule{
 				{
 					Models: []config.PayloadModelRule{
-						{Name: "gpt-*", Protocol: "openai", FormProtocol: "responses"},
+						{Name: "gpt-*", Protocol: "openai", FromProtocol: "responses"},
 					},
 					Params: map[string]any{
 						"metadata.source": "responses",
@@ -185,7 +185,7 @@ func TestApplyPayloadConfigWithRequest_FormProtocolGateUsesSourceProtocol(t *tes
 				},
 				{
 					Models: []config.PayloadModelRule{
-						{Name: "gpt-*", Protocol: "openai", FormProtocol: "openai"},
+						{Name: "gpt-*", Protocol: "openai", FromProtocol: "openai"},
 					},
 					Params: map[string]any{
 						"metadata.source": "openai",
