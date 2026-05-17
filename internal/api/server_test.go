@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,64 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath, opts...)
+}
+
+func TestNewServer_NormalizesTransientCooldownForStructConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	auth.SetTransientErrorCooldown(0)
+	t.Cleanup(func() {
+		auth.SetTransientErrorCooldown(time.Minute)
+	})
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		AuthDir: authDir,
+		Debug:   true,
+	}
+	authManager := auth.NewManager(nil, nil, nil)
+
+	NewServer(cfg, authManager, sdkaccess.NewManager(), filepath.Join(tmpDir, "config.yaml"))
+
+	if got := cfg.TransientErrorCooldownSeconds; got != proxyconfig.DefaultTransientErrorCooldownSeconds {
+		t.Fatalf("TransientErrorCooldownSeconds = %d, want %d", got, proxyconfig.DefaultTransientErrorCooldownSeconds)
+	}
+
+	runtimeManager := auth.NewManager(nil, nil, nil)
+	runtimeAuth := &auth.Auth{
+		ID:       "auth-transient-default",
+		Provider: "claude",
+	}
+	if _, errRegister := runtimeManager.Register(context.Background(), runtimeAuth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	runtimeManager.MarkResult(context.Background(), auth.Result{
+		AuthID:   runtimeAuth.ID,
+		Provider: "claude",
+		Model:    "test-model",
+		Success:  false,
+		Error:    &auth.Error{HTTPStatus: http.StatusServiceUnavailable, Message: "upstream unavailable"},
+	})
+
+	updated, ok := runtimeManager.GetByID(runtimeAuth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates["test-model"]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected transient error cooldown to remain enabled")
+	}
 }
 
 func TestHealthz(t *testing.T) {

@@ -76,11 +76,35 @@ const (
 	quotaBackoffMax           = 30 * time.Minute
 )
 
-var quotaCooldownDisabled atomic.Bool
+var (
+	quotaCooldownDisabled         atomic.Bool
+	transientErrorCooldownNanos   atomic.Int64
+)
+
+func init() {
+	transientErrorCooldownNanos.Store(int64(1 * time.Minute))
+}
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
+}
+
+// SetTransientErrorCooldown updates the cooldown used for transient upstream errors.
+// Set duration to 0 to keep auths immediately reusable after 408/500/502/503/504.
+func SetTransientErrorCooldown(duration time.Duration) {
+	if duration < 0 {
+		duration = 0
+	}
+	transientErrorCooldownNanos.Store(int64(duration))
+}
+
+func transientErrorCooldown() time.Duration {
+	nanos := transientErrorCooldownNanos.Load()
+	if nanos <= 0 {
+		return 0
+	}
+	return time.Duration(nanos)
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
@@ -2252,9 +2276,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
+							} else if cooldown := transientErrorCooldown(); cooldown > 0 {
+								next := now.Add(cooldown)
 								state.NextRetryAfter = next
+							} else {
+								state.NextRetryAfter = time.Time{}
 							}
 						default:
 							state.NextRetryAfter = time.Time{}
@@ -2705,8 +2731,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
+		} else if cooldown := transientErrorCooldown(); cooldown > 0 {
+			auth.NextRetryAfter = now.Add(cooldown)
 		} else {
-			auth.NextRetryAfter = now.Add(1 * time.Minute)
+			auth.NextRetryAfter = time.Time{}
 		}
 	default:
 		if auth.StatusMessage == "" {

@@ -20,9 +20,13 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-	DefaultPprofAddr             = "127.0.0.1:8316"
-	DefaultAuthDir               = "~/.cli-proxy-api"
+	DefaultPanelGitHubRepository         = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr                     = "127.0.0.1:8316"
+	DefaultAuthDir                       = "~/.cli-proxy-api"
+	DefaultTransientErrorCooldownSeconds = 60
+
+	maxTransientErrorCooldownSeconds = 3600
+	transientErrorCooldownKey        = "transient-error-cooldown-seconds"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -76,6 +80,11 @@ type Config struct {
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
+
+	// TransientErrorCooldownSeconds controls auth/model cooldown after transient upstream failures.
+	// Applies to 408/500/502/503/504 responses. Set to 0 to disable only this cooldown.
+	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
+	transientErrorCooldownSet     bool
 
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
@@ -147,6 +156,62 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// ApplyRuntimeDefaults fills defaults that cannot be represented by Go zero values.
+func (cfg *Config) ApplyRuntimeDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.normalizeTransientErrorCooldown()
+}
+
+// SetTransientErrorCooldownSeconds marks the cooldown as explicitly configured.
+func (cfg *Config) SetTransientErrorCooldownSeconds(seconds int) {
+	if cfg == nil {
+		return
+	}
+	cfg.TransientErrorCooldownSeconds = seconds
+	cfg.transientErrorCooldownSet = true
+	cfg.normalizeTransientErrorCooldown()
+}
+
+func (cfg *Config) normalizeTransientErrorCooldown() {
+	if cfg == nil {
+		return
+	}
+	if cfg.TransientErrorCooldownSeconds < 0 {
+		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds cannot be negative; clamping to 0")
+		cfg.TransientErrorCooldownSeconds = 0
+		cfg.transientErrorCooldownSet = true
+		return
+	}
+	if cfg.TransientErrorCooldownSeconds > maxTransientErrorCooldownSeconds {
+		log.WithField("value", cfg.TransientErrorCooldownSeconds).Warn("transient-error-cooldown-seconds too large; clamping to 3600")
+		cfg.TransientErrorCooldownSeconds = maxTransientErrorCooldownSeconds
+		cfg.transientErrorCooldownSet = true
+		return
+	}
+	if cfg.TransientErrorCooldownSeconds == 0 && !cfg.transientErrorCooldownSet {
+		cfg.TransientErrorCooldownSeconds = DefaultTransientErrorCooldownSeconds
+	}
+}
+
+func hasTopLevelYAMLKey(data []byte, key string) bool {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false
+	}
+	if len(root.Content) == 0 || root.Content[0] == nil || root.Content[0].Kind != yaml.MappingNode {
+		return false
+	}
+	mapping := root.Content[0]
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i] != nil && mapping.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
@@ -638,6 +703,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.TransientErrorCooldownSeconds = DefaultTransientErrorCooldownSeconds
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -650,6 +716,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	cfg.transientErrorCooldownSet = hasTopLevelYAMLKey(data, transientErrorCooldownKey)
 
 	// NOTE: Startup legacy key migration is intentionally disabled.
 	// Reason: avoid mutating config.yaml during server startup.
@@ -705,6 +772,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		log.WithField("value", cfg.RedisUsageQueueRetentionSeconds).Warn("redis-usage-queue-retention-seconds too large; clamping to 3600")
 		cfg.RedisUsageQueueRetentionSeconds = 3600
 	}
+	cfg.ApplyRuntimeDefaults()
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0

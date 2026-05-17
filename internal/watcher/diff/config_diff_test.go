@@ -219,21 +219,22 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	oldCfg := &config.Config{
-		Port:                   1000,
-		AuthDir:                "/old",
-		Debug:                  false,
-		LoggingToFile:          false,
-		UsageStatisticsEnabled: false,
-		DisableCooling:         false,
-		RequestRetry:           1,
-		MaxRetryCredentials:    1,
-		MaxRetryInterval:       1,
-		WebsocketAuth:          false,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
-		ClaudeKey:              []config.ClaudeKey{{APIKey: "c1"}},
-		CodexKey:               []config.CodexKey{{APIKey: "x1"}},
-		AmpCode:                config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
-		RemoteManagement:       config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
+		Port:                          1000,
+		AuthDir:                       "/old",
+		Debug:                         false,
+		LoggingToFile:                 false,
+		UsageStatisticsEnabled:        false,
+		DisableCooling:                false,
+		TransientErrorCooldownSeconds: 60,
+		RequestRetry:                  1,
+		MaxRetryCredentials:           1,
+		MaxRetryInterval:              1,
+		WebsocketAuth:                 false,
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
+		ClaudeKey:                     []config.ClaudeKey{{APIKey: "c1"}},
+		CodexKey:                      []config.CodexKey{{APIKey: "x1"}},
+		AmpCode:                       config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
+		RemoteManagement:              config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
@@ -243,17 +244,18 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		},
 	}
 	newCfg := &config.Config{
-		Port:                   2000,
-		AuthDir:                "/new",
-		Debug:                  true,
-		LoggingToFile:          true,
-		UsageStatisticsEnabled: true,
-		DisableCooling:         true,
-		RequestRetry:           2,
-		MaxRetryCredentials:    3,
-		MaxRetryInterval:       3,
-		WebsocketAuth:          true,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
+		Port:                          2000,
+		AuthDir:                       "/new",
+		Debug:                         true,
+		LoggingToFile:                 true,
+		UsageStatisticsEnabled:        true,
+		DisableCooling:                true,
+		TransientErrorCooldownSeconds: 0,
+		RequestRetry:                  2,
+		MaxRetryCredentials:           3,
+		MaxRetryInterval:              3,
+		WebsocketAuth:                 true,
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -288,6 +290,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "logging-to-file: false -> true")
 	expectContains(t, details, "usage-statistics-enabled: false -> true")
 	expectContains(t, details, "disable-cooling: false -> true")
+	expectContains(t, details, "transient-error-cooldown-seconds: 60 -> 0")
 	expectContains(t, details, "disable-image-generation: false -> true")
 	expectContains(t, details, "request-log: false -> true")
 	expectContains(t, details, "request-retry: 1 -> 2")
@@ -313,17 +316,18 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 
 func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	oldCfg := &config.Config{
-		Port:                   1,
-		AuthDir:                "/a",
-		Debug:                  false,
-		LoggingToFile:          false,
-		UsageStatisticsEnabled: false,
-		DisableCooling:         false,
-		RequestRetry:           1,
-		MaxRetryCredentials:    1,
-		MaxRetryInterval:       1,
-		WebsocketAuth:          false,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
+		Port:                          1,
+		AuthDir:                       "/a",
+		Debug:                         false,
+		LoggingToFile:                 false,
+		UsageStatisticsEnabled:        false,
+		DisableCooling:                false,
+		TransientErrorCooldownSeconds: 60,
+		RequestRetry:                  1,
+		MaxRetryCredentials:           1,
+		MaxRetryInterval:              1,
+		WebsocketAuth:                 false,
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
 		GeminiKey: []config.GeminiKey{
 			{APIKey: "g-old", BaseURL: "http://g-old", ProxyURL: "http://gp-old", Headers: map[string]string{"A": "1"}},
 		},
@@ -367,17 +371,18 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		},
 	}
 	newCfg := &config.Config{
-		Port:                   2,
-		AuthDir:                "/b",
-		Debug:                  true,
-		LoggingToFile:          true,
-		UsageStatisticsEnabled: true,
-		DisableCooling:         true,
-		RequestRetry:           2,
-		MaxRetryCredentials:    3,
-		MaxRetryInterval:       3,
-		WebsocketAuth:          true,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
+		Port:                          2,
+		AuthDir:                       "/b",
+		Debug:                         true,
+		LoggingToFile:                 true,
+		UsageStatisticsEnabled:        true,
+		DisableCooling:                true,
+		TransientErrorCooldownSeconds: 0,
+		RequestRetry:                  2,
+		MaxRetryCredentials:           3,
+		MaxRetryInterval:              3,
+		WebsocketAuth:                 true,
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
 		GeminiKey: []config.GeminiKey{
 			{APIKey: "g-new", BaseURL: "http://g-new", ProxyURL: "http://gp-new", Headers: map[string]string{"A": "2"}, ExcludedModels: []string{"x", "y"}},
 		},
@@ -434,6 +439,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "logging-to-file: false -> true")
 	expectContains(t, changes, "usage-statistics-enabled: false -> true")
 	expectContains(t, changes, "disable-cooling: false -> true")
+	expectContains(t, changes, "transient-error-cooldown-seconds: 60 -> 0")
 	expectContains(t, changes, "disable-image-generation: false -> true")
 	expectContains(t, changes, "request-retry: 1 -> 2")
 	expectContains(t, changes, "max-retry-credentials: 1 -> 3")
