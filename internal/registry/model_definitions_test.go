@@ -121,7 +121,7 @@ func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {
 	if model.Description != "Frontier model for complex coding, research, and real-world work." {
 		t.Fatalf("%s description mismatch: got %q", source, model.Description)
 	}
-	if model.ContextLength != 272000 {
+	if model.ContextLength != 400000 {
 		t.Fatalf("%s context length mismatch: got %d", source, model.ContextLength)
 	}
 	if model.MaxCompletionTokens != 128000 {
@@ -134,7 +134,7 @@ func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {
 		t.Fatalf("%s missing thinking support", source)
 	}
 
-	want := []string{"low", "medium", "high", "xhigh"}
+	want := []string{"none", "low", "medium", "high", "xhigh"}
 	if len(model.Thinking.Levels) != len(want) {
 		t.Fatalf("%s thinking level count mismatch: got %d, want %d", source, len(model.Thinking.Levels), len(want))
 	}
