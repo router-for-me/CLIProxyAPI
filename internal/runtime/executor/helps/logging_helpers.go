@@ -787,15 +787,23 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		return
 	}
 	// Streaming SSE: one TCP chunk may carry multiple events.
-	// Read current value once and write back only if changed.
-	var current string
-	if v, ok := ginCtx.Get(UpstreamResponseTextKey); ok {
-		if s, ok := v.(string); ok {
-			current = s
-		}
+	// Use a *strings.Builder stored in the gin context to avoid O(n²)
+	// allocations from repeated string concatenation across chunks.
+	const builderKey = "upstream_response_text_builder"
+	var sb *strings.Builder
+	if v, ok := ginCtx.Get(builderKey); ok {
+		sb, _ = v.(*strings.Builder)
+	}
+	if sb == nil {
+		sb = &strings.Builder{}
+		ginCtx.Set(builderKey, sb)
 	}
 	updated := false
+	const sawDeltaKey = "upstream_saw_output_text_delta"
 	sawOutputTextDelta := false
+	if v, ok := ginCtx.Get(sawDeltaKey); ok {
+		sawOutputTextDelta, _ = v.(bool)
+	}
 	for _, line := range bytes.Split(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -818,6 +826,7 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 				delta = gjson.GetBytes(data, "delta").String()
 				if delta != "" {
 					sawOutputTextDelta = true
+					ginCtx.Set(sawDeltaKey, true)
 				}
 			}
 		}
@@ -848,16 +857,17 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		if delta == "" {
 			continue
 		}
-		if len(current) < maxLen {
-			current += delta
-			if len(current) > maxLen {
-				current = current[:maxLen] + "..."
-			}
+		if sb.Len() < maxLen {
+			sb.WriteString(delta)
 			updated = true
 		}
 	}
 	if updated {
-		ginCtx.Set(UpstreamResponseTextKey, current)
+		s := sb.String()
+		if len(s) > maxLen {
+			s = s[:maxLen] + "..."
+		}
+		ginCtx.Set(UpstreamResponseTextKey, s)
 	}
 }
 
@@ -921,12 +931,20 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 			}
 		}
 	}
-	// Derive total_tokens from input + output when the upstream omits it or
-	// when a late SSE event raises output_tokens without updating total_tokens.
-	// reasoning_tokens is a subset of output_tokens/completion_tokens, so it
-	// must NOT be added again here lest we double-count it.
-	if derived := current["input_tokens"] + current["output_tokens"] +
-		current["prompt_tokens"] + current["completion_tokens"]; derived > current["total_tokens"] {
+	// Derive total_tokens when the upstream omits it or a late SSE event
+	// updates a component without updating the total.
+	// Use max(input_tokens, prompt_tokens) + max(output_tokens, completion_tokens)
+	// to avoid double-counting when a provider reports both Anthropic-style and
+	// OpenAI-style fields (e.g. after usageMetadata mapping).
+	inputSide := current["input_tokens"]
+	if current["prompt_tokens"] > inputSide {
+		inputSide = current["prompt_tokens"]
+	}
+	outputSide := current["output_tokens"]
+	if current["completion_tokens"] > outputSide {
+		outputSide = current["completion_tokens"]
+	}
+	if derived := inputSide + outputSide; derived > current["total_tokens"] {
 		current["total_tokens"] = derived
 	}
 
