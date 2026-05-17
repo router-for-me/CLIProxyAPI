@@ -693,7 +693,10 @@ func extractFirstUserText(body []byte) string {
 					return true
 				}
 				item.Get("content").ForEach(func(_, block gjson.Result) bool {
-					if block.Get("type").String() == "input_text" {
+					// Accept explicit input_text blocks and blocks with no type
+					// (the Responses converter treats missing type as input_text).
+					blockType := block.Get("type").String()
+					if blockType == "input_text" || blockType == "" {
 						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
 							text = t
 							return false
