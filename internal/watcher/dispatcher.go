@@ -106,18 +106,11 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 	}
 	if w.currentAuths == nil {
 		w.currentAuths = newState
-		if w.authQueue == nil {
-			return nil
-		}
 		updates := make([]AuthUpdate, 0, len(newState))
 		for id, auth := range newState {
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: auth.Clone()})
 		}
 		return updates
-	}
-	if w.authQueue == nil {
-		w.currentAuths = newState
-		return nil
 	}
 	updates := make([]AuthUpdate, 0, len(newState)+len(w.currentAuths))
 	for id, auth := range newState {
