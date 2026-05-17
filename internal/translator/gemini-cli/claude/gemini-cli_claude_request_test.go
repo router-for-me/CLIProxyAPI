@@ -40,3 +40,38 @@ func TestConvertClaudeRequestToCLI_ToolChoice_SpecificTool(t *testing.T) {
 		t.Fatalf("Expected allowedFunctionNames ['json'], got %s", gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
 	}
 }
+
+func TestConvertClaudeRequestToCLI_FlattensStructuredToolResultContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "json-call-1", "name": "json", "input": {"ok": true}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "json-call-1",
+						"content": [
+							{"type": "text", "text": "alpha"},
+							{"type": "image", "source": {"type": "base64", "media_type": "image/png"}}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
+
+	got := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.response.result").String()
+	want := "alpha\n\n{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\"}}"
+	if got != want {
+		t.Fatalf("functionResponse.response.result = %q, want %q", got, want)
+	}
+}

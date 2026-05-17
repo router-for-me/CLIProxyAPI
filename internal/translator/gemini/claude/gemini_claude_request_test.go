@@ -78,3 +78,38 @@ func TestConvertClaudeRequestToGemini_ImageContent(t *testing.T) {
 		t.Fatalf("Expected image data 'aGVsbG8=', got '%s'", got)
 	}
 }
+
+func TestConvertClaudeRequestToGemini_FlattensStructuredToolResultContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "json-call-1", "name": "json", "input": {"ok": true}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "json-call-1",
+						"content": [
+							{"type": "text", "text": "alpha"},
+							{"type": "image", "source": {"type": "base64", "media_type": "image/png"}}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	got := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.response.result").String()
+	want := "alpha\n\n{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\"}}"
+	if got != want {
+		t.Fatalf("functionResponse.response.result = %q, want %q", got, want)
+	}
+}
