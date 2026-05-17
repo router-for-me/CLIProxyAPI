@@ -34,9 +34,9 @@ func RegisterProvider(name string, applier ProviderApplier) {
 // IsUserDefinedModel reports whether the model is a user-defined model that should
 // have thinking configuration passed through without validation.
 //
-// User-defined models are configured via config file's models[] array
-// (e.g., openai-compatibility.*.models[], *-api-key.models[]). These models
-// are marked with UserDefined=true at registration time.
+// User-defined models are passthrough aliases configured via config file
+// models[] entries (for example, *-api-key.models[]). These models are marked
+// with UserDefined=true at registration time.
 //
 // User-defined models should have their thinking configuration applied directly,
 // letting the upstream service validate the configuration.
