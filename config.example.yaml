@@ -333,9 +333,24 @@ nonstream-keepalive-interval: 0
 #   force-model-mappings: false
 #   # Amp Model Mappings
 #   # Route unavailable Amp models to alternative models available in your local proxy.
-#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
-#   # but you have a similar model available (e.g., Claude Sonnet 4).
+#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.7)
+#   # but you have a similar model available (e.g., GPT-5.5 through Codex OAuth).
 #   model-mappings:
+#     # Smart mode (Opus 4.7) -> GPT-5.5 for users without Claude access.
+#     # Alt+D smart effort high/xhigh/max maps onto GPT-5.5 low/medium/high.
+#     - from: "claude-opus-4-7"
+#       to: "gpt-5.5"
+#       reasoning-effort-mappings:
+#         high: "low"
+#         xhigh: "medium"
+#         max: "high"
+#     # Deep mode (GPT-5.5) -> keep GPT-5.5, but map Amp's xhigh toggle to GPT-5.5 high.
+#     - from: "gpt-5.5"
+#       to: "gpt-5.5"
+#       reasoning-effort-mappings:
+#         low: "low"
+#         medium: "medium"
+#         xhigh: "high"
 #     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
 #       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
 #     - from: "claude-sonnet-4-5-20250929"

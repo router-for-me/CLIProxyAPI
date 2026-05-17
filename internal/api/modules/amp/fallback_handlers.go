@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -146,18 +147,18 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			thinkingSuffix = "(" + suffixResult.RawSuffix + ")"
 		}
 
-		resolveMappedModel := func() (string, []string) {
+		resolveMappedModel := func() (string, []string, config.AmpModelMapping) {
 			if fh.modelMapper == nil {
-				return "", nil
+				return "", nil, config.AmpModelMapping{}
 			}
 
-			mappedModel := fh.modelMapper.MapModel(modelName)
-			if mappedModel == "" {
-				mappedModel = fh.modelMapper.MapModel(normalizedModel)
+			mapped := fh.modelMapper.MapModelWithInfo(modelName)
+			if mapped.Model == "" {
+				mapped = fh.modelMapper.MapModelWithInfo(normalizedModel)
 			}
-			mappedModel = strings.TrimSpace(mappedModel)
+			mappedModel := strings.TrimSpace(mapped.Model)
 			if mappedModel == "" {
-				return "", nil
+				return "", nil, config.AmpModelMapping{}
 			}
 
 			// Preserve dynamic thinking suffix (e.g. "(xhigh)") when mapping applies, unless the target
@@ -172,15 +173,16 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			mappedBaseModel := thinking.ParseSuffix(mappedModel).ModelName
 			mappedProviders := util.GetProviderName(mappedBaseModel)
 			if len(mappedProviders) == 0 {
-				return "", nil
+				return "", nil, config.AmpModelMapping{}
 			}
 
-			return mappedModel, mappedProviders
+			return mappedModel, mappedProviders, mapped.Mapping
 		}
 
 		// Track resolved model for logging (may change if mapping is applied)
 		resolvedModel := normalizedModel
 		usedMapping := false
+		var appliedMapping config.AmpModelMapping
 		var providers []string
 
 		// Check if model mappings should be forced ahead of local API keys
@@ -189,14 +191,16 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		if forceMappings {
 			// FORCE MODE: Check model mappings FIRST (takes precedence over local API keys)
 			// This allows users to route Amp requests to their preferred OAuth providers
-			if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
+			if mappedModel, mappedProviders, mapping := resolveMappedModel(); mappedModel != "" {
 				// Mapping found and provider available - rewrite the model in request body
+				bodyBytes = applyReasoningEffortMapping(bodyBytes, mapping)
 				bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				// Store mapped model in context for handlers that check it (like gemini bridge)
 				c.Set(MappedModelContextKey, mappedModel)
 				resolvedModel = mappedModel
 				usedMapping = true
+				appliedMapping = mapping
 				providers = mappedProviders
 			}
 
@@ -210,14 +214,16 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 
 			if len(providers) == 0 {
 				// No providers configured - check if we have a model mapping
-				if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
+				if mappedModel, mappedProviders, mapping := resolveMappedModel(); mappedModel != "" {
 					// Mapping found and provider available - rewrite the model in request body
+					bodyBytes = applyReasoningEffortMapping(bodyBytes, mapping)
 					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 					// Store mapped model in context for handlers that check it (like gemini bridge)
 					c.Set(MappedModelContextKey, mappedModel)
 					resolvedModel = mappedModel
 					usedMapping = true
+					appliedMapping = mapping
 					providers = mappedProviders
 				}
 			}
@@ -250,6 +256,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 
 		if usedMapping {
 			// Log: Model was mapped to another model
+			if len(appliedMapping.ReasoningEffortMappings) > 0 {
+				log.Debugf("amp model mapping: applied reasoning effort mapping for %s -> %s", normalizedModel, resolvedModel)
+			}
 			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
 			rewriter := NewResponseRewriter(c.Writer, modelName)
@@ -293,6 +302,40 @@ func filterAntropicBetaHeader(c *gin.Context) {
 			c.Request.Header.Del("Anthropic-Beta")
 		}
 	}
+}
+
+// applyReasoningEffortMapping remaps common reasoning effort fields when an Amp model mapping requests it.
+func applyReasoningEffortMapping(body []byte, mapping config.AmpModelMapping) []byte {
+	if len(mapping.ReasoningEffortMappings) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	paths := []string{"output_config.effort", "reasoning.effort", "reasoning_effort"}
+	result := body
+	for _, path := range paths {
+		current := gjson.GetBytes(result, path)
+		if !current.Exists() || current.Type != gjson.String {
+			continue
+		}
+		value := strings.ToLower(strings.TrimSpace(current.String()))
+		if value == "" {
+			continue
+		}
+		mappedEffort := strings.TrimSpace(mapping.ReasoningEffortMappings[value])
+		if mappedEffort == "" {
+			mappedEffort = strings.TrimSpace(mapping.ReasoningEffortMappings[current.String()])
+		}
+		if mappedEffort == "" {
+			continue
+		}
+		updated, err := sjson.SetBytes(result, path, mappedEffort)
+		if err != nil {
+			log.Warnf("amp model mapping: failed to remap reasoning effort at %s: %v", path, err)
+			continue
+		}
+		result = updated
+	}
+	return result
 }
 
 // rewriteModelInRequest replaces the model name in a JSON request body
