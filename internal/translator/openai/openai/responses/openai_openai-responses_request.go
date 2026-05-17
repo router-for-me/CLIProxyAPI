@@ -75,6 +75,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
 		pendingReasoningContent := ""
+		pendingReasoningContentSet := false
 
 		flushPendingToolCalls := func() {
 			if len(pendingToolCalls) == 0 {
@@ -82,6 +83,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if pendingReasoningContentSet {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoningContent)
+				pendingReasoningContent = ""
+				pendingReasoningContentSet = false
+			}
 			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
@@ -174,9 +180,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if role == "assistant" {
 					if rc := item.Get("reasoning_content"); rc.Exists() {
 						message, _ = sjson.SetBytes(message, "reasoning_content", rc.String())
-					} else if pendingReasoningContent != "" {
+					} else if pendingReasoningContentSet {
 						message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
 						pendingReasoningContent = ""
+						pendingReasoningContentSet = false
 					}
 				}
 
@@ -227,17 +234,21 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "reasoning":
 				if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
 					var textParts []string
+					hasSummaryText := false
 					summary.ForEach(func(_, s gjson.Result) bool {
 						if t := s.Get("text"); t.Exists() {
+							hasSummaryText = true
 							textParts = append(textParts, t.String())
 						}
 						return true
 					})
-					if len(textParts) > 0 {
+					if hasSummaryText {
 						pendingReasoningContent = strings.Join(textParts, "")
+						pendingReasoningContentSet = true
 					}
-				} else if ec := item.Get("encrypted_content"); ec.Exists() && ec.String() != "" {
+				} else if ec := item.Get("encrypted_content"); ec.Exists() {
 					pendingReasoningContent = ec.String()
+					pendingReasoningContentSet = true
 				}
 			}
 

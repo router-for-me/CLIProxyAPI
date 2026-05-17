@@ -56,3 +56,31 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Use logrus structured logging; avoid leaking secrets/tokens in logs
 - Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
 - Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
+
+### [Testing] Baseline full-suite failures can be unrelated to the current patch
+Detailed description:
+Running `go test ./...` on `fix/preserve-reasoning-content` surfaced existing failures outside the Responses reasoning follow-up work:
+- `internal/registry`: `TestCodexFreeModelsExcludeGPT55`
+- `internal/runtime/executor`: `TestEnsureAccessToken_WarmTokenLoadsCreditsHint`
+- `internal/runtime/executor`: `TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent`
+These failures can block "green full suite" expectations even when the modified package under review is passing.
+
+Impact scope:
+AI agents reviewing or preparing commits for narrowly scoped translator/request fixes may incorrectly assume their patch caused unrelated red tests, delaying or broadening the change unnecessarily.
+
+Suggested solutions:
+- Record both the full-suite result and the package-scoped result when reporting verification.
+- For Responses reasoning fixes, verify at minimum `go test ./internal/translator/openai/openai/responses` and `go build -o test-output ./cmd/server`.
+- Treat unrelated full-suite failures as baseline noise unless the diff touches the failing package.
+
+### [Change Scope] Do not mix unverified local executor refactors into Responses-only fixes
+Detailed description:
+The working tree may contain extra local edits under `internal/runtime/executor/` that are not required for a Responses translator issue. In this session, `internal/runtime/executor/reasoning_preserve.go` included a separate strategy change that rebuilds the entire `messages` array after patching reasoning fields. That implementation detail is broader than the Responses follow-up fix and needs its own dedicated validation before inclusion.
+
+Impact scope:
+If an agent stages all modified files blindly, a small Responses bugfix commit can accidentally absorb executor behavior changes that were not part of the same root cause or acceptance scope.
+
+Suggested solutions:
+- Stage only files directly tied to the issue being fixed.
+- When executor-side reasoning preservation logic changes independently, add focused tests for the specific reconstruction strategy before committing it.
+- Call out excluded local files explicitly in the handoff or commit summary.

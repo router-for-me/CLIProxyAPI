@@ -717,9 +717,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 	// Build output list from choices[...]
 	outputsWrapper := []byte(`{"arr":[]}`)
-	// Detect and capture reasoning content if present
-	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
-	includeReasoning := rcText != ""
+	// Detect and capture reasoning content if present.
+	rcNode := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content")
+	rcText := rcNode.String()
+	includeReasoning := rcNode.Exists()
 	if !includeReasoning && len(requestRawJSON) > 0 {
 		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()
 	}
@@ -731,7 +732,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		// Prefer summary_text from reasoning_content; encrypted_content is optional
 		reasoningItem := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
 		reasoningItem, _ = sjson.SetBytes(reasoningItem, "id", fmt.Sprintf("rs_%s", rid))
-		if rcText != "" {
+		if rcNode.Exists() {
 			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.type", "summary_text")
 			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.text", rcText)
 		}

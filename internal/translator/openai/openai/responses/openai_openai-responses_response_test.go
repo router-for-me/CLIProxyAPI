@@ -421,3 +421,55 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_PreservesEmptyReasoningContent(t *testing.T) {
+	request := []byte(`{"model":"deepseek-r1","reasoning":{"effort":"medium"}}`)
+	raw := []byte(`{
+		"id":"resp_empty_reasoning",
+		"object":"chat.completion",
+		"created":1773896263,
+		"model":"deepseek-r1",
+		"choices":[
+			{
+				"index":0,
+				"message":{
+					"role":"assistant",
+					"content":"answer",
+					"reasoning_content":""
+				},
+				"finish_reason":"stop"
+			}
+		],
+		"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+	}`)
+
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "deepseek-r1", request, request, raw, nil)
+
+	output := gjson.GetBytes(out, "output")
+	if !output.Exists() || !output.IsArray() {
+		t.Fatalf("output should be an array")
+	}
+	if got := len(output.Array()); got != 2 {
+		t.Fatalf("output length = %d, want %d", got, 2)
+	}
+
+	reasoning := output.Array()[0]
+	if got := reasoning.Get("type").String(); got != "reasoning" {
+		t.Fatalf("output[0].type = %q, want %q", got, "reasoning")
+	}
+	summary := reasoning.Get("summary")
+	if !summary.Exists() || !summary.IsArray() || len(summary.Array()) != 1 {
+		t.Fatalf("reasoning summary should contain one empty summary_text item")
+	}
+	if got := summary.Get("0.type").String(); got != "summary_text" {
+		t.Fatalf("summary[0].type = %q, want %q", got, "summary_text")
+	}
+	if got := summary.Get("0.text").String(); got != "" {
+		t.Fatalf("summary[0].text = %q, want empty string", got)
+	}
+
+	message := output.Array()[1]
+	if got := message.Get("type").String(); got != "message" {
+		t.Fatalf("output[1].type = %q, want %q", got, "message")
+	}
+}

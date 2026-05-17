@@ -230,6 +230,77 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningItemSumma
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningBeforeFunctionCall(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_abc","summary":[{"type":"summary_text","text":"I need to call a tool"}]},
+			{"type":"function_call","call_id":"call_1","name":"search","arguments":"{\"q\":\"test\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"result"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, true)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist when reasoning precedes function_call")
+	}
+	if rc.String() != "I need to call a tool" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc.String(), "I need to call a tool")
+	}
+
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "assistant" {
+		t.Fatalf("messages.1.role = %q, want %q", got, "assistant")
+	}
+	if got := len(gjson.GetBytes(out, "messages.1.tool_calls").Array()); got != 1 {
+		t.Fatalf("messages.1.tool_calls length = %d, want %d", got, 1)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningBeforeFunctionCallEncrypted(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_abc","encrypted_content":"enc_data"},
+			{"type":"function_call","call_id":"call_1","name":"search","arguments":"{\"q\":\"test\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"result"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k2.6", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist from encrypted_content when reasoning precedes function_call")
+	}
+	if rc.String() != "enc_data" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", rc.String(), "enc_data")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningItemEmptySummaryText(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_empty","summary":[{"type":"summary_text","text":""}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-r1", raw, false)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content")
+	if !rc.Exists() {
+		t.Fatalf("messages.1.reasoning_content should exist for empty summary text")
+	}
+	if rc.String() != "" {
+		t.Fatalf("messages.1.reasoning_content = %q, want empty string", rc.String())
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningItemFallsBackToMessageRC(t *testing.T) {
 	raw := []byte(`{
 		"input": [
