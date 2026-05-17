@@ -433,6 +433,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if errValidate := validateClaudeUpstreamPayloadForCompat(compatKind, bodyForUpstream); errValidate != nil {
 		return nil, errValidate
 	}
+	progressStartInputTokens := int64(0)
+	if shouldPatchClaudeStartUsageForProgress(compatKind, baseURL) {
+		progressStartInputTokens = estimateClaudeProgressInputTokens(baseModel, bodyForUpstream)
+	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -521,6 +525,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				line = restoreClaudeToolNamesFromStreamLine(line, toolNameSanitization)
 				if oauthToken {
 					line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
+				}
+				if progressStartInputTokens > 0 {
+					line = patchClaudeMessageStartUsageForProgress(line, progressStartInputTokens)
 				}
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
@@ -1193,6 +1200,70 @@ func claudeCompatKind(auth *cliproxyauth.Auth, baseURL string) string {
 		}
 	}
 	return config.InferCompatKindFromBaseURL(baseURL)
+}
+
+func shouldPatchClaudeStartUsageForProgress(compatKind, baseURL string) bool {
+	if strings.EqualFold(strings.TrimSpace(compatKind), "qianfan") {
+		return true
+	}
+	return strings.EqualFold(config.InferCompatKindFromBaseURL(baseURL), "qianfan")
+}
+
+func estimateClaudeProgressInputTokens(model string, body []byte) int64 {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return 0
+	}
+	text := string(body)
+	if enc, err := helps.TokenizerForModel(model); err == nil {
+		if count, errCount := enc.Count(text); errCount == nil && count > 0 {
+			return int64(count)
+		}
+	}
+	runes := len([]rune(text))
+	count := (runes + 3) / 4
+	if count < 1 {
+		return 1
+	}
+	return int64(count)
+}
+
+func patchClaudeMessageStartUsageForProgress(line []byte, inputTokens int64) []byte {
+	if inputTokens <= 0 {
+		return line
+	}
+	payload, ok := sseDataPayload(line)
+	if !ok || len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return line
+	}
+	if gjson.GetBytes(payload, "type").String() != "message_start" {
+		return line
+	}
+	if existing := gjson.GetBytes(payload, "message.usage.input_tokens"); existing.Exists() && existing.Int() > 0 {
+		return line
+	}
+	updated, err := sjson.SetBytes(payload, "message.usage.input_tokens", inputTokens)
+	if err != nil {
+		return line
+	}
+	return replaceSSEDataPayload(line, updated)
+}
+
+func sseDataPayload(line []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil, false
+	}
+	return bytes.TrimSpace(trimmed[len("data:"):]), true
+}
+
+func replaceSSEDataPayload(line, payload []byte) []byte {
+	leadingLen := len(line) - len(bytes.TrimLeft(line, " \t"))
+	out := make([]byte, 0, leadingLen+len("data: ")+len(payload))
+	out = append(out, line[:leadingLen]...)
+	out = append(out, "data: "...)
+	out = append(out, payload...)
+	return out
 }
 
 func downgradeClaudeStructuredOutputForCompat(baseURL string, body []byte) []byte {

@@ -2234,6 +2234,83 @@ func TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_ExecuteStream_PatchesQianfanStartUsageForProgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"as_123","type":"message","role":"assistant","model":"qianfan-code-latest","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":42,"output_tokens":1}}`,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":     "key-123",
+		"base_url":    server.URL,
+		"compat_kind": "qianfan",
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"read_file","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "qianfan-code-latest",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var combined strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("chunk error: %v", chunk.Err)
+		}
+		combined.Write(chunk.Payload)
+	}
+	startPayload := findClaudeSSEPayload(t, combined.String(), "message_start")
+	if got := gjson.GetBytes(startPayload, "message.usage.input_tokens").Int(); got <= 0 {
+		t.Fatalf("message_start input_tokens = %d, want patched positive value; payload=%s", got, string(startPayload))
+	}
+	deltaPayload := findClaudeSSEPayload(t, combined.String(), "message_delta")
+	if got := gjson.GetBytes(deltaPayload, "usage.input_tokens").Int(); got != 42 {
+		t.Fatalf("message_delta input_tokens = %d, want upstream value 42; payload=%s", got, string(deltaPayload))
+	}
+}
+
+func TestPatchClaudeMessageStartUsageForProgressKeepsExistingUsage(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":99,"output_tokens":0}}}`)
+	out := patchClaudeMessageStartUsageForProgress(line, 1234)
+	payload, ok := sseDataPayload(out)
+	if !ok {
+		t.Fatal("expected patched line to remain an SSE data line")
+	}
+	if got := gjson.GetBytes(payload, "message.usage.input_tokens").Int(); got != 99 {
+		t.Fatalf("input_tokens = %d, want existing value 99", got)
+	}
+}
+
+func findClaudeSSEPayload(t *testing.T, stream, eventType string) []byte {
+	t.Helper()
+	for _, line := range strings.Split(stream, "\n") {
+		payload, ok := sseDataPayload([]byte(line))
+		if !ok || len(payload) == 0 || !gjson.ValidBytes(payload) {
+			continue
+		}
+		if gjson.GetBytes(payload, "type").String() == eventType {
+			return payload
+		}
+	}
+	t.Fatalf("stream did not contain event type %q: %s", eventType, stream)
+	return nil
+}
+
 // TestClaudeExecutor_Execute_SetsCompressedAcceptEncoding verifies that non-streaming
 // requests keep the full accept-encoding to allow response compression (which
 // decodeResponseBody handles correctly).

@@ -114,6 +114,16 @@ func TestInferCompatKindFromBaseURL(t *testing.T) {
 			want:    "doubao",
 		},
 		{
+			name:    "qianfan anthropic coding",
+			baseURL: "https://qianfan.baidubce.com/anthropic/coding",
+			want:    "qianfan",
+		},
+		{
+			name:    "qianfan openai coding",
+			baseURL: "https://qianfan.baidubce.com/v2/coding",
+			want:    "qianfan",
+		},
+		{
 			name:    "minimax non anthropic path",
 			baseURL: "https://api.minimaxi.com/v1",
 			want:    "",
