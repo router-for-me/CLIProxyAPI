@@ -306,6 +306,8 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 		usageNode.Get("total_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("prompt_cache_hit_tokens").Exists() ||
+		usageNode.Get("prompt_cache_miss_tokens").Exists() ||
 		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
 		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
@@ -328,8 +330,16 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
+	promptCacheHit := usageNode.Get("prompt_cache_hit_tokens")
+	promptCacheMiss := usageNode.Get("prompt_cache_miss_tokens")
+	if !cached.Exists() {
+		cached = promptCacheHit
+	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
+	}
+	if detail.InputTokens == 0 && (promptCacheHit.Exists() || promptCacheMiss.Exists()) {
+		detail.InputTokens = promptCacheHit.Int() + promptCacheMiss.Int()
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
@@ -338,7 +348,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
-	return detail
+	return normalizeUsageDetailTotal(detail)
 }
 
 func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {

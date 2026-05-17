@@ -48,6 +48,93 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageDeepSeekPromptCacheFields(t *testing.T) {
+	data := []byte(`{"usage":{"prompt_tokens":16075935,"completion_tokens":44056,"total_tokens":16119991,"prompt_cache_hit_tokens":14771712,"prompt_cache_miss_tokens":1260167}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 16075935 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 16075935)
+	}
+	if detail.OutputTokens != 44056 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 44056)
+	}
+	if detail.TotalTokens != 16119991 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 16119991)
+	}
+	if detail.CachedTokens != 14771712 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 14771712)
+	}
+}
+
+func TestParseOpenAIStreamUsageDeepSeekPromptCacheFields(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":16075935,"completion_tokens":44056,"total_tokens":16119991,"prompt_cache_hit_tokens":14771712,"prompt_cache_miss_tokens":1260167}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 16075935 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 16075935)
+	}
+	if detail.OutputTokens != 44056 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 44056)
+	}
+	if detail.TotalTokens != 16119991 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 16119991)
+	}
+	if detail.CachedTokens != 14771712 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 14771712)
+	}
+}
+
+func TestParseOpenAIUsageDeepSeekCacheOnlyFields(t *testing.T) {
+	data := []byte(`{"usage":{"completion_tokens":5,"prompt_cache_hit_tokens":13,"prompt_cache_miss_tokens":7}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 20 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 20)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.TotalTokens != 25 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 25)
+	}
+	if detail.CachedTokens != 13 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 13)
+	}
+}
+
+func TestParseOpenAIUsageDoesNotRecoverInputFromCachedDetailsOnly(t *testing.T) {
+	testCases := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "prompt tokens details",
+			data: []byte(`{"usage":{"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":13}}}`),
+		},
+		{
+			name: "input tokens details",
+			data: []byte(`{"usage":{"completion_tokens":5,"input_tokens_details":{"cached_tokens":13}}}`),
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := ParseOpenAIUsage(tc.data)
+			if detail.InputTokens != 0 {
+				t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 0)
+			}
+			if detail.OutputTokens != 5 {
+				t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+			}
+			if detail.TotalTokens != 5 {
+				t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 5)
+			}
+			if detail.CachedTokens != 13 {
+				t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 13)
+			}
+		})
+	}
+}
+
 func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
 	data := []byte(`{"usage":null}`)
 	detail := ParseOpenAIUsage(data)
