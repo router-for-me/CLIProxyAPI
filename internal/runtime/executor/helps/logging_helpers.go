@@ -606,6 +606,21 @@ func extractHTMLTitle(body []byte) string {
 
 // extractFirstUserText returns the text of the first user message in a
 // request body. Supports Anthropic /v1/messages and Gemini /generateContent
+// geminiPartsText walks a gjson array of Gemini content parts and returns
+// the first non-empty text field. Handles responses where the first part is
+// a function call, inline data, or thought and text appears in a later part.
+func geminiPartsText(parts gjson.Result) string {
+	var text string
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if t := strings.TrimSpace(part.Get("text").String()); t != "" {
+			text = t
+			return false
+		}
+		return true
+	})
+	return text
+}
+
 // formats. Returns empty string on any parse error.
 func extractFirstUserText(body []byte) string {
 	// Antigravity: request.contents[].parts[].text
@@ -753,13 +768,13 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 		if text == "" {
 			text = gjson.GetBytes(chunk, "choices.0.message.content").String()
 		}
-		// Gemini/Vertex non-streaming: candidates[0].content.parts[0].text
+		// Gemini/Vertex non-streaming: walk parts to find first text field.
 		if text == "" {
-			text = gjson.GetBytes(chunk, "candidates.0.content.parts.0.text").String()
+			text = geminiPartsText(gjson.GetBytes(chunk, "candidates.0.content.parts"))
 		}
-		// Antigravity wrapper: response.candidates[0].content.parts[0].text
+		// Antigravity wrapper: response.candidates[0].content.parts[]
 		if text == "" {
-			text = gjson.GetBytes(chunk, "response.candidates.0.content.parts.0.text").String()
+			text = geminiPartsText(gjson.GetBytes(chunk, "response.candidates.0.content.parts"))
 		}
 		// Codex Responses API: top-level output[].content[].text (compact/non-streaming)
 		if text == "" {
@@ -862,12 +877,12 @@ func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
 			}
 		}
 		if delta == "" {
-			// Gemini SSE (native): candidates[0].content.parts[0].text
-			delta = gjson.GetBytes(data, "candidates.0.content.parts.0.text").String()
+			// Gemini SSE (native): walk parts to find first text field.
+			delta = geminiPartsText(gjson.GetBytes(data, "candidates.0.content.parts"))
 		}
 		if delta == "" {
-			// Gemini SSE (Antigravity wrapper): response.candidates[0].content.parts[0].text
-			delta = gjson.GetBytes(data, "response.candidates.0.content.parts.0.text").String()
+			// Gemini SSE (Antigravity wrapper): response.candidates[0].content.parts[]
+			delta = geminiPartsText(gjson.GetBytes(data, "response.candidates.0.content.parts"))
 		}
 		if delta == "" {
 			continue
@@ -897,9 +912,13 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		usage = gjson.GetBytes(data, "message.usage")
 	}
 	if !usage.Exists() {
-		// Check Gemini usageMetadata path before giving up.
-		if !gjson.GetBytes(data, "usageMetadata").Exists() &&
-			!gjson.GetBytes(data, "response.usageMetadata").Exists() {
+		// Check Gemini usageMetadata path before giving up (both camelCase
+		// and snake_case variants used by different Gemini/Antigravity paths).
+		hasMetadata := gjson.GetBytes(data, "usageMetadata").Exists() ||
+			gjson.GetBytes(data, "usage_metadata").Exists() ||
+			gjson.GetBytes(data, "response.usageMetadata").Exists() ||
+			gjson.GetBytes(data, "response.usage_metadata").Exists()
+		if !hasMetadata {
 			return
 		}
 	}
@@ -966,36 +985,42 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		current["total_tokens"] = derived
 	}
 
-	// Antigravity wrapper: response.usageMetadata
-	if meta := gjson.GetBytes(data, "response.usageMetadata"); meta.Exists() {
-		setFromPath := func(key, path string) {
-			if r := meta.Get(path); r.Exists() {
-				if v := r.Int(); v > current[key] {
-					current[key] = v
+	// Antigravity wrapper: response.usageMetadata / response.usage_metadata
+	for _, metaKey := range []string{"response.usageMetadata", "response.usage_metadata"} {
+		if meta := gjson.GetBytes(data, metaKey); meta.Exists() {
+			setFromPath := func(key, path string) {
+				if r := meta.Get(path); r.Exists() {
+					if v := r.Int(); v > current[key] {
+						current[key] = v
+					}
 				}
 			}
+			setFromPath("prompt_tokens", "promptTokenCount")
+			setFromPath("completion_tokens", "candidatesTokenCount")
+			setFromPath("total_tokens", "totalTokenCount")
+			setFromPath("reasoning_tokens", "thoughtsTokenCount")
+			setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
+			break
 		}
-		setFromPath("prompt_tokens", "promptTokenCount")
-		setFromPath("completion_tokens", "candidatesTokenCount")
-		setFromPath("total_tokens", "totalTokenCount")
-		setFromPath("reasoning_tokens", "thoughtsTokenCount")
-		setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
 	}
 
 	// Gemini usageMetadata lives at the top level, not under "usage".
-	if meta := gjson.GetBytes(data, "usageMetadata"); meta.Exists() {
-		setFromPath := func(key, path string) {
-			if r := meta.Get(path); r.Exists() {
-				if v := r.Int(); v > current[key] {
-					current[key] = v
+	for _, metaKey := range []string{"usageMetadata", "usage_metadata"} {
+		if meta := gjson.GetBytes(data, metaKey); meta.Exists() {
+			setFromPath := func(key, path string) {
+				if r := meta.Get(path); r.Exists() {
+					if v := r.Int(); v > current[key] {
+						current[key] = v
+					}
 				}
 			}
+			setFromPath("prompt_tokens", "promptTokenCount")
+			setFromPath("completion_tokens", "candidatesTokenCount")
+			setFromPath("total_tokens", "totalTokenCount")
+			setFromPath("reasoning_tokens", "thoughtsTokenCount")
+			setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
+			break
 		}
-		setFromPath("prompt_tokens", "promptTokenCount")
-		setFromPath("completion_tokens", "candidatesTokenCount")
-		setFromPath("total_tokens", "totalTokenCount")
-		setFromPath("reasoning_tokens", "thoughtsTokenCount")
-		setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
 	}
 
 	ginCtx.Set(UpstreamRawUsageKey, current)
