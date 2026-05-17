@@ -2177,6 +2177,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
+					credentialDisabledFailure := false
+					credentialDisabledRetryAt := time.Time{}
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
 					state.Status = StatusError
@@ -2196,6 +2198,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						shouldSuspendModel = true
 					} else {
 						switch statusCode {
+						case 400:
+							if isCredentialDisabledErrorMessage(state.StatusMessage) {
+								credentialDisabledFailure = true
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(30 * time.Minute)
+									state.NextRetryAfter = next
+									credentialDisabledRetryAt = next
+									suspendReason = "credential_disabled"
+									shouldSuspendModel = true
+								}
+							}
 						case 401:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -2264,6 +2279,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
+					if credentialDisabledFailure {
+						auth.Unavailable = true
+						auth.NextRetryAfter = credentialDisabledRetryAt
+						auth.StatusMessage = "credential_disabled"
+					}
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
@@ -2571,6 +2591,25 @@ func isModelSupportErrorMessage(message string) bool {
 	return false
 }
 
+func isCredentialDisabledErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"organization has been disabled",
+		"account has been disabled",
+		"credential has been disabled",
+		"user has been disabled",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func isModelSupportError(err error) bool {
 	if err == nil {
 		return false
@@ -2627,6 +2666,9 @@ func isRequestInvalidError(err error) bool {
 	switch status {
 	case http.StatusBadRequest:
 		msg := err.Error()
+		if isCredentialDisabledErrorMessage(msg) {
+			return false
+		}
 		return strings.Contains(msg, "invalid_request_error") ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
 			strings.Contains(msg, "FAILED_PRECONDITION")

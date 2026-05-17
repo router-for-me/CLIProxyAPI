@@ -977,17 +977,42 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 		return false
 	}
 	status := errMsg.StatusCode
+	errText := ""
 	if status <= 0 && errMsg.Error != nil {
 		if se, ok := errMsg.Error.(interface{ StatusCode() int }); ok && se != nil {
 			status = se.StatusCode()
 		}
 	}
+	if errMsg.Error != nil {
+		errText = errMsg.Error.Error()
+	}
 	switch status {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
 		return true
+	case http.StatusBadRequest:
+		return isResponsesWebsocketCredentialDisabledError(errText)
 	default:
 		return false
 	}
+}
+
+func isResponsesWebsocketCredentialDisabledError(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"organization has been disabled",
+		"account has been disabled",
+		"credential has been disabled",
+		"user has been disabled",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
