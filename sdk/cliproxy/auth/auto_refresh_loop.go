@@ -348,6 +348,14 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
+	// Antigravity uses lazy on-demand OAuth in ensureAccessToken during
+	// Execute, so its tokens are never refreshed by the background loop.
+	// Keeping it out of the scheduler avoids a tight reschedule loop when
+	// no valid expiry exists yet.
+	if strings.EqualFold(auth.Provider, "antigravity") {
+		return time.Time{}, false
+	}
+
 	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
 		return auth.NextRefreshAfter, true
 	}

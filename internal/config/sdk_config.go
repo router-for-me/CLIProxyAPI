@@ -9,6 +9,12 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// TLSSkipVerify disables TLS certificate verification for outbound connections.
+	// This can be useful when operating behind a corporate proxy that intercepts TLS traffic,
+	// but should only be used in trusted environments as it removes certificate validation.
+	// When true, sets InsecureSkipVerify on the TLS client config for Antigravity and other outbound HTTP clients.
+	TLSSkipVerify bool `yaml:"tls-skip-verify" json:"tls-skip-verify"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:
