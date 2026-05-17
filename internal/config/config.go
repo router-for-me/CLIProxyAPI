@@ -265,6 +265,56 @@ type AmpModelMapping struct {
 	// expression for matching model names. When true, this mapping is evaluated
 	// after exact matches and in the order provided. Defaults to false (exact match).
 	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
+
+	// When optionally constrains this mapping to requests matching specific
+	// feature/tool fingerprints. When omitted, the mapping applies unconditionally
+	// (subject to From matching). Multiple entries with the same From may be
+	// declared with different When clauses; they are evaluated in declaration
+	// order and the first match wins. A trailing entry with no When acts as the
+	// fallback for that From value.
+	When *AmpMappingCondition `yaml:"when,omitempty" json:"when,omitempty"`
+}
+
+// AmpMappingCondition expresses a per-request fingerprint condition used to
+// scope an AmpModelMapping to a specific Amp feature/tool invocation. All
+// non-empty fields must match for the condition to be satisfied (logical AND).
+type AmpMappingCondition struct {
+	// Feature is a high-level semantic alias for a known Amp feature.
+	// Inferred via forced tool name or hardcoded system-prompt prefixes
+	// observed in the Amp client binary. Currently recognized values:
+	//   - "handoff"          (Amp thread handoff; tool create_handoff_context)
+	//   - "titling"          (Amp thread title generation; tool set_title)
+	//   - "oracle"           (Amp Oracle advisor; gpt-5.4 via Responses API)
+	//   - "search"           (Amp finder/search subagent; gemini-3-flash)
+	//   - "look_at"          (Amp look_at file analyzer; gemini-3-flash)
+	//   - "review"           (Amp code review main + summary; gemini-3.1-pro / gemini-3-flash)
+	//   - "painter"          (Amp painter image generation; gemini-3-pro-image)
+	//   - "librarian"        (Amp librarian repo-understanding subagent; claude-sonnet-4-6)
+	//   - "classifier"       (Amp internal yes/no classifier; tool answer_question, claude-haiku-4-5)
+	//   - "git_list"         (Amp review git-list helper; claude-haiku-4-5)
+	//   - "git_diff"         (Amp review git-diff helper; claude-haiku-4-5)
+	//   - "codereview_check" (Amp per-check review subagent; claude-haiku-4-5)
+	//   - "thread_extract"   (Amp read_thread internal Gemini extraction)
+	//   - "error_summary"    (Amp subagent error-recovery Gemini summarizer)
+	// Other Amp features should be matched via ToolChoice / UserSuffix /
+	// SystemPrefix when their fingerprint is known. Case-insensitive.
+	Feature string `yaml:"feature,omitempty" json:"feature,omitempty"`
+
+	// ToolChoice matches when the request forces a specific tool by name via
+	// the Anthropic/OpenAI/Gemini tool-choice mechanism (e.g.
+	// "create_handoff_context" for Amp handoff). Case-insensitive.
+	ToolChoice string `yaml:"tool_choice,omitempty" json:"tool_choice,omitempty"`
+
+	// UserSuffix matches when the last user message ends with the given
+	// substring (case-insensitive, after trimming trailing whitespace).
+	// Useful for distinguishing prompts that share a model.
+	UserSuffix string `yaml:"user_suffix,omitempty" json:"user_suffix,omitempty"`
+
+	// SystemPrefix matches when the request's system / systemInstruction
+	// prompt starts with the given substring (case-insensitive, after
+	// trimming leading whitespace). Useful for identifying Amp features
+	// whose system prompts are hardcoded in the client binary.
+	SystemPrefix string `yaml:"system_prefix,omitempty" json:"system_prefix,omitempty"`
 }
 
 // AmpCode groups Amp CLI integration settings including upstream routing,

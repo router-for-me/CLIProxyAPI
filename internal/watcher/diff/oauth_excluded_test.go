@@ -59,6 +59,72 @@ func TestSummarizeAmpModelMappings(t *testing.T) {
 	}
 }
 
+// TestSummarizeAmpModelMappings_OrderMatters verifies that reordering
+// produces a different hash, since order is semantically meaningful for
+// conditional rules.
+func TestSummarizeAmpModelMappings_OrderMatters(t *testing.T) {
+	a := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X"},
+		{From: "y", To: "Y"},
+	})
+	b := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "y", To: "Y"},
+		{From: "x", To: "X"},
+	})
+	if a.hash == b.hash {
+		t.Fatal("expected different hashes for reordered mappings")
+	}
+}
+
+// TestSummarizeAmpModelMappings_WhenContributesToHash verifies that
+// changing the When clause produces a different hash.
+func TestSummarizeAmpModelMappings_WhenContributesToHash(t *testing.T) {
+	a := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X", When: &config.AmpMappingCondition{Feature: "handoff"}},
+	})
+	b := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X", When: &config.AmpMappingCondition{ToolChoice: "create_handoff_context"}},
+	})
+	c := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X"},
+	})
+	if a.hash == b.hash {
+		t.Fatal("expected different hashes for different When conditions")
+	}
+	if a.hash == c.hash {
+		t.Fatal("expected different hashes when adding/removing When")
+	}
+}
+
+// TestSummarizeAmpModelMappings_SystemPrefixContributesToHash verifies that
+// two mappings differing only by When.SystemPrefix produce different hashes,
+// so the config-diff logger does not silently drop SystemPrefix-only edits.
+func TestSummarizeAmpModelMappings_SystemPrefixContributesToHash(t *testing.T) {
+	a := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X", When: &config.AmpMappingCondition{SystemPrefix: "you are agg man"}},
+	})
+	b := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X", When: &config.AmpMappingCondition{SystemPrefix: "you are amp"}},
+	})
+	if a.hash == b.hash {
+		t.Fatal("expected different hashes for distinct SystemPrefix")
+	}
+}
+
+// TestSummarizeAmpModelMappings_RegexContributesToHash verifies the regex
+// flag is part of the hash.
+func TestSummarizeAmpModelMappings_RegexContributesToHash(t *testing.T) {
+	a := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X"},
+	})
+	b := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X", Regex: true},
+	})
+	if a.hash == b.hash {
+		t.Fatal("expected different hashes when regex flag toggles")
+	}
+}
+
 func TestSummarizeOAuthExcludedModels_NormalizesKeys(t *testing.T) {
 	out := SummarizeOAuthExcludedModels(map[string][]string{
 		"ProvA": {"X"},

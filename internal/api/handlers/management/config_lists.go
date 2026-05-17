@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -1299,6 +1300,10 @@ func (h *Handler) PutAmpModelMappings(c *gin.Context) {
 }
 
 // PatchAmpModelMappings adds or updates model mappings.
+//
+// Identity for update is the tuple (from, regex, when), so multiple
+// mappings sharing the same From but different When clauses can be
+// patched independently.
 func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 	var body struct {
 		Value []config.AmpModelMapping `json:"value"`
@@ -1310,22 +1315,29 @@ func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 
 	existing := make(map[string]int)
 	for i, m := range h.cfg.AmpCode.ModelMappings {
-		existing[strings.TrimSpace(m.From)] = i
+		key := ampMappingKey(m)
+		if _, ok := existing[key]; !ok {
+			existing[key] = i
+		}
 	}
 
 	for _, newMapping := range body.Value {
-		from := strings.TrimSpace(newMapping.From)
-		if idx, ok := existing[from]; ok {
+		key := ampMappingKey(newMapping)
+		if idx, ok := existing[key]; ok {
 			h.cfg.AmpCode.ModelMappings[idx] = newMapping
 		} else {
 			h.cfg.AmpCode.ModelMappings = append(h.cfg.AmpCode.ModelMappings, newMapping)
-			existing[from] = len(h.cfg.AmpCode.ModelMappings) - 1
+			existing[key] = len(h.cfg.AmpCode.ModelMappings) - 1
 		}
 	}
 	h.persist(c)
 }
 
-// DeleteAmpModelMappings removes specified model mappings by "from" field.
+// DeleteAmpModelMappings removes specified model mappings.
+//
+// Each entry in body.Value is interpreted as a "from" string. All mappings
+// sharing that From are removed, regardless of regex flag or When clause.
+// Pass an empty body to clear all mappings.
 func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 	var body struct {
 		Value []string `json:"value"`
@@ -1349,6 +1361,30 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 	}
 	h.cfg.AmpCode.ModelMappings = newMappings
 	h.persist(c)
+}
+
+// ampMappingKey returns a stable identity for a mapping entry, accounting
+// for the regex flag and the optional When clause so that PATCH can
+// distinguish multiple rules sharing the same From. When fields are
+// lower-cased to match ConditionMatches' case-insensitive semantics, so
+// a PATCH that differs only by case is recognized as the same rule.
+// A condition whose every field trims to empty (e.g. `when: {}`) is
+// treated identically to a nil When, mirroring selectTarget's
+// "effectively empty" classification so that PATCH does not create a
+// duplicate entry for what is, semantically, the same unconditional
+// rule.
+func ampMappingKey(m config.AmpModelMapping) string {
+	when := ""
+	if m.When != nil {
+		feat := strings.ToLower(strings.TrimSpace(m.When.Feature))
+		tool := strings.ToLower(strings.TrimSpace(m.When.ToolChoice))
+		usuf := strings.ToLower(strings.TrimSpace(m.When.UserSuffix))
+		spre := strings.ToLower(strings.TrimSpace(m.When.SystemPrefix))
+		if feat != "" || tool != "" || usuf != "" || spre != "" {
+			when = feat + "\x1f" + tool + "\x1f" + usuf + "\x1f" + spre
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(m.From)) + "\x1e" + strconv.FormatBool(m.Regex) + "\x1e" + when
 }
 
 // GetAmpForceModelMappings returns whether model mappings are forced.

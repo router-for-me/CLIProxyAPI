@@ -19,93 +19,139 @@ import (
 type ModelMapper interface {
 	// MapModel returns the target model name if a mapping exists and the target
 	// model has available providers. Returns empty string if no mapping applies.
+	// Equivalent to MapModelCtx with an empty fingerprint.
 	MapModel(requestedModel string) string
+
+	// MapModelCtx is the feature-aware variant. Rules are scanned in
+	// declaration order (exact before regex); the first matching rule
+	// whose condition is satisfied and whose target is available wins.
+	MapModelCtx(requestedModel string, fp RequestFingerprint) string
 
 	// UpdateMappings refreshes the mapping configuration (for hot-reload).
 	UpdateMappings(mappings []config.AmpModelMapping)
 }
 
 // DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
+//
+// Selection order (see selectTarget for the full algorithm):
+//  1. exact rules (in declaration order)
+//  2. regex rules (in declaration order)
+//
+// Within each pass, rules are scanned top-to-bottom. The first rule
+// whose From matches, whose When condition is satisfied, and whose
+// target has available providers wins. Users must place conditional
+// rules before their unconditional fallback.
 type DefaultModelMapper struct {
-	mu       sync.RWMutex
-	mappings map[string]string // exact: from -> to (normalized lowercase keys)
-	regexps  []regexMapping    // regex rules evaluated in order
+	mu     sync.RWMutex
+	exacts []mappingRule
+	regexs []mappingRule
+}
+
+// mappingRule is a normalized form of a single AmpModelMapping entry.
+type mappingRule struct {
+	exactFrom string                      // lower-cased exact from, "" if regex
+	re        *regexp.Regexp              // compiled regex, nil if exact
+	to        string                      // raw target (may include thinking suffix)
+	when      *config.AmpMappingCondition // optional condition
 }
 
 // NewModelMapper creates a new model mapper with the given initial mappings.
 func NewModelMapper(mappings []config.AmpModelMapping) *DefaultModelMapper {
-	m := &DefaultModelMapper{
-		mappings: make(map[string]string),
-		regexps:  nil,
-	}
+	m := &DefaultModelMapper{}
 	m.UpdateMappings(mappings)
 	return m
 }
 
-// MapModel checks if a mapping exists for the requested model and if the
-// target model has available local providers. Returns the mapped model name
-// or empty string if no valid mapping exists.
+// MapModel is a convenience wrapper for callers that have no fingerprint.
+// Equivalent to MapModelCtx with an empty fingerprint, so conditions
+// requiring a non-empty Feature/ToolChoice/UserSuffix/SystemPrefix
+// will not match (rules with a nil When still apply normally).
+func (m *DefaultModelMapper) MapModel(requestedModel string) string {
+	return m.MapModelCtx(requestedModel, RequestFingerprint{})
+}
+
+// MapModelCtx checks if a mapping exists for the requested model and if the
+// target model has available local providers. Conditional rules (When) are
+// evaluated against fp; an unconditional fallback for the same From is used
+// when no conditional rule matches.
 //
 // If the requested model contains a thinking suffix (e.g., "g25p(8192)"),
 // the suffix is preserved in the returned model name (e.g., "gemini-2.5-pro(8192)").
 // However, if the mapping target already contains a suffix, the config suffix
 // takes priority over the user's suffix.
-func (m *DefaultModelMapper) MapModel(requestedModel string) string {
+func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFingerprint) string {
 	if requestedModel == "" {
 		return ""
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	// Extract thinking suffix from requested model using ParseSuffix
 	requestResult := thinking.ParseSuffix(requestedModel)
 	baseModel := requestResult.ModelName
-
-	// Normalize the base model for lookup (case-insensitive)
 	normalizedBase := strings.ToLower(strings.TrimSpace(baseModel))
 
-	// Check for direct mapping using base model name
-	targetModel, exists := m.mappings[normalizedBase]
-	if !exists {
-		// Try regex mappings in order using base model only
-		// (suffix is handled separately via ParseSuffix)
-		for _, rm := range m.regexps {
-			if rm.re.MatchString(baseModel) {
-				targetModel = rm.to
-				exists = true
-				break
-			}
-		}
-		if !exists {
-			return ""
-		}
+	m.mu.RLock()
+	targetModel := selectTarget(m.exacts, baseModel, normalizedBase, fp, false, hasProviders)
+	if targetModel == "" {
+		targetModel = selectTarget(m.regexs, baseModel, normalizedBase, fp, true, hasProviders)
 	}
+	m.mu.RUnlock()
 
-	// Check if target model already has a thinking suffix (config priority)
-	targetResult := thinking.ParseSuffix(targetModel)
-
-	// Verify target model has available providers (use base model for lookup)
-	providers := util.GetProviderName(targetResult.ModelName)
-	if len(providers) == 0 {
-		log.Debugf("amp model mapping: target model %s has no available providers, skipping mapping", targetModel)
+	if targetModel == "" {
 		return ""
 	}
 
+	// Target was already validated by selectTarget; ParseSuffix again
+	// only to decide on suffix-merge behavior below.
+	targetResult := thinking.ParseSuffix(targetModel)
+
 	// Suffix handling: config suffix takes priority, otherwise preserve user suffix
 	if targetResult.HasSuffix {
-		// Config's "to" already contains a suffix - use it as-is (config priority)
 		return targetModel
 	}
-
-	// Preserve user's thinking suffix on the mapped model
-	// (skip empty suffixes to avoid returning "model()")
 	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
 		return targetModel + "(" + requestResult.RawSuffix + ")"
 	}
-
-	// Note: Detailed routing log is handled by logAmpRouting in fallback_handlers.go
 	return targetModel
+}
+
+// hasProviders reports whether a target model (possibly with a thinking
+// suffix) has any registered local providers. Used by selectTarget to
+// skip rules whose target is unavailable so that fallback rules can
+// still apply.
+func hasProviders(targetModel string) bool {
+	if targetModel == "" {
+		return false
+	}
+	res := thinking.ParseSuffix(targetModel)
+	return len(util.GetProviderName(res.ModelName)) > 0
+}
+
+// selectTarget scans rules of one class (exact or regex) in declaration
+// order and returns the first matching target. A rule matches when:
+//  1. Its From matches the requested model (exact or regex).
+//  2. Its When condition is satisfied by the fingerprint (or is nil/empty).
+//  3. Its target model has available local providers.
+//
+// Returns "" if no rule produces an available target.
+func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool, available func(string) bool) string {
+	for _, r := range rules {
+		if isRegex {
+			if r.re == nil || !r.re.MatchString(baseModel) {
+				continue
+			}
+		} else {
+			if r.exactFrom == "" || r.exactFrom != normalizedBase {
+				continue
+			}
+		}
+		if !IsConditionEffectivelyEmpty(r.when) && !ConditionMatches(r.when, fp) {
+			continue
+		}
+		if available(r.to) {
+			return r.to
+		}
+	}
+	return ""
 }
 
 // UpdateMappings refreshes the mapping configuration from config.
@@ -114,58 +160,74 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Clear and rebuild mappings
-	m.mappings = make(map[string]string, len(mappings))
-	m.regexps = make([]regexMapping, 0, len(mappings))
+	m.exacts = m.exacts[:0]
+	m.regexs = m.regexs[:0]
 
+	conditional := 0
 	for _, mapping := range mappings {
 		from := strings.TrimSpace(mapping.From)
 		to := strings.TrimSpace(mapping.To)
-
 		if from == "" || to == "" {
 			log.Warnf("amp model mapping: skipping invalid mapping (from=%q, to=%q)", from, to)
 			continue
 		}
 
+		// Deep-copy When so the mapper does not share state with the
+		// caller's config object.
+		var when *config.AmpMappingCondition
+		if mapping.When != nil {
+			c := *mapping.When
+			when = &c
+		}
+		rule := mappingRule{to: to, when: when}
+
 		if mapping.Regex {
-			// Compile case-insensitive regex; wrap with (?i) to match behavior of exact lookups
 			pattern := "(?i)" + from
 			re, err := regexp.Compile(pattern)
 			if err != nil {
 				log.Warnf("amp model mapping: invalid regex %q: %v", from, err)
 				continue
 			}
-			m.regexps = append(m.regexps, regexMapping{re: re, to: to})
-			log.Debugf("amp model regex mapping registered: /%s/ -> %s", from, to)
+			rule.re = re
+			m.regexs = append(m.regexs, rule)
+			log.Debugf("amp model regex mapping registered: /%s/ -> %s (when=%+v)", from, to, when)
 		} else {
-			// Store with normalized lowercase key for case-insensitive lookup
-			normalizedFrom := strings.ToLower(from)
-			m.mappings[normalizedFrom] = to
-			log.Debugf("amp model mapping registered: %s -> %s", from, to)
+			rule.exactFrom = strings.ToLower(from)
+			m.exacts = append(m.exacts, rule)
+			log.Debugf("amp model mapping registered: %s -> %s (when=%+v)", from, to, when)
+		}
+		if when != nil {
+			conditional++
 		}
 	}
 
-	if len(m.mappings) > 0 {
-		log.Infof("amp model mapping: loaded %d mapping(s)", len(m.mappings))
+	if n := len(m.exacts); n > 0 {
+		log.Infof("amp model mapping: loaded %d mapping(s)", n)
 	}
-	if n := len(m.regexps); n > 0 {
+	if n := len(m.regexs); n > 0 {
 		log.Infof("amp model mapping: loaded %d regex mapping(s)", n)
+	}
+	if conditional > 0 {
+		log.Infof("amp model mapping: %d mapping(s) are feature-conditional", conditional)
 	}
 }
 
-// GetMappings returns a copy of current mappings (for debugging/status).
+// GetMappings returns a snapshot of current unconditional exact mappings
+// (for debugging/status). Conditional and regex rules are excluded; they
+// can be inspected via configuration.
 func (m *DefaultModelMapper) GetMappings() map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	result := make(map[string]string, len(m.mappings))
-	for k, v := range m.mappings {
-		result[k] = v
+	result := make(map[string]string)
+	for _, r := range m.exacts {
+		if r.when != nil {
+			continue
+		}
+		// First wins; do not overwrite existing entries.
+		if _, ok := result[r.exactFrom]; !ok {
+			result[r.exactFrom] = r.to
+		}
 	}
 	return result
-}
-
-type regexMapping struct {
-	re *regexp.Regexp
-	to string
 }

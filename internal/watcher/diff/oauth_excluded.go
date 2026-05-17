@@ -93,6 +93,8 @@ type AmpModelMappingsSummary struct {
 }
 
 // SummarizeAmpModelMappings hashes Amp model mappings for change detection.
+// Order is semantically meaningful (conditional rules win in declaration
+// order) and the optional When clause must contribute to the hash.
 func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappingsSummary {
 	if len(mappings) == 0 {
 		return AmpModelMappingsSummary{}
@@ -104,12 +106,23 @@ func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappin
 		if from == "" && to == "" {
 			continue
 		}
-		entries = append(entries, from+"->"+to)
+		regex := "0"
+		if mapping.Regex {
+			regex = "1"
+		}
+		when := ""
+		if mapping.When != nil {
+			when = strings.TrimSpace(mapping.When.Feature) + "\x1f" +
+				strings.TrimSpace(mapping.When.ToolChoice) + "\x1f" +
+				strings.TrimSpace(mapping.When.UserSuffix) + "\x1f" +
+				strings.TrimSpace(mapping.When.SystemPrefix)
+		}
+		entries = append(entries, from+"\x1e"+to+"\x1e"+regex+"\x1e"+when)
 	}
 	if len(entries) == 0 {
 		return AmpModelMappingsSummary{}
 	}
-	sort.Strings(entries)
+	// Order matters: do not sort. Hash entries in declaration order.
 	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
 	return AmpModelMappingsSummary{
 		hash:  hex.EncodeToString(sum[:]),
