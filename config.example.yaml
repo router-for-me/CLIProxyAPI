@@ -120,6 +120,9 @@ disable-cooling: false
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
 disable-image-generation: false
 
+# When true, force Codex upstream requests to use service_tier: "priority" (Codex fast mode / higher quota multiplier).
+codex-fast-mode: false
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16

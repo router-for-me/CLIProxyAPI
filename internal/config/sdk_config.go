@@ -19,6 +19,11 @@ type SDKConfig struct {
 	//     while keeping /v1/images/generations and /v1/images/edits enabled and preserving image_generation there.
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
+	// CodexFastMode forces Codex upstream requests to use Priority service tier.
+	// This is the same request-level service tier used by Codex fast mode and may
+	// consume quota/billing at a higher multiplier where supported.
+	CodexFastMode bool `yaml:"codex-fast-mode" json:"codex-fast-mode"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`

@@ -334,6 +334,7 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 	fields = append(fields, configField{"Request Retry", "request-retry", "int", fmt.Sprintf("%.0f", getFloat(cfg, "request-retry")), nil})
 	fields = append(fields, configField{"Max Retry Interval (s)", "max-retry-interval", "int", fmt.Sprintf("%.0f", getFloat(cfg, "max-retry-interval")), nil})
 	fields = append(fields, configField{"Force Model Prefix", "force-model-prefix", "string", getString(cfg, "force-model-prefix"), nil})
+	fields = append(fields, configField{"Codex Fast Mode", "codex-fast-mode", "bool", fmt.Sprintf("%v", getBool(cfg, "codex-fast-mode")), nil})
 
 	// Logging
 	fields = append(fields, configField{"Logging to File", "logging-to-file", "bool", fmt.Sprintf("%v", getBool(cfg, "logging-to-file")), nil})
@@ -379,7 +380,7 @@ func fieldSection(apiPath string) string {
 		return T("section_routing")
 	}
 	switch apiPath {
-	case "port", "host", "debug", "proxy-url", "request-retry", "max-retry-interval", "force-model-prefix":
+	case "port", "host", "debug", "proxy-url", "request-retry", "max-retry-interval", "force-model-prefix", "codex-fast-mode":
 		return T("section_server")
 	case "logging-to-file", "logs-max-total-size-mb", "error-logs-max-files", "usage-statistics-enabled", "request-log":
 		return T("section_logging")

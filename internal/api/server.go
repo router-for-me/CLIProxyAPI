@@ -619,6 +619,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
+		mgmt.GET("/codex-fast-mode", s.mgmt.GetCodexFastMode)
+		mgmt.PUT("/codex-fast-mode", s.mgmt.PutCodexFastMode)
+		mgmt.PATCH("/codex-fast-mode", s.mgmt.PutCodexFastMode)
 
 		mgmt.GET("/ampcode", s.mgmt.GetAmpCode)
 		mgmt.GET("/ampcode/upstream-url", s.mgmt.GetAmpUpstreamURL)
@@ -1397,6 +1400,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
 		log.Infof("disable-image-generation updated: %v -> %v", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
+	}
+	if oldCfg != nil && oldCfg.CodexFastMode != cfg.CodexFastMode {
+		log.Infof("codex-fast-mode updated: %v -> %v", oldCfg.CodexFastMode, cfg.CodexFastMode)
 	}
 
 	applySignatureCacheConfig(oldCfg, cfg)

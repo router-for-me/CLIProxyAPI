@@ -68,7 +68,12 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}))
 	defer server.Close()
 
-	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	exec := NewCodexWebsocketsExecutor(&config.Config{
+		SDKConfig: config.SDKConfig{
+			CodexFastMode:          true,
+			DisableImageGeneration: config.DisableImageGenerationAll,
+		},
+	})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
@@ -87,6 +92,9 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 		}
 		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp-1" {
 			t.Fatalf("upstream previous_response_id = %s, want resp-1; payload=%s", got, payload)
+		}
+		if got := gjson.GetBytes(payload, "service_tier").String(); got != "priority" {
+			t.Fatalf("upstream service_tier = %s, want priority; payload=%s", got, payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
