@@ -86,7 +86,7 @@ func (c *Client) ingest(ctx context.Context, events ...ingestionEvent) error {
 	if err != nil {
 		return fmt.Errorf("langfuse: http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody := make([]byte, 2048)
 	n, _ := resp.Body.Read(respBody)
 	respBody = respBody[:n]

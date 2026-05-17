@@ -35,6 +35,8 @@ const ginContextKey = "gin"
 const workerCount = 4
 
 // Plugin implements coreusage.Plugin.
+// Note: Plugin has no Close method; the worker goroutines run for the
+// lifetime of the process. This is intentional for an example binary.
 type Plugin struct {
 	client *Client
 	queue  chan GenerationBody
@@ -54,6 +56,10 @@ func New(baseURL, publicKey, secretKey string) *Plugin {
 
 func (p *Plugin) worker() {
 	for gen := range p.queue {
+		// context.Background() has no timeout. This is intentional: AGENTS.md
+		// policy permits timeouts only during credential acquisition. If
+		// Langfuse is slow, the bounded queue (cap 256) absorbs the back-pressure
+		// and events are dropped once it fills rather than blocking the proxy.
 		if err := p.client.SendGeneration(context.Background(), gen); err != nil {
 			log.Debugf("langfuse plugin: %v", err)
 		}
