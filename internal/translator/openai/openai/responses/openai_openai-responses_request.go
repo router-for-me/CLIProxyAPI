@@ -180,6 +180,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if role == "assistant" {
 					if rc := item.Get("reasoning_content"); rc.Exists() {
 						message, _ = sjson.SetBytes(message, "reasoning_content", rc.String())
+						pendingReasoningContent = ""
+						pendingReasoningContentSet = false
 					} else if pendingReasoningContentSet {
 						message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
 						pendingReasoningContent = ""

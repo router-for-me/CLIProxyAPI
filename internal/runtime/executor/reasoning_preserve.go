@@ -8,6 +8,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const reasoningContentKey = "reasoning_content"
+
 // preserveReasoningContent ensures assistant messages in the translated OpenAI-format
 // payload retain reasoning_content from the original source payload.
 //
@@ -56,25 +58,188 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 
 	out := translated
 	assistantOrdinal := 0
+	patches := make(map[int]string)
 	for i, msg := range transMsgArr {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
 
 		origText, origOK := origReasoning[assistantOrdinal]
-		transRC := msg.Get("reasoning_content")
+		transRC := msg.Get(reasoningContentKey)
 		if origOK && !transRC.Exists() {
-			path := fmt.Sprintf("messages.%d.reasoning_content", i)
-			next, err := sjson.SetBytes(out, path, origText)
-			if err != nil {
-				return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
-			}
-			out = next
+			patches[i] = origText
 		}
 		assistantOrdinal++
 	}
 
+	if len(patches) > 0 {
+		msgsArray := []byte("[]")
+		for i, msg := range transMsgArr {
+			msgBytes := []byte(msg.Raw)
+			if rc, ok := patches[i]; ok {
+				patched, err := sjson.SetBytes(msgBytes, reasoningContentKey, rc)
+				if err != nil {
+					return translated, fmt.Errorf("preserveReasoningContent: failed to set reasoning_content at index %d: %w", i, err)
+				}
+				msgBytes = patched
+			}
+			msgsArray, _ = sjson.SetRawBytes(msgsArray, "-1", msgBytes)
+		}
+		result, err := sjson.SetRawBytes(out, "messages", msgsArray)
+		if err != nil {
+			return translated, fmt.Errorf("preserveReasoningContent: failed to update messages: %w", err)
+		}
+		out = result
+	}
+
 	return out, nil
+}
+
+// convertReasoningToThinkingContent transforms top-level reasoning_content on assistant
+// messages into content-array thinking blocks when the payload has thinking mode enabled,
+// while preserving the top-level reasoning_content field for backward compatibility.
+//
+// Providers like MiMo, DeepSeek require assistant messages with reasoning_content to
+// also express it as a structured content part:
+//
+//	{"type": "thinking", "thinking": "<reasoning text>"}
+//
+// Without this, these APIs return 400:
+//   - MiMo/DeepSeek: "messages.N.content.M.thinking.thinking: Field required"
+//   - DeepSeek: "The reasoning_content in the thinking mode must be passed back to the API."
+//
+// Other providers (standard OpenAI, OpenRouter) only recognize the top-level
+// reasoning_content field and would reject a content-array thinking block.
+// To maintain compatibility with both camps, this function emits BOTH formats:
+//
+//	{
+//	  "content": [{"type":"thinking","thinking":"..."}, {"type":"text","text":"..."}],
+//	  "reasoning_content": "..."
+//	}
+//
+// The function checks for thinking-mode indicators in the payload:
+//   - "reasoning_effort" (OpenAI/MiMo/DeepSeek level-based thinking)
+//   - "thinking.type" == "enabled" (MiMo/DeepSeek explicit thinking toggle)
+//
+// When thinking mode is NOT active, the payload is returned unchanged.
+//
+// Conversion rules for each assistant message that has reasoning_content:
+//  1. Build a new content array: [{"type":"thinking","thinking": rc}, ...existing content parts...]
+//  2. If existing content is a string, wrap it as {"type":"text","text": content}
+//     (unless it's empty, in which case only the thinking block is emitted).
+//  3. If existing content is already an array, prepend the thinking block.
+//  4. Keep the top-level reasoning_content field (dual-format compatibility).
+func convertReasoningToThinkingContent(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	if !isThinkingModeActive(payload) {
+		return payload
+	}
+
+	msgs := gjson.GetBytes(payload, "messages")
+	if !msgs.Exists() || !msgs.IsArray() {
+		return payload
+	}
+
+	msgArr := msgs.Array()
+	needsRewrite := false
+
+	for _, msg := range msgArr {
+		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+			continue
+		}
+		rc := msg.Get(reasoningContentKey)
+		if !rc.Exists() {
+			continue
+		}
+		reasoningText := rc.String()
+		if strings.TrimSpace(reasoningText) == "" {
+			continue
+		}
+		needsRewrite = true
+		break
+	}
+
+	if !needsRewrite {
+		return payload
+	}
+
+	outMsgs := []byte("[]")
+	for _, msg := range msgArr {
+		msgBytes := []byte(msg.Raw)
+
+		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+			outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
+			continue
+		}
+
+		rc := msg.Get(reasoningContentKey)
+		if !rc.Exists() || strings.TrimSpace(rc.String()) == "" {
+			outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
+			continue
+		}
+
+		reasoningText := rc.String()
+
+		thinkingBlock := []byte(`{"type":"thinking","thinking":""}`)
+		thinkingBlock, _ = sjson.SetBytes(thinkingBlock, "thinking", reasoningText)
+
+		content := msg.Get("content")
+		var newContent []byte
+
+		if content.Exists() && content.IsArray() {
+			newContent = []byte("[]")
+			newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			for _, part := range content.Array() {
+				newContent, _ = sjson.SetRawBytes(newContent, "-1", []byte(part.Raw))
+			}
+		} else if content.Exists() && content.Type == gjson.String {
+			text := content.String()
+			newContent = []byte("[]")
+			newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			if text != "" {
+				textBlock := []byte(`{"type":"text","text":""}`)
+				textBlock, _ = sjson.SetBytes(textBlock, "text", text)
+				newContent, _ = sjson.SetRawBytes(newContent, "-1", textBlock)
+			}
+		} else {
+			newContent = []byte("[]")
+			newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+		}
+
+		updated, err := sjson.SetRawBytes(msgBytes, "content", newContent)
+		if err != nil {
+			outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
+			continue
+		}
+		outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", updated)
+	}
+
+	result, err := sjson.SetRawBytes(payload, "messages", outMsgs)
+	if err != nil {
+		return payload
+	}
+	return result
+}
+
+// isThinkingModeActive checks whether the payload has thinking mode enabled
+// via either reasoning_effort or thinking.type=enabled.
+func isThinkingModeActive(payload []byte) bool {
+	if re := gjson.GetBytes(payload, "reasoning_effort"); re.Exists() && re.Type == gjson.String {
+		effort := strings.ToLower(strings.TrimSpace(re.String()))
+		if effort != "" && effort != "none" {
+			return true
+		}
+	}
+	if tt := gjson.GetBytes(payload, "thinking.type"); tt.Exists() && tt.Type == gjson.String {
+		t := strings.ToLower(strings.TrimSpace(tt.String()))
+		if t == "enabled" || t == "adaptive" || t == "auto" {
+			return true
+		}
+	}
+	return false
 }
 
 // collectAssistantReasoning extracts reasoning_content from assistant messages,
@@ -87,7 +252,7 @@ func collectAssistantReasoning(messages []gjson.Result) map[int]string {
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 			continue
 		}
-		if rc := msg.Get("reasoning_content"); rc.Exists() {
+		if rc := msg.Get(reasoningContentKey); rc.Exists() {
 			reasoning[ordinal] = rc.String()
 		}
 		ordinal++

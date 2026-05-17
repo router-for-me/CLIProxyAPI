@@ -394,3 +394,149 @@ func TestPreserveReasoningContent_FilterRemovalIsRespected(t *testing.T) {
 		t.Fatalf("second assistant: translated override takes precedence: got %q, want %q", rc2, "filtered replacement")
 	}
 }
+
+func TestConvertReasoningToThinkingContent_NoOpWhenThinkingModeInactive(t *testing.T) {
+	payload := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":"thinking..."}
+		]
+	}`)
+
+	out := convertReasoningToThinkingContent(payload)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if rc != "thinking..." {
+		t.Fatalf("reasoning_content should be preserved when thinking mode is inactive, got %q", rc)
+	}
+	content := gjson.GetBytes(out, "messages.1.content")
+	if content.IsArray() {
+		t.Fatalf("content should remain a string when thinking mode is inactive")
+	}
+}
+
+func TestConvertReasoningToThinkingContent_ConvertsWhenReasoningEffortSet(t *testing.T) {
+	payload := []byte(`{
+		"reasoning_effort":"high",
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer text","reasoning_content":"I need to think about this"}
+		]
+	}`)
+
+	out := convertReasoningToThinkingContent(payload)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if rc != "I need to think about this" {
+		t.Fatalf("reasoning_content top-level field should be preserved for backward compat, got %q", rc)
+	}
+
+	contentType0 := gjson.GetBytes(out, "messages.1.content.0.type").String()
+	if contentType0 != "thinking" {
+		t.Fatalf("first content part should be thinking block, got type %q", contentType0)
+	}
+	thinkingText := gjson.GetBytes(out, "messages.1.content.0.thinking").String()
+	if thinkingText != "I need to think about this" {
+		t.Fatalf("thinking text = %q, want %q", thinkingText, "I need to think about this")
+	}
+
+	contentType1 := gjson.GetBytes(out, "messages.1.content.1.type").String()
+	if contentType1 != "text" {
+		t.Fatalf("second content part should be text block, got type %q", contentType1)
+	}
+	textContent := gjson.GetBytes(out, "messages.1.content.1.text").String()
+	if textContent != "answer text" {
+		t.Fatalf("text content = %q, want %q", textContent, "answer text")
+	}
+}
+
+func TestConvertReasoningToThinkingContent_ConvertsWhenThinkingTypeEnabled(t *testing.T) {
+	payload := []byte(`{
+		"thinking":{"type":"enabled"},
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"","reasoning_content":"my reasoning","tool_calls":[{"id":"c1","type":"function","function":{"name":"fn","arguments":"{}"}}]}
+		]
+	}`)
+
+	out := convertReasoningToThinkingContent(payload)
+
+	rc := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if rc != "my reasoning" {
+		t.Fatalf("reasoning_content should be preserved for backward compat, got %q", rc)
+	}
+
+	thinkingText := gjson.GetBytes(out, "messages.1.content.0.thinking").String()
+	if thinkingText != "my reasoning" {
+		t.Fatalf("thinking text = %q, want %q", thinkingText, "my reasoning")
+	}
+
+	if !gjson.GetBytes(out, "messages.1.tool_calls").Exists() {
+		t.Fatalf("tool_calls should be preserved")
+	}
+}
+
+func TestConvertReasoningToThinkingContent_PreservesContentArray(t *testing.T) {
+	payload := []byte(`{
+		"reasoning_effort":"medium",
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":[{"type":"text","text":"part1"},{"type":"text","text":"part2"}],"reasoning_content":"thinking here"}
+		]
+	}`)
+
+	out := convertReasoningToThinkingContent(payload)
+
+	numParts := len(gjson.GetBytes(out, "messages.1.content").Array())
+	if numParts != 3 {
+		t.Fatalf("expected 3 content parts (1 thinking + 2 text), got %d", numParts)
+	}
+
+	if gjson.GetBytes(out, "messages.1.content.0.type").String() != "thinking" {
+		t.Fatalf("first part should be thinking")
+	}
+	if gjson.GetBytes(out, "messages.1.content.1.text").String() != "part1" {
+		t.Fatalf("second part text should be part1")
+	}
+	if gjson.GetBytes(out, "messages.1.content.2.text").String() != "part2" {
+		t.Fatalf("third part text should be part2")
+	}
+}
+
+func TestConvertReasoningToThinkingContent_SkipsEmptyReasoning(t *testing.T) {
+	payload := []byte(`{
+		"reasoning_effort":"high",
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"answer","reasoning_content":""}
+		]
+	}`)
+
+	out := convertReasoningToThinkingContent(payload)
+
+	if gjson.GetBytes(out, "messages.1.content").IsArray() {
+		t.Fatalf("empty reasoning_content should not trigger conversion to content array")
+	}
+}
+
+func TestConvertReasoningToThinkingContent_SkipsNonAssistantMessages(t *testing.T) {
+	payload := []byte(`{
+		"reasoning_effort":"high",
+		"messages":[
+			{"role":"user","content":"hello","reasoning_content":"should be ignored"},
+			{"role":"assistant","content":"answer","reasoning_content":"valid reasoning"}
+		]
+	}`)
+
+	out := convertReasoningToThinkingContent(payload)
+
+	userRC := gjson.GetBytes(out, "messages.0.reasoning_content")
+	if !userRC.Exists() {
+		t.Fatalf("user message reasoning_content should not be touched")
+	}
+
+	assistantThinking := gjson.GetBytes(out, "messages.1.content.0.thinking").String()
+	if assistantThinking != "valid reasoning" {
+		t.Fatalf("assistant thinking = %q, want %q", assistantThinking, "valid reasoning")
+	}
+}
