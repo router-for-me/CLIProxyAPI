@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -130,5 +131,183 @@ func TestApplyPayloadConfigWithRoot_DisableImageGeneration_PayloadOverrideCanRes
 	}
 	if !gjson.GetBytes(out, "tool_choice").Exists() {
 		t.Fatalf("expected tool_choice to be restored by payload override")
+	}
+}
+
+func TestApplyPayloadConfigWithRequest_HeaderGateRequiresWildcardMatch(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{
+						{
+							Name:     "gpt-*",
+							Protocol: "openai",
+							Headers: map[string]string{
+								"X-Client-Tier": "tenant-*-region-*",
+							},
+						},
+					},
+					Params: map[string]any{
+						"metadata.enabled": true,
+					},
+				},
+			},
+		},
+	}
+	payload := []byte(`{"model":"gpt-5.4"}`)
+	headers := http.Header{}
+	headers.Set("X-Client-Tier", "tenant-alpha-region-us")
+
+	out := ApplyPayloadConfigWithRequest(cfg, "gpt-5.4", "openai", "responses", "", payload, nil, "", "", headers)
+	if !gjson.GetBytes(out, "metadata.enabled").Bool() {
+		t.Fatalf("expected header-matched payload rule to apply, payload=%s", string(out))
+	}
+
+	headers.Set("X-Client-Tier", "tenant-alpha")
+	out = ApplyPayloadConfigWithRequest(cfg, "gpt-5.4", "openai", "responses", "", payload, nil, "", "", headers)
+	if gjson.GetBytes(out, "metadata.enabled").Exists() {
+		t.Fatalf("expected header-mismatched payload rule to be skipped, payload=%s", string(out))
+	}
+}
+
+func TestApplyPayloadConfigWithRequest_FormProtocolGateUsesSourceProtocol(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{
+						{Name: "gpt-*", Protocol: "openai", FormProtocol: "responses"},
+					},
+					Params: map[string]any{
+						"metadata.source": "responses",
+					},
+				},
+				{
+					Models: []config.PayloadModelRule{
+						{Name: "gpt-*", Protocol: "openai", FormProtocol: "openai"},
+					},
+					Params: map[string]any{
+						"metadata.source": "openai",
+					},
+				},
+			},
+		},
+	}
+	payload := []byte(`{"model":"gpt-5.4"}`)
+
+	out := ApplyPayloadConfigWithRequest(cfg, "gpt-5.4", "openai", "openai-response", "", payload, nil, "", "", nil)
+	if got := gjson.GetBytes(out, "metadata.source").String(); got != "responses" {
+		t.Fatalf("metadata.source = %q, want responses; payload=%s", got, string(out))
+	}
+
+	out = ApplyPayloadConfigWithRequest(cfg, "gpt-5.4", "openai", "openai", "", payload, nil, "", "", nil)
+	if got := gjson.GetBytes(out, "metadata.source").String(); got != "openai" {
+		t.Fatalf("metadata.source = %q, want openai; payload=%s", got, string(out))
+	}
+}
+
+func TestApplyPayloadConfigWithRequest_PayloadConditionsNarrowRule(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{
+						{
+							Name: "gpt-*",
+							Match: []map[string]any{
+								{"metadata.client": "codex"},
+								{"tools.#(type==\"web_search\").enabled": true},
+							},
+							NotMatch: []map[string]any{
+								{"metadata.mode": "dev"},
+							},
+							Exist: []string{
+								"tools.#(type==\"web_search\").type",
+							},
+							NotExist: []string{
+								"metadata.missing",
+								"metadata.null_value",
+							},
+						},
+					},
+					Params: map[string]any{
+						"metadata.applied": true,
+					},
+				},
+			},
+		},
+	}
+	payload := []byte(`{"model":"gpt-5.4","metadata":{"client":"codex","mode":"prod","null_value":null},"tools":[{"type":"function"},{"type":"web_search","enabled":true}]}`)
+
+	out := ApplyPayloadConfigWithRequest(cfg, "gpt-5.4", "openai", "responses", "", payload, nil, "", "", nil)
+	if !gjson.GetBytes(out, "metadata.applied").Bool() {
+		t.Fatalf("expected payload condition-matched rule to apply, payload=%s", string(out))
+	}
+}
+
+func TestApplyPayloadConfigWithRequest_PayloadConditionsSkipRule(t *testing.T) {
+	testCases := []struct {
+		name  string
+		model config.PayloadModelRule
+	}{
+		{
+			name: "match mismatch",
+			model: config.PayloadModelRule{
+				Name:  "gpt-*",
+				Match: []map[string]any{{"metadata.client": "codex"}},
+			},
+		},
+		{
+			name: "not-match matched",
+			model: config.PayloadModelRule{
+				Name:     "gpt-*",
+				NotMatch: []map[string]any{{"metadata.mode": "dev"}},
+			},
+		},
+		{
+			name: "exist missing",
+			model: config.PayloadModelRule{
+				Name:  "gpt-*",
+				Exist: []string{"metadata.missing"},
+			},
+		},
+		{
+			name: "exist null",
+			model: config.PayloadModelRule{
+				Name:  "gpt-*",
+				Exist: []string{"metadata.null_value"},
+			},
+		},
+		{
+			name: "not-exist present",
+			model: config.PayloadModelRule{
+				Name:     "gpt-*",
+				NotExist: []string{"metadata.client"},
+			},
+		},
+	}
+	payload := []byte(`{"model":"gpt-5.4","metadata":{"client":"other","mode":"dev","null_value":null}}`)
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Payload: config.PayloadConfig{
+					Override: []config.PayloadRule{
+						{
+							Models: []config.PayloadModelRule{tc.model},
+							Params: map[string]any{
+								"metadata.applied": true,
+							},
+						},
+					},
+				},
+			}
+
+			out := ApplyPayloadConfigWithRequest(cfg, "gpt-5.4", "openai", "responses", "", payload, nil, "", "", nil)
+			if gjson.GetBytes(out, "metadata.applied").Exists() {
+				t.Fatalf("expected payload condition-mismatched rule to be skipped, payload=%s", string(out))
+			}
+		})
 	}
 }

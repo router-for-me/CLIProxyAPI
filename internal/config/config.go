@@ -344,6 +344,18 @@ type PayloadModelRule struct {
 	Name string `yaml:"name" json:"name"`
 	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
 	Protocol string `yaml:"protocol" json:"protocol"`
+	// Headers restricts the rule to requests whose headers match all configured wildcard patterns.
+	Headers map[string]string `yaml:"headers" json:"headers"`
+	// FormProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
+	FormProtocol string `yaml:"form-protocol" json:"form-protocol"`
+	// Match requires payload JSON paths to equal the configured values.
+	Match []map[string]any `yaml:"match" json:"match"`
+	// NotMatch requires payload JSON paths to not equal the configured values.
+	NotMatch []map[string]any `yaml:"not-match" json:"not-match"`
+	// Exist requires payload JSON paths to exist and not be null.
+	Exist []string `yaml:"exist" json:"exist"`
+	// NotExist requires payload JSON paths to be missing or null.
+	NotExist []string `yaml:"not-exist" json:"not-exist"`
 }
 
 // CloakConfig configures request cloaking for non-Claude-Code clients.

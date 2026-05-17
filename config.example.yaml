@@ -407,6 +407,17 @@ nonstream-keepalive-interval: 0
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
 #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           form-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, gemini, claude
+#           headers: # all configured request headers must match; values support "*" wildcards
+#             X-Client-Tier: "tenant-*-region-*"
+#           match: # all payload JSON paths must equal the configured values
+#             - "metadata.client": "codex"
+#           not-match: # payload JSON paths must not equal the configured values
+#             - "metadata.mode": "dev"
+#           exist: # all payload JSON paths must exist and not be null
+#             - "tools.#(type==\"web_search\").type"
+#           not-exist: # all payload JSON paths must be missing or null
+#             - "metadata.disable_payload"
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "generationConfig.thinkingConfig.thinkingBudget": 32768
 #   default-raw: # Default raw rules set parameters using raw JSON when missing (must be valid JSON).
