@@ -27,6 +27,14 @@ func NewClaudeAuthenticator() *ClaudeAuthenticator {
 	return &ClaudeAuthenticator{CallbackPort: 54545}
 }
 
+// claudeFileName returns the auth filename for a Claude account.
+func claudeFileName(email, label string) string {
+	if label != "" {
+		return fmt.Sprintf("claude-%s-%s.json", email, label)
+	}
+	return fmt.Sprintf("claude-%s.json", email)
+}
+
 func (a *ClaudeAuthenticator) Provider() string {
 	return "claude"
 }
@@ -204,10 +212,7 @@ waitForCallback:
 		return nil, fmt.Errorf("claude token storage missing account information")
 	}
 
-	fileName := fmt.Sprintf("claude-%s.json", tokenStorage.Email)
-	if opts.Label != "" {
-		fileName = fmt.Sprintf("claude-%s-%s.json", tokenStorage.Email, opts.Label)
-	}
+	fileName := claudeFileName(tokenStorage.Email, opts.Label)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}

@@ -38,15 +38,6 @@ func TestValidateLabel(t *testing.T) {
 
 func TestClaudeFilenameConstruction(t *testing.T) {
 	email := "user@example.com"
-
-	// no label: claude-<email>.json
-	withoutLabel := func(email, label string) string {
-		if label != "" {
-			return "claude-" + email + "-" + label + ".json"
-		}
-		return "claude-" + email + ".json"
-	}
-
 	cases := []struct {
 		label string
 		want  string
@@ -57,9 +48,9 @@ func TestClaudeFilenameConstruction(t *testing.T) {
 		{"my_team", "claude-user@example.com-my_team.json"},
 	}
 	for _, tc := range cases {
-		got := withoutLabel(email, tc.label)
+		got := claudeFileName(email, tc.label)
 		if got != tc.want {
-			t.Errorf("filename(%q) = %q, want %q", tc.label, got, tc.want)
+			t.Errorf("claudeFileName(%q, %q) = %q, want %q", email, tc.label, got, tc.want)
 		}
 	}
 }
