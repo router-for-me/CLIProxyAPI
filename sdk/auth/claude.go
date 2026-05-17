@@ -46,6 +46,10 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		opts = &LoginOptions{}
 	}
 
+	if err := ValidateLabel(opts.Label); err != nil {
+		return nil, err
+	}
+
 	callbackPort := a.CallbackPort
 	if opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort
@@ -201,6 +205,9 @@ waitForCallback:
 	}
 
 	fileName := fmt.Sprintf("claude-%s.json", tokenStorage.Email)
+	if opts.Label != "" {
+		fileName = fmt.Sprintf("claude-%s-%s.json", tokenStorage.Email, opts.Label)
+	}
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}

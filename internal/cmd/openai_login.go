@@ -24,6 +24,10 @@ type LoginOptions struct {
 
 	// Prompt allows the caller to provide interactive input when needed.
 	Prompt func(prompt string) (string, error)
+
+	// Label is appended to the auth filename so multiple accounts for the
+	// same provider can coexist in one auth-dir. See sdk/auth.LoginOptions.
+	Label string
 }
 
 // DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.

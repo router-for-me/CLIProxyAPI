@@ -24,6 +24,11 @@ func DoClaudeLogin(cfg *config.Config, options *LoginOptions) {
 		options = &LoginOptions{}
 	}
 
+	if err := sdkAuth.ValidateLabel(options.Label); err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	promptFn := options.Prompt
 	if promptFn == nil {
 		promptFn = defaultProjectPrompt()
@@ -36,6 +41,7 @@ func DoClaudeLogin(cfg *config.Config, options *LoginOptions) {
 		CallbackPort: options.CallbackPort,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
+		Label:        options.Label,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "claude", cfg, authOpts)
