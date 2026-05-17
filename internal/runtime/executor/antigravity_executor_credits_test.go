@@ -240,14 +240,15 @@ func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 			"base_url": server.URL,
 		},
 		Metadata: map[string]any{
-			"access_token": "token",
-			"project_id":   "project-1",
-			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			"access_token":  "token",
+			"project_id":    "project-1",
+			"expired":       time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			"enable_credit": true,
 		},
 	}
 
-	// Simulate conductor setting credits requested flag in context
-	ctx := cliproxyauth.WithAntigravityCredits(context.Background())
+	// With per-auth enable_credit in metadata, credits should be injected
+	ctx := context.Background()
 
 	resp, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   "claude-sonnet-4-6",
@@ -395,8 +396,9 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID: "auth-warm-token-credits",
 		Metadata: map[string]any{
-			"access_token": "token",
-			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			"access_token":  "token",
+			"expired":       time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			"enable_credit": true,
 		},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -448,6 +450,9 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-load-code-assist-ua",
 		Attributes: map[string]string{"user_agent": userAgent},
+		Metadata: map[string]any{
+			"enable_credit": true,
+		},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
