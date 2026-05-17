@@ -976,6 +976,7 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		}
 	}
 	// Antigravity wrapper: response.usageMetadata / response.usage_metadata
+	var sawGeminiMeta bool
 	for _, metaKey := range []string{"response.usageMetadata", "response.usage_metadata"} {
 		if meta := gjson.GetBytes(data, metaKey); meta.Exists() {
 			setFromPath := func(key, path string) {
@@ -990,6 +991,7 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 			setFromPath("total_tokens", "totalTokenCount")
 			setFromPath("reasoning_tokens", "thoughtsTokenCount")
 			setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
+			sawGeminiMeta = true
 			break
 		}
 	}
@@ -1009,6 +1011,7 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 			setFromPath("total_tokens", "totalTokenCount")
 			setFromPath("reasoning_tokens", "thoughtsTokenCount")
 			setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
+			sawGeminiMeta = true
 			break
 		}
 	}
@@ -1026,12 +1029,11 @@ func accumulateUsage(ginCtx *gin.Context, data []byte) {
 		outputSide = current["completion_tokens"]
 	}
 	// For Gemini, reasoning_tokens (thoughtsTokenCount) is separate from
-	// candidatesTokenCount and must be included. For OpenAI, reasoning_tokens
-	// is already a subset of output/completion and must not be added again.
-	// Heuristic: include it only when there are no output/completion tokens
-	// (pure Gemini metadata path where only prompt+candidates+thoughts exist).
+	// candidatesTokenCount and must be included in the fallback total.
+	// For OpenAI, reasoning_tokens is already a subset of output/completion
+	// and must not be added again. Use sawGeminiMeta to distinguish.
 	reasoningSide := int64(0)
-	if outputSide == 0 {
+	if sawGeminiMeta {
 		reasoningSide = current["reasoning_tokens"]
 	}
 	if derived := inputSide + outputSide + reasoningSide; derived > current["total_tokens"] {
