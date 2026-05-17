@@ -67,7 +67,7 @@ func SetModelRefreshCallback(cb ModelRefreshCallback) {
 func init() {
 	// Load embedded data as fallback on startup.
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
-		panic(fmt.Sprintf("registry: failed to parse embedded models.json: %v", err))
+		log.Warnf("registry: failed to parse embedded models.json (embedded catalog may be incomplete or invalid; continuing startup and will rely on remote model refresh): %v", err)
 	}
 }
 
