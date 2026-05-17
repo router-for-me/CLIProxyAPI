@@ -143,7 +143,7 @@ routing:
   session-affinity-ttl: "1h"
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
-ws-auth: false
+ws-auth: true
 
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.
