@@ -1238,7 +1238,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 	}
 	if lastErr != nil {
-		if shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
 				return resp, nil
 			}
@@ -1304,7 +1304,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
-		if shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
 				return result, nil
 			}
@@ -3587,6 +3587,15 @@ type creditsCandidateEntry struct {
 	provider string
 }
 
+func hasAntigravityProvider(providers []string) bool {
+	for _, p := range providers {
+		if strings.EqualFold(strings.TrimSpace(p), "antigravity") {
+			return true
+		}
+	}
+	return false
+}
+
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
 	status := statusCodeFromError(lastErr)
 	log.WithFields(log.Fields{
@@ -3596,18 +3605,6 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	}).Debug("shouldAttemptAntigravityCreditsFallback")
 	if m == nil || lastErr == nil {
 		return false
-	}
-	if len(providers) > 0 {
-		hasAntigravity := false
-		for _, p := range providers {
-			if strings.EqualFold(strings.TrimSpace(p), "antigravity") {
-				hasAntigravity = true
-				break
-			}
-		}
-		if !hasAntigravity {
-			return false
-		}
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits {
