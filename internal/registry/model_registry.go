@@ -746,6 +746,16 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		}
 	}
 
+	// Fallback: strip known model variant suffixes (e.g. "-customtools").
+	// These variants share the same provider as the base model.
+	if stripped := StripModelVariantSuffix(modelID); stripped != modelID {
+		for _, id := range models {
+			if strings.EqualFold(strings.TrimSpace(id), stripped) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
