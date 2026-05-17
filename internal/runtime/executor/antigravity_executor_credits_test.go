@@ -444,24 +444,25 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
 	exec := NewAntigravityExecutor(&config.Config{})
-	const userAgent = "antigravity/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
+	const configuredUserAgent = "antigravity/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
+	const loadCodeAssistUserAgent = "antigravity/1.23.2 windows/amd64"
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-load-code-assist-ua",
-		Attributes: map[string]string{"user_agent": userAgent},
+		Attributes: map[string]string{"user_agent": configuredUserAgent},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
-		if got := req.Header.Get("User-Agent"); got != userAgent {
-			t.Fatalf("User-Agent = %q, want %q", got, userAgent)
+		if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {
+			t.Fatalf("User-Agent = %q, want %q", got, loadCodeAssistUserAgent)
 		}
-		if got := req.Header.Get("X-Goog-Api-Client"); got != "gl-node/22.21.1" {
-			t.Fatalf("X-Goog-Api-Client = %q, want %q", got, "gl-node/22.21.1")
+		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
+			t.Fatalf("X-Goog-Api-Client = %q, want empty", got)
 		}
 		body, _ := io.ReadAll(req.Body)
 		_ = req.Body.Close()
-		if string(body) != `{"metadata":{"ide_name":"antigravity","ide_type":"ANTIGRAVITY","ide_version":"1.23.2"}}` {
+		if string(body) != `{"metadata":{"ideType":"ANTIGRAVITY"}}` {
 			t.Fatalf("loadCodeAssist body = %s", string(body))
 		}
 		return &http.Response{
