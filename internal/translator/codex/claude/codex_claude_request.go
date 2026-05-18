@@ -532,11 +532,10 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 }
 
 // normalizeToolParameters ensures object schemas contain at least an empty properties map.
+// NormalizeCodexToolSchema already handles invalid/empty/null inputs by returning a
+// safe default, so we delegate validation to it and then layer on the
+// "object schemas need a properties map" guarantee Codex expects.
 func normalizeToolParameters(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "null" || !gjson.Valid(raw) {
-		return `{"type":"object","properties":{}}`
-	}
 	schema := util.NormalizeCodexToolSchema(raw)
 	result := gjson.ParseBytes(schema)
 	schemaType := result.Get("type").String()
