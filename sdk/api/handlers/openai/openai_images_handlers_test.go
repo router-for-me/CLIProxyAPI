@@ -405,6 +405,63 @@ func TestImagesEditsJSONOpenAICompatModelSkipsNativeProvider(t *testing.T) {
 	}
 }
 
+func TestImagesGenerationsOpenAICompatRejectsNonImageModel(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "openrouter"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "compat-chat-auth", Provider: "openrouter", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "chat-model", Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"chat-model","prompt":"draw this"}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	assertUnsupportedImagesModelResponse(t, resp, "chat-model")
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	}
+}
+
+func TestImagesGenerationsOpenAICompatAllowsGPTImageAlias(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "openai-compat"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "compat-gpt-image-auth", Provider: "openai-compat", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: defaultImagesToolModel, Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"gpt-image-2","prompt":"draw this"}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if executor.alt != "images/generations" {
+		t.Fatalf("alt = %q, want images/generations", executor.alt)
+	}
+}
+
 func TestImagesEditsJSONOpenAICompatAcceptsLegacyXAIImageShape(t *testing.T) {
 	executor := &imagesCaptureExecutor{id: "xai"}
 	manager := coreauth.NewManager(nil, nil, nil)

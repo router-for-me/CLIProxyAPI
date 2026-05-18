@@ -546,10 +546,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManagerProviders(ctx context.Context, ha
 	if len(providers) == 0 {
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
-	_, normalizedModel, errMsg := h.getRequestDetails(modelName)
-	if errMsg != nil {
-		return nil, nil, errMsg
-	}
+	normalizedModel := h.normalizeRequestModelName(modelName)
 	return h.executeWithAuthManagerProviders(ctx, handlerType, modelName, normalizedModel, rawJSON, alt, providers)
 }
 
@@ -863,27 +860,7 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	resolvedModelName := modelName
-	initialSuffix := thinking.ParseSuffix(modelName)
-	if initialSuffix.ModelName == "auto" {
-		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-			resolvedModelName = modelName
-		} else {
-			resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
-			if initialSuffix.HasSuffix {
-				resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
-			} else {
-				resolvedModelName = resolvedBase
-			}
-		}
-	} else {
-		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-			resolvedModelName = modelName
-		} else {
-			resolvedModelName = util.ResolveAutoModel(modelName)
-		}
-	}
-
+	resolvedModelName := h.normalizeRequestModelName(modelName)
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
@@ -915,6 +892,30 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func (h *BaseAPIHandler) normalizeRequestModelName(modelName string) string {
+	resolvedModelName := modelName
+	initialSuffix := thinking.ParseSuffix(modelName)
+	if initialSuffix.ModelName == "auto" {
+		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+			resolvedModelName = modelName
+		} else {
+			resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+			if initialSuffix.HasSuffix {
+				resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
+			} else {
+				resolvedModelName = resolvedBase
+			}
+		}
+	} else {
+		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+			resolvedModelName = modelName
+		} else {
+			resolvedModelName = util.ResolveAutoModel(modelName)
+		}
+	}
+	return resolvedModelName
 }
 
 func cloneBytes(src []byte) []byte {

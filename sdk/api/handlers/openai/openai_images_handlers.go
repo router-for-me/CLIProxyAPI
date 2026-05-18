@@ -496,6 +496,9 @@ func (h *OpenAIAPIHandler) openAICompatImageProviders(model string) []string {
 		return nil
 	}
 	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if !isOpenAICompatImageCapableModel(model) {
+		return nil
+	}
 	providers := make([]string, 0)
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(model) {
 		info := registry.GetGlobalRegistry().GetModelInfo(model, provider)
@@ -508,6 +511,11 @@ func (h *OpenAIAPIHandler) openAICompatImageProviders(model string) []string {
 
 func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
 	return len(h.openAICompatImageProviders(model)) > 0
+}
+
+func isOpenAICompatImageCapableModel(model string) bool {
+	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	return strings.EqualFold(model, defaultImagesToolModel) || isXAIImagesModel(model)
 }
 
 func rejectOpenAICompatImageStreaming(c *gin.Context, stream bool) bool {
