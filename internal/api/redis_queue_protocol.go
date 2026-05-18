@@ -14,6 +14,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const redisUsageChannel = "usage"
+
+type redisSubscriptionCommand struct {
+	args []string
+	err  error
+}
+
 func isRedisRESPPrefix(prefix byte) bool {
 	switch prefix {
 	case '*', '$', '+', '-', ':':
@@ -131,6 +138,41 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 			if !flush() {
 				return
 			}
+		case "SUBSCRIBE":
+			if !authed {
+				_ = writeRedisError(writer, "NOAUTH Authentication required.")
+				if !flush() {
+					return
+				}
+				continue
+			}
+			channel, ok := parseSubscribeChannel(args)
+			if !ok {
+				_ = writeRedisError(writer, "ERR wrong number of arguments for 'subscribe' command")
+				if !flush() {
+					return
+				}
+				continue
+			}
+			if !strings.EqualFold(channel, redisUsageChannel) {
+				_ = writeRedisError(writer, fmt.Sprintf("ERR unsupported channel '%s'", channel))
+				if !flush() {
+					return
+				}
+				continue
+			}
+			messages, unsubscribe := redisqueue.SubscribeUsage()
+			if errWrite := writeRedisPubSubSubscribe(writer, redisUsageChannel, 1); errWrite != nil {
+				unsubscribe()
+				log.Errorf("redis protocol subscribe response error: %v", errWrite)
+				return
+			}
+			if !flush() {
+				unsubscribe()
+				return
+			}
+			s.streamRedisUsageSubscription(reader, writer, messages, unsubscribe)
+			return
 		case "LPOP", "RPOP":
 			if !authed {
 				_ = writeRedisError(writer, "NOAUTH Authentication required.")
@@ -182,6 +224,101 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 	}
 }
 
+func (s *Server) streamRedisUsageSubscription(reader *bufio.Reader, writer *bufio.Writer, messages <-chan []byte, unsubscribe func()) {
+	if unsubscribe == nil {
+		return
+	}
+	defer unsubscribe()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	commands := make(chan redisSubscriptionCommand, 1)
+	go readRedisSubscriptionCommands(reader, commands, done)
+
+	for {
+		select {
+		case msg, ok := <-messages:
+			if !ok {
+				return
+			}
+			if errWrite := writeRedisPubSubMessage(writer, redisUsageChannel, msg); errWrite != nil {
+				log.Errorf("redis protocol publish message error: %v", errWrite)
+				return
+			}
+			if errFlush := writer.Flush(); errFlush != nil {
+				log.Errorf("redis protocol flush error: %v", errFlush)
+				return
+			}
+		case command, ok := <-commands:
+			if !ok {
+				return
+			}
+			keepOpen := handleRedisSubscriptionCommand(writer, command)
+			if errFlush := writer.Flush(); errFlush != nil {
+				log.Errorf("redis protocol flush error: %v", errFlush)
+				return
+			}
+			if !keepOpen {
+				return
+			}
+		}
+	}
+}
+
+func readRedisSubscriptionCommands(reader *bufio.Reader, commands chan<- redisSubscriptionCommand, done <-chan struct{}) {
+	defer close(commands)
+
+	for {
+		args, err := readRESPArray(reader)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				select {
+				case commands <- redisSubscriptionCommand{err: err}:
+				case <-done:
+				}
+			}
+			return
+		}
+		select {
+		case commands <- redisSubscriptionCommand{args: args}:
+		case <-done:
+			return
+		}
+	}
+}
+
+func handleRedisSubscriptionCommand(writer *bufio.Writer, command redisSubscriptionCommand) bool {
+	if command.err != nil {
+		_ = writeRedisError(writer, "ERR "+command.err.Error())
+		return false
+	}
+	if len(command.args) == 0 {
+		_ = writeRedisError(writer, "ERR empty command")
+		return true
+	}
+
+	cmd := strings.ToUpper(strings.TrimSpace(command.args[0]))
+	switch cmd {
+	case "PING":
+		payload := []byte(nil)
+		if len(command.args) > 1 {
+			payload = []byte(command.args[1])
+		}
+		_ = writeRedisPubSubPong(writer, payload)
+		return true
+	case "UNSUBSCRIBE":
+		_ = writeRedisPubSubUnsubscribe(writer, redisUsageChannel, 0)
+		return false
+	case "QUIT":
+		_ = writeRedisSimpleString(writer, "OK")
+		return false
+	default:
+		_ = writeRedisError(writer, fmt.Sprintf("ERR unknown command '%s'", strings.ToLower(cmd)))
+		return true
+	}
+}
+
 func resolveRemoteIP(addr net.Addr) (ip string, localClient bool) {
 	if addr == nil {
 		return "", false
@@ -230,6 +367,13 @@ func parseAuthPassword(args []string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func parseSubscribeChannel(args []string) (string, bool) {
+	if len(args) != 2 {
+		return "", false
+	}
+	return strings.TrimSpace(args[1]), true
 }
 
 func parsePopCount(args []string) (count int, hasCount bool, ok bool) {
@@ -374,4 +518,69 @@ func writeRedisArrayOfBulkStrings(writer *bufio.Writer, items [][]byte) error {
 		}
 	}
 	return nil
+}
+
+func writeRedisInteger(writer *bufio.Writer, value int) error {
+	if writer == nil {
+		return net.ErrClosed
+	}
+	_, err := writer.WriteString(":" + strconv.Itoa(value) + "\r\n")
+	return err
+}
+
+func writeRedisArrayHeader(writer *bufio.Writer, count int) error {
+	if writer == nil {
+		return net.ErrClosed
+	}
+	_, err := writer.WriteString("*" + strconv.Itoa(count) + "\r\n")
+	return err
+}
+
+func writeRedisPubSubSubscribe(writer *bufio.Writer, channel string, count int) error {
+	if err := writeRedisArrayHeader(writer, 3); err != nil {
+		return err
+	}
+	if err := writeRedisBulkString(writer, []byte("subscribe")); err != nil {
+		return err
+	}
+	if err := writeRedisBulkString(writer, []byte(channel)); err != nil {
+		return err
+	}
+	return writeRedisInteger(writer, count)
+}
+
+func writeRedisPubSubUnsubscribe(writer *bufio.Writer, channel string, count int) error {
+	if err := writeRedisArrayHeader(writer, 3); err != nil {
+		return err
+	}
+	if err := writeRedisBulkString(writer, []byte("unsubscribe")); err != nil {
+		return err
+	}
+	if err := writeRedisBulkString(writer, []byte(channel)); err != nil {
+		return err
+	}
+	return writeRedisInteger(writer, count)
+}
+
+func writeRedisPubSubMessage(writer *bufio.Writer, channel string, payload []byte) error {
+	if err := writeRedisArrayHeader(writer, 3); err != nil {
+		return err
+	}
+	if err := writeRedisBulkString(writer, []byte("message")); err != nil {
+		return err
+	}
+	if err := writeRedisBulkString(writer, []byte(channel)); err != nil {
+		return err
+	}
+	return writeRedisBulkString(writer, payload)
+}
+
+func writeRedisPubSubPong(writer *bufio.Writer, payload []byte) error {
+	if err := writeRedisArrayHeader(writer, 2); err != nil {
+		return err
+	}
+	if err := writeRedisBulkString(writer, []byte("pong")); err != nil {
+		return err
+	}
+	return writeRedisBulkString(writer, payload)
 }

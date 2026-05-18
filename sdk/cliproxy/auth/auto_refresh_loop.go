@@ -339,6 +339,9 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
+	if hasUnauthorizedAuthFailure(auth) {
+		return time.Time{}, false
+	}
 
 	accountType, _ := auth.AccountInfo()
 	if accountType == "api_key" {
