@@ -247,18 +247,6 @@ func main() {
 	// Parse the command-line flags.
 	flag.Parse()
 
-	// Allow env var fallback for home flags so they can be configured without command args.
-	if strings.TrimSpace(homeAddr) == "" {
-		if v, ok := os.LookupEnv("HOME_ADDR"); ok {
-			homeAddr = strings.TrimSpace(v)
-		}
-	}
-	if strings.TrimSpace(homePassword) == "" {
-		if v, ok := os.LookupEnv("HOME_PASSWORD"); ok {
-			homePassword = strings.TrimSpace(v)
-		}
-	}
-
 	// Core application variables.
 	var err error
 	var cfg *config.Config
@@ -311,6 +299,19 @@ func main() {
 		return "", false
 	}
 	writableBase := util.WritablePath()
+
+	// Allow env var fallback for home flags so they can be configured without command args.
+	if strings.TrimSpace(homeAddr) == "" {
+		if v, ok := lookupEnv("HOME_ADDR", "home_addr"); ok {
+			homeAddr = v
+		}
+	}
+	if strings.TrimSpace(homePassword) == "" {
+		if v, ok := lookupEnv("HOME_PASSWORD", "home_password"); ok {
+			homePassword = v
+		}
+	}
+
 	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
 		usePostgresStore = true
 		pgStoreDSN = value
