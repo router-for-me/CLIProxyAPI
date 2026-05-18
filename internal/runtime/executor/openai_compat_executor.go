@@ -506,6 +506,10 @@ func xAIImageSizeMapping(size string) (aspectRatio, resolution string, ok bool) 
 		return "16:9", "1k", true
 	case "1024x1792":
 		return "9:16", "1k", true
+	case "1536x1024":
+		return "3:2", "1k", true
+	case "1024x1536":
+		return "2:3", "1k", true
 	case "2048x2048":
 		return "1:1", "2k", true
 	}

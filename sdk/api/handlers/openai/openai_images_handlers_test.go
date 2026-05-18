@@ -355,6 +355,40 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 	}
 }
 
+func TestImagesEditsJSONOpenAICompatAcceptsLegacyXAIImageShape(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "xai"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "xai-images-edit-legacy-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "grok-imagine-image-quality", Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","image":{"url":"data:image/png;base64,AA=="},"size":"1536x1024"}`)
+
+	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if got := gjson.GetBytes(executor.payload, "image.url").String(); got != "data:image/png;base64,AA==" {
+		t.Fatalf("payload image url = %q; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "size").String(); got != "1536x1024" {
+		t.Fatalf("payload size = %q, want 1536x1024; body=%s", got, string(executor.payload))
+	}
+}
+
 func TestImagesEditsJSONRejectsStreamingOpenAICompatModel(t *testing.T) {
 	executor := &imagesCaptureExecutor{id: "xai"}
 	manager := coreauth.NewManager(nil, nil, nil)

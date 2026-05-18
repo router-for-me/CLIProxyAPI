@@ -365,7 +365,8 @@ func TestXAIImageSizeMapping(t *testing.T) {
 		{size: "1280x1280", ok: false},
 		{size: "1536x1536", ok: false},
 		{size: "2048x2048", aspectRatio: "1:1", resolution: "2k", ok: true},
-		{size: "1536x1024", ok: false},
+		{size: "1536x1024", aspectRatio: "3:2", resolution: "1k", ok: true},
+		{size: "1024x1536", aspectRatio: "2:3", resolution: "1k", ok: true},
 		{size: "4096x4096", ok: false},
 	}
 	for _, tt := range tests {
