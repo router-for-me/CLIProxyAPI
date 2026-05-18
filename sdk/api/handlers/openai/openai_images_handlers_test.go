@@ -229,6 +229,68 @@ func TestImagesGenerationsRoutesOpenAICompatModelThroughAuthManager(t *testing.T
 	}
 }
 
+func TestImagesGenerationsRoutesSuffixedOpenAICompatModelThroughAuthManager(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "xai"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "xai-images-suffix-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "grok-imagine-image-quality", Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality(high)","prompt":"draw a square","size":"1024x1024"}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if executor.alt != "images/generations" {
+		t.Fatalf("alt = %q, want images/generations", executor.alt)
+	}
+}
+
+func TestImagesGenerationsRejectsStreamingOpenAICompatModel(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "xai"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "xai-images-stream-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "grok-imagine-image-quality", Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"draw a square","stream":true}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	}
+	if got := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); !strings.Contains(got, "stream is not supported") {
+		t.Fatalf("error message = %q", got)
+	}
+}
+
 func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) {
 	executor := &imagesCaptureExecutor{id: "xai"}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -290,6 +352,37 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 	}
 	if got := gjson.GetBytes(resp.Body.Bytes(), "data.0.url").String(); got != "https://example.test/image.png" {
 		t.Fatalf("response url = %q", got)
+	}
+}
+
+func TestImagesEditsJSONRejectsStreamingOpenAICompatModel(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "xai"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "xai-images-edit-stream-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "grok-imagine-image-quality", Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}],"stream":true}`)
+
+	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	}
+	if got := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); !strings.Contains(got, "stream is not supported") {
+		t.Fatalf("error message = %q", got)
 	}
 }
 

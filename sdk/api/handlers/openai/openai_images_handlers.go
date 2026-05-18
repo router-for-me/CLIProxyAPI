@@ -17,6 +17,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -435,6 +436,9 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		imageModel = defaultImagesToolModel
 	}
 	if h.isOpenAICompatImagesModel(imageModel) {
+		if rejectOpenAICompatImageStreaming(c, gjson.GetBytes(rawJSON, "stream").Bool()) {
+			return
+		}
 		h.forwardOpenAICompatImageGeneration(c, imageModel, rawJSON)
 		return
 	}
@@ -510,6 +514,7 @@ func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
 	if model == "" {
 		return false
 	}
+	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(model) {
 		info := registry.GetGlobalRegistry().GetModelInfo(model, provider)
 		if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
@@ -517,6 +522,19 @@ func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
 		}
 	}
 	return false
+}
+
+func rejectOpenAICompatImageStreaming(c *gin.Context, stream bool) bool {
+	if !stream {
+		return false
+	}
+	c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{
+			Message: "Invalid request: stream is not supported for OpenAI-compatible image models",
+			Type:    "invalid_request_error",
+		},
+	})
+	return true
 }
 
 func (h *OpenAIAPIHandler) forwardOpenAICompatImageGeneration(c *gin.Context, model string, rawJSON []byte) {
@@ -662,6 +680,9 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 
 	if openAICompatImageModel {
+		if rejectOpenAICompatImageStreaming(c, stream) {
+			return
+		}
 		rawJSON, err := buildOpenAICompatImageEditRequest(imageModel, prompt, images, maskDataURL, openAICompatMultipartImageEditOptions(c))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -829,6 +850,9 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 
 	if openAICompatImageModel {
+		if rejectOpenAICompatImageStreaming(c, stream) {
+			return
+		}
 		editJSON, err := buildOpenAICompatImageEditRequest(
 			imageModel,
 			prompt,
