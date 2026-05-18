@@ -299,6 +299,19 @@ func main() {
 		return "", false
 	}
 	writableBase := util.WritablePath()
+
+	// Allow env var fallback for home flags so they can be configured without command args.
+	if strings.TrimSpace(homeAddr) == "" {
+		if v, ok := lookupEnv("HOME_ADDR", "home_addr"); ok {
+			homeAddr = v
+		}
+	}
+	if strings.TrimSpace(homePassword) == "" {
+		if v, ok := lookupEnv("HOME_PASSWORD", "home_password"); ok {
+			homePassword = v
+		}
+	}
+
 	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
 		usePostgresStore = true
 		pgStoreDSN = value
