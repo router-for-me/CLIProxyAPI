@@ -29,6 +29,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/router-for-me/CLIProxyAPI/v7/examples/langfuse-plugin/langfuse"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
