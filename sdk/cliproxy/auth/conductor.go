@@ -2960,8 +2960,14 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			tried[selected.ID] = struct{}{}
 			continue
 		}
+		authID := selected.ID
 		selected = m.refreshAuthIfNeeded(ctx, selected)
+		m.mu.RLock()
+		if fresh, ok := m.auths[authID]; ok && fresh != nil {
+			selected = fresh
+		}
 		authCopy := selected.Clone()
+		m.mu.RUnlock()
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -3155,8 +3161,14 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
+		authID := selected.ID
 		selected = m.refreshAuthIfNeeded(ctx, selected)
+		m.mu.RLock()
+		if fresh, ok := m.auths[authID]; ok && fresh != nil {
+			selected = fresh
+		}
 		authCopy := selected.Clone()
+		m.mu.RUnlock()
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -3942,7 +3954,7 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 	if !needs {
 		return auth
 	}
-	m.lazyRefreshAuth(ctx, auth.ID)
+	m.lazyRefreshAuth(auth.ID)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if fresh, ok := m.auths[auth.ID]; ok && fresh != nil {
@@ -3951,11 +3963,14 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 	return auth
 }
 
-func (m *Manager) lazyRefreshAuth(ctx context.Context, id string) {
-	m.lazyRefreshGroup.Do(id, func() (any, error) {
+func (m *Manager) lazyRefreshAuth(id string) {
+	_, err, _ := m.lazyRefreshGroup.Do(id, func() (any, error) {
 		m.refreshAuth(context.Background(), id)
 		return nil, nil
 	})
+	if err != nil {
+		log.Debugf("lazyRefreshAuth singleflight error for %s: %v", id, err)
+	}
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
