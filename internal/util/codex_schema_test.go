@@ -110,6 +110,69 @@ func TestNormalizeCodexToolSchema_NumericPropertyName(t *testing.T) {
 	}
 }
 
+// TestNormalizeCodexToolSchema_SignedNumericPropertyName verifies that signed
+// integer property names ("-1", "+1") are forced into object-key path lookup
+// rather than being interpreted as path tokens (e.g. negative array indices).
+func TestNormalizeCodexToolSchema_SignedNumericPropertyName(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"negative", "-1"},
+		{"positive", "+1"},
+		{"negative multi-digit", "-123"},
+		{"positive multi-digit", "+42"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"type":"object","properties":{"` + tc.key + `":{"type":"object","required":null,"description":"d"}}}`
+			got := NormalizeCodexToolSchema(input)
+			if !gjson.ValidBytes(got) {
+				t.Fatalf("output is not valid JSON: %s", got)
+			}
+			path := `properties.` + tc.key
+			if !gjson.GetBytes(got, path).Exists() {
+				t.Errorf("expected %s preserved, output: %s", path, got)
+			}
+			if gjson.GetBytes(got, path+".required").Exists() {
+				t.Errorf("expected %s.required removed, output: %s", path, got)
+			}
+			if gjson.GetBytes(got, path+".description").String() != "d" {
+				t.Errorf("expected %s.description preserved, output: %s", path, got)
+			}
+		})
+	}
+}
+
+// TestIsCodexNumericPathKey locks the predicate's contract so signed integer
+// keys are recognised but lone signs and non-numeric input are not.
+func TestIsCodexNumericPathKey(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false},
+		{"0", true},
+		{"123", true},
+		{"-1", true},
+		{"+1", true},
+		{"-123", true},
+		{"+42", true},
+		{"-", false},
+		{"+", false},
+		{"--1", false},
+		{"1-", false},
+		{"1.0", false},
+		{"abc", false},
+		{"1a", false},
+	}
+	for _, tc := range cases {
+		if got := isCodexNumericPathKey(tc.in); got != tc.want {
+			t.Errorf("isCodexNumericPathKey(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestNormalizeCodexToolSchema_SpecialCharPropertyNames ensures property names
 // containing characters with special meaning in sjson paths (\ . * ? :) are
 // escaped correctly so the cleanup still locates and deletes the null fields.

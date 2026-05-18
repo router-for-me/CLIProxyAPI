@@ -114,7 +114,14 @@ func isCodexNumericPathKey(key string) bool {
 	if key == "" {
 		return false
 	}
-	for i := 0; i < len(key); i++ {
+	start := 0
+	if key[0] == '-' || key[0] == '+' {
+		if len(key) == 1 {
+			return false
+		}
+		start = 1
+	}
+	for i := start; i < len(key); i++ {
 		if key[i] < '0' || key[i] > '9' {
 			return false
 		}
