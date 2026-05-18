@@ -136,6 +136,56 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
+	longID := "toolu_" + strings.Repeat("a", 62)
+	if len(longID) <= 64 {
+		t.Fatalf("test setup error: longID length = %d, want > 64", len(longID))
+	}
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{"role": "user", "content": [{"type":"text","text":"run pwd"}]},
+			{"role": "assistant", "content": [
+				{"type":"tool_use","id":"` + longID + `","name":"Bash","input":{"cmd":"pwd"}}
+			]},
+			{"role": "user", "content": [
+				{"type":"tool_result","tool_use_id":"` + longID + `","content":"ok"}
+			]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+
+	var callID string
+	var outputCallID string
+	for _, item := range inputs {
+		switch item.Get("type").String() {
+		case "function_call":
+			callID = item.Get("call_id").String()
+		case "function_call_output":
+			outputCallID = item.Get("call_id").String()
+		}
+	}
+
+	if callID == "" {
+		t.Fatalf("missing function_call item. Output: %s", string(result))
+	}
+	if outputCallID == "" {
+		t.Fatalf("missing function_call_output item. Output: %s", string(result))
+	}
+	if callID != outputCallID {
+		t.Fatalf("call_id mismatch: function_call=%q function_call_output=%q. Output: %s", callID, outputCallID, string(result))
+	}
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if callID == longID {
+		t.Fatalf("long call_id was not shortened: %q", callID)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ToolChoiceModeMapping(t *testing.T) {
 	tests := []struct {
 		name                string
