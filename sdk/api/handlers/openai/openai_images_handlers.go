@@ -495,15 +495,25 @@ func (h *OpenAIAPIHandler) openAICompatImageProviders(model string) []string {
 	if model == "" {
 		return nil
 	}
-	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
 	if !isOpenAICompatImageCapableModel(model) {
 		return nil
 	}
 	providers := make([]string, 0)
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(model) {
-		info := registry.GetGlobalRegistry().GetModelInfo(model, provider)
-		if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
-			providers = append(providers, provider)
+	seen := make(map[string]struct{})
+	for _, modelID := range openAICompatImageProviderLookupModels(model) {
+		for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelID) {
+			providerKey := strings.TrimSpace(provider)
+			if providerKey == "" {
+				continue
+			}
+			if _, ok := seen[providerKey]; ok {
+				continue
+			}
+			info := registry.GetGlobalRegistry().GetModelInfo(modelID, providerKey)
+			if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
+				seen[providerKey] = struct{}{}
+				providers = append(providers, providerKey)
+			}
 		}
 	}
 	return providers
@@ -515,7 +525,32 @@ func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
 
 func isOpenAICompatImageCapableModel(model string) bool {
 	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if slash := strings.LastIndex(model, "/"); slash >= 0 {
+		model = strings.TrimSpace(model[slash+1:])
+	}
 	return strings.EqualFold(model, defaultImagesToolModel) || isXAIImagesModel(model)
+}
+
+func openAICompatImageProviderLookupModels(model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	models := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	for _, candidate := range []string{baseModel, model} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		models = append(models, candidate)
+	}
+	return models
 }
 
 func rejectOpenAICompatImageStreaming(c *gin.Context, stream bool) bool {
@@ -986,7 +1021,7 @@ func applyOpenAICompatImageEditMask(req []byte, mask *string) []byte {
 
 func openAICompatJSONImageEditOptions(rawJSON []byte) []byte {
 	out := []byte(`{}`)
-	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation"} {
+	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation", "aspect_ratio", "resolution"} {
 		if value := strings.TrimSpace(gjson.GetBytes(rawJSON, field).String()); value != "" {
 			out, _ = sjson.SetBytes(out, field, value)
 		}
@@ -1001,7 +1036,7 @@ func openAICompatJSONImageEditOptions(rawJSON []byte) []byte {
 
 func openAICompatMultipartImageEditOptions(c *gin.Context) []byte {
 	out := []byte(`{}`)
-	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation"} {
+	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation", "aspect_ratio", "resolution"} {
 		if value := strings.TrimSpace(c.PostForm(field)); value != "" {
 			out, _ = sjson.SetBytes(out, field, value)
 		}
@@ -1018,7 +1053,7 @@ func applyOpenAICompatImageEditOptions(req []byte, options []byte) []byte {
 	if len(options) == 0 || !json.Valid(options) {
 		return req
 	}
-	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation"} {
+	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation", "aspect_ratio", "resolution"} {
 		if value := strings.TrimSpace(gjson.GetBytes(options, field).String()); value != "" {
 			req, _ = sjson.SetBytes(req, field, value)
 		}

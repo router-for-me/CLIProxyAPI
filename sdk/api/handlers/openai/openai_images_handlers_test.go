@@ -311,7 +311,7 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	handler := NewOpenAIAPIHandler(base)
-	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}],"mask":{"image_url":"data:image/png;base64,BB=="},"size":"1024x1024","quality":"high","background":"transparent","output_format":"png","response_format":"url","input_fidelity":"high","moderation":"low","output_compression":80,"partial_images":2,"n":3}`)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}],"mask":{"image_url":"data:image/png;base64,BB=="},"size":"1024x1024","quality":"high","background":"transparent","output_format":"png","response_format":"url","input_fidelity":"high","moderation":"low","aspect_ratio":"3:2","resolution":"2k","output_compression":80,"partial_images":2,"n":3}`)
 
 	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
 
@@ -344,6 +344,8 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 		"response_format": "url",
 		"input_fidelity":  "high",
 		"moderation":      "low",
+		"aspect_ratio":    "3:2",
+		"resolution":      "2k",
 	} {
 		if got := gjson.GetBytes(executor.payload, field).String(); got != want {
 			t.Fatalf("payload %s = %q, want %q; body=%s", field, got, want, string(executor.payload))
@@ -462,6 +464,70 @@ func TestImagesGenerationsOpenAICompatAllowsGPTImageAlias(t *testing.T) {
 	}
 }
 
+func TestImagesGenerationsOpenAICompatAllowsPrefixedImageModels(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "team-a"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "compat-prefixed-image-auth", Provider: "team-a", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: "team-a/gpt-image-2", Type: "openai-compatibility"},
+		{ID: "team-a/grok-imagine-image-quality", Type: "openai-compatibility"},
+	})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+
+	gptResp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", strings.NewReader(`{"model":"team-a/gpt-image-2","prompt":"draw this"}`), handler.ImagesGenerations)
+	if gptResp.Code != http.StatusOK {
+		t.Fatalf("gpt-image-2 status = %d, want %d: %s", gptResp.Code, http.StatusOK, gptResp.Body.String())
+	}
+
+	xaiResp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", strings.NewReader(`{"model":"team-a/grok-imagine-image-quality","prompt":"draw this"}`), handler.ImagesGenerations)
+
+	if xaiResp.Code != http.StatusOK {
+		t.Fatalf("xai status = %d, want %d: %s", xaiResp.Code, http.StatusOK, xaiResp.Body.String())
+	}
+	if executor.calls != 2 {
+		t.Fatalf("executor calls = %d, want 2", executor.calls)
+	}
+}
+
+func TestImagesGenerationsOpenAICompatPreservesFullSuffixedModelLookup(t *testing.T) {
+	executor := &imagesCaptureExecutor{id: "team-a"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	model := "team-a/grok-imagine-image-quality(custom)"
+	auth := &coreauth.Auth{ID: "compat-suffixed-image-auth", Provider: "team-a", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model, Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"team-a/grok-imagine-image-quality(custom)","prompt":"draw this"}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+}
+
 func TestImagesEditsJSONOpenAICompatAcceptsLegacyXAIImageShape(t *testing.T) {
 	executor := &imagesCaptureExecutor{id: "xai"}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -555,6 +621,12 @@ func TestImagesEditsMultipartRoutesOpenAICompatModelThroughAuthManager(t *testin
 	if err := writer.WriteField("quality", "high"); err != nil {
 		t.Fatalf("write quality field: %v", err)
 	}
+	if err := writer.WriteField("aspect_ratio", "3:2"); err != nil {
+		t.Fatalf("write aspect_ratio field: %v", err)
+	}
+	if err := writer.WriteField("resolution", "2k"); err != nil {
+		t.Fatalf("write resolution field: %v", err)
+	}
 	if err := writer.WriteField("response_format", "url"); err != nil {
 		t.Fatalf("write response_format field: %v", err)
 	}
@@ -606,6 +678,12 @@ func TestImagesEditsMultipartRoutesOpenAICompatModelThroughAuthManager(t *testin
 	}
 	if got := gjson.GetBytes(executor.payload, "response_format").String(); got != "url" {
 		t.Fatalf("payload response_format = %q, want url; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "aspect_ratio").String(); got != "3:2" {
+		t.Fatalf("payload aspect_ratio = %q, want 3:2; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "resolution").String(); got != "2k" {
+		t.Fatalf("payload resolution = %q, want 2k; body=%s", got, string(executor.payload))
 	}
 	if got := gjson.GetBytes(executor.payload, "output_compression").Int(); got != 75 {
 		t.Fatalf("payload output_compression = %d, want 75; body=%s", got, string(executor.payload))
