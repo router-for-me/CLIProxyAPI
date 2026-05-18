@@ -58,6 +58,51 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"AA=="}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"compat/gpt-image-2","prompt":"draw a square","stream":true}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Stream:       false,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/images/generations" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/images/generations")
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-2" {
+		t.Fatalf("model = %q, want gpt-image-2; body=%s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "stream").Exists() {
+		t.Fatalf("stream should be removed for image passthrough: %s", string(gotBody))
+	}
+	if string(resp.Payload) != `{"created":123,"data":[{"b64_json":"AA=="}]}` {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
 func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
