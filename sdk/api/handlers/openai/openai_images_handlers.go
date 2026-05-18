@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -199,32 +200,11 @@ func xaiImagesAspectRatio(raw string, fallback string) string {
 }
 
 func xaiImagesAspectRatioFromSize(size string, fallback string) string {
-	size = strings.ToLower(strings.TrimSpace(size))
-	switch size {
-	case "1024x1024", "2048x2048", "1:1":
-		return "1:1"
-	case "1792x1024", "16:9":
-		return "16:9"
-	case "1024x1792", "9:16":
-		return "9:16"
-	case "1536x1024", "3:2":
-		return "3:2"
-	case "1024x1536", "2:3":
-		return "2:3"
-	default:
-		return fallback
-	}
+	return util.XAIImageAspectRatioFromSize(size, fallback)
 }
 
 func xaiImagesResolution(raw string, size string, fallback string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1k", "2k":
-		return strings.ToLower(strings.TrimSpace(raw))
-	}
-	if strings.Contains(strings.ToLower(strings.TrimSpace(size)), "2048") {
-		return "2k"
-	}
-	return fallback
+	return util.XAIImageResolution(raw, size, fallback)
 }
 
 func xaiImagesRef(imageURL string) []byte {

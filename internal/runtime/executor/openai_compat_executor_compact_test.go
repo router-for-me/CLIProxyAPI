@@ -352,31 +352,6 @@ func TestOpenAICompatExecutorImagesGenerationLeavesNonXAIProviderPayload(t *test
 	}
 }
 
-func TestXAIImageSizeMapping(t *testing.T) {
-	tests := []struct {
-		size        string
-		aspectRatio string
-		resolution  string
-		ok          bool
-	}{
-		{size: "1024x1024", aspectRatio: "1:1", resolution: "1k", ok: true},
-		{size: "1792x1024", aspectRatio: "16:9", resolution: "1k", ok: true},
-		{size: "1024x1792", aspectRatio: "9:16", resolution: "1k", ok: true},
-		{size: "1280x1280", ok: false},
-		{size: "1536x1536", ok: false},
-		{size: "2048x2048", aspectRatio: "1:1", resolution: "2k", ok: true},
-		{size: "1536x1024", aspectRatio: "3:2", resolution: "1k", ok: true},
-		{size: "1024x1536", aspectRatio: "2:3", resolution: "1k", ok: true},
-		{size: "4096x4096", ok: false},
-	}
-	for _, tt := range tests {
-		aspectRatio, resolution, ok := xAIImageSizeMapping(tt.size)
-		if ok != tt.ok || aspectRatio != tt.aspectRatio || resolution != tt.resolution {
-			t.Fatalf("xAIImageSizeMapping(%q) = (%q, %q, %v), want (%q, %q, %v)", tt.size, aspectRatio, resolution, ok, tt.aspectRatio, tt.resolution, tt.ok)
-		}
-	}
-}
-
 func TestOpenAICompatExecutorStreamRejectsPlainJSONAfterBlankLines(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

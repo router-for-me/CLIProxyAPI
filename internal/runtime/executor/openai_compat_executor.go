@@ -448,7 +448,7 @@ func (e *OpenAICompatExecutor) prepareImagePayload(auth *cliproxyauth.Auth, payl
 		return payload, nil
 	}
 
-	aspectRatio, resolution, ok := xAIImageSizeMapping(size)
+	aspectRatio, resolution, ok := util.XAIImageSizeMapping(size)
 	if !ok {
 		if gjson.GetBytes(payload, "aspect_ratio").Exists() && gjson.GetBytes(payload, "resolution").Exists() {
 			return sjson.DeleteBytes(payload, "size")
@@ -495,25 +495,6 @@ func (e *OpenAICompatExecutor) isXAICompatProvider(auth *cliproxyauth.Auth) bool
 		return name == "xai" || strings.Contains(baseURL, "api.x.ai")
 	}
 	return false
-}
-
-func xAIImageSizeMapping(size string) (aspectRatio, resolution string, ok bool) {
-	size = strings.TrimSpace(size)
-	switch size {
-	case "256x256", "512x512", "1024x1024":
-		return "1:1", "1k", true
-	case "1792x1024":
-		return "16:9", "1k", true
-	case "1024x1792":
-		return "9:16", "1k", true
-	case "1536x1024":
-		return "3:2", "1k", true
-	case "1024x1536":
-		return "2:3", "1k", true
-	case "2048x2048":
-		return "1:1", "2k", true
-	}
-	return "", "", false
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
