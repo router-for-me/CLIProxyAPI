@@ -78,3 +78,31 @@ func TestConvertClaudeRequestToGemini_ImageContent(t *testing.T) {
 		t.Fatalf("Expected image data 'aGVsbG8=', got '%s'", got)
 	}
 }
+
+func TestConvertClaudeRequestToGemini_StripsClaudeCodeAttribution(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"system": [
+			{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=12345;"},
+			{"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
+			{"type": "text", "text": "User system prompt"}
+		],
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	parts := gjson.GetBytes(output, "system_instruction.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("Expected 2 system parts after attribution strip, got %d: %s", len(parts), gjson.GetBytes(output, "system_instruction.parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("Unexpected first system part: %q", got)
+	}
+	if got := parts[1].Get("text").String(); got != "User system prompt" {
+		t.Fatalf("Unexpected second system part: %q", got)
+	}
+	if gjson.GetBytes(output, `system_instruction.parts.#(text%"x-anthropic-billing-header:*")`).Exists() {
+		t.Fatalf("Claude Code attribution block was forwarded: %s", gjson.GetBytes(output, "system_instruction.parts").Raw)
+	}
+}
