@@ -12,8 +12,11 @@ type HomeConfig struct {
 
 // HomeTLSConfig configures client-side TLS for the home Redis connection.
 type HomeTLSConfig struct {
-	Enable             bool   `yaml:"enable" json:"-"`
-	ServerName         string `yaml:"server-name" json:"-"`
-	InsecureSkipVerify bool   `yaml:"insecure-skip-verify" json:"-"`
-	CACert             string `yaml:"ca-cert" json:"-"`
+	Enable              bool   `yaml:"enable" json:"-"`
+	ServerName          string `yaml:"server-name" json:"-"`
+	InsecureSkipVerify  bool   `yaml:"insecure-skip-verify" json:"-"`
+	CACert              string `yaml:"ca-cert" json:"-"`
+	ClientCert          string `yaml:"-" json:"-"`
+	ClientKey           string `yaml:"-" json:"-"`
+	UseTargetServerName bool   `yaml:"-" json:"-"`
 }

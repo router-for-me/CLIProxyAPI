@@ -172,7 +172,7 @@ func (c *Client) ensureClients() error {
 }
 
 func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
-	tlsConfig, errTLS := c.homeTLSConfigLocked()
+	tlsConfig, errTLS := c.homeTLSConfigLocked(addr)
 	if errTLS != nil {
 		return nil, errTLS
 	}
@@ -183,15 +183,27 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 	}, nil
 }
 
-func (c *Client) homeTLSConfigLocked() (*tls.Config, error) {
+func (c *Client) homeTLSConfigLocked(addr string) (*tls.Config, error) {
 	serverName := strings.TrimSpace(c.homeCfg.TLS.ServerName)
 	if serverName == "" {
-		serverName = strings.TrimSpace(c.seedHost)
+		if c.homeCfg.TLS.UseTargetServerName {
+			serverName = hostFromAddress(addr)
+		} else {
+			serverName = strings.TrimSpace(c.seedHost)
+		}
 	}
 	if serverName == "" {
 		serverName = strings.TrimSpace(c.homeCfg.Host)
 	}
 	return newHomeTLSConfig(c.homeCfg.TLS, serverName)
+}
+
+func hostFromAddress(addr string) string {
+	host, _, errSplit := net.SplitHostPort(strings.TrimSpace(addr))
+	if errSplit == nil {
+		return strings.TrimSpace(host)
+	}
+	return strings.TrimSpace(addr)
 }
 
 func newHomeTLSConfig(cfg config.HomeTLSConfig, fallbackServerName string) (*tls.Config, error) {
@@ -208,6 +220,19 @@ func newHomeTLSConfig(cfg config.HomeTLSConfig, fallbackServerName string) (*tls
 		MinVersion:         tls.VersionTLS12,
 		ServerName:         serverName,
 		InsecureSkipVerify: cfg.InsecureSkipVerify,
+	}
+
+	clientCertPath := strings.TrimSpace(cfg.ClientCert)
+	clientKeyPath := strings.TrimSpace(cfg.ClientKey)
+	if clientCertPath != "" || clientKeyPath != "" {
+		if clientCertPath == "" || clientKeyPath == "" {
+			return nil, fmt.Errorf("home tls: client certificate and key must be set together")
+		}
+		certPair, errLoad := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if errLoad != nil {
+			return nil, fmt.Errorf("home tls: load client certificate: %w", errLoad)
+		}
+		tlsConfig.Certificates = []tls.Certificate{certPair}
 	}
 
 	caCertPath := strings.TrimSpace(cfg.CACert)
