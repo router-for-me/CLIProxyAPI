@@ -307,7 +307,7 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	handler := NewOpenAIAPIHandler(base)
-	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}],"mask":{"image_url":"data:image/png;base64,BB=="},"size":"1024x1024","quality":"high","background":"transparent","output_format":"png","input_fidelity":"high","moderation":"low","output_compression":80,"partial_images":2}`)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}],"mask":{"image_url":"data:image/png;base64,BB=="},"size":"1024x1024","quality":"high","background":"transparent","output_format":"png","response_format":"url","input_fidelity":"high","moderation":"low","output_compression":80,"partial_images":2,"n":3}`)
 
 	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
 
@@ -333,12 +333,13 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 		t.Fatalf("payload mask url = %q; body=%s", got, string(executor.payload))
 	}
 	for field, want := range map[string]string{
-		"size":           "1024x1024",
-		"quality":        "high",
-		"background":     "transparent",
-		"output_format":  "png",
-		"input_fidelity": "high",
-		"moderation":     "low",
+		"size":            "1024x1024",
+		"quality":         "high",
+		"background":      "transparent",
+		"output_format":   "png",
+		"response_format": "url",
+		"input_fidelity":  "high",
+		"moderation":      "low",
 	} {
 		if got := gjson.GetBytes(executor.payload, field).String(); got != want {
 			t.Fatalf("payload %s = %q, want %q; body=%s", field, got, want, string(executor.payload))
@@ -349,6 +350,9 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 	}
 	if got := gjson.GetBytes(executor.payload, "partial_images").Int(); got != 2 {
 		t.Fatalf("payload partial_images = %d, want 2; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "n").Int(); got != 3 {
+		t.Fatalf("payload n = %d, want 3; body=%s", got, string(executor.payload))
 	}
 	if got := gjson.GetBytes(resp.Body.Bytes(), "data.0.url").String(); got != "https://example.test/image.png" {
 		t.Fatalf("response url = %q", got)
@@ -448,8 +452,14 @@ func TestImagesEditsMultipartRoutesOpenAICompatModelThroughAuthManager(t *testin
 	if err := writer.WriteField("quality", "high"); err != nil {
 		t.Fatalf("write quality field: %v", err)
 	}
+	if err := writer.WriteField("response_format", "url"); err != nil {
+		t.Fatalf("write response_format field: %v", err)
+	}
 	if err := writer.WriteField("output_compression", "75"); err != nil {
 		t.Fatalf("write output_compression field: %v", err)
+	}
+	if err := writer.WriteField("n", "2"); err != nil {
+		t.Fatalf("write n field: %v", err)
 	}
 	imageWriter, err := writer.CreateFormFile("image", "reference.png")
 	if err != nil {
@@ -491,8 +501,14 @@ func TestImagesEditsMultipartRoutesOpenAICompatModelThroughAuthManager(t *testin
 	if got := gjson.GetBytes(executor.payload, "quality").String(); got != "high" {
 		t.Fatalf("payload quality = %q, want high; body=%s", got, string(executor.payload))
 	}
+	if got := gjson.GetBytes(executor.payload, "response_format").String(); got != "url" {
+		t.Fatalf("payload response_format = %q, want url; body=%s", got, string(executor.payload))
+	}
 	if got := gjson.GetBytes(executor.payload, "output_compression").Int(); got != 75 {
 		t.Fatalf("payload output_compression = %d, want 75; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "n").Int(); got != 2 {
+		t.Fatalf("payload n = %d, want 2; body=%s", got, string(executor.payload))
 	}
 }
 

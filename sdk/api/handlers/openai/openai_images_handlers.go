@@ -644,23 +644,12 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
-	var maskDataURL *string
-	if maskFiles := form.File["mask"]; len(maskFiles) > 0 && maskFiles[0] != nil {
-		dataURL, err := multipartFileToDataURL(maskFiles[0])
-		if err != nil {
-			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-				Error: handlers.ErrorDetail{
-					Message: fmt.Sprintf("Invalid request: %v", err),
-					Type:    "invalid_request_error",
-				},
-			})
-			return
-		}
-		maskDataURL = &dataURL
-	}
-
 	if openAICompatImageModel {
 		if rejectOpenAICompatImageStreaming(c, stream) {
+			return
+		}
+		maskDataURL, ok := multipartMaskDataURL(c, form)
+		if !ok {
 			return
 		}
 		rawJSON, err := buildOpenAICompatImageEditRequest(imageModel, prompt, images, maskDataURL, openAICompatMultipartImageEditOptions(c))
@@ -684,6 +673,11 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		n := parseIntField(c.PostForm("n"), 0)
 		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
+		return
+	}
+
+	maskDataURL, ok := multipartMaskDataURL(c, form)
+	if !ok {
 		return
 	}
 
@@ -726,6 +720,27 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		return
 	}
 	h.collectImagesFromResponses(c, responsesReq, responseFormat)
+}
+
+func multipartMaskDataURL(c *gin.Context, form *multipart.Form) (*string, bool) {
+	if form == nil {
+		return nil, true
+	}
+	maskFiles := form.File["mask"]
+	if len(maskFiles) == 0 || maskFiles[0] == nil {
+		return nil, true
+	}
+	dataURL, err := multipartFileToDataURL(maskFiles[0])
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return nil, false
+	}
+	return &dataURL, true
 }
 
 func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
@@ -957,12 +972,12 @@ func applyOpenAICompatImageEditMask(req []byte, mask *string) []byte {
 
 func openAICompatJSONImageEditOptions(rawJSON []byte) []byte {
 	out := []byte(`{}`)
-	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
+	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation"} {
 		if value := strings.TrimSpace(gjson.GetBytes(rawJSON, field).String()); value != "" {
 			out, _ = sjson.SetBytes(out, field, value)
 		}
 	}
-	for _, field := range []string{"output_compression", "partial_images"} {
+	for _, field := range []string{"output_compression", "partial_images", "n"} {
 		if value := gjson.GetBytes(rawJSON, field); value.Exists() && value.Type == gjson.Number {
 			out, _ = sjson.SetRawBytes(out, field, []byte(value.Raw))
 		}
@@ -972,12 +987,12 @@ func openAICompatJSONImageEditOptions(rawJSON []byte) []byte {
 
 func openAICompatMultipartImageEditOptions(c *gin.Context) []byte {
 	out := []byte(`{}`)
-	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
+	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation"} {
 		if value := strings.TrimSpace(c.PostForm(field)); value != "" {
 			out, _ = sjson.SetBytes(out, field, value)
 		}
 	}
-	for _, field := range []string{"output_compression", "partial_images"} {
+	for _, field := range []string{"output_compression", "partial_images", "n"} {
 		if value := strings.TrimSpace(c.PostForm(field)); value != "" {
 			out, _ = sjson.SetBytes(out, field, parseIntField(value, 0))
 		}
@@ -989,12 +1004,12 @@ func applyOpenAICompatImageEditOptions(req []byte, options []byte) []byte {
 	if len(options) == 0 || !json.Valid(options) {
 		return req
 	}
-	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
+	for _, field := range []string{"size", "quality", "background", "output_format", "response_format", "input_fidelity", "moderation"} {
 		if value := strings.TrimSpace(gjson.GetBytes(options, field).String()); value != "" {
 			req, _ = sjson.SetBytes(req, field, value)
 		}
 	}
-	for _, field := range []string{"output_compression", "partial_images"} {
+	for _, field := range []string{"output_compression", "partial_images", "n"} {
 		if value := gjson.GetBytes(options, field); value.Exists() && value.Type == gjson.Number {
 			req, _ = sjson.SetRawBytes(req, field, []byte(value.Raw))
 		}
