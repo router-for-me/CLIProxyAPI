@@ -291,7 +291,7 @@ nonstream-keepalive-interval: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 #
-#   - name: "xai" # xAI image generation through the OpenAI-compatible provider path.
+#   - name: "xai-openai-compat" # xAI image generation through the OpenAI-compatible provider path.
 #     base-url: "https://api.x.ai/v1"
 #     api-key-entries:
 #       - api-key: "xai-dummy-replace-me"

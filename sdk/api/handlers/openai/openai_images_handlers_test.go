@@ -26,6 +26,7 @@ type imagesCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	authProvider string
 	payload      []byte
 }
 
@@ -35,6 +36,9 @@ func (e *imagesCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Auth
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
+	if auth != nil {
+		e.authProvider = auth.Provider
+	}
 	e.payload = append([]byte(nil), req.Payload...)
 	return coreexecutor.Response{Payload: []byte(`{"data":[{"url":"https://example.test/image.png"}]}`)}, nil
 }
@@ -356,6 +360,48 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 	}
 	if got := gjson.GetBytes(resp.Body.Bytes(), "data.0.url").String(); got != "https://example.test/image.png" {
 		t.Fatalf("response url = %q", got)
+	}
+}
+
+func TestImagesEditsJSONOpenAICompatModelSkipsNativeProvider(t *testing.T) {
+	compatExecutor := &imagesCaptureExecutor{id: "xai-openai-compat"}
+	nativeExecutor := &imagesCaptureExecutor{id: "xai"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(nativeExecutor)
+	manager.RegisterExecutor(compatExecutor)
+
+	nativeAuth := &coreauth.Auth{ID: "xai-images-edit-native-auth", Provider: "xai", Status: coreauth.StatusActive}
+	compatAuth := &coreauth.Auth{ID: "xai-images-edit-compat-auth", Provider: "xai-openai-compat", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), nativeAuth); err != nil {
+		t.Fatalf("Register native auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), compatAuth); err != nil {
+		t.Fatalf("Register compat auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(nativeAuth.ID, nativeAuth.Provider, []*registry.ModelInfo{{ID: "grok-imagine-image-quality", Type: "xai"}})
+	registry.GetGlobalRegistry().RegisterClient(compatAuth.ID, compatAuth.Provider, []*registry.ModelInfo{{ID: "grok-imagine-image-quality", Type: "openai-compatibility"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(nativeAuth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(compatAuth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
+
+	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if nativeExecutor.calls != 0 {
+		t.Fatalf("native executor calls = %d, want 0", nativeExecutor.calls)
+	}
+	if compatExecutor.calls != 1 {
+		t.Fatalf("compat executor calls = %d, want 1", compatExecutor.calls)
+	}
+	if compatExecutor.authProvider != "xai-openai-compat" {
+		t.Fatalf("auth provider = %q, want xai-openai-compat", compatExecutor.authProvider)
 	}
 }
 

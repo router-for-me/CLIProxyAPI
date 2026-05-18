@@ -415,11 +415,12 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	if h.isOpenAICompatImagesModel(imageModel) {
+	openAICompatImageProviders := h.openAICompatImageProviders(imageModel)
+	if len(openAICompatImageProviders) > 0 {
 		if rejectOpenAICompatImageStreaming(c, gjson.GetBytes(rawJSON, "stream").Bool()) {
 			return
 		}
-		h.forwardOpenAICompatImageGeneration(c, imageModel, rawJSON)
+		h.forwardOpenAICompatImageGeneration(c, imageModel, rawJSON, openAICompatImageProviders)
 		return
 	}
 	if rejectUnsupportedImagesModel(c, imageModel) {
@@ -486,22 +487,27 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	h.collectImagesFromResponses(c, responsesReq, responseFormat)
 }
 
-func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
+func (h *OpenAIAPIHandler) openAICompatImageProviders(model string) []string {
 	if h == nil || h.BaseAPIHandler == nil || h.BaseAPIHandler.AuthManager == nil {
-		return false
+		return nil
 	}
 	model = strings.TrimSpace(model)
 	if model == "" {
-		return false
+		return nil
 	}
 	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	providers := make([]string, 0)
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(model) {
 		info := registry.GetGlobalRegistry().GetModelInfo(model, provider)
 		if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
-			return true
+			providers = append(providers, provider)
 		}
 	}
-	return false
+	return providers
+}
+
+func (h *OpenAIAPIHandler) isOpenAICompatImagesModel(model string) bool {
+	return len(h.openAICompatImageProviders(model)) > 0
 }
 
 func rejectOpenAICompatImageStreaming(c *gin.Context, stream bool) bool {
@@ -517,12 +523,12 @@ func rejectOpenAICompatImageStreaming(c *gin.Context, stream bool) bool {
 	return true
 }
 
-func (h *OpenAIAPIHandler) forwardOpenAICompatImageGeneration(c *gin.Context, model string, rawJSON []byte) {
+func (h *OpenAIAPIHandler) forwardOpenAICompatImageGeneration(c *gin.Context, model string, rawJSON []byte, providers []string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), model, rawJSON, "images/generations")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManagerProviders(cliCtx, h.HandlerType(), model, rawJSON, "images/generations", providers)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -534,12 +540,12 @@ func (h *OpenAIAPIHandler) forwardOpenAICompatImageGeneration(c *gin.Context, mo
 	cliCancel()
 }
 
-func (h *OpenAIAPIHandler) forwardOpenAICompatImageEdit(c *gin.Context, model string, rawJSON []byte) {
+func (h *OpenAIAPIHandler) forwardOpenAICompatImageEdit(c *gin.Context, model string, rawJSON []byte, providers []string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), model, rawJSON, "images/edits")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManagerProviders(cliCtx, h.HandlerType(), model, rawJSON, "images/edits", providers)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -591,8 +597,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	openAICompatImageModel := h.isOpenAICompatImagesModel(imageModel)
-	if !openAICompatImageModel && rejectUnsupportedImagesModel(c, imageModel) {
+	openAICompatImageProviders := h.openAICompatImageProviders(imageModel)
+	if len(openAICompatImageProviders) == 0 && rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
 
@@ -644,7 +650,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
-	if openAICompatImageModel {
+	if len(openAICompatImageProviders) > 0 {
 		if rejectOpenAICompatImageStreaming(c, stream) {
 			return
 		}
@@ -662,7 +668,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 			})
 			return
 		}
-		h.forwardOpenAICompatImageEdit(c, imageModel, rawJSON)
+		h.forwardOpenAICompatImageEdit(c, imageModel, rawJSON, openAICompatImageProviders)
 		return
 	}
 
@@ -768,8 +774,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
-	openAICompatImageModel := h.isOpenAICompatImagesModel(imageModel)
-	if !openAICompatImageModel && rejectUnsupportedImagesModel(c, imageModel) {
+	openAICompatImageProviders := h.openAICompatImageProviders(imageModel)
+	if len(openAICompatImageProviders) == 0 && rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
 
@@ -790,7 +796,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	if !openAICompatImageModel && isXAIImagesModel(imageModel) {
+	if len(openAICompatImageProviders) == 0 && isXAIImagesModel(imageModel) {
 		images := collectXAIImagesFromJSON(rawJSON)
 		if len(images) == 0 {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -834,7 +840,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		return
 	}
 
-	if openAICompatImageModel {
+	if len(openAICompatImageProviders) > 0 {
 		if rejectOpenAICompatImageStreaming(c, stream) {
 			return
 		}
@@ -854,7 +860,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 			})
 			return
 		}
-		h.forwardOpenAICompatImageEdit(c, imageModel, editJSON)
+		h.forwardOpenAICompatImageEdit(c, imageModel, editJSON, openAICompatImageProviders)
 		return
 	}
 

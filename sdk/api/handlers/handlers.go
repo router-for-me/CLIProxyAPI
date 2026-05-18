@@ -538,6 +538,22 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+	return h.executeWithAuthManagerProviders(ctx, handlerType, modelName, normalizedModel, rawJSON, alt, providers)
+}
+
+// ExecuteWithAuthManagerProviders executes a non-streaming request constrained to the supplied providers.
+func (h *BaseAPIHandler) ExecuteWithAuthManagerProviders(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, providers []string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if len(providers) == 0 {
+		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+	}
+	_, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	if errMsg != nil {
+		return nil, nil, errMsg
+	}
+	return h.executeWithAuthManagerProviders(ctx, handlerType, modelName, normalizedModel, rawJSON, alt, providers)
+}
+
+func (h *BaseAPIHandler) executeWithAuthManagerProviders(ctx context.Context, handlerType, modelName string, normalizedModel string, rawJSON []byte, alt string, providers []string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
