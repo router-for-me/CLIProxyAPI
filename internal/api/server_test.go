@@ -14,12 +14,17 @@ import (
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func newTestServer(t *testing.T) *Server {
+	return newTestServerWithOptions(t)
+}
+
+func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -45,7 +50,7 @@ func newTestServer(t *testing.T) *Server {
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	return NewServer(cfg, authManager, accessManager, configPath)
+	return NewServer(cfg, authManager, accessManager, configPath, opts...)
 }
 
 func TestHealthz(t *testing.T) {
@@ -147,6 +152,26 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	}
 }
 
+func TestManagementLocalPasswordRejectsSpoofedForwardedFor(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	server := newTestServerWithOptions(t, WithLocalManagementPassword("test-local-key"))
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.RemoteAddr = "203.0.113.10:45678"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	req.Header.Set("Authorization", "Bearer test-local-key")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "remote management disabled") {
+		t.Fatalf("body = %q, want remote management disabled", body)
+	}
+}
+
 func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
@@ -236,6 +261,142 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
 			}
 		})
+	}
+}
+
+func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-client-version-catalog"
+	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+		{
+			ID:            "gpt-5.5",
+			Object:        "model",
+			Created:       1776902400,
+			OwnedBy:       "openai",
+			Type:          "openai",
+			DisplayName:   "GPT 5.5",
+			Description:   "Frontier model for complex coding, research, and real-world work.",
+			ContextLength: 272000,
+			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:            "custom-codex-model-test",
+			Object:        "model",
+			OwnedBy:       "test",
+			Type:          "openai",
+			DisplayName:   "Custom Codex Model",
+			Description:   "Custom model from registry",
+			ContextLength: 123456,
+			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium"}},
+		},
+		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
+		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
+		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "claude-cli/1.0")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Models []map[string]any `json:"models"`
+		Object string           `json:"object"`
+		Data   []any            `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if resp.Object != "" || resp.Data != nil {
+		t.Fatalf("expected codex catalog format without object/data, got object=%q data=%v", resp.Object, resp.Data)
+	}
+	if len(resp.Models) == 0 {
+		t.Fatal("expected codex catalog models")
+	}
+
+	var gpt55 map[string]any
+	var custom map[string]any
+	for _, model := range resp.Models {
+		switch slug, _ := model["slug"].(string); slug {
+		case "gpt-5.5":
+			gpt55 = model
+		case "custom-codex-model-test":
+			custom = model
+		}
+	}
+	if gpt55 == nil {
+		t.Fatal("expected gpt-5.5 codex catalog entry")
+	}
+	if _, ok := gpt55["minimal_client_version"]; !ok {
+		t.Fatal("expected minimal_client_version in codex catalog")
+	}
+	serviceTiers, ok := gpt55["service_tiers"].([]any)
+	if !ok || len(serviceTiers) != 1 {
+		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	}
+	if custom == nil {
+		t.Fatal("expected custom model codex catalog entry")
+	}
+	if got, _ := custom["display_name"].(string); got != "Custom Codex Model" {
+		t.Fatalf("custom display_name = %q, want Custom Codex Model", got)
+	}
+	if got, _ := custom["description"].(string); got != "Custom model from registry" {
+		t.Fatalf("custom description = %q, want Custom model from registry", got)
+	}
+	if got, _ := custom["context_window"].(float64); got != 123456 {
+		t.Fatalf("custom context_window = %v, want 123456", custom["context_window"])
+	}
+	if custom["base_instructions"] != gpt55["base_instructions"] {
+		t.Fatal("expected custom model to use gpt-5.5 base_instructions fallback")
+	}
+	if _, ok := custom["available_in_plans"].([]any); !ok {
+		t.Fatalf("expected custom model to use gpt-5.5 available_in_plans fallback, got %#v", custom["available_in_plans"])
+	}
+	if got, _ := custom["prefer_websockets"].(bool); got {
+		t.Fatalf("custom prefer_websockets = %v, want false", custom["prefer_websockets"])
+	}
+	if _, ok := custom["apply_patch_tool_type"]; ok {
+		t.Fatal("expected custom model to omit apply_patch_tool_type")
+	}
+	if _, ok := custom["upgrade"]; ok {
+		t.Fatal("expected custom model to omit upgrade")
+	}
+	if _, ok := custom["availability_nux"]; ok {
+		t.Fatal("expected custom model to omit availability_nux")
+	}
+
+	hiddenModels := map[string]bool{
+		"grok-imagine-image-quality": false,
+		"gpt-image-2":                false,
+		"grok-imagine-image":         false,
+		"grok-imagine-video":         false,
+	}
+	for _, model := range resp.Models {
+		slug, _ := model["slug"].(string)
+		if _, ok := hiddenModels[slug]; !ok {
+			continue
+		}
+		if visibility, _ := model["visibility"].(string); visibility != "hide" {
+			t.Fatalf("%s visibility = %q, want hide", slug, visibility)
+		}
+		hiddenModels[slug] = true
+	}
+	for slug, found := range hiddenModels {
+		if !found {
+			t.Fatalf("expected hidden model %s in codex catalog", slug)
+		}
 	}
 }
 

@@ -2,7 +2,7 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
+A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
@@ -41,20 +41,22 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 ## Overview
 
-- OpenAI/Gemini/Claude compatible API endpoints for CLI models
+- OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
+- Grok Build support via OAuth login
 - Amp CLI and IDE extensions support with provider routing
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude)
-- Simple CLI authentication flows (Gemini, OpenAI, Claude)
+- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok)
+- Simple CLI authentication flows (Gemini, OpenAI, Claude, Grok)
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing
 - Gemini CLI multi-account load balancing
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
+- Grok Build multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 

@@ -53,6 +53,120 @@ func init() {
 	buildinfo.BuildDate = BuildDate
 }
 
+func parseHomeFlagConfig(rawAddr string, password string) (config.HomeConfig, error) {
+	rawAddr = strings.TrimSpace(rawAddr)
+	if rawAddr == "" {
+		return config.HomeConfig{}, fmt.Errorf("address is empty")
+	}
+
+	if strings.Contains(rawAddr, "://") {
+		return parseHomeURLConfig(rawAddr, password)
+	}
+
+	host, portStr, errSplit := net.SplitHostPort(rawAddr)
+	if errSplit != nil {
+		return config.HomeConfig{}, fmt.Errorf("expected host:port, redis://host:port, or rediss://host:port: %w", errSplit)
+	}
+
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return config.HomeConfig{}, fmt.Errorf("host is empty")
+	}
+
+	port, errPort := parseHomePort(portStr)
+	if errPort != nil {
+		return config.HomeConfig{}, errPort
+	}
+
+	return config.HomeConfig{
+		Enabled:  true,
+		Host:     host,
+		Port:     port,
+		Password: password,
+	}, nil
+}
+
+func parseHomeURLConfig(rawAddr string, password string) (config.HomeConfig, error) {
+	parsed, errParse := url.Parse(rawAddr)
+	if errParse != nil {
+		return config.HomeConfig{}, fmt.Errorf("parse URL: %w", errParse)
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "redis" && scheme != "rediss" {
+		return config.HomeConfig{}, fmt.Errorf("unsupported URL scheme %q", parsed.Scheme)
+	}
+
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return config.HomeConfig{}, fmt.Errorf("host is empty")
+	}
+
+	port, errPort := parseHomePort(parsed.Port())
+	if errPort != nil {
+		return config.HomeConfig{}, errPort
+	}
+
+	if password == "" && parsed.User != nil {
+		if urlPassword, ok := parsed.User.Password(); ok {
+			password = urlPassword
+		}
+	}
+
+	homeCfg := config.HomeConfig{
+		Enabled:  true,
+		Host:     host,
+		Port:     port,
+		Password: password,
+	}
+	query := parsed.Query()
+	homeCfg.DisableClusterDiscovery = parseHomeBoolQuery(query, "disable-cluster-discovery", "disable_cluster_discovery")
+
+	if scheme == "rediss" {
+		homeCfg.TLS.Enable = true
+		homeCfg.TLS.ServerName = strings.TrimSpace(firstHomeQueryValue(query, "server-name", "server_name"))
+		homeCfg.TLS.InsecureSkipVerify = parseHomeBoolQuery(query, "insecure-skip-verify", "insecure_skip_verify", "skip_verify")
+		homeCfg.TLS.CACert = strings.TrimSpace(firstHomeQueryValue(query, "ca-cert", "ca_cert"))
+	}
+
+	return homeCfg, nil
+}
+
+func parseHomePort(rawPort string) (int, error) {
+	rawPort = strings.TrimSpace(rawPort)
+	if rawPort == "" {
+		return 0, fmt.Errorf("port is empty")
+	}
+
+	port, errPort := strconv.Atoi(rawPort)
+	if errPort != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("invalid port %q", rawPort)
+	}
+
+	return port, nil
+}
+
+func firstHomeQueryValue(values url.Values, keys ...string) string {
+	for _, key := range keys {
+		if value := values.Get(key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseHomeBoolQuery(values url.Values, keys ...string) bool {
+	for _, key := range keys {
+		value := strings.TrimSpace(values.Get(key))
+		if value == "" {
+			continue
+		}
+		parsed, errParse := strconv.ParseBool(value)
+		return errParse == nil && parsed
+	}
+	return false
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -68,6 +182,7 @@ func main() {
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
+	var xaiLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -75,6 +190,7 @@ func main() {
 	var password string
 	var homeAddr string
 	var homePassword string
+	var homeDisableClusterDiscovery bool
 	var tuiMode bool
 	var standalone bool
 	var localModel bool
@@ -88,13 +204,15 @@ func main() {
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
-	flag.StringVar(&homeAddr, "home", "", "Home control plane address in host:port format (loads config from home and skips local config file)")
+	flag.StringVar(&homeAddr, "home", "", "Home control plane address in host:port, redis://host:port, or rediss://host:port format (loads config from home and skips local config file)")
 	flag.StringVar(&homePassword, "home-password", "", "Home control plane password (Redis AUTH)")
+	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
@@ -247,27 +365,13 @@ func main() {
 	if strings.TrimSpace(homeAddr) != "" {
 		configLoadedFromHome = true
 		trimmedHomePassword := strings.TrimSpace(homePassword)
-		host, portStr, errSplit := net.SplitHostPort(strings.TrimSpace(homeAddr))
-		if errSplit != nil {
-			log.Errorf("invalid -home address %q (expected host:port): %v", homeAddr, errSplit)
+		homeCfg, errHomeCfg := parseHomeFlagConfig(homeAddr, trimmedHomePassword)
+		if errHomeCfg != nil {
+			log.Errorf("invalid -home address %q: %v", homeAddr, errHomeCfg)
 			return
 		}
-		host = strings.TrimSpace(host)
-		if host == "" {
-			log.Errorf("invalid -home address %q: host is empty", homeAddr)
-			return
-		}
-		port, errPort := strconv.Atoi(strings.TrimSpace(portStr))
-		if errPort != nil || port <= 0 {
-			log.Errorf("invalid -home address %q: invalid port %q", homeAddr, portStr)
-			return
-		}
-
-		homeCfg := config.HomeConfig{
-			Enabled:  true,
-			Host:     host,
-			Port:     port,
-			Password: trimmedHomePassword,
+		if homeDisableClusterDiscovery {
+			homeCfg.DisableClusterDiscovery = true
 		}
 		homeClient := home.New(homeCfg)
 		defer homeClient.Close()
@@ -554,6 +658,8 @@ func main() {
 		cmd.DoClaudeLogin(cfg, options)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
+	} else if xaiLogin {
+		cmd.DoXAILogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
