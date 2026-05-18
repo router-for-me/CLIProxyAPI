@@ -155,6 +155,69 @@ func TestOpenAICompatExecutorImagesGenerationPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorImagesGenerationAppliesPayloadConfigBeforeXAIMapping(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"url":"https://example.test/image.png"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("xai", &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "grok-imagine-image-quality", Protocol: "openai"}},
+					Params: map[string]any{
+						"quality": "high",
+						"size":    "2048x2048",
+					},
+				},
+			},
+			Filter: []config.PayloadFilterRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "grok-imagine-image-quality", Protocol: "openai"}},
+					Params: []string{"response_format"},
+				},
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"provider_key": "xai",
+		},
+	}
+	payload := []byte(`{"model":"grok-imagine-image-quality(high)","prompt":"draw a square","size":"1024x1024","response_format":"url"}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image-quality(high)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Alt:          "images/generations",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "grok-imagine-image-quality" {
+		t.Fatalf("model = %q, want normalized base model; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "quality").String(); got != "high" {
+		t.Fatalf("quality = %q, want high; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k; body=%s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "response_format").Exists() {
+		t.Fatalf("response_format should be filtered: %s", string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorImagesEditPassthrough(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
@@ -208,6 +271,48 @@ func TestOpenAICompatExecutorImagesEditPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorImagesPreservesExplicitXAIAspectSettings(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"url":"https://example.test/image.png"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("xai", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"provider_key": "xai",
+		},
+	}
+	payload := []byte(`{"model":"grok-imagine-image-quality","prompt":"draw wide","size":"1024x1024","aspect_ratio":"16:9","resolution":"2k"}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image-quality",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Alt:          "images/generations",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "aspect_ratio").String(); got != "16:9" {
+		t.Fatalf("aspect_ratio = %q, want explicit 16:9; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want explicit 2k; body=%s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "size").Exists() {
+		t.Fatalf("size should be removed for xAI request: %s", string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationLeavesNonXAIProviderPayload(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -257,8 +362,8 @@ func TestXAIImageSizeMapping(t *testing.T) {
 		{size: "1024x1024", aspectRatio: "1:1", resolution: "1k", ok: true},
 		{size: "1792x1024", aspectRatio: "16:9", resolution: "1k", ok: true},
 		{size: "1024x1792", aspectRatio: "9:16", resolution: "1k", ok: true},
-		{size: "1280x1280", aspectRatio: "1:1", resolution: "2k", ok: true},
-		{size: "1536x1536", aspectRatio: "1:1", resolution: "2k", ok: true},
+		{size: "1280x1280", ok: false},
+		{size: "1536x1536", ok: false},
 		{size: "2048x2048", aspectRatio: "1:1", resolution: "2k", ok: true},
 		{size: "1536x1024", ok: false},
 		{size: "4096x4096", ok: false},

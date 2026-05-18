@@ -161,7 +161,7 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	handler := NewOpenAIAPIHandler(base)
-	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}],"size":"1024x1024"}`)
+	body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}],"mask":{"image_url":"data:image/png;base64,BB=="},"size":"1024x1024","quality":"high","background":"transparent","output_format":"png","input_fidelity":"high","moderation":"low","output_compression":80,"partial_images":2}`)
 
 	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
 
@@ -182,6 +182,27 @@ func TestImagesEditsJSONRoutesOpenAICompatModelThroughAuthManager(t *testing.T) 
 	}
 	if got := gjson.GetBytes(executor.payload, "image.url").String(); got != "data:image/png;base64,AA==" {
 		t.Fatalf("payload image url = %q; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "mask.url").String(); got != "data:image/png;base64,BB==" {
+		t.Fatalf("payload mask url = %q; body=%s", got, string(executor.payload))
+	}
+	for field, want := range map[string]string{
+		"size":           "1024x1024",
+		"quality":        "high",
+		"background":     "transparent",
+		"output_format":  "png",
+		"input_fidelity": "high",
+		"moderation":     "low",
+	} {
+		if got := gjson.GetBytes(executor.payload, field).String(); got != want {
+			t.Fatalf("payload %s = %q, want %q; body=%s", field, got, want, string(executor.payload))
+		}
+	}
+	if got := gjson.GetBytes(executor.payload, "output_compression").Int(); got != 80 {
+		t.Fatalf("payload output_compression = %d, want 80; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "partial_images").Int(); got != 2 {
+		t.Fatalf("payload partial_images = %d, want 2; body=%s", got, string(executor.payload))
 	}
 	if got := gjson.GetBytes(resp.Body.Bytes(), "data.0.url").String(); got != "https://example.test/image.png" {
 		t.Fatalf("response url = %q", got)
@@ -213,12 +234,25 @@ func TestImagesEditsMultipartRoutesOpenAICompatModelThroughAuthManager(t *testin
 	if err := writer.WriteField("size", "1024x1024"); err != nil {
 		t.Fatalf("write size field: %v", err)
 	}
+	if err := writer.WriteField("quality", "high"); err != nil {
+		t.Fatalf("write quality field: %v", err)
+	}
+	if err := writer.WriteField("output_compression", "75"); err != nil {
+		t.Fatalf("write output_compression field: %v", err)
+	}
 	imageWriter, err := writer.CreateFormFile("image", "reference.png")
 	if err != nil {
 		t.Fatalf("create image field: %v", err)
 	}
 	if _, err := imageWriter.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}); err != nil {
 		t.Fatalf("write image bytes: %v", err)
+	}
+	maskWriter, err := writer.CreateFormFile("mask", "mask.png")
+	if err != nil {
+		t.Fatalf("create mask field: %v", err)
+	}
+	if _, err := maskWriter.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}); err != nil {
+		t.Fatalf("write mask bytes: %v", err)
 	}
 	if errClose := writer.Close(); errClose != nil {
 		t.Fatalf("close multipart writer: %v", errClose)
@@ -239,6 +273,15 @@ func TestImagesEditsMultipartRoutesOpenAICompatModelThroughAuthManager(t *testin
 	}
 	if got := gjson.GetBytes(executor.payload, "image.url").String(); !strings.HasPrefix(got, "data:application/octet-stream;base64,") {
 		t.Fatalf("payload image url = %q; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "mask.url").String(); !strings.HasPrefix(got, "data:application/octet-stream;base64,") {
+		t.Fatalf("payload mask url = %q; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "quality").String(); got != "high" {
+		t.Fatalf("payload quality = %q, want high; body=%s", got, string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "output_compression").Int(); got != 75 {
+		t.Fatalf("payload output_compression = %d, want 75; body=%s", got, string(executor.payload))
 	}
 }
 
