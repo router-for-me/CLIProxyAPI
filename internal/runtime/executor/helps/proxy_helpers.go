@@ -58,7 +58,27 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Transport = rt
 	}
 
+	applyUpstreamHTTP2Setting(httpClient)
 	return httpClient
+}
+
+func applyUpstreamHTTP2Setting(httpClient *http.Client) {
+	if httpClient == nil || !proxyutil.DisableUpstreamHTTP2() {
+		return
+	}
+	if httpClient.Transport == nil {
+		if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+			httpClient.Transport = proxyutil.CloneTransportWithHTTP11(transport)
+		} else {
+			transport := &http.Transport{}
+			proxyutil.DisableHTTP2ForTransport(transport)
+			httpClient.Transport = transport
+		}
+		return
+	}
+	if transport, ok := httpClient.Transport.(*http.Transport); ok && transport != nil {
+		httpClient.Transport = proxyutil.CloneTransportWithHTTP11(transport)
+	}
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

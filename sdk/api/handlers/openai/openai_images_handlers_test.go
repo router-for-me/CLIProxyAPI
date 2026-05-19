@@ -2,6 +2,8 @@ package openai
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -10,9 +12,11 @@ import (
 	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -342,5 +346,250 @@ func TestImagesEdits_DisableImageGenerationChat_DoesNotReturn404(t *testing.T) {
 
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+}
+
+func TestCollectImagesFromResponsesStreamCompleted(t *testing.T) {
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: response.completed
+data: {"type":"response.completed","response":{"created_at":123,"output":[{"type":"image_generation_call","result":"image-data","output_format":"png","revised_prompt":"refined"}],"tool_usage":{"image_gen":{"total_tokens":7}}}}
+
+`)
+	close(data)
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if errMsg != nil {
+		t.Fatalf("collectImagesFromResponsesStream() error = %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(out, "created").Int(); got != 123 {
+		t.Fatalf("created = %d, want 123", got)
+	}
+	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "image-data" {
+		t.Fatalf("data.0.b64_json = %q, want image-data", got)
+	}
+	if got := gjson.GetBytes(out, "data.0.revised_prompt").String(); got != "refined" {
+		t.Fatalf("data.0.revised_prompt = %q, want refined", got)
+	}
+	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 7 {
+		t.Fatalf("usage.total_tokens = %d, want 7", got)
+	}
+}
+
+func TestCollectImagesFromResponsesStreamMissingCompleted(t *testing.T) {
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: response.created
+data: {"type":"response.created","response":{"id":"resp-1"}}
+
+`)
+	close(data)
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=missing_response_completed")
+	requireImagesStreamErrorContains(t, errMsg, "received_completed=false")
+	requireImagesStreamErrorContains(t, errMsg, "saw_response_completed=false")
+	requireImagesStreamErrorContains(t, errMsg, "saw_first_event=true")
+	requireImagesStreamErrorContains(t, errMsg, `last_event_type="response.created"`)
+	requireImagesStreamErrorContains(t, errMsg, `last_data_type="response.created"`)
+	requireImagesStreamErrorContains(t, errMsg, "event_count=1")
+	requireImagesStreamErrorContains(t, errMsg, "data_count=1")
+	requireImagesStreamErrorContains(t, errMsg, "chunk_count=1")
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="data_channel_closed"`)
+	requireImagesStreamErrorContains(t, errMsg, "cause=upstream_stream_closed")
+}
+
+func TestCollectImagesFromResponsesStreamUpstreamClosedWithoutPayload(t *testing.T) {
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway}
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=upstream_stream_closed")
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="upstream_stream_closed"`)
+	requireImagesStreamErrorContains(t, errMsg, "saw_response_completed=false")
+}
+
+func TestCollectImagesFromResponsesStreamScannerError(t *testing.T) {
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: errors.New("scanner read failed")}
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=scanner_error")
+	requireImagesStreamErrorContains(t, errMsg, "cause=scanner_error")
+	requireImagesStreamErrorContains(t, errMsg, `scanner_error_type="scanner_error"`)
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="scanner_error"`)
+}
+
+func TestCollectImagesFromResponsesStreamContextTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond)
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+
+	out, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusGatewayTimeout, "classification=context_timeout")
+	requireImagesStreamErrorContains(t, errMsg, "cause=context_deadline_exceeded")
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="context_timeout"`)
+}
+
+func TestCollectImagesFromResponsesStreamContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage)
+
+	out, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusRequestTimeout, "classification=context_canceled")
+	requireImagesStreamErrorContains(t, errMsg, "cause=context_canceled")
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="context_canceled"`)
+}
+
+func TestCollectImagesFromResponsesStreamHTTP2Reset(t *testing.T) {
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{
+		StatusCode: http.StatusInternalServerError,
+		Error:      errors.New("stream error: stream ID 15; INTERNAL_ERROR; received from peer"),
+	}
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusInternalServerError, "classification=h2_stream_reset")
+	requireImagesStreamErrorContains(t, errMsg, "cause=http2_stream_reset")
+	requireImagesStreamErrorContains(t, errMsg, `scanner_error_type="http2_stream_reset"`)
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="h2_stream_reset"`)
+	requireImagesStreamErrorNotContains(t, errMsg, "stream ID 15")
+}
+
+func TestCollectImagesFromResponsesStreamHTTP2ResetRSTStream(t *testing.T) {
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New("http2: RST_STREAM closed stream"),
+	}
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=h2_stream_reset")
+	requireImagesStreamErrorContains(t, errMsg, "cause=http2_stream_reset")
+	requireImagesStreamErrorNotContains(t, errMsg, "RST_STREAM")
+}
+
+func TestCollectImagesFromResponsesStreamUpstreamErrorEvent(t *testing.T) {
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: error
+data: {"type":"error","message":"safe upstream error"}
+
+`)
+	close(data)
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=upstream_error_event")
+	requireImagesStreamErrorContains(t, errMsg, "saw_error_event=true")
+	requireImagesStreamErrorContains(t, errMsg, `last_event_type="error"`)
+	requireImagesStreamErrorContains(t, errMsg, `last_data_type="error"`)
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="upstream_error_event"`)
+	requireImagesStreamErrorNotContains(t, errMsg, "safe upstream error")
+}
+
+func TestCollectImagesFromResponsesStreamErrorSummaryDoesNotLeakSensitiveData(t *testing.T) {
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: response.created
+data: {"type":"response.created","response":{"id":"resp-1"}}
+
+`)
+	close(data)
+	close(errs)
+
+	_, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	for _, forbidden := range []string{
+		"Authorization",
+		"Cookie",
+		"API key",
+		"api_key",
+		"prompt",
+		"base64",
+		"b64_json",
+		`"response":{"id":"resp-1"}`,
+		"data:",
+		"event: response.created",
+	} {
+		requireImagesStreamErrorNotContains(t, errMsg, forbidden)
+	}
+}
+
+func requireImagesStreamError(t *testing.T, errMsg *interfaces.ErrorMessage, status int, contains string) {
+	t.Helper()
+	if errMsg == nil {
+		t.Fatalf("errMsg = nil, want status %d containing %q", status, contains)
+	}
+	if errMsg.StatusCode != status {
+		t.Fatalf("status = %d, want %d: %v", errMsg.StatusCode, status, errMsg.Error)
+	}
+	requireImagesStreamErrorContains(t, errMsg, contains)
+}
+
+func requireImagesStreamErrorContains(t *testing.T, errMsg *interfaces.ErrorMessage, contains string) {
+	t.Helper()
+	if errMsg == nil || errMsg.Error == nil {
+		t.Fatalf("errMsg/error is nil, want containing %q", contains)
+	}
+	if !strings.Contains(errMsg.Error.Error(), contains) {
+		t.Fatalf("error = %q, want containing %q", errMsg.Error.Error(), contains)
+	}
+}
+
+func requireImagesStreamErrorNotContains(t *testing.T, errMsg *interfaces.ErrorMessage, contains string) {
+	t.Helper()
+	if errMsg == nil || errMsg.Error == nil {
+		return
+	}
+	if strings.Contains(errMsg.Error.Error(), contains) {
+		t.Fatalf("error = %q, want not containing %q", errMsg.Error.Error(), contains)
 	}
 }

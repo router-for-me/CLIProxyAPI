@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestBuildHTTPTransportDirectBypassesProxy(t *testing.T) {
 }
 
 func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
-	t.Parallel()
+	t.Setenv(DisableUpstreamHTTP2Env, "false")
 
 	transport, mode, errBuild := BuildHTTPTransport("http://proxy.example.com:8080")
 	if errBuild != nil {
@@ -118,7 +119,7 @@ func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
 }
 
 func TestBuildHTTPTransportSOCKS5ProxyInheritsDefaultTransportSettings(t *testing.T) {
-	t.Parallel()
+	t.Setenv(DisableUpstreamHTTP2Env, "false")
 
 	transport, mode, errBuild := BuildHTTPTransport("socks5://proxy.example.com:1080")
 	if errBuild != nil {
@@ -143,6 +144,105 @@ func TestBuildHTTPTransportSOCKS5ProxyInheritsDefaultTransportSettings(t *testin
 	}
 	if transport.TLSHandshakeTimeout != defaultTransport.TLSHandshakeTimeout {
 		t.Fatalf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, defaultTransport.TLSHandshakeTimeout)
+	}
+}
+
+func TestBuildHTTPTransportDisableHTTP2TrueForcesHTTP11AndKeepsProxy(t *testing.T) {
+	t.Setenv(DisableUpstreamHTTP2Env, "true")
+
+	transport, mode, errBuild := BuildHTTPTransport("http://proxy.example.com:8080")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if transport == nil {
+		t.Fatal("expected transport, got nil")
+	}
+
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("transport.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://proxy.example.com:8080" {
+		t.Fatalf("proxy URL = %v, want http://proxy.example.com:8080", proxyURL)
+	}
+	assertTransportForcesHTTP11(t, transport)
+}
+
+func TestBuildHTTPTransportDisableHTTP2TrueForcesHTTP11OnDirect(t *testing.T) {
+	t.Setenv(DisableUpstreamHTTP2Env, "true")
+
+	transport, mode, errBuild := BuildHTTPTransport("direct")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeDirect {
+		t.Fatalf("mode = %d, want %d", mode, ModeDirect)
+	}
+	if transport == nil {
+		t.Fatal("expected transport, got nil")
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected direct transport to disable proxy function")
+	}
+	assertTransportForcesHTTP11(t, transport)
+}
+
+func TestDisableHTTP2ForTransportNegotiatesHTTP11WithHTTP2Server(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	base, ok := server.Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("server client transport type = %T, want *http.Transport", server.Client().Transport)
+	}
+	transport := base.Clone()
+	transport.ForceAttemptHTTP2 = true
+	DisableHTTP2ForTransport(transport)
+
+	client := &http.Client{Transport: transport}
+	resp, errGet := client.Get(server.URL)
+	if errGet != nil {
+		t.Fatalf("client.Get returned error: %v", errGet)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Errorf("resp.Body.Close returned error: %v", errClose)
+		}
+	}()
+
+	if resp.Proto != "HTTP/1.1" {
+		t.Fatalf("resp.Proto = %s, want HTTP/1.1", resp.Proto)
+	}
+}
+
+func assertTransportForcesHTTP11(t *testing.T, transport *http.Transport) {
+	t.Helper()
+
+	if transport.ForceAttemptHTTP2 {
+		t.Fatal("ForceAttemptHTTP2 = true, want false")
+	}
+	if transport.TLSNextProto == nil {
+		t.Fatal("TLSNextProto = nil, want empty map")
+	}
+	if len(transport.TLSNextProto) != 0 {
+		t.Fatalf("TLSNextProto length = %d, want 0", len(transport.TLSNextProto))
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("TLSClientConfig = nil")
+	}
+	if got := transport.TLSClientConfig.NextProtos; len(got) != 1 || got[0] != "http/1.1" {
+		t.Fatalf("NextProtos = %v, want [http/1.1]", got)
 	}
 }
 
