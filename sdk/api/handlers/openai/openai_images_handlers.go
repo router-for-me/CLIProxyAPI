@@ -163,9 +163,6 @@ func (s *imagesResponsesStreamStats) err(classification string, statusCode int, 
 	if statusCode <= 0 {
 		statusCode = http.StatusBadGateway
 	}
-	if classification == "context_timeout" && statusCode == http.StatusRequestTimeout {
-		statusCode = http.StatusGatewayTimeout
-	}
 	elapsedMS := int64(0)
 	startedAt := ""
 	if s != nil && !s.startedAt.IsZero() {
