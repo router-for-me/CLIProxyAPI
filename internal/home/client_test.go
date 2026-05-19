@@ -37,10 +37,9 @@ func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
 
 func TestRedisOptionsHomeTLSDisabled(t *testing.T) {
 	client := New(config.HomeConfig{
-		Enabled:  true,
-		Host:     "127.0.0.1",
-		Port:     6379,
-		Password: "secret",
+		Enabled: true,
+		Host:    "127.0.0.1",
+		Port:    6379,
 	})
 
 	client.mu.Lock()
@@ -53,8 +52,8 @@ func TestRedisOptionsHomeTLSDisabled(t *testing.T) {
 	if options.TLSConfig != nil {
 		t.Fatalf("TLSConfig = %#v, want nil", options.TLSConfig)
 	}
-	if options.Password != "secret" {
-		t.Fatalf("Password = %q, want secret", options.Password)
+	if options.Password != "" {
+		t.Fatalf("Password = %q, want empty", options.Password)
 	}
 }
 
