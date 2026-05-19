@@ -4163,6 +4163,9 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	// rotated credentials.
 	a = m.refreshAuthIfNeeded(req.Context(), a)
 	m.mu.RLock()
+	if fresh, ok := m.auths[authID]; ok && fresh != nil {
+		a = fresh
+	}
 	var exec ProviderExecutor
 	if a != nil {
 		exec = m.executors[executorKeyFromAuth(a)]
@@ -4206,6 +4209,16 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	// Refresh through the manager so any rotated refresh token is
 	// persisted in the map; a no-op for transient auths not in the map.
 	auth = m.refreshAuthIfNeeded(ctx, auth)
+
+	// Snapshot the refreshed auth under the lock so the preparer
+	// reads a stable clone, not the mutable manager-owned pointer.
+	authID := auth.ID
+	m.mu.RLock()
+	if fresh, ok := m.auths[authID]; ok && fresh != nil {
+		auth = fresh.Clone()
+	}
+	m.mu.RUnlock()
+
 	return preparer.PrepareRequest(req, auth)
 }
 
