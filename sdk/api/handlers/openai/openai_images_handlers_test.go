@@ -519,6 +519,12 @@ func TestImagesResponsesStreamStatusCode(t *testing.T) {
 			upstreamStatus: 0,
 			want:           http.StatusGatewayTimeout,
 		},
+		{
+			name:           "preserves upstream request timeout",
+			classification: "context_timeout",
+			upstreamStatus: http.StatusRequestTimeout,
+			want:           http.StatusRequestTimeout,
+		},
 	}
 
 	for _, tt := range tests {
@@ -528,6 +534,25 @@ func TestImagesResponsesStreamStatusCode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCollectImagesFromResponsesStreamPreservesUpstream408Timeout(t *testing.T) {
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{
+		StatusCode: http.StatusRequestTimeout,
+		Error:      errors.New("upstream request timeout"),
+	}
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusRequestTimeout, "classification=context_timeout")
+	requireImagesStreamErrorContains(t, errMsg, "cause=request_timeout")
+	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="scanner_error"`)
 }
 
 func TestCollectImagesFromResponsesStreamScannerError(t *testing.T) {
