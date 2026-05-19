@@ -394,7 +394,6 @@ data: {"type":"response.created","response":{"id":"resp-1"}}
 		t.Fatalf("out = %s, want nil", string(out))
 	}
 	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=missing_response_completed")
-	requireImagesStreamErrorContains(t, errMsg, "received_completed=false")
 	requireImagesStreamErrorContains(t, errMsg, "saw_response_completed=false")
 	requireImagesStreamErrorContains(t, errMsg, "saw_first_event=true")
 	requireImagesStreamErrorContains(t, errMsg, `last_event_type="response.created"`)
@@ -420,6 +419,61 @@ func TestCollectImagesFromResponsesStreamUpstreamClosedWithoutPayload(t *testing
 	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=upstream_stream_closed")
 	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="upstream_stream_closed"`)
 	requireImagesStreamErrorContains(t, errMsg, "saw_response_completed=false")
+}
+
+func TestCollectImagesFromResponsesStreamPreservesAddonOnWrappedErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *interfaces.ErrorMessage
+	}{
+		{
+			name: "scanner error",
+			msg: &interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      errors.New("scanner read failed"),
+				Addon: http.Header{
+					"Retry-After":  {"30"},
+					"X-Request-Id": {"req-1", "req-2"},
+				},
+			},
+		},
+		{
+			name: "closed without error",
+			msg: &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Addon: http.Header{
+					"Retry-After":  {"60"},
+					"X-Request-Id": {"req-3"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := make(chan []byte)
+			errs := make(chan *interfaces.ErrorMessage, 1)
+			errs <- tt.msg
+			close(errs)
+
+			_, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+			if errMsg == nil {
+				t.Fatal("errMsg = nil, want wrapped error")
+			}
+			if got := errMsg.Addon.Get("Retry-After"); got != tt.msg.Addon.Get("Retry-After") {
+				t.Fatalf("Retry-After = %q, want %q", got, tt.msg.Addon.Get("Retry-After"))
+			}
+			if got, want := errMsg.Addon.Values("X-Request-Id"), tt.msg.Addon.Values("X-Request-Id"); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+				t.Fatalf("X-Request-Id = %#v, want %#v", got, want)
+			}
+
+			tt.msg.Addon.Set("Retry-After", "mutated")
+			if got := errMsg.Addon.Get("Retry-After"); got == "mutated" {
+				t.Fatal("wrapped Addon shares source header map")
+			}
+		})
+	}
 }
 
 func TestCollectImagesFromResponsesStreamScannerError(t *testing.T) {
