@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,7 +252,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 			Type:          "openai",
 			DisplayName:   "GPT 5.5",
 			Description:   "Frontier model for complex coding, research, and real-world work.",
-			ContextLength: 272000,
+			ContextLength: 1050000,
 			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 		{
@@ -320,6 +321,12 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
 	if !ok || len(serviceTiers) != 1 {
 		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	}
+	if got, _ := gpt55["context_window"].(float64); got != 1050000 {
+		t.Fatalf("gpt-5.5 context_window = %v, want 1050000", gpt55["context_window"])
+	}
+	if got, _ := gpt55["max_context_window"].(float64); got != 1050000 {
+		t.Fatalf("gpt-5.5 max_context_window = %v, want 1050000", gpt55["max_context_window"])
 	}
 	if custom == nil {
 		t.Fatal("expected custom model codex catalog entry")
