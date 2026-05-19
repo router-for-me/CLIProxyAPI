@@ -423,8 +423,9 @@ func TestCollectImagesFromResponsesStreamUpstreamClosedWithoutPayload(t *testing
 
 func TestCollectImagesFromResponsesStreamPreservesAddonOnWrappedErrors(t *testing.T) {
 	tests := []struct {
-		name string
-		msg  *interfaces.ErrorMessage
+		name       string
+		msg        *interfaces.ErrorMessage
+		wantStatus int
 	}{
 		{
 			name: "scanner error",
@@ -436,16 +437,18 @@ func TestCollectImagesFromResponsesStreamPreservesAddonOnWrappedErrors(t *testin
 					"X-Request-Id": {"req-1", "req-2"},
 				},
 			},
+			wantStatus: http.StatusTooManyRequests,
 		},
 		{
 			name: "closed without error",
 			msg: &interfaces.ErrorMessage{
-				StatusCode: http.StatusBadGateway,
+				StatusCode: http.StatusUnauthorized,
 				Addon: http.Header{
 					"Retry-After":  {"60"},
 					"X-Request-Id": {"req-3"},
 				},
 			},
+			wantStatus: http.StatusUnauthorized,
 		},
 	}
 
@@ -460,6 +463,9 @@ func TestCollectImagesFromResponsesStreamPreservesAddonOnWrappedErrors(t *testin
 
 			if errMsg == nil {
 				t.Fatal("errMsg = nil, want wrapped error")
+			}
+			if errMsg.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, tt.wantStatus)
 			}
 			if got := errMsg.Addon.Get("Retry-After"); got != tt.msg.Addon.Get("Retry-After") {
 				t.Fatalf("Retry-After = %q, want %q", got, tt.msg.Addon.Get("Retry-After"))
@@ -476,6 +482,54 @@ func TestCollectImagesFromResponsesStreamPreservesAddonOnWrappedErrors(t *testin
 	}
 }
 
+func TestImagesResponsesStreamStatusCode(t *testing.T) {
+	tests := []struct {
+		name           string
+		classification string
+		upstreamStatus int
+		want           int
+	}{
+		{
+			name:           "preserves upstream client error",
+			classification: "scanner_error",
+			upstreamStatus: http.StatusTooManyRequests,
+			want:           http.StatusTooManyRequests,
+		},
+		{
+			name:           "preserves upstream server error",
+			classification: "upstream_stream_closed",
+			upstreamStatus: http.StatusInternalServerError,
+			want:           http.StatusInternalServerError,
+		},
+		{
+			name:           "scanner fallback without upstream status",
+			classification: "scanner_error",
+			upstreamStatus: 0,
+			want:           http.StatusBadGateway,
+		},
+		{
+			name:           "scanner ignores upstream success status",
+			classification: "scanner_error",
+			upstreamStatus: http.StatusOK,
+			want:           http.StatusBadGateway,
+		},
+		{
+			name:           "timeout fallback without upstream status",
+			classification: "context_timeout",
+			upstreamStatus: 0,
+			want:           http.StatusGatewayTimeout,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := imagesResponsesStreamStatusCode(tt.classification, tt.upstreamStatus); got != tt.want {
+				t.Fatalf("status = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCollectImagesFromResponsesStreamScannerError(t *testing.T) {
 	data := make(chan []byte)
 	errs := make(chan *interfaces.ErrorMessage, 1)
@@ -487,7 +541,7 @@ func TestCollectImagesFromResponsesStreamScannerError(t *testing.T) {
 	if out != nil {
 		t.Fatalf("out = %s, want nil", string(out))
 	}
-	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "classification=scanner_error")
+	requireImagesStreamError(t, errMsg, http.StatusInternalServerError, "classification=scanner_error")
 	requireImagesStreamErrorContains(t, errMsg, "cause=scanner_error")
 	requireImagesStreamErrorContains(t, errMsg, `scanner_error_type="scanner_error"`)
 	requireImagesStreamErrorContains(t, errMsg, `stream_end_reason="scanner_error"`)

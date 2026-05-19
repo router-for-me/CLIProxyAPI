@@ -289,6 +289,9 @@ func classifyImagesResponsesStreamError(err error) string {
 }
 
 func imagesResponsesStreamStatusCode(classification string, upstreamStatus int) int {
+	if upstreamStatus >= http.StatusBadRequest && upstreamStatus <= 599 {
+		return upstreamStatus
+	}
 	switch classification {
 	case "context_timeout":
 		return http.StatusGatewayTimeout
@@ -297,14 +300,8 @@ func imagesResponsesStreamStatusCode(classification string, upstreamStatus int) 
 	case "missing_response_completed", "upstream_stream_closed", "scanner_error", "upstream_error_event":
 		return http.StatusBadGateway
 	case "h2_stream_reset":
-		if upstreamStatus >= http.StatusInternalServerError && upstreamStatus <= 599 {
-			return upstreamStatus
-		}
 		return http.StatusBadGateway
 	default:
-		if upstreamStatus > 0 {
-			return upstreamStatus
-		}
 		return http.StatusBadGateway
 	}
 }
