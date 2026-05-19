@@ -1018,6 +1018,8 @@ func xiaomiCredentialsFromAuth(auth *coreauth.Auth) helps.XiaomiCredentials {
 				creds.Cookies = cookies
 			}
 		}
+		creds.Email = strings.TrimSpace(auth.Attributes["xiaomi_email"])
+		creds.Password = strings.TrimSpace(auth.Attributes["xiaomi_password"])
 	}
 	if creds.Cookies == "" && auth.Metadata != nil {
 		if cookies, ok := auth.Metadata["xiaomi_cookies"].(string); ok {
@@ -1287,13 +1289,31 @@ func (h *Handler) RefreshOpenAICompatBalance(c *gin.Context) {
 		creds := helps.XiaomiCredentials{
 			Cookies: strings.TrimSpace(req.Cookie),
 		}
-		if !creds.HasAny() {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "no xiaomi credentials provided; pass 'cookie' (browser session cookies for platform.xiaomimimo.com)"})
+		// Try to find per-key xiaomi credentials from config
+		if creds.Cookies == "" {
+			xiaomiEmail, xiaomiPassword := findXiaomiCredentialsFromConfig(h.cfg, req.APIKey)
+			if xiaomiEmail != "" && xiaomiPassword != "" {
+				creds.Email = xiaomiEmail
+				creds.Password = xiaomiPassword
+			}
+		}
+		if !creds.HasAny() && !h.cfg.XiaomiPlatform.Enabled() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no xiaomi credentials provided; pass 'cookie' (browser session cookies for platform.xiaomimimo.com) or configure xiaomi-email/xiaomi-password in api-key-entries"})
 			return
 		}
 		balance, err := helps.RefreshXiaomiBalanceWithCreds(creds, h.cfg, proxyAuth)
 		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch xiaomi balance: %v", err)})
+			var verReq *helps.BrowserVerificationRequired
+				if errors.As(err, &verReq) {
+					c.JSON(http.StatusOK, gin.H{
+						"need_verification": true,
+						"session_id":        verReq.SessionID,
+						"email":             verReq.Email,
+						"message":           verReq.Message,
+					})
+					return
+				}
+				c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch xiaomi balance: %v", err)})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"balance": gin.H{
@@ -1342,6 +1362,39 @@ func (h *Handler) RefreshOpenAICompatBalance(c *gin.Context) {
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported provider: must be 'ollama', 'deepseek', 'xiaomi', or 'anyrouter'"})
 	}
+}
+
+// SubmitXiaomiVerification 向正在运行的 Playwright 浏览器 session 提交邮箱验证码。
+func (h *Handler) SubmitXiaomiVerification(c *gin.Context) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		Code      string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	sessionID := strings.TrimSpace(req.SessionID)
+	code := strings.TrimSpace(req.Code)
+	if sessionID == "" || code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session_id and code are required"})
+		return
+	}
+
+	if err := helps.SubmitVerificationCode(sessionID, code); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to submit verification code: %v", err)})
+		return
+	}
+
+	// 等待登录完成（WaitForBrowserLogin 内部会自动缓存 cookies）
+	_, err := helps.WaitForBrowserLogin(sessionID)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("login after verification failed: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
