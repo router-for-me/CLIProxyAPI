@@ -201,6 +201,9 @@ Windows-focused, local-first desktop management platform for Codex CLI built on 
 
 Native macOS SwiftUI app for monitoring ChatGPT/Codex account quotas in CLIProxyAPI pools. Displays account availability, Plus-base capacity, 5-hour and weekly quota bars, plan weights, and restore forecasts through the Management API.
 
+### [Codex Switch](https://github.com/9ycrooked/CodexSwitch)
+Command-line tool for managing multiple OpenAI Codex desktop accounts. Switch between saved ChatGPT/Codex auth profiles, check real-time 5-hour and weekly quota usage, validate token health, view active account details, and import or save auth.json files without manual copying.
+
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
