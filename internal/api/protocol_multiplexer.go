@@ -103,20 +103,8 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 	}
 
 	if isRedisRESPPrefix(prefix[0]) {
-		if s.cfg != nil && s.cfg.Home.Enabled {
-			if errClose := conn.Close(); errClose != nil {
-				log.Errorf("failed to close redis connection while home mode is enabled: %v", errClose)
-			}
-			return
-		}
-		if !s.managementRoutesEnabled.Load() {
-			if errClose := conn.Close(); errClose != nil {
-				log.Errorf("failed to close redis connection while management is disabled: %v", errClose)
-			}
-			return
-		}
 		_ = conn.SetReadDeadline(time.Time{})
-		s.handleRedisConnection(conn, reader)
+		s.handleRedisConnection(conn)
 		return
 	}
 
