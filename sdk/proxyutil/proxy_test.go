@@ -79,6 +79,37 @@ func TestBuildHTTPTransportDirectBypassesProxy(t *testing.T) {
 	}
 }
 
+func TestBuildHTTPTransportInheritKeepsDefaultTransportWhenHTTP2Enabled(t *testing.T) {
+	t.Setenv(DisableUpstreamHTTP2Env, "false")
+
+	transport, mode, errBuild := BuildHTTPTransport("")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeInherit {
+		t.Fatalf("mode = %d, want %d", mode, ModeInherit)
+	}
+	if transport != nil {
+		t.Fatalf("transport = %T, want nil default transport", transport)
+	}
+}
+
+func TestBuildHTTPTransportInheritDisablesHTTP2WhenRequested(t *testing.T) {
+	t.Setenv(DisableUpstreamHTTP2Env, "true")
+
+	transport, mode, errBuild := BuildHTTPTransport("")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeInherit {
+		t.Fatalf("mode = %d, want %d", mode, ModeInherit)
+	}
+	if transport == nil {
+		t.Fatal("expected transport, got nil")
+	}
+	assertTransportForcesHTTP11(t, transport)
+}
+
 func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
 	t.Setenv(DisableUpstreamHTTP2Env, "false")
 

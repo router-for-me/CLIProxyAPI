@@ -140,6 +140,9 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 
 	switch setting.Mode {
 	case ModeInherit:
+		if DisableUpstreamHTTP2() {
+			return applyUpstreamHTTP2Setting(cloneDefaultTransport()), setting.Mode, nil
+		}
 		return nil, setting.Mode, nil
 	case ModeDirect:
 		return applyUpstreamHTTP2Setting(NewDirectTransport()), setting.Mode, nil
