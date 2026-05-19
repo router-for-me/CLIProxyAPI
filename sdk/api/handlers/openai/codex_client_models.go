@@ -104,6 +104,9 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if info.ContextLength > 0 {
 			contextWindow = info.ContextLength
 		}
+		if info.Type == registry.OpenAIImageModelType {
+			entry["visibility"] = "hide"
+		}
 		applyCodexClientThinkingMetadata(entry, info.Thinking)
 	}
 

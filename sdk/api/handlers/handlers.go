@@ -535,7 +535,16 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+// ExecuteImageWithAuthManager executes an OpenAI-compatible image endpoint request.
+func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+}
+
+func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -632,7 +641,16 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+// ExecuteImageStreamWithAuthManager executes a streaming OpenAI-compatible image endpoint request.
+func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+}
+
+func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -848,6 +866,10 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	return h.getRequestDetailsWithOptions(modelName, false)
+}
+
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -872,10 +894,10 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(baseModel, "gpt-image-2") {
+	if strings.EqualFold(routeModelBaseName(baseModel), "gpt-image-2") && !allowImageModel {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
-			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
+			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
 		}
 	}
 
@@ -900,6 +922,14 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func routeModelBaseName(model string) string {
+	model = strings.TrimSpace(model)
+	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx < len(model)-1 {
+		return strings.TrimSpace(model[idx+1:])
+	}
+	return model
 }
 
 func cloneBytes(src []byte) []byte {
