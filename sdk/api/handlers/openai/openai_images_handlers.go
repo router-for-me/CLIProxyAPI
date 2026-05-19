@@ -201,11 +201,10 @@ func (s *imagesResponsesStreamStats) err(classification string, statusCode int, 
 		partialImageCount = s.partialImageCount
 	}
 	message := fmt.Sprintf(
-		"images responses stream aggregation failed: classification=%s started_at=%q saw_first_event=%t saw_response_completed=%t received_completed=%t saw_error_event=%t last_event_type=%q last_data_type=%q event_count=%d data_count=%d image_count=%d partial_image_count=%d finish_reason=%q scanner_error_type=%q stream_end_reason=%q chunk_count=%d elapsed_ms=%d",
+		"images responses stream aggregation failed: classification=%s started_at=%q saw_first_event=%t saw_response_completed=%t saw_error_event=%t last_event_type=%q last_data_type=%q event_count=%d data_count=%d image_count=%d partial_image_count=%d finish_reason=%q scanner_error_type=%q stream_end_reason=%q chunk_count=%d elapsed_ms=%d",
 		classification,
 		startedAt,
 		sawFirstEvent,
-		sawResponseCompleted,
 		sawResponseCompleted,
 		sawErrorEvent,
 		lastEventType,
@@ -224,6 +223,13 @@ func (s *imagesResponsesStreamStats) err(classification string, statusCode int, 
 		message += "; cause=" + safeImagesResponsesStreamCause(cause)
 	}
 	return &interfaces.ErrorMessage{StatusCode: statusCode, Error: fmt.Errorf("%s", message)}
+}
+
+func withImagesResponsesErrorAddon(dst, src *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if dst != nil && src != nil && src.Addon != nil {
+		dst.Addon = src.Addon.Clone()
+	}
+	return dst
 }
 
 func safeImagesResponsesStreamCause(err error) string {
@@ -304,15 +310,15 @@ func imagesResponsesStreamStatusCode(classification string, upstreamStatus int) 
 }
 
 func isImagesResponsesHTTP2ResetErrorText(text string) bool {
-	lowerText := strings.ToLower(strings.TrimSpace(text))
-	if lowerText == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return false
 	}
-	return strings.Contains(lowerText, "stream id") ||
-		strings.Contains(lowerText, "internal_error") ||
-		strings.Contains(lowerText, "received from peer") ||
-		strings.Contains(lowerText, "http2") ||
-		strings.Contains(lowerText, "rst_stream")
+	return strings.Contains(text, "stream id") ||
+		strings.Contains(text, "internal_error") ||
+		strings.Contains(text, "received from peer") ||
+		strings.Contains(text, "http2") ||
+		strings.Contains(text, "rst_stream")
 }
 
 func isImagesResponsesErrorEventType(eventType string) bool {
@@ -1779,10 +1785,10 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 					if classification == "h2_stream_reset" {
 						stats.markStreamEnd("h2_stream_reset")
 					}
-					return nil, stats.err(classification, imagesResponsesStreamStatusCode(classification, errMsg.StatusCode), errMsg.Error)
+					return nil, withImagesResponsesErrorAddon(stats.err(classification, imagesResponsesStreamStatusCode(classification, errMsg.StatusCode), errMsg.Error), errMsg)
 				}
 				stats.markStreamEnd("upstream_stream_closed")
-				return nil, stats.err("upstream_stream_closed", imagesResponsesStreamStatusCode("upstream_stream_closed", errMsg.StatusCode), nil)
+				return nil, withImagesResponsesErrorAddon(stats.err("upstream_stream_closed", imagesResponsesStreamStatusCode("upstream_stream_closed", errMsg.StatusCode), nil), errMsg)
 			}
 			errs = nil
 		case chunk, ok := <-data:
