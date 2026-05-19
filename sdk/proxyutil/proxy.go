@@ -9,10 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/proxy"
 )
+
+const DisableUpstreamHTTP2Env = "CPA_DISABLE_UPSTREAM_HTTP2"
 
 // Mode describes how a proxy setting should be interpreted.
 type Mode int
@@ -78,6 +82,48 @@ func cloneDefaultTransport() *http.Transport {
 	return &http.Transport{}
 }
 
+// DisableUpstreamHTTP2 reports whether CPA upstream HTTP clients should force HTTP/1.1.
+func DisableUpstreamHTTP2() bool {
+	raw, ok := os.LookupEnv(DisableUpstreamHTTP2Env)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	enabled, errParse := strconv.ParseBool(strings.TrimSpace(raw))
+	return errParse == nil && enabled
+}
+
+// DisableHTTP2ForTransport mutates a transport so TLS requests negotiate HTTP/1.1 only.
+func DisableHTTP2ForTransport(transport *http.Transport) {
+	if transport == nil {
+		return
+	}
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+}
+
+// CloneTransportWithHTTP11 clones a transport and disables HTTP/2 on the clone.
+func CloneTransportWithHTTP11(base *http.Transport) *http.Transport {
+	if base == nil {
+		return nil
+	}
+	clone := base.Clone()
+	DisableHTTP2ForTransport(clone)
+	return clone
+}
+
+func applyUpstreamHTTP2Setting(transport *http.Transport) *http.Transport {
+	if transport != nil && DisableUpstreamHTTP2() {
+		DisableHTTP2ForTransport(transport)
+	}
+	return transport
+}
+
 // NewDirectTransport returns a transport that bypasses environment proxies.
 func NewDirectTransport() *http.Transport {
 	clone := cloneDefaultTransport()
@@ -96,7 +142,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	case ModeInherit:
 		return nil, setting.Mode, nil
 	case ModeDirect:
-		return NewDirectTransport(), setting.Mode, nil
+		return applyUpstreamHTTP2Setting(NewDirectTransport()), setting.Mode, nil
 	case ModeProxy:
 		if setting.URL.Scheme == "socks5" || setting.URL.Scheme == "socks5h" {
 			var proxyAuth *proxy.Auth
@@ -114,11 +160,11 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			}
-			return transport, setting.Mode, nil
+			return applyUpstreamHTTP2Setting(transport), setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()
 		transport.Proxy = http.ProxyURL(setting.URL)
-		return transport, setting.Mode, nil
+		return applyUpstreamHTTP2Setting(transport), setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
 	}

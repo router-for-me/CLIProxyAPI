@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -47,6 +48,293 @@ type imageCallResult struct {
 
 type sseFrameAccumulator struct {
 	pending []byte
+}
+
+type imagesResponsesStreamStats struct {
+	startedAt            time.Time
+	sawFirstEvent        bool
+	sawResponseCompleted bool
+	sawErrorEvent        bool
+	lastEventType        string
+	lastDataType         string
+	finishReason         string
+	scannerErrorType     string
+	streamEndReason      string
+	chunkCount           int
+	eventCount           int
+	dataCount            int
+	imageCount           int
+	partialImageCount    int
+}
+
+func newImagesResponsesStreamStats() *imagesResponsesStreamStats {
+	return &imagesResponsesStreamStats{startedAt: time.Now()}
+}
+
+func (s *imagesResponsesStreamStats) observeChunk(chunk []byte) {
+	if s == nil || len(chunk) == 0 {
+		return
+	}
+	s.chunkCount++
+}
+
+func (s *imagesResponsesStreamStats) observeFrameLine(line []byte) {
+	if s == nil {
+		return
+	}
+	trimmed := bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+	if len(trimmed) == 0 {
+		return
+	}
+	if bytes.HasPrefix(trimmed, []byte("event:")) {
+		s.eventCount++
+		s.lastEventType = string(bytes.TrimSpace(trimmed[len("event:"):]))
+		s.sawFirstEvent = true
+		if isImagesResponsesErrorEventType(s.lastEventType) {
+			s.sawErrorEvent = true
+		}
+	}
+}
+
+func (s *imagesResponsesStreamStats) observeDataPayload(payload []byte) {
+	if s == nil {
+		return
+	}
+	s.dataCount++
+	if json.Valid(payload) {
+		s.lastDataType = gjson.GetBytes(payload, "type").String()
+		if s.lastDataType != "" {
+			s.sawFirstEvent = true
+		}
+		if s.lastDataType == "response.completed" {
+			s.sawResponseCompleted = true
+			s.observeCompletedPayload(payload)
+		}
+		if isImagesResponsesErrorEventType(s.lastDataType) {
+			s.sawErrorEvent = true
+		}
+		if s.lastDataType == "response.image_generation_call.partial_image" {
+			s.partialImageCount++
+		}
+		if finishReason := firstNonEmptyGJSON(payload,
+			"response.status",
+			"response.incomplete_details.reason",
+			"response.error.code",
+			"item.status",
+		); finishReason != "" && s.finishReason == "" {
+			s.finishReason = finishReason
+		}
+	}
+}
+
+func (s *imagesResponsesStreamStats) observeCompletedPayload(payload []byte) {
+	if s == nil || !json.Valid(payload) {
+		return
+	}
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.IsArray() {
+		return
+	}
+	for _, item := range output.Array() {
+		if item.Get("type").String() == "image_generation_call" && strings.TrimSpace(item.Get("result").String()) != "" {
+			s.imageCount++
+		}
+	}
+}
+
+func (s *imagesResponsesStreamStats) markStreamEnd(reason string) {
+	if s == nil {
+		return
+	}
+	if strings.TrimSpace(reason) != "" {
+		s.streamEndReason = strings.TrimSpace(reason)
+	}
+}
+
+func (s *imagesResponsesStreamStats) markScannerError(err error) {
+	if s == nil {
+		return
+	}
+	s.scannerErrorType = safeImagesResponsesStreamCause(err)
+	s.markStreamEnd("scanner_error")
+}
+
+func (s *imagesResponsesStreamStats) err(classification string, statusCode int, cause error) *interfaces.ErrorMessage {
+	if statusCode <= 0 {
+		statusCode = http.StatusBadGateway
+	}
+	if classification == "context_timeout" && statusCode == http.StatusRequestTimeout {
+		statusCode = http.StatusGatewayTimeout
+	}
+	elapsedMS := int64(0)
+	startedAt := ""
+	if s != nil && !s.startedAt.IsZero() {
+		elapsedMS = time.Since(s.startedAt).Milliseconds()
+		startedAt = s.startedAt.UTC().Format(time.RFC3339Nano)
+	}
+	sawFirstEvent := false
+	sawResponseCompleted := false
+	sawErrorEvent := false
+	lastEventType := ""
+	lastDataType := ""
+	finishReason := ""
+	scannerErrorType := ""
+	streamEndReason := ""
+	chunkCount := 0
+	eventCount := 0
+	dataCount := 0
+	imageCount := 0
+	partialImageCount := 0
+	if s != nil {
+		sawFirstEvent = s.sawFirstEvent
+		sawResponseCompleted = s.sawResponseCompleted
+		sawErrorEvent = s.sawErrorEvent
+		lastEventType = s.lastEventType
+		lastDataType = s.lastDataType
+		finishReason = s.finishReason
+		scannerErrorType = s.scannerErrorType
+		streamEndReason = s.streamEndReason
+		chunkCount = s.chunkCount
+		eventCount = s.eventCount
+		dataCount = s.dataCount
+		imageCount = s.imageCount
+		partialImageCount = s.partialImageCount
+	}
+	message := fmt.Sprintf(
+		"images responses stream aggregation failed: classification=%s started_at=%q saw_first_event=%t saw_response_completed=%t received_completed=%t saw_error_event=%t last_event_type=%q last_data_type=%q event_count=%d data_count=%d image_count=%d partial_image_count=%d finish_reason=%q scanner_error_type=%q stream_end_reason=%q chunk_count=%d elapsed_ms=%d",
+		classification,
+		startedAt,
+		sawFirstEvent,
+		sawResponseCompleted,
+		sawResponseCompleted,
+		sawErrorEvent,
+		lastEventType,
+		lastDataType,
+		eventCount,
+		dataCount,
+		imageCount,
+		partialImageCount,
+		finishReason,
+		scannerErrorType,
+		streamEndReason,
+		chunkCount,
+		elapsedMS,
+	)
+	if cause != nil {
+		message += "; cause=" + safeImagesResponsesStreamCause(cause)
+	}
+	return &interfaces.ErrorMessage{StatusCode: statusCode, Error: fmt.Errorf("%s", message)}
+}
+
+func safeImagesResponsesStreamCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := strings.TrimSpace(err.Error())
+	if text == "" {
+		return ""
+	}
+	if classifyImagesResponsesStreamError(err) == "h2_stream_reset" {
+		return "http2_stream_reset"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline_exceeded"
+	}
+	lowerText := strings.ToLower(text)
+	if lowerText == "upstream_stream_closed" {
+		return "upstream_stream_closed"
+	}
+	if strings.Contains(lowerText, "request timeout") || strings.Contains(lowerText, "timeout") {
+		return "request_timeout"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(lowerText, "unexpected eof") {
+		return "unexpected_eof"
+	}
+	if errors.Is(err, io.EOF) || lowerText == "eof" {
+		return "eof"
+	}
+	if strings.Contains(lowerText, "scanner") {
+		return "scanner_error"
+	}
+	return "stream_read_error"
+}
+
+func classifyImagesResponsesStreamError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := strings.ToLower(err.Error())
+	if isImagesResponsesHTTP2ResetErrorText(text) {
+		return "h2_stream_reset"
+	}
+	if errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(text, "context deadline exceeded") ||
+		strings.Contains(text, "request timeout") ||
+		strings.Contains(text, "timeout") {
+		return "context_timeout"
+	}
+	if errors.Is(err, context.Canceled) || strings.Contains(text, "context canceled") {
+		return "context_canceled"
+	}
+	return "scanner_error"
+}
+
+func imagesResponsesStreamStatusCode(classification string, upstreamStatus int) int {
+	switch classification {
+	case "context_timeout":
+		return http.StatusGatewayTimeout
+	case "context_canceled":
+		return http.StatusRequestTimeout
+	case "missing_response_completed", "upstream_stream_closed", "scanner_error", "upstream_error_event":
+		return http.StatusBadGateway
+	case "h2_stream_reset":
+		if upstreamStatus >= http.StatusInternalServerError && upstreamStatus <= 599 {
+			return upstreamStatus
+		}
+		return http.StatusBadGateway
+	default:
+		if upstreamStatus > 0 {
+			return upstreamStatus
+		}
+		return http.StatusBadGateway
+	}
+}
+
+func isImagesResponsesHTTP2ResetErrorText(text string) bool {
+	lowerText := strings.ToLower(strings.TrimSpace(text))
+	if lowerText == "" {
+		return false
+	}
+	return strings.Contains(lowerText, "stream id") ||
+		strings.Contains(lowerText, "internal_error") ||
+		strings.Contains(lowerText, "received from peer") ||
+		strings.Contains(lowerText, "http2") ||
+		strings.Contains(lowerText, "rst_stream")
+}
+
+func isImagesResponsesErrorEventType(eventType string) bool {
+	eventType = strings.ToLower(strings.TrimSpace(eventType))
+	return eventType == "error" ||
+		eventType == "response.error" ||
+		eventType == "response.failed" ||
+		eventType == "response.incomplete"
+}
+
+func firstNonEmptyGJSON(payload []byte, paths ...string) string {
+	for _, path := range paths {
+		result := gjson.GetBytes(payload, path)
+		if !result.Exists() {
+			continue
+		}
+		value := strings.TrimSpace(result.String())
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type xaiImageResult struct {
@@ -1421,9 +1709,11 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 
 func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, *interfaces.ErrorMessage) {
 	acc := &sseFrameAccumulator{}
+	stats := newImagesResponsesStreamStats()
 
 	processFrame := func(frame []byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		for _, line := range bytes.Split(frame, []byte("\n")) {
+			stats.observeFrameLine(line)
 			trimmed := bytes.TrimSpace(bytes.TrimRight(line, "\r"))
 			if len(trimmed) == 0 {
 				continue
@@ -1435,8 +1725,19 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 				continue
 			}
+			stats.observeDataPayload(payload)
+			if isImagesResponsesErrorEventType(stats.lastEventType) {
+				stats.markStreamEnd("upstream_error_event")
+				return nil, false, stats.err("upstream_error_event", http.StatusBadGateway, nil)
+			}
 			if !json.Valid(payload) {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
+				stats.markStreamEnd("invalid_sse_data_json")
+				return nil, false, stats.err("invalid_sse_data_json", http.StatusBadGateway, nil)
+			}
+
+			if isImagesResponsesErrorEventType(stats.lastDataType) {
+				stats.markStreamEnd("upstream_error_event")
+				return nil, false, stats.err("upstream_error_event", http.StatusBadGateway, nil)
 			}
 
 			if gjson.GetBytes(payload, "type").String() != "response.completed" {
@@ -1445,14 +1746,14 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 
 			results, createdAt, usageRaw, firstMeta, err := extractImagesFromResponsesCompleted(payload)
 			if err != nil {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+				return nil, false, stats.err("response_completed_extract_failed", http.StatusBadGateway, err)
 			}
 			if len(results) == 0 {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
+				return nil, false, stats.err("missing_image_output", http.StatusBadGateway, nil)
 			}
 			out, err := buildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, responseFormat)
 			if err != nil {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+				return nil, false, stats.err("image_response_build_failed", http.StatusInternalServerError, err)
 			}
 			return out, true, nil
 		}
@@ -1462,10 +1763,26 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, &interfaces.ErrorMessage{StatusCode: http.StatusRequestTimeout, Error: ctx.Err()}
+			classification := classifyImagesResponsesStreamError(ctx.Err())
+			if classification == "context_canceled" {
+				stats.markStreamEnd("context_canceled")
+			} else {
+				classification = "context_timeout"
+				stats.markStreamEnd("context_timeout")
+			}
+			return nil, stats.err(classification, imagesResponsesStreamStatusCode(classification, 0), ctx.Err())
 		case errMsg, ok := <-errs:
 			if ok && errMsg != nil {
-				return nil, errMsg
+				if errMsg.Error != nil {
+					classification := classifyImagesResponsesStreamError(errMsg.Error)
+					stats.markScannerError(errMsg.Error)
+					if classification == "h2_stream_reset" {
+						stats.markStreamEnd("h2_stream_reset")
+					}
+					return nil, stats.err(classification, imagesResponsesStreamStatusCode(classification, errMsg.StatusCode), errMsg.Error)
+				}
+				stats.markStreamEnd("upstream_stream_closed")
+				return nil, stats.err("upstream_stream_closed", imagesResponsesStreamStatusCode("upstream_stream_closed", errMsg.StatusCode), nil)
 			}
 			errs = nil
 		case chunk, ok := <-data:
@@ -1477,8 +1794,10 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 						return out, nil
 					}
 				}
-				return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("stream disconnected before completion")}
+				stats.markStreamEnd("data_channel_closed")
+				return nil, stats.err("missing_response_completed", imagesResponsesStreamStatusCode("missing_response_completed", 0), fmt.Errorf("upstream_stream_closed"))
 			}
+			stats.observeChunk(chunk)
 			for _, frame := range acc.AddChunk(chunk) {
 				if out, done, errMsg := processFrame(frame); errMsg != nil {
 					return nil, errMsg
