@@ -46,10 +46,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 安装基础依赖
-# --mount=type=cache 持久化 apt 包缓存，重复构建跳过下载
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     python3 \
@@ -73,13 +70,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxfixes3 \
     libxkbcommon0 \
     fonts-liberation \
-    xdg-utils
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 # 安装 Playwright
-# --mount=type=cache 持久化 pip 下载缓存
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    python3 -m venv /opt/playwright-venv \
-    && /opt/playwright-venv/bin/pip install playwright \
+RUN python3 -m venv /opt/playwright-venv \
+    && /opt/playwright-venv/bin/pip install --no-cache-dir playwright \
     && /opt/playwright-venv/bin/python -m playwright install chromium \
     && /opt/playwright-venv/bin/python -m playwright install-deps chromium
 
