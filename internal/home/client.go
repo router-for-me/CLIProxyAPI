@@ -180,7 +180,6 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 	}
 	return &redis.Options{
 		Addr:                  addr,
-		Password:              c.homeCfg.Password,
 		TLSConfig:             tlsConfig,
 		DialTimeout:           homeRedisOperationTimeout,
 		ReadTimeout:           homeRedisOperationTimeout,
