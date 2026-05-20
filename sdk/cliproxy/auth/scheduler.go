@@ -432,6 +432,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	now := time.Now()
 	total := 0
 	cooldownCount := 0
+	permanentlyBlocked := 0
 	earliest := time.Time{}
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
@@ -442,9 +443,10 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(triedPredicate(tried))
+		localTotal, localCooldown, localBlocked, localEarliest := shard.availabilitySummaryLocked(triedPredicate(tried))
 		total += localTotal
-		cooldownCount += localCooldownCount
+		cooldownCount += localCooldown
+		permanentlyBlocked += localBlocked
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -452,7 +454,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if cooldownCount == total && !earliest.IsZero() {
+	// Return 429 when all non-permanently-blocked auths are in cooldown and will recover.
+	recoverableCount := total - permanentlyBlocked
+	if cooldownCount > 0 && cooldownCount == recoverableCount && !earliest.IsZero() {
 		resetIn := earliest.Sub(now)
 		if resetIn < 0 {
 			resetIn = 0
@@ -843,11 +847,16 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
+	total, cooldownCount, permanentlyBlocked, earliest := m.availabilitySummaryLocked(predicate)
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if cooldownCount == total && !earliest.IsZero() {
+	// Return 429 (model_cooldown) when all non-permanently-blocked auths are in
+	// cooldown, because those cooldowns will expire and the auths will recover.
+	// Previously, any mix of disabled/blocked auths with cooldown auths would
+	// incorrectly return 503 (auth_unavailable).
+	recoverableCount := total - permanentlyBlocked
+	if cooldownCount > 0 && cooldownCount == recoverableCount && !earliest.IsZero() {
 		providerForError := provider
 		if providerForError == "mixed" {
 			providerForError = ""
@@ -861,13 +870,15 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
-func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
+// availabilitySummaryLocked summarizes total candidates, cooldown count, permanently
+// blocked count (disabled + non-cooldown blocked), and earliest retry time.
+func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, int, time.Time) {
 	if m == nil {
-		return 0, 0, time.Time{}
+		return 0, 0, 0, time.Time{}
 	}
 	total := 0
 	cooldownCount := 0
+	permanentlyBlocked := 0
 	earliest := time.Time{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
@@ -877,15 +888,17 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state != scheduledStateCooldown {
-			continue
-		}
-		cooldownCount++
-		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
-			earliest = entry.nextRetryAt
+		switch entry.state {
+		case scheduledStateCooldown:
+			cooldownCount++
+			if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
+				earliest = entry.nextRetryAt
+			}
+		case scheduledStateDisabled, scheduledStateBlocked:
+			permanentlyBlocked++
 		}
 	}
-	return total, cooldownCount, earliest
+	return total, cooldownCount, permanentlyBlocked, earliest
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
