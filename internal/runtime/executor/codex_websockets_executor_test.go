@@ -481,6 +481,46 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersUsesDefaultCodexUserAgentForOAuth(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	req = req.WithContext(contextWithGinHeaders(map[string]string{
+		"User-Agent": "Mozilla/5.0 CherryStudio/1.9.6 Electron/41.2.1",
+	}))
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if got := req.Header.Get("User-Agent"); got != codexUserAgent {
+		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
+	}
+}
+
+func TestApplyCodexHeadersPreservesClientUserAgentForAPIKey(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"api_key": "sk-test"},
+	}
+	req = req.WithContext(contextWithGinHeaders(map[string]string{
+		"User-Agent": "api-key-client/1.0",
+	}))
+
+	applyCodexHeaders(req, auth, "sk-test", true, nil)
+
+	if got := req.Header.Get("User-Agent"); got != "api-key-client/1.0" {
+		t.Fatalf("User-Agent = %s, want %s", got, "api-key-client/1.0")
+	}
+}
+
 func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {

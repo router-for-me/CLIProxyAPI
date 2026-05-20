@@ -793,7 +793,11 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
+	isAPIKey := codexAuthUsesAPIKey(auth)
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
+	if !isAPIKey && strings.TrimSpace(cfgUserAgent) == "" {
+		cfgUserAgent = codexUserAgent
+	}
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
@@ -807,12 +811,6 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
