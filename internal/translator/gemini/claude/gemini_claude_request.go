@@ -81,8 +81,12 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {
 					case "text":
+						text := contentResult.Get("text").String()
+						if text == "" {
+							return true
+						}
 						part := []byte(`{"text":""}`)
-						part, _ = sjson.SetBytes(part, "text", contentResult.Get("text").String())
+						part, _ = sjson.SetBytes(part, "text", text)
 						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 					case "tool_use":
