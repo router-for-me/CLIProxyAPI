@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/samplekeys"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Register ensures the config-access provider is available to the access manager.
@@ -17,6 +19,9 @@ func Register(cfg *sdkconfig.SDKConfig) {
 	}
 
 	keys := normalizeKeys(cfg.APIKeys)
+	if samplekeys.ContainsClientAPIKey(keys) {
+		log.Warn("configured API keys include rejected sample values; replace them with private keys before exposing the server")
+	}
 	if len(keys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
@@ -90,8 +95,8 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if isBlockedSampleAPIKey(candidate.value) {
-			return nil, sdkaccess.NewInvalidCredentialError()
+		if samplekeys.IsClientAPIKey(candidate.value) {
+			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
 			return &sdkaccess.Result{
@@ -119,14 +124,6 @@ func extractBearerToken(header string) string {
 		return header
 	}
 	return strings.TrimSpace(parts[1])
-}
-
-func isBlockedSampleAPIKey(key string) bool {
-	switch key {
-	case "your-api-key-1", "your-api-key-2", "your-api-key-3":
-		return true
-	}
-	return false
 }
 
 func normalizeKeys(keys []string) []string {

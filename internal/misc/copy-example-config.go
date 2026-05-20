@@ -9,30 +9,31 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/samplekeys"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
 const generatedClientAPIKeyBytes = 32
 
-func CopyConfigTemplate(src, dst string) error {
+func CopyConfigTemplate(src, dst string) (string, error) {
 	data, err := os.ReadFile(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	rendered, generatedKey, generated, err := renderConfigTemplateWithGeneratedAPIKey(data)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if err = os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-		return err
+		return "", err
 	}
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() {
 		if errClose := out.Close(); errClose != nil {
@@ -41,15 +42,15 @@ func CopyConfigTemplate(src, dst string) error {
 	}()
 
 	if _, err = out.Write(rendered); err != nil {
-		return err
+		return "", err
 	}
 	if err = out.Sync(); err != nil {
-		return err
+		return "", err
 	}
 	if generated {
-		fmt.Printf("Generated client API key for %s: %s\n", filepath.Clean(dst), generatedKey)
+		return generatedKey, nil
 	}
-	return nil
+	return "", nil
 }
 
 func generateClientAPIKey() (string, error) {
@@ -77,7 +78,7 @@ func renderConfigTemplateWithGeneratedAPIKey(data []byte) ([]byte, string, bool,
 	if apiKeysValueNode == nil {
 		return data, "", false, nil
 	}
-	if hasOperatorAPIKeys(apiKeysValueNode) {
+	if !shouldGenerateClientAPIKey(apiKeysValueNode) {
 		return data, "", false, nil
 	}
 
@@ -103,6 +104,8 @@ func renderConfigTemplateWithGeneratedAPIKey(data []byte) ([]byte, string, bool,
 	}
 
 	var out bytes.Buffer
+	// Encoding yaml.Node may normalize whitespace and comments. This only runs when
+	// generating a fresh bootstrap config from sample placeholders.
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)
 	if err = encoder.Encode(&doc); err != nil {
@@ -128,36 +131,37 @@ func topLevelMappingEntry(root *yaml.Node, key string) (*yaml.Node, *yaml.Node) 
 	return nil, nil
 }
 
-func hasOperatorAPIKeys(node *yaml.Node) bool {
+func shouldGenerateClientAPIKey(node *yaml.Node) bool {
 	if node == nil {
 		return false
+	}
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!null" {
+		return true
 	}
 	if node.Kind != yaml.SequenceNode {
 		return false
 	}
+	sawSample := false
 	for _, child := range node.Content {
 		if child == nil || child.Kind != yaml.ScalarNode {
 			continue
 		}
 		key := strings.TrimSpace(child.Value)
-		if key == "" || isSampleClientAPIKey(key) {
+		if key == "" {
 			continue
 		}
-		return true
+		if !samplekeys.IsClientAPIKey(key) {
+			return false
+		}
+		sawSample = true
 	}
-	return false
-}
-
-func isSampleClientAPIKey(key string) bool {
-	switch strings.TrimSpace(key) {
-	case "your-api-key-1", "your-api-key-2", "your-api-key-3":
-		return true
-	}
-	return false
+	return sawSample
 }
 
 func removeTopLevelSampleAPIKeyComments(data []byte) []byte {
 	var out strings.Builder
+	// The sample template keeps inactive api-keys as commented list items. After
+	// generating a real key, drop those placeholder lines from the copied config.
 	for _, line := range strings.SplitAfter(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, `# - "your-api-key-`) {

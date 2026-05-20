@@ -52,6 +52,27 @@ func TestAuthenticateAllowsCustomAPIKey(t *testing.T) {
 	}
 }
 
+func TestAuthenticateAllowsLaterCustomAPIKeyAfterBlockedSample(t *testing.T) {
+	p := newProvider("test", []string{"your-api-key-1", "real-key"})
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer your-api-key-1")
+	req.Header.Set("X-Api-Key", "real-key")
+
+	result, authErr := p.Authenticate(context.Background(), req)
+	if authErr != nil {
+		t.Fatalf("Authenticate() error = %v, want nil", authErr)
+	}
+	if result == nil {
+		t.Fatal("Authenticate() result = nil, want result")
+	}
+	if result.Principal != "real-key" {
+		t.Fatalf("Authenticate() principal = %q, want real-key", result.Principal)
+	}
+	if got := result.Metadata["source"]; got != "x-api-key" {
+		t.Fatalf("Authenticate() source = %q, want x-api-key", got)
+	}
+}
+
 func TestAuthenticateTrimsCandidateAPIKey(t *testing.T) {
 	p := newProvider("test", []string{"real-key"})
 	req := httptest.NewRequest("GET", "/?key=%20real-key%20", nil)

@@ -139,20 +139,21 @@ func (s *ObjectTokenStore) AuthDir() string {
 }
 
 // Bootstrap ensures the target bucket exists and synchronizes data from the object storage backend.
-func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath string) error {
+func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath string) (string, error) {
 	if s == nil {
-		return fmt.Errorf("object store: not initialized")
+		return "", fmt.Errorf("object store: not initialized")
 	}
 	if err := s.ensureBucket(ctx); err != nil {
-		return err
+		return "", err
 	}
-	if err := s.syncConfigFromBucket(ctx, exampleConfigPath); err != nil {
-		return err
+	generatedKey, err := s.syncConfigFromBucket(ctx, exampleConfigPath)
+	if err != nil {
+		return "", err
 	}
 	if err := s.syncAuthFromBucket(ctx); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return generatedKey, nil
 }
 
 // Save persists authentication metadata to disk and uploads it to the object storage backend.
@@ -346,51 +347,54 @@ func (s *ObjectTokenStore) ensureBucket(ctx context.Context) error {
 	return nil
 }
 
-func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example string) error {
+func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example string) (string, error) {
+	generatedKey := ""
 	key := s.prefixedKey(objectStoreConfigKey)
 	_, err := s.client.StatObject(ctx, s.cfg.Bucket, key, minio.StatObjectOptions{})
 	switch {
 	case err == nil:
 		object, errGet := s.client.GetObject(ctx, s.cfg.Bucket, key, minio.GetObjectOptions{})
 		if errGet != nil {
-			return fmt.Errorf("object store: fetch config: %w", errGet)
+			return "", fmt.Errorf("object store: fetch config: %w", errGet)
 		}
 		defer object.Close()
 		data, errRead := io.ReadAll(object)
 		if errRead != nil {
-			return fmt.Errorf("object store: read config: %w", errRead)
+			return "", fmt.Errorf("object store: read config: %w", errRead)
 		}
 		if errWrite := os.WriteFile(s.configPath, normalizeLineEndingsBytes(data), 0o600); errWrite != nil {
-			return fmt.Errorf("object store: write config: %w", errWrite)
+			return "", fmt.Errorf("object store: write config: %w", errWrite)
 		}
 	case isObjectNotFound(err):
 		if _, statErr := os.Stat(s.configPath); errors.Is(statErr, fs.ErrNotExist) {
 			if example != "" {
-				if errCopy := misc.CopyConfigTemplate(example, s.configPath); errCopy != nil {
-					return fmt.Errorf("object store: copy example config: %w", errCopy)
+				copiedKey, errCopy := misc.CopyConfigTemplate(example, s.configPath)
+				if errCopy != nil {
+					return "", fmt.Errorf("object store: copy example config: %w", errCopy)
 				}
+				generatedKey = copiedKey
 			} else {
 				if errCreate := os.MkdirAll(filepath.Dir(s.configPath), 0o700); errCreate != nil {
-					return fmt.Errorf("object store: prepare config directory: %w", errCreate)
+					return "", fmt.Errorf("object store: prepare config directory: %w", errCreate)
 				}
 				if errWrite := os.WriteFile(s.configPath, []byte{}, 0o600); errWrite != nil {
-					return fmt.Errorf("object store: create empty config: %w", errWrite)
+					return "", fmt.Errorf("object store: create empty config: %w", errWrite)
 				}
 			}
 		}
 		data, errRead := os.ReadFile(s.configPath)
 		if errRead != nil {
-			return fmt.Errorf("object store: read local config: %w", errRead)
+			return "", fmt.Errorf("object store: read local config: %w", errRead)
 		}
 		if len(data) > 0 {
 			if errPut := s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml"); errPut != nil {
-				return errPut
+				return "", errPut
 			}
 		}
 	default:
-		return fmt.Errorf("object store: stat config: %w", err)
+		return "", fmt.Errorf("object store: stat config: %w", err)
 	}
-	return nil
+	return generatedKey, nil
 }
 
 func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {

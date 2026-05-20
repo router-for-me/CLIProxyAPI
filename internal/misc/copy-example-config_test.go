@@ -116,6 +116,27 @@ api-keys:
 	}
 }
 
+func TestRenderConfigTemplatePreservesExplicitEmptyAPIKeys(t *testing.T) {
+	template := []byte(`host: ""
+api-keys: []
+debug: false
+`)
+
+	rendered, key, generated, err := renderConfigTemplateWithGeneratedAPIKey(template)
+	if err != nil {
+		t.Fatalf("renderConfigTemplateWithGeneratedAPIKey() error = %v", err)
+	}
+	if generated {
+		t.Fatalf("renderConfigTemplateWithGeneratedAPIKey() generated = true, want false")
+	}
+	if key != "" {
+		t.Fatalf("generated key = %q, want empty", key)
+	}
+	if string(rendered) != string(template) {
+		t.Fatalf("rendered config changed explicit empty api-keys:\n%s", rendered)
+	}
+}
+
 func TestCopyConfigTemplateGeneratesClientAPIKey(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "config.example.yaml")
@@ -124,8 +145,12 @@ func TestCopyConfigTemplateGeneratesClientAPIKey(t *testing.T) {
 		t.Fatalf("write template: %v", err)
 	}
 
-	if err := CopyConfigTemplate(src, dst); err != nil {
+	generatedKey, err := CopyConfigTemplate(src, dst)
+	if err != nil {
 		t.Fatalf("CopyConfigTemplate() error = %v", err)
+	}
+	if !strings.HasPrefix(generatedKey, "cpak-") {
+		t.Fatalf("CopyConfigTemplate() generated key = %q, want cpak- prefix", generatedKey)
 	}
 
 	data, err := os.ReadFile(dst)
@@ -140,5 +165,8 @@ func TestCopyConfigTemplateGeneratesClientAPIKey(t *testing.T) {
 	}
 	if len(cfg.APIKeys) != 1 || !strings.HasPrefix(cfg.APIKeys[0], "cpak-") {
 		t.Fatalf("api-keys = %#v, want one generated cpak key", cfg.APIKeys)
+	}
+	if cfg.APIKeys[0] != generatedKey {
+		t.Fatalf("api-keys[0] = %q, generated key = %q", cfg.APIKeys[0], generatedKey)
 	}
 }

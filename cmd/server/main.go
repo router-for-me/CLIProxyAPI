@@ -323,13 +323,15 @@ func main() {
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+		generatedClientAPIKey, errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath)
+		if errBootstrap != nil {
 			cancel()
 			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
 			return
 		}
 		cancel()
 		configFilePath = pgStoreInst.ConfigPath()
+		logGeneratedClientAPIKey(configFilePath, generatedClientAPIKey)
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {
 			cfg.AuthDir = pgStoreInst.AuthDir()
@@ -387,13 +389,15 @@ func main() {
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+		generatedClientAPIKey, errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath)
+		if errBootstrap != nil {
 			cancel()
 			log.Errorf("failed to bootstrap object-backed config: %v", errBootstrap)
 			return
 		}
 		cancel()
 		configFilePath = objectStoreInst.ConfigPath()
+		logGeneratedClientAPIKey(configFilePath, generatedClientAPIKey)
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {
 			if cfg == nil {
@@ -428,10 +432,12 @@ func main() {
 				log.Errorf("failed to find template config file: %v", errExample)
 				return
 			}
-			if errCopy := misc.CopyConfigTemplate(examplePath, configFilePath); errCopy != nil {
+			generatedClientAPIKey, errCopy := misc.CopyConfigTemplate(examplePath, configFilePath)
+			if errCopy != nil {
 				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
 				return
 			}
+			logGeneratedClientAPIKey(configFilePath, generatedClientAPIKey)
 			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
 				log.Errorf("failed to commit initial git-backed config: %v", errCommit)
 				return
@@ -655,4 +661,11 @@ func main() {
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
+}
+
+func logGeneratedClientAPIKey(configPath, generatedKey string) {
+	if strings.TrimSpace(generatedKey) == "" {
+		return
+	}
+	log.Infof("generated client API key for %s: %s", filepath.Clean(configPath), generatedKey)
 }
