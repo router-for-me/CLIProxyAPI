@@ -240,6 +240,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			// on collision. This matters for providers like xiaomi/anyrouter
 			// where each api-key carries its own session cookies / new-api-user.
 			addConfigHeadersToAttrs(entry.Headers, attrs)
+			// Pass per-key Xiaomi credentials for auto-login.
+			if entry.XiaomiEmail != "" {
+				attrs["xiaomi_email"] = entry.XiaomiEmail
+			}
+			if entry.XiaomiPassword != "" {
+				attrs["xiaomi_password"] = entry.XiaomiPassword
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,

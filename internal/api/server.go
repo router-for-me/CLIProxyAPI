@@ -670,6 +670,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/auth-files/ollama-balance/refresh", s.mgmt.RefreshOllamaBalance)
 		mgmt.POST("/auth-files/deepseek-balance/refresh", s.mgmt.RefreshDeepSeekBalance)
 		mgmt.POST("/openai-compat/balance/refresh", s.mgmt.RefreshOpenAICompatBalance)
+			mgmt.POST("/xiaomi/verify", s.mgmt.SubmitXiaomiVerification)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)

@@ -925,6 +925,34 @@ func openAICompatEntryMatchesBalanceCreds(entry *config.OpenAICompatibilityAPIKe
 	return false
 }
 
+// findXiaomiCredentialsFromConfig looks up per-key xiaomi credentials from
+// openai-compatibility config entries matching the given API key.
+func findXiaomiCredentialsFromConfig(cfg *config.Config, apiKey string) (email, password string) {
+	if cfg == nil {
+		return "", ""
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return "", ""
+	}
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(compat.Name), "xiaomi") {
+			continue
+		}
+		for j := range compat.APIKeyEntries {
+			entry := &compat.APIKeyEntries[j]
+			if strings.TrimSpace(entry.APIKey) == apiKey {
+				return strings.TrimSpace(entry.XiaomiEmail), strings.TrimSpace(entry.XiaomiPassword)
+			}
+		}
+	}
+	return "", ""
+}
+
 func lookupHeaderValue(headers map[string]string, key string) string {
 	if len(headers) == 0 {
 		return ""

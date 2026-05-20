@@ -139,6 +139,12 @@ type Config struct {
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
+	// XiaomiPlatform contains credentials for auto-login to the Xiaomi MiMo platform
+	// (platform.xiaomimimo.com) to fetch token-plan usage/balance metrics.
+	// When configured, the server automatically refreshes session cookies so that
+	// the management API can display per-key balance without manual cookie extraction.
+	XiaomiPlatform XiaomiPlatformConfig `yaml:"xiaomi-platform,omitempty" json:"xiaomi-platform,omitempty"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
@@ -376,6 +382,21 @@ type AmpUpstreamAPIKeyEntry struct {
 
 	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+}
+
+// XiaomiPlatformConfig holds credentials for automatic Xiaomi MiMo platform login.
+// When Email and Password are set, the server will automatically refresh session cookies
+// used for token-plan usage/balance lookups without requiring manual cookie extraction.
+type XiaomiPlatformConfig struct {
+	// Email is the Xiaomi account email address for platform.xiaomimimo.com login.
+	Email string `yaml:"email,omitempty" json:"email,omitempty"`
+	// Password is the Xiaomi account password (plaintext; the server will apply MD5 hashing).
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+}
+
+// Enabled reports whether both email and password are configured.
+func (c XiaomiPlatformConfig) Enabled() bool {
+	return strings.TrimSpace(c.Email) != "" && strings.TrimSpace(c.Password) != ""
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -684,6 +705,15 @@ type OpenAICompatibilityAPIKey struct {
 	// forwarded to inference; APIKey is used for that. Leave empty to disable
 	// balance display for this credential.
 	BalanceToken string `yaml:"balance-token,omitempty" json:"balance-token,omitempty"`
+
+	// XiaomiEmail is the Xiaomi account email for per-key auto-login to platform.xiaomimimo.com.
+	// When set together with XiaomiPassword, the server automatically obtains session cookies
+	// for this specific credential without requiring manual cookie extraction.
+	XiaomiEmail string `yaml:"xiaomi-email,omitempty" json:"xiaomi-email,omitempty"`
+
+	// XiaomiPassword is the Xiaomi account password for per-key auto-login.
+	// The server applies MD5 hashing before sending to Xiaomi's login endpoint.
+	XiaomiPassword string `yaml:"xiaomi-password,omitempty" json:"xiaomi-password,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,
