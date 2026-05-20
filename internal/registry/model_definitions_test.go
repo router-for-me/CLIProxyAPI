@@ -49,6 +49,31 @@ func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	}
 }
 
+func TestAntigravityModelsIncludeGemini35FlashVariants(t *testing.T) {
+	models := GetAntigravityModels()
+	tests := map[string]string{
+		"gemini-3.5-flash":        "Gemini 3.5 Flash",
+		"gemini-3.5-flash-high":   "Gemini 3.5 Flash (High)",
+		"gemini-3.5-flash-medium": "Gemini 3.5 Flash (Medium)",
+	}
+
+	for id, displayName := range tests {
+		model := findModelInfo(models, id)
+		if model == nil {
+			t.Fatalf("expected Antigravity model %s", id)
+		}
+		if model.DisplayName != displayName {
+			t.Fatalf("%s display name = %q, want %q", id, model.DisplayName, displayName)
+		}
+		if model.Thinking == nil {
+			t.Fatalf("%s should keep Antigravity thinking support", id)
+		}
+		if !hasLevel(model.Thinking.Levels, "medium") || !hasLevel(model.Thinking.Levels, "high") {
+			t.Fatalf("%s thinking levels = %v, want medium and high", id, model.Thinking.Levels)
+		}
+	}
+}
+
 func TestValidateModelsCatalogAllowsMissingSections(t *testing.T) {
 	data := validTestModelsCatalog()
 	data.XAI = nil
@@ -83,6 +108,15 @@ func validTestModelsCatalog() *staticModelsJSON {
 		Antigravity: models,
 		XAI:         models,
 	}
+}
+
+func hasLevel(levels []string, want string) bool {
+	for _, level := range levels {
+		if level == want {
+			return true
+		}
+	}
+	return false
 }
 
 func findModelInfo(models []*ModelInfo, id string) *ModelInfo {

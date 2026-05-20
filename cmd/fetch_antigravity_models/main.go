@@ -35,10 +35,11 @@ import (
 )
 
 const (
-	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.googleapis.com"
-	antigravitySandboxBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
-	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
+	antigravityBaseURLDaily           = "https://daily-cloudcode-pa.googleapis.com"
+	antigravitySandboxBaseURLDaily    = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	antigravitySandboxBaseURLAutopush = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd            = "https://cloudcode-pa.googleapis.com"
+	antigravityModelsPath             = "/v1internal:fetchAvailableModels"
 )
 
 func init() {
@@ -167,96 +168,128 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 		return nil
 	}
 
-	baseURLs := []string{antigravityBaseURLProd, antigravityBaseURLDaily, antigravitySandboxBaseURLDaily}
+	baseURLs := []string{
+		antigravityBaseURLProd,
+		antigravityBaseURLDaily,
+		antigravitySandboxBaseURLDaily,
+		antigravitySandboxBaseURLAutopush,
+	}
+	var bestModels []modelEntry
 
 	for _, baseURL := range baseURLs {
-		modelsURL := baseURL + antigravityModelsPath
-
-		var payload []byte
+		payloads := [][]byte{[]byte(`{}`)}
 		if auth != nil && auth.Metadata != nil {
 			if pid, ok := auth.Metadata["project_id"].(string); ok && strings.TrimSpace(pid) != "" {
-				payload = []byte(fmt.Sprintf(`{"project": "%s"}`, strings.TrimSpace(pid)))
+				if raw, errMarshal := json.Marshal(map[string]string{"project": strings.TrimSpace(pid)}); errMarshal == nil {
+					payloads = append([][]byte{raw}, payloads...)
+				}
 			}
 		}
-		if len(payload) == 0 {
-			payload = []byte(`{}`)
-		}
 
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
-		if errReq != nil {
-			continue
-		}
-		httpReq.Close = true
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-		httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
+		for _, payload := range payloads {
+			modelsURL := baseURL + antigravityModelsPath
 
-		httpClient := &http.Client{Timeout: 30 * time.Second}
-		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
-			httpClient.Transport = transport
-		}
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			continue
-		}
-
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		if errRead != nil {
-			continue
-		}
-
-		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-			continue
-		}
-
-		result := gjson.GetBytes(bodyBytes, "models")
-		if !result.Exists() {
-			continue
-		}
-
-		var models []modelEntry
-
-		for originalName, modelData := range result.Map() {
-			modelID := strings.TrimSpace(originalName)
-			if modelID == "" {
+			httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
+			if errReq != nil {
 				continue
 			}
-			// Skip internal/experimental models
-			switch modelID {
-			case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+			httpReq.Close = true
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Accept", "application/json")
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+			httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
+			httpReq.Header.Set("X-Client-Name", "antigravity")
+			httpReq.Header.Set("X-Client-Version", misc.AntigravityLatestVersion())
+			httpReq.Header.Set("x-request-source", "local")
+
+			httpClient := &http.Client{Timeout: 30 * time.Second}
+			if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
+				httpClient.Transport = transport
+			}
+			httpResp, errDo := httpClient.Do(httpReq)
+			if errDo != nil {
 				continue
 			}
 
-			displayName := modelData.Get("displayName").String()
-			if displayName == "" {
-				displayName = modelID
+			bodyBytes, errRead := io.ReadAll(httpResp.Body)
+			httpResp.Body.Close()
+			if errRead != nil {
+				continue
 			}
 
-			entry := modelEntry{
-				ID:          modelID,
-				Object:      "model",
-				OwnedBy:     "antigravity",
-				Type:        "antigravity",
-				DisplayName: displayName,
-				Name:        modelID,
-				Description: displayName,
+			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+				continue
 			}
 
-			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
-				entry.ContextLength = int(maxTok)
-			}
-			if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
-				entry.MaxCompletionTokens = int(maxOut)
+			result := gjson.GetBytes(bodyBytes, "models")
+			if !result.Exists() {
+				continue
 			}
 
-			models = append(models, entry)
+			var models []modelEntry
+
+			for originalName, modelData := range result.Map() {
+				modelID := strings.TrimSpace(originalName)
+				if modelID == "" {
+					continue
+				}
+				// Skip internal/experimental models
+				switch modelID {
+				case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+					continue
+				}
+
+				displayName := misc.AntigravityDisplayName(modelID, modelData.Get("displayName").String())
+
+				entry := modelEntry{
+					ID:          modelID,
+					Object:      "model",
+					OwnedBy:     "antigravity",
+					Type:        "antigravity",
+					DisplayName: displayName,
+					Name:        modelID,
+					Description: displayName,
+				}
+
+				if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
+					entry.ContextLength = int(maxTok)
+				}
+				if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
+					entry.MaxCompletionTokens = int(maxOut)
+				}
+
+				models = append(models, entry)
+			}
+
+			if len(models) == 0 {
+				continue
+			}
+			if bestModels == nil {
+				bestModels = models
+			}
+			if hasAntigravity35FlashPair(models) {
+				return models
+			}
 		}
-
-		return models
 	}
 
-	return nil
+	return bestModels
+}
+
+func hasAntigravity35FlashPair(models []modelEntry) bool {
+	hasHigh := false
+	hasMedium := false
+	for _, model := range models {
+		modelID := strings.ToLower(strings.TrimSpace(model.ID))
+		displayName := strings.ToLower(strings.TrimSpace(model.DisplayName))
+		switch {
+		case modelID == "gemini-3-flash-agent" || modelID == "gemini-3.5-flash-high" || strings.Contains(displayName, "gemini 3.5 flash (high)"):
+			hasHigh = true
+		case modelID == "gemini-3.5-flash-low" || modelID == "gemini-3.5-flash-medium" || strings.Contains(displayName, "gemini 3.5 flash (medium)"):
+			hasMedium = true
+		}
+	}
+	return hasHigh && hasMedium
 }
 
 func metaStringValue(m map[string]interface{}, key string) string {

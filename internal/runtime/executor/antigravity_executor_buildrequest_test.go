@@ -35,6 +35,50 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
 }
 
+func TestAntigravityBuildRequest_ResolvesGemini35FlashWireModels(t *testing.T) {
+	medium := buildRequestBodyFromRawPayload(t, "gemini-3.5-flash-medium", []byte(`{
+		"request": {
+			"contents": [
+				{"role": "user", "parts": [{"text": "hello"}]}
+			]
+		}
+	}`))
+	if got, _ := medium["model"].(string); got != "gemini-3.5-flash-low" {
+		t.Fatalf("medium wire model = %q, want gemini-3.5-flash-low", got)
+	}
+	assertThinkingLevel(t, medium, "medium")
+
+	high := buildRequestBodyFromRawPayload(t, "gemini-3.5-flash-high", []byte(`{
+		"request": {
+			"contents": [
+				{"role": "user", "parts": [{"text": "hello"}]}
+			]
+		}
+	}`))
+	if got, _ := high["model"].(string); got != "gemini-3-flash-agent" {
+		t.Fatalf("high wire model = %q, want gemini-3-flash-agent", got)
+	}
+	assertThinkingLevel(t, high, "high")
+}
+
+func TestAntigravityBuildRequest_PreservesExplicitGemini35FlashThinking(t *testing.T) {
+	body := buildRequestBodyFromRawPayload(t, "gemini-3.5-flash-medium", []byte(`{
+		"request": {
+			"contents": [
+				{"role": "user", "parts": [{"text": "hello"}]}
+			],
+			"generationConfig": {
+				"thinkingConfig": {
+					"thinkingLevel": "low",
+					"includeThoughts": false
+				}
+			}
+		}
+	}`))
+
+	assertThinkingLevel(t, body, "low")
+}
+
 func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithoutToolsField(t *testing.T) {
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-flash-image", []byte(`{
 		"request": {
@@ -90,6 +134,24 @@ func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithEmptyToolsArray(t *t
 	assertNonSchemaRequestPreserved(t, body)
 }
 
+func TestAntigravityBaseURLFallbackOrderIncludesAntigravity20Sandboxes(t *testing.T) {
+	got := antigravityBaseURLFallbackOrder(nil)
+	want := []string{
+		antigravityBaseURLDaily,
+		antigravitySandboxBaseURLDaily,
+		antigravitySandboxBaseURLAutopush,
+		antigravityBaseURLProd,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("fallback order length = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("fallback order[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
 	t.Helper()
 
@@ -125,6 +187,26 @@ func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
 		if _, ok := generationConfig["maxOutputTokens"]; ok {
 			t.Fatalf("maxOutputTokens should still be removed for non-Claude requests")
 		}
+	}
+}
+
+func assertThinkingLevel(t *testing.T, body map[string]any, want string) {
+	t.Helper()
+
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid type")
+	}
+	generationConfig, ok := request["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("generationConfig missing or invalid type")
+	}
+	thinkingConfig, ok := generationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinkingConfig missing or invalid type")
+	}
+	if got, _ := thinkingConfig["thinkingLevel"].(string); got != want {
+		t.Fatalf("thinkingLevel = %q, want %q", got, want)
 	}
 }
 

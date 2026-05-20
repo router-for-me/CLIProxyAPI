@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -36,7 +37,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	rawJSON := inputRawJSON
 	template := `{"project":"","request":{},"model":""}`
 	templateBytes, _ := sjson.SetRawBytes([]byte(template), "request", rawJSON)
-	templateBytes, _ = sjson.SetBytes(templateBytes, "model", modelName)
+	templateBytes, _ = sjson.SetBytes(templateBytes, "model", misc.AntigravityWireModel(modelName))
 	template = string(templateBytes)
 	template, _ = sjson.Delete(template, "request.model")
 
