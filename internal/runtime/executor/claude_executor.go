@@ -939,6 +939,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	r.Header.Set("Content-Type", "application/json")
 
+	// Strip the opt-in X-CPA-Force-Fast-Mode header before forwarding upstream.
+	// This header is a private contract between a downstream gateway and CPA's
+	// Fast Mode spoof; Anthropic must never see it. Deletion is unconditional
+	// (regardless of cfg.ClaudeFastModeSpoof) so the header cannot leak even
+	// when the flag is off.
+	r.Header.Del("X-CPA-Force-Fast-Mode")
+
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
@@ -1528,6 +1535,20 @@ func getWorkloadFromContext(ctx context.Context) string {
 	return ""
 }
 
+// isForceFastModeFromContext reports whether the inbound gin request carries
+// the opt-in X-CPA-Force-Fast-Mode header set to a truthy value. Used by the
+// Fast Mode spoof in applyCloaking as a per-request activation path that
+// complements UA-based detection: a downstream gateway can stamp the header
+// to force the spoof bundle regardless of the inbound User-Agent shape. The
+// header is stripped before forwarding upstream in applyClaudeHeaders so
+// Anthropic never sees it.
+func isForceFastModeFromContext(ctx context.Context) bool {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return util.IsForceFastModeHeader(ginCtx.Request.Header)
+	}
+	return false
+}
+
 // getCloakConfigFromAuth extracts cloak configuration from auth attributes.
 // Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
 func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
@@ -1855,8 +1876,15 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		// Fast Mode spoof: rewrite SDK-shaped entrypoints to a TTY-style value
 		// when the upstream client leaked sdk-* (Anthropic gates Fast Mode on
 		// entrypoint). Opt-in via config.claude-fast-mode-spoof; default off.
+		//
+		// A second activation path is the inbound X-CPA-Force-Fast-Mode header:
+		// when present and truthy it forces the rewrite regardless of UA shape,
+		// so a downstream gateway can opt requests in per-request. The header
+		// alone does NOTHING without the config flag also being on; the flag
+		// remains the master opt-in switch.
 		if cfg != nil && cfg.ClaudeFastModeSpoof != nil && *cfg.ClaudeFastModeSpoof {
-			if util.IsSDKEntrypoint(entrypoint) {
+			forceFastMode := isForceFastModeFromContext(ctx)
+			if util.IsSDKEntrypoint(entrypoint) || forceFastMode {
 				if forced := strings.TrimSpace(cfg.ClaudeFastModeSpoofEntrypoint); forced != "" {
 					entrypoint = forced
 				} else {

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"net/http"
 	"strings"
 	"unicode"
 )
@@ -25,4 +26,20 @@ func IsSDKEntrypoint(ep string) bool {
 	return strings.HasPrefix(ep, "sdk") ||
 		ep == "external-sdk" ||
 		strings.Contains(ep, "-sdk")
+}
+
+// IsForceFastModeHeader reports whether the inbound request carries the opt-in
+// "X-CPA-Force-Fast-Mode" header set to a truthy value ("1", "true", "yes",
+// "on"; case-insensitive). The Claude Fast Mode spoof in the executor uses
+// this predicate as a per-request activation path that complements UA-based
+// detection: a downstream gateway can stamp the header to force the spoof
+// bundle even when the upstream User-Agent does not look SDK-shaped. The
+// header itself must be stripped before forwarding upstream so that Anthropic
+// never sees it.
+func IsForceFastModeHeader(h http.Header) bool {
+	if h == nil {
+		return false
+	}
+	v := strings.ToLower(strings.TrimSpace(h.Get("X-CPA-Force-Fast-Mode")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
