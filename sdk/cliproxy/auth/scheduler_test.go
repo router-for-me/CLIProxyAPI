@@ -515,10 +515,10 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		reg.UnregisterClient("auth-a")
 		reg.UnregisterClient("auth-b")
 	})
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini", Metadata: map[string]any{"access_token": "token-a"}}); errRegister != nil {
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
 		t.Fatalf("Register(auth-a) error = %v", errRegister)
 	}
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini", Metadata: map[string]any{"access_token": "token-b"}}); errRegister != nil {
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
 		t.Fatalf("Register(auth-b) error = %v", errRegister)
 	}
 
@@ -530,32 +530,14 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		Error:    &Error{HTTPStatus: 429, Message: "quota"},
 	})
 
-	// Token should be invalidated (access_token deleted) after non-2xx.
-	manager.mu.RLock()
-	storedA := manager.auths["auth-a"]
-	hasToken := storedA != nil && storedA.Metadata != nil && storedA.Metadata["access_token"] != nil
-	manager.mu.RUnlock()
-	if hasToken {
-		t.Fatal("expected auth-a access_token to be deleted after 429 error")
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() after cooldown error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-b" {
+		t.Fatalf("scheduler.pickSingle() after cooldown auth = %v, want auth-b", got)
 	}
 
-	// No cooldown — both auths should still be pickable.
-	seen := make(map[string]struct{}, 2)
-	for index := 0; index < 2; index++ {
-		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("scheduler.pickSingle() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("scheduler.pickSingle() #%d auth = nil", index)
-		}
-		seen[got.ID] = struct{}{}
-	}
-	if len(seen) != 2 {
-		t.Fatalf("len(seen) = %d, want %d (both auths should be available)", len(seen), 2)
-	}
-
-	// Recovery: mark success, both auths still available.
 	manager.MarkResult(context.Background(), Result{
 		AuthID:   "auth-a",
 		Provider: "gemini",
@@ -563,9 +545,9 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		Success:  true,
 	})
 
-	seen = make(map[string]struct{}, 2)
+	seen := make(map[string]struct{}, 2)
 	for index := 0; index < 2; index++ {
-		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+		got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("scheduler.pickSingle() after recovery #%d error = %v", index, errPick)
 		}

@@ -168,7 +168,6 @@ func TestManager_PickNext_RebuildsSchedulerAfterModelCooldownError(t *testing.T)
 	oldAuth := &Auth{
 		ID:       "cooldown-stale-old",
 		Provider: "gemini",
-		Metadata: map[string]any{"access_token": "old-token"},
 	}
 	if _, errRegister := manager.Register(ctx, oldAuth); errRegister != nil {
 		t.Fatalf("register old auth: %v", errRegister)
@@ -181,15 +180,6 @@ func TestManager_PickNext_RebuildsSchedulerAfterModelCooldownError(t *testing.T)
 		Success:  false,
 		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
 	})
-
-	// Token should be invalidated after non-2xx error.
-	manager.mu.RLock()
-	stored := manager.auths[oldAuth.ID]
-	hasToken := stored != nil && stored.Metadata != nil && stored.Metadata["access_token"] != nil
-	manager.mu.RUnlock()
-	if hasToken {
-		t.Fatal("expected access_token to be deleted after 429 error")
-	}
 
 	newAuth := &Auth{
 		ID:       "cooldown-stale-new",
@@ -205,12 +195,23 @@ func TestManager_PickNext_RebuildsSchedulerAfterModelCooldownError(t *testing.T)
 		reg.UnregisterClient(newAuth.ID)
 	})
 
-	// No cooldown means pickSingle should succeed (no modelCooldownError).
 	got, errPick := manager.scheduler.pickSingle(ctx, "gemini", "scheduler-cooldown-rebuild-model", cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("pickSingle() error = %v, want nil (no cooldown)", errPick)
+	var cooldownErr *modelCooldownError
+	if !errors.As(errPick, &cooldownErr) {
+		t.Fatalf("pickSingle() before sync error = %v, want modelCooldownError", errPick)
 	}
-	if got == nil {
-		t.Fatal("pickSingle() auth = nil, want non-nil")
+	if got != nil {
+		t.Fatalf("pickSingle() before sync auth = %v, want nil", got)
+	}
+
+	got, executor, errPick := manager.pickNext(ctx, "gemini", "scheduler-cooldown-rebuild-model", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if executor == nil {
+		t.Fatal("pickNext() executor = nil")
+	}
+	if got == nil || got.ID != newAuth.ID {
+		t.Fatalf("pickNext() auth = %v, want %q", got, newAuth.ID)
 	}
 }

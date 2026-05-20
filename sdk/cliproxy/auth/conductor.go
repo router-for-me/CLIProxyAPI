@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -878,6 +879,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		m.syncRefreshedAuth(auth)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1394,6 +1396,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			m.syncRefreshedAuth(auth)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1493,6 +1496,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			m.syncRefreshedAuth(auth)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2320,6 +2324,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						switch statusCode {
 						case 401:
 							state.StatusMessage = "unauthorized"
+							delete(auth.Metadata, "access_token")
 						case 402, 403:
 							state.StatusMessage = "payment_required"
 						case 404:
@@ -2330,6 +2335,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							state.StatusMessage = "quota"
 							state.Quota = QuotaState{Exceeded: true, Reason: "quota"}
+							if !quotaCooldownDisabledForAuth(auth) {
+								cooldown := defaultQuotaCooldown
+								if result.Error != nil {
+									if parsed, ok := parseQuotaResetDuration(result.Error.Message); ok {
+										cooldown = parsed
+									}
+								}
+								next := now.Add(cooldown)
+								state.NextRetryAfter = next
+								state.Quota.NextRecoverAt = next
+								suspendReason = "quota"
+								shouldSuspendModel = true
+							}
 						case 408, 500, 502, 503, 504:
 							state.StatusMessage = "transient upstream error"
 						default:
@@ -2716,6 +2734,29 @@ func isRequestInvalidError(err error) bool {
 	}
 }
 
+// defaultQuotaCooldown is the fallback duration when a 429 error message
+// does not contain a parseable reset time.
+const defaultQuotaCooldown = 1 * time.Hour
+
+// parseQuotaResetDuration extracts a cooldown duration from a quota error message.
+// It recognises patterns like "after 167h29m46s", "after 42m", "after 30s".
+// Returns the parsed duration and true on success, or (0, false) if unparseable.
+func parseQuotaResetDuration(message string) (time.Duration, bool) {
+	if message == "" {
+		return 0, false
+	}
+	re := regexp.MustCompile(`(?i)after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)`)
+	matches := re.FindStringSubmatch(message)
+	if len(matches) < 2 {
+		return 0, false
+	}
+	d, err := time.ParseDuration(matches[1])
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
 		return
@@ -2746,6 +2787,17 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
+		if !quotaCooldownDisabledForAuth(auth) {
+			cooldown := defaultQuotaCooldown
+			if resultErr != nil {
+				if parsed, ok := parseQuotaResetDuration(resultErr.Message); ok {
+					cooldown = parsed
+				}
+			}
+			next := now.Add(cooldown)
+			auth.NextRetryAfter = next
+			auth.Quota.NextRecoverAt = next
+		}
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 	default:
@@ -3711,6 +3763,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			m.syncRefreshedAuth(c.auth)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				result.Error = &Error{Message: errExec.Error()}
@@ -4173,6 +4226,46 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
 	_, _ = m.Update(ctx, updated)
+}
+
+// syncRefreshedAuth persists any credentials the executor refreshed in-place
+// (e.g. a new access_token from ensureAccessToken) back to the manager-owned
+// auth so the next request doesn't re-do the OAuth flow.
+func (m *Manager) syncRefreshedAuth(executorAuth *Auth) {
+	if executorAuth == nil || executorAuth.ID == "" {
+		return
+	}
+	newToken, _ := executorAuth.Metadata["access_token"].(string)
+	if newToken == "" {
+		return
+	}
+	m.mu.RLock()
+	current := m.auths[executorAuth.ID]
+	oldToken := ""
+	if current != nil && current.Metadata != nil {
+		oldToken, _ = current.Metadata["access_token"].(string)
+	}
+	m.mu.RUnlock()
+	if newToken == oldToken {
+		return
+	}
+	refreshedKeys := []string{
+		"access_token", "refresh_token", "expired",
+		"expires_in", "timestamp", "project_id", "type",
+	}
+	m.mu.Lock()
+	if current := m.auths[executorAuth.ID]; current != nil {
+		if current.Metadata == nil {
+			current.Metadata = make(map[string]any)
+		}
+		for _, k := range refreshedKeys {
+			if v, ok := executorAuth.Metadata[k]; ok {
+				current.Metadata[k] = v
+			}
+		}
+		m.auths[executorAuth.ID] = current
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
