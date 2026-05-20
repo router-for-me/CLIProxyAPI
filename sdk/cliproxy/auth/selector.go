@@ -197,7 +197,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount, permanentlyBlocked int, earliest time.Time) {
+func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount, disabledCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
@@ -212,11 +212,11 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 				earliest = next
 			}
-		} else {
-			permanentlyBlocked++
+		} else if reason == blockReasonDisabled {
+			disabledCount++
 		}
 	}
-	return available, cooldownCount, permanentlyBlocked, earliest
+	return available, cooldownCount, disabledCount, earliest
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
@@ -224,11 +224,13 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, permanentlyBlocked, earliest := collectAvailableByPriority(auths, model, now)
+	availableByPriority, cooldownCount, disabledCount, earliest := collectAvailableByPriority(auths, model, now)
 	if len(availableByPriority) == 0 {
-		// Return 429 (model_cooldown) when all non-permanently-blocked auths are in
-		// cooldown. Previously mixed disabled+cooldown pools incorrectly returned 503.
-		recoverableCount := len(auths) - permanentlyBlocked
+		// Return 429 (model_cooldown) when all non-disabled auths are in
+		// cooldown. Disabled auths are permanently unavailable; cooldown
+		// auths will recover. blockReasonOther (transient outages, 401s)
+		// are NOT excluded from the quorum since they are temporary.
+		recoverableCount := len(auths) - disabledCount
 		if cooldownCount > 0 && cooldownCount == recoverableCount && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
