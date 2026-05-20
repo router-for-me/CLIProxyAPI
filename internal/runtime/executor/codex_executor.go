@@ -982,6 +982,7 @@ func codexInputLooksLikeFullTranscript(input gjson.Result) bool {
 		return false
 	}
 	for _, item := range input.Array() {
+		// Some Responses transcript items omit type, so assistant role alone is transcript evidence.
 		if strings.TrimSpace(item.Get("role").String()) == "assistant" {
 			return true
 		}
@@ -1060,6 +1061,7 @@ func looksLikeOpenCodeEnvBlock(block string) bool {
 		return false
 	}
 
+	// OpenCode env blocks vary by version; two secondary markers avoid matching arbitrary developer text.
 	markerCount := 0
 	for _, marker := range []string{
 		"Workspace root folder:",
