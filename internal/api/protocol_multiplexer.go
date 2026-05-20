@@ -104,7 +104,7 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 
 	if isRedisRESPPrefix(prefix[0]) {
 		_ = conn.SetReadDeadline(time.Time{})
-		s.handleRedisConnection(conn)
+		s.handleRedisConnection(conn, reader)
 		return
 	}
 
