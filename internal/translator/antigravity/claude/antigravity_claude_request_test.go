@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -68,6 +68,28 @@ func buildClaudeSignaturePayload(t *testing.T, channelID uint64, field2 *uint64,
 
 func uint64Ptr(v uint64) *uint64 {
 	return &v
+}
+
+func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+		"system": [
+			{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=12345;"},
+			{"type": "text", "text": "Antigravity system prompt"}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected 1 system part after attribution strip, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "Antigravity system prompt" {
+		t.Fatalf("Unexpected system part: %q", got)
+	}
 }
 
 func testNonAnthropicRawSignature(t *testing.T) string {

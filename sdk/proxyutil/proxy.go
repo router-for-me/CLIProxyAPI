@@ -54,7 +54,7 @@ func Parse(raw string) (Setting, error) {
 	parsedURL, errParse := url.Parse(trimmed)
 	if errParse != nil {
 		setting.Mode = ModeInvalid
-		return setting, fmt.Errorf("parse proxy URL failed: %w", errParse)
+		return setting, fmt.Errorf("parse proxy URL failed")
 	}
 	parsedURL.Scheme = strings.ToLower(parsedURL.Scheme)
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
@@ -262,4 +262,35 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+	if trimmed == "" {
+		return ""
+	}
+
+	parsedURL, errParse := url.Parse(trimmed)
+	if errParse != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return "<invalid proxy URL>"
+	}
+
+	redacted := &url.URL{
+		Scheme: parsedURL.Scheme,
+		Host:   parsedURL.Host,
+	}
+	if parsedURL.User != nil {
+		redacted.User = url.User("redacted")
+	}
+	return redacted.String()
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	if c.reader.Buffered() > 0 {
+		return c.reader.Read(p)
+	}
+	return c.Conn.Read(p)
 }
