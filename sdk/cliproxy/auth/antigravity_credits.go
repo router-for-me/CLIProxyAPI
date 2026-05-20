@@ -72,6 +72,14 @@ func HasKnownAntigravityCreditsHint(authID string) bool {
 	return ok && hint.Known
 }
 
+func antigravityCreditsEligibleModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return false
+	}
+	return strings.Contains(model, "claude") || strings.HasPrefix(model, "gemini-3.5-flash")
+}
+
 func antigravityCreditsAvailableForModel(auth *Auth, model string) bool {
 	if auth == nil {
 		return false
@@ -79,7 +87,7 @@ func antigravityCreditsAvailableForModel(auth *Auth, model string) bool {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
 		return false
 	}
-	if !strings.Contains(strings.ToLower(strings.TrimSpace(model)), "claude") {
+	if !antigravityCreditsEligibleModel(model) {
 		return false
 	}
 	hint, ok := GetAntigravityCreditsHint(auth.ID)

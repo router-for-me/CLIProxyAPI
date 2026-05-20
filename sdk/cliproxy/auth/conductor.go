@@ -3545,7 +3545,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opt
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
+		if !antigravityCreditsEligibleModel(routeModel) {
 			continue
 		}
 		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
@@ -3589,11 +3589,18 @@ type creditsCandidateEntry struct {
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
 	status := statusCodeFromError(lastErr)
+	creditsEnabled := false
+	if m != nil {
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		creditsEnabled = cfg != nil && cfg.QuotaExceeded.AntigravityCredits
+	}
 	log.WithFields(log.Fields{
-		"lastErr":   errorString(lastErr),
-		"status":    status,
-		"providers": providers,
+		"lastErr":                     errorString(lastErr),
+		"status":                      status,
+		"providers":                   providers,
+		"antigravity_credits_enabled": creditsEnabled,
 	}).Debug("shouldAttemptAntigravityCreditsFallback")
+	log.Debugf("shouldAttemptAntigravityCreditsFallback status=%d providers=%v antigravity_credits_enabled=%t lastErr=%s", status, providers, creditsEnabled, errorString(lastErr))
 	if m == nil || lastErr == nil {
 		return false
 	}
@@ -3609,8 +3616,7 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 			return false
 		}
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits {
+	if !creditsEnabled {
 		return false
 	}
 	switch status {
@@ -3634,6 +3640,11 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool) {
 	routeModel := req.Model
 	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
+	log.WithFields(log.Fields{
+		"routeModel": routeModel,
+		"candidates": len(candidates),
+	}).Debug("antigravity credits fallback candidates")
+	log.Debugf("antigravity credits fallback candidates routeModel=%s candidates=%d", routeModel, len(candidates))
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return cliproxyexecutor.Response{}, false
@@ -3648,6 +3659,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
 		models := m.executionModelCandidates(c.auth, routeModel)
 		if len(models) == 0 {
+			log.Debugf("antigravity credits fallback skipped auth=%s routeModel=%s reason=no_execution_models", c.auth.ID, routeModel)
 			continue
 		}
 		for _, upstreamModel := range models {
@@ -3677,6 +3689,11 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool) {
 	routeModel := req.Model
 	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
+	log.WithFields(log.Fields{
+		"routeModel": routeModel,
+		"candidates": len(candidates),
+	}).Debug("antigravity credits stream fallback candidates")
+	log.Debugf("antigravity credits stream fallback candidates routeModel=%s candidates=%d", routeModel, len(candidates))
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return nil, false
@@ -3690,6 +3707,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
 		models := m.executionModelCandidates(c.auth, routeModel)
 		if len(models) == 0 {
+			log.Debugf("antigravity credits stream fallback skipped auth=%s routeModel=%s reason=no_execution_models", c.auth.ID, routeModel)
 			continue
 		}
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, len(models) > 1)

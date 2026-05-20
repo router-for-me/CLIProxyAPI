@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +108,29 @@ func AntigravityLatestVersion() string {
 // AntigravityUserAgent returns the User-Agent string for antigravity requests
 // using the latest version fetched from the releases API.
 func AntigravityUserAgent() string {
-	return fmt.Sprintf("antigravity/%s darwin/arm64", AntigravityLatestVersion())
+	return fmt.Sprintf("antigravity/%s %s/%s", AntigravityLatestVersion(), antigravityOS(), antigravityArch())
+}
+
+func antigravityOS() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "win32"
+	case "darwin":
+		return "darwin"
+	default:
+		return "linux"
+	}
+}
+
+func antigravityArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	default:
+		return "x86"
+	}
 }
 
 func antigravityBaseUserAgent(userAgent string) string {
@@ -169,11 +192,15 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 	return rest
 }
 
-// AntigravityWireModel resolves legacy Antigravity model aliases to their
-// backend model keys while preserving native Gemini 3.5 Flash variant IDs.
+// AntigravityWireModel resolves public Antigravity model IDs to the backend
+// model keys currently accepted by the Antigravity generation endpoint.
 func AntigravityWireModel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
+	case "gemini-3.5-flash-high":
+		return "gemini-3-flash-agent"
+	case "gemini-3.5-flash", "gemini-3.5-flash-medium":
+		return "gemini-3.5-flash-low"
 	case "gemini-3-flash-high", "gemini-3-flash-medium", "gemini-3-flash-low":
 		return "gemini-3-flash"
 	default:

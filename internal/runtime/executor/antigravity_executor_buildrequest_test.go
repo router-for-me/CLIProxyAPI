@@ -35,7 +35,7 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
 }
 
-func TestAntigravityBuildRequest_PreservesGemini35FlashWireModels(t *testing.T) {
+func TestAntigravityBuildRequest_UsesGemini35FlashBackendWireModels(t *testing.T) {
 	medium := buildRequestBodyFromRawPayload(t, "gemini-3.5-flash-medium", []byte(`{
 		"request": {
 			"contents": [
@@ -43,8 +43,8 @@ func TestAntigravityBuildRequest_PreservesGemini35FlashWireModels(t *testing.T) 
 			]
 		}
 	}`))
-	if got, _ := medium["model"].(string); got != "gemini-3.5-flash-medium" {
-		t.Fatalf("medium wire model = %q, want gemini-3.5-flash-medium", got)
+	if got, _ := medium["model"].(string); got != "gemini-3.5-flash-low" {
+		t.Fatalf("medium wire model = %q, want gemini-3.5-flash-low", got)
 	}
 	assertThinkingLevel(t, medium, "medium")
 
@@ -55,8 +55,8 @@ func TestAntigravityBuildRequest_PreservesGemini35FlashWireModels(t *testing.T) 
 			]
 		}
 	}`))
-	if got, _ := high["model"].(string); got != "gemini-3.5-flash-high" {
-		t.Fatalf("high wire model = %q, want gemini-3.5-flash-high", got)
+	if got, _ := high["model"].(string); got != "gemini-3-flash-agent" {
+		t.Fatalf("high wire model = %q, want gemini-3-flash-agent", got)
 	}
 	assertThinkingLevel(t, high, "high")
 
@@ -67,8 +67,8 @@ func TestAntigravityBuildRequest_PreservesGemini35FlashWireModels(t *testing.T) 
 			]
 		}
 	}`))
-	if got, _ := base["model"].(string); got != "gemini-3.5-flash" {
-		t.Fatalf("base wire model = %q, want gemini-3.5-flash", got)
+	if got, _ := base["model"].(string); got != "gemini-3.5-flash-low" {
+		t.Fatalf("base wire model = %q, want gemini-3.5-flash-low", got)
 	}
 }
 
@@ -149,7 +149,6 @@ func TestAntigravityBaseURLFallbackOrderIncludesAntigravity20Sandboxes(t *testin
 	got := antigravityBaseURLFallbackOrder(nil)
 	want := []string{
 		antigravityBaseURLDaily,
-		antigravitySandboxBaseURLDaily,
 		antigravitySandboxBaseURLAutopush,
 		antigravityBaseURLProd,
 	}

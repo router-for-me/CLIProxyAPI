@@ -43,9 +43,20 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 		t.Fatalf("candidates[1].auth.ID = %q, want %q", candidates[1].auth.ID, "aa-unknown")
 	}
 
-	nonClaude := m.findAllAntigravityCreditsCandidateAuths("gemini-3-flash", opts)
-	if len(nonClaude) != 0 {
-		t.Fatalf("nonClaude len = %d, want 0", len(nonClaude))
+	gemini35 := m.findAllAntigravityCreditsCandidateAuths("gemini-3.5-flash-high", opts)
+	if len(gemini35) != 2 {
+		t.Fatalf("gemini35 len = %d, want 2", len(gemini35))
+	}
+	if gemini35[0].auth.ID != "zz-credits" {
+		t.Fatalf("gemini35[0].auth.ID = %q, want %q", gemini35[0].auth.ID, "zz-credits")
+	}
+	if gemini35[1].auth.ID != "aa-unknown" {
+		t.Fatalf("gemini35[1].auth.ID = %q, want %q", gemini35[1].auth.ID, "aa-unknown")
+	}
+
+	olderGemini := m.findAllAntigravityCreditsCandidateAuths("gemini-3-flash", opts)
+	if len(olderGemini) != 0 {
+		t.Fatalf("olderGemini len = %d, want 0", len(olderGemini))
 	}
 
 	pinnedOpts := cliproxyexecutor.Options{

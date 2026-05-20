@@ -74,6 +74,55 @@ func TestAntigravityModelsIncludeGemini35FlashVariants(t *testing.T) {
 	}
 }
 
+func TestAntigravityModelsNormalizeLegacyGemini35Aliases(t *testing.T) {
+	modelsCatalogStore.mu.Lock()
+	original := modelsCatalogStore.data
+	modelsCatalogStore.data = &staticModelsJSON{
+		Claude:    []*ModelInfo{{ID: "claude-test"}},
+		Gemini:    []*ModelInfo{{ID: "gemini-test"}},
+		Vertex:    []*ModelInfo{{ID: "vertex-test"}},
+		GeminiCLI: []*ModelInfo{{ID: "gemini-cli-test"}},
+		AIStudio:  []*ModelInfo{{ID: "aistudio-test"}},
+		CodexFree: []*ModelInfo{{ID: "codex-free-test"}},
+		CodexTeam: []*ModelInfo{{ID: "codex-team-test"}},
+		CodexPlus: []*ModelInfo{{ID: "codex-plus-test"}},
+		CodexPro:  []*ModelInfo{{ID: "codex-pro-test"}},
+		Kimi:      []*ModelInfo{{ID: "kimi-test"}},
+		XAI:       []*ModelInfo{{ID: "xai-test"}},
+		Antigravity: []*ModelInfo{
+			{ID: "gemini-3-flash", Object: "model", OwnedBy: "antigravity", Type: "antigravity", DisplayName: "Gemini 3 Flash"},
+			{ID: "gemini-3-flash-agent", Object: "model", OwnedBy: "antigravity", Type: "antigravity", DisplayName: "Gemini 3.5 Flash (High)"},
+			{ID: "gemini-3.5-flash-low", Object: "model", OwnedBy: "antigravity", Type: "antigravity", DisplayName: "Gemini 3.5 Flash (Medium)"},
+		},
+	}
+	modelsCatalogStore.mu.Unlock()
+
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+
+	models := GetAntigravityModels()
+	for _, id := range []string{"gemini-3.5-flash", "gemini-3.5-flash-high", "gemini-3.5-flash-medium"} {
+		if findModelInfo(models, id) == nil {
+			t.Fatalf("expected canonical Antigravity model %s", id)
+		}
+		if LookupStaticModelInfo(id) == nil {
+			t.Fatalf("expected static lookup for %s", id)
+		}
+	}
+
+	for _, legacyID := range []string{"gemini-3-flash-agent", "gemini-3.5-flash-low"} {
+		if findModelInfo(models, legacyID) != nil {
+			t.Fatalf("did not expect legacy alias model %s in Antigravity models", legacyID)
+		}
+		if LookupStaticModelInfo(legacyID) != nil {
+			t.Fatalf("did not expect static lookup to expose legacy alias %s", legacyID)
+		}
+	}
+}
+
 func TestValidateModelsCatalogAllowsMissingSections(t *testing.T) {
 	data := validTestModelsCatalog()
 	data.XAI = nil

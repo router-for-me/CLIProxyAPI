@@ -11,6 +11,9 @@ const (
 	xaiBuiltinImageModelID        = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID        = "grok-imagine-video"
+	antigravityGemini35FlashID    = "gemini-3.5-flash"
+	antigravityGemini35HighID     = "gemini-3.5-flash-high"
+	antigravityGemini35MediumID   = "gemini-3.5-flash-medium"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -81,7 +84,7 @@ func GetKimiModels() []*ModelInfo {
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Antigravity)
+	return WithAntigravityBuiltins(cloneModelInfos(getModels().Antigravity))
 }
 
 // GetXAIModels returns the standard xAI Grok model definitions.
@@ -100,6 +103,29 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo())
+}
+
+// WithAntigravityBuiltins injects canonical Antigravity Gemini 3.5 Flash model
+// definitions and removes legacy alias IDs that some remote catalogs still
+// publish for those same variants.
+func WithAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(model.ID)) {
+		case "gemini-3-flash-agent", "gemini-3.5-flash-low":
+			continue
+		default:
+			filtered = append(filtered, model)
+		}
+	}
+	return upsertModelInfos(filtered,
+		antigravityGemini35FlashModelInfo(),
+		antigravityGemini35HighModelInfo(),
+		antigravityGemini35MediumModelInfo(),
+	)
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
@@ -151,6 +177,45 @@ func xaiBuiltinVideoModelInfo() *ModelInfo {
 		Name:        xaiBuiltinVideoModelID,
 		Description: "xAI Grok video generation model.",
 	}
+}
+
+func antigravityGemini35FlashModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  antigravityGemini35FlashID,
+		Object:              "model",
+		Created:             1735689600, // 2025-01-01
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 3.5 Flash",
+		Name:                antigravityGemini35FlashID,
+		Description:         "Gemini 3.5 Flash",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Levels:         []string{"minimal", "low", "medium", "high"},
+			Min:            128,
+			Max:            32768,
+			DynamicAllowed: true,
+		},
+	}
+}
+
+func antigravityGemini35HighModelInfo() *ModelInfo {
+	model := antigravityGemini35FlashModelInfo()
+	model.ID = antigravityGemini35HighID
+	model.DisplayName = "Gemini 3.5 Flash (High)"
+	model.Name = antigravityGemini35HighID
+	model.Description = "Gemini 3.5 Flash (High)"
+	return model
+}
+
+func antigravityGemini35MediumModelInfo() *ModelInfo {
+	model := antigravityGemini35FlashModelInfo()
+	model.ID = antigravityGemini35MediumID
+	model.DisplayName = "Gemini 3.5 Flash (Medium)"
+	model.Name = antigravityGemini35MediumID
+	model.Description = "Gemini 3.5 Flash (Medium)"
+	return model
 }
 
 func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
@@ -257,17 +322,19 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		return nil
 	}
 
-	data := getModels()
 	allModels := [][]*ModelInfo{
-		data.Claude,
-		data.Gemini,
-		data.Vertex,
-		data.GeminiCLI,
-		data.AIStudio,
-		data.CodexPro,
-		data.Kimi,
-		data.Antigravity,
-		data.XAI,
+		GetClaudeModels(),
+		GetGeminiModels(),
+		GetGeminiVertexModels(),
+		GetGeminiCLIModels(),
+		GetAIStudioModels(),
+		GetCodexFreeModels(),
+		GetCodexTeamModels(),
+		GetCodexPlusModels(),
+		GetCodexProModels(),
+		GetKimiModels(),
+		GetAntigravityModels(),
+		GetXAIModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {

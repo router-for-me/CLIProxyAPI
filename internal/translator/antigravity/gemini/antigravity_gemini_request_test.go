@@ -51,18 +51,18 @@ func TestConvertGeminiRequestToAntigravity_PreservesGemini35FlashWireModels(t *t
 	}`)
 
 	medium := ConvertGeminiRequestToAntigravity("gemini-3.5-flash-medium", inputJSON, false)
-	if got := gjson.GetBytes(medium, "model").String(); got != "gemini-3.5-flash-medium" {
-		t.Fatalf("medium wire model = %q, want gemini-3.5-flash-medium", got)
+	if got := gjson.GetBytes(medium, "model").String(); got != "gemini-3.5-flash-low" {
+		t.Fatalf("medium wire model = %q, want gemini-3.5-flash-low", got)
 	}
 
 	high := ConvertGeminiRequestToAntigravity("gemini-3.5-flash-high", inputJSON, false)
-	if got := gjson.GetBytes(high, "model").String(); got != "gemini-3.5-flash-high" {
-		t.Fatalf("high wire model = %q, want gemini-3.5-flash-high", got)
+	if got := gjson.GetBytes(high, "model").String(); got != "gemini-3-flash-agent" {
+		t.Fatalf("high wire model = %q, want gemini-3-flash-agent", got)
 	}
 
 	base := ConvertGeminiRequestToAntigravity("gemini-3.5-flash", inputJSON, false)
-	if got := gjson.GetBytes(base, "model").String(); got != "gemini-3.5-flash" {
-		t.Fatalf("base wire model = %q, want gemini-3.5-flash", got)
+	if got := gjson.GetBytes(base, "model").String(); got != "gemini-3.5-flash-low" {
+		t.Fatalf("base wire model = %q, want gemini-3.5-flash-low", got)
 	}
 }
 

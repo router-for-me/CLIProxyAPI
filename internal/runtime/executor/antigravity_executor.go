@@ -613,12 +613,8 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if antigravityShouldRetryEndpointNotFound(httpResp.StatusCode) && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: endpoint/model not found on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
-				}
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				if antigravityShouldRetryEndpointUnavailable(httpResp.StatusCode, bodyBytes) && idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: endpoint/model unavailable on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
@@ -828,12 +824,8 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if antigravityShouldRetryEndpointNotFound(httpResp.StatusCode) && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: endpoint/model not found on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
-				}
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				if antigravityShouldRetryEndpointUnavailable(httpResp.StatusCode, bodyBytes) && idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: endpoint/model unavailable on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
@@ -1292,12 +1284,8 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if antigravityShouldRetryEndpointNotFound(httpResp.StatusCode) && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: endpoint/model not found on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
-				}
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				if antigravityShouldRetryEndpointUnavailable(httpResp.StatusCode, bodyBytes) && idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: endpoint/model unavailable on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
@@ -1560,12 +1548,8 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), bodyBytes...)
 		lastErr = nil
-		if antigravityShouldRetryEndpointNotFound(httpResp.StatusCode) && idx+1 < len(baseURLs) {
-			log.Debugf("antigravity executor: endpoint/model not found on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-			continue
-		}
-		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+		if antigravityShouldRetryEndpointUnavailable(httpResp.StatusCode, bodyBytes) && idx+1 < len(baseURLs) {
+			log.Debugf("antigravity executor: endpoint/model unavailable on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
 		}
 		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
@@ -1821,7 +1805,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		log.Debugf("antigravity executor: marshal loadCodeAssist request error: %v", errMarshal)
 		return
 	}
-	baseURL := buildBaseURL(auth)
+	baseURL := buildLoadCodeAssistBaseURL(auth)
 	endpointURL := strings.TrimSuffix(baseURL, "/") + "/v1internal:loadCodeAssist"
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
 	if errReq != nil {
@@ -1951,8 +1935,9 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	isClaude := strings.Contains(lowerWireModelName, "claude")
 	useAntigravitySchema := isClaude || strings.Contains(lowerWireModelName, "gemini-3-pro") || strings.Contains(lowerWireModelName, "gemini-3.1-pro")
 	var (
-		bodyReader io.Reader
-		payloadLog []byte
+		bodyReader       io.Reader
+		payloadLog       []byte
+		requestSessionID string
 	)
 	if antigravityRequestNeedsSchemaSanitization(payload) {
 		payloadStr := string(payload)
@@ -1976,6 +1961,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 
 		bodyReader = strings.NewReader(payloadStr)
+		requestSessionID = strings.TrimSpace(gjson.Get(payloadStr, "request.sessionId").String())
 		if e.cfg != nil && e.cfg.RequestLog {
 			payloadLog = []byte(payloadStr)
 		}
@@ -1987,6 +1973,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 
 		bodyReader = bytes.NewReader(payload)
+		requestSessionID = strings.TrimSpace(gjson.GetBytes(payload, "request.sessionId").String())
 		if e.cfg != nil && e.cfg.RequestLog {
 			payloadLog = append([]byte(nil), payload...)
 		}
@@ -2013,6 +2000,10 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("x-request-source", "local")
+	if requestSessionID != "" {
+		httpReq.Header.Set("X-Machine-Session-Id", requestSessionID)
+	}
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
@@ -2121,6 +2112,13 @@ func buildBaseURL(auth *cliproxyauth.Auth) string {
 	return antigravityBaseURLDaily
 }
 
+func buildLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
+	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
+		return base
+	}
+	return antigravityBaseURLProd
+}
+
 func resolveHost(base string) string {
 	parsed, errParse := url.Parse(base)
 	if errParse != nil {
@@ -2213,8 +2211,17 @@ func antigravityShouldRetrySoftRateLimit(statusCode int, body []byte) bool {
 	return decideAntigravity429(body).kind == antigravity429DecisionSoftRetry
 }
 
-func antigravityShouldRetryEndpointNotFound(statusCode int) bool {
-	return statusCode == http.StatusNotFound
+func antigravityShouldRetryEndpointUnavailable(statusCode int, body []byte) bool {
+	if statusCode == http.StatusNotFound {
+		return true
+	}
+	if statusCode != http.StatusForbidden || len(body) == 0 {
+		return false
+	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "gemini for google cloud api (staging)") &&
+		strings.Contains(msg, "staging-cloudaicompanion.sandbox.googleapis.com") &&
+		strings.Contains(msg, "disabled")
 }
 
 func antigravityDefaultThinkingLevel(modelName string) string {
@@ -2352,7 +2359,6 @@ var antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
 	}
 	return []string{
 		antigravityBaseURLDaily,
-		antigravitySandboxBaseURLDaily,
 		antigravitySandboxBaseURLAutopush,
 		antigravityBaseURLProd,
 	}

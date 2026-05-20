@@ -128,6 +128,19 @@ func TestAntigravityShouldRetryNoCapacity_Standard503(t *testing.T) {
 	}
 }
 
+func TestAntigravityShouldRetryEndpointUnavailable_Staging403(t *testing.T) {
+	body := []byte(`{"error":{"code":403,"message":"Gemini for Google Cloud API (Staging) has not been used in project vertical-kite-22hpz before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/staging-cloudaicompanion.sandbox.googleapis.com/overview?project=vertical-kite-22hpz then retry.","status":"PERMISSION_DENIED"}}`)
+	if !antigravityShouldRetryEndpointUnavailable(http.StatusForbidden, body) {
+		t.Fatal("antigravityShouldRetryEndpointUnavailable() = false, want true for staging endpoint 403")
+	}
+	if antigravityShouldRetryEndpointUnavailable(http.StatusForbidden, []byte(`{"error":{"message":"permission denied"}}`)) {
+		t.Fatal("antigravityShouldRetryEndpointUnavailable() = true for generic 403, want false")
+	}
+	if !antigravityShouldRetryEndpointUnavailable(http.StatusNotFound, nil) {
+		t.Fatal("antigravityShouldRetryEndpointUnavailable() = false for 404, want true")
+	}
+}
+
 func TestInjectEnabledCreditTypes(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-6","request":{}}`)
 	got := injectEnabledCreditTypes(body)
@@ -205,6 +218,62 @@ func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
 	}
 	if requestCount != 2 {
 		t.Fatalf("request count = %d, want 2", requestCount)
+	}
+}
+
+func TestAntigravityExecute_DoesNotFallbackBaseURLOnQuota429(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var primaryCount int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"quota exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`))
+	}))
+	defer primary.Close()
+
+	var fallbackCount int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"unexpected fallback"}]}}]}}`))
+	}))
+	defer fallback.Close()
+
+	originalOrder := antigravityBaseURLFallbackOrder
+	antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
+		return []string{primary.URL, fallback.URL}
+	}
+	t.Cleanup(func() {
+		antigravityBaseURLFallbackOrder = originalOrder
+	})
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-quota-429",
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 429")
+	}
+	if primaryCount != 1 {
+		t.Fatalf("primary request count = %d, want 1", primaryCount)
+	}
+	if fallbackCount != 0 {
+		t.Fatalf("fallback request count = %d, want 0", fallbackCount)
 	}
 }
 
