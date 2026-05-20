@@ -37,6 +37,30 @@ func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnFunctionCall
 	}
 }
 
+func TestConvertGeminiRequestToAntigravity_ResolvesGemini35FlashWireModels(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash-medium",
+		"contents": [
+			{
+				"role": "user",
+				"parts": [
+					{"text": "hello"}
+				]
+			}
+		]
+	}`)
+
+	medium := ConvertGeminiRequestToAntigravity("gemini-3.5-flash-medium", inputJSON, false)
+	if got := gjson.GetBytes(medium, "model").String(); got != "gemini-3.5-flash-low" {
+		t.Fatalf("medium wire model = %q, want gemini-3.5-flash-low", got)
+	}
+
+	high := ConvertGeminiRequestToAntigravity("gemini-3.5-flash-high", inputJSON, false)
+	if got := gjson.GetBytes(high, "model").String(); got != "gemini-3-flash-agent" {
+		t.Fatalf("high wire model = %q, want gemini-3-flash-agent", got)
+	}
+}
+
 func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnTextPart(t *testing.T) {
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
 	inputJSON := []byte(fmt.Sprintf(`{

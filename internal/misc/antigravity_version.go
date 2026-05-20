@@ -16,7 +16,7 @@ import (
 
 const (
 	antigravityReleasesURL     = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
-	antigravityFallbackVersion = "1.21.9"
+	antigravityFallbackVersion = "2.0.1"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
@@ -167,6 +167,47 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 		return AntigravityLatestVersion()
 	}
 	return rest
+}
+
+// AntigravityWireModel resolves user-facing Antigravity model IDs to the
+// backend model keys returned by Antigravity's fetchAvailableModels endpoint.
+func AntigravityWireModel(modelName string) string {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
+	switch normalized {
+	case "gemini-3.5-flash-high":
+		return "gemini-3-flash-agent"
+	case "gemini-3.5-flash-medium", "gemini-3.5-flash":
+		return "gemini-3.5-flash-low"
+	case "gemini-3-flash-high", "gemini-3-flash-medium", "gemini-3-flash-low":
+		return "gemini-3-flash"
+	default:
+		return modelName
+	}
+}
+
+// AntigravityDisplayName normalizes backend model keys to the user-facing
+// labels used by Antigravity's model picker and quota UI.
+func AntigravityDisplayName(modelName, fallback string) string {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
+	switch normalized {
+	case "gemini-3.5-flash-high", "gemini-3-flash-agent":
+		return "Gemini 3.5 Flash (High)"
+	case "gemini-3.5-flash-medium", "gemini-3.5-flash-low":
+		return "Gemini 3.5 Flash (Medium)"
+	case "gemini-3.5-flash":
+		return "Gemini 3.5 Flash"
+	case "gemini-3-flash-high":
+		return "Gemini 3 Flash (High)"
+	case "gemini-3-flash-medium":
+		return "Gemini 3 Flash (Medium)"
+	case "gemini-3-flash-low":
+		return "Gemini 3 Flash (Low)"
+	}
+	fallback = strings.TrimSpace(fallback)
+	if fallback != "" {
+		return fallback
+	}
+	return strings.TrimSpace(modelName)
 }
 
 func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
