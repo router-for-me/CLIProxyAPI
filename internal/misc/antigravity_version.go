@@ -169,15 +169,11 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 	return rest
 }
 
-// AntigravityWireModel resolves user-facing Antigravity model IDs to the
-// backend model keys returned by Antigravity's fetchAvailableModels endpoint.
+// AntigravityWireModel resolves legacy Antigravity model aliases to their
+// backend model keys while preserving native Gemini 3.5 Flash variant IDs.
 func AntigravityWireModel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
-	case "gemini-3.5-flash-high":
-		return "gemini-3-flash-agent"
-	case "gemini-3.5-flash-medium", "gemini-3.5-flash":
-		return "gemini-3.5-flash-low"
 	case "gemini-3-flash-high", "gemini-3-flash-medium", "gemini-3-flash-low":
 		return "gemini-3-flash"
 	default:

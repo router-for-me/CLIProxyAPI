@@ -4,8 +4,8 @@ import "testing"
 
 func TestHasAntigravity35FlashPair(t *testing.T) {
 	models := []modelEntry{
-		{ID: "gemini-3-flash-agent", DisplayName: "Gemini 3.5 Flash (High)"},
-		{ID: "gemini-3.5-flash-low", DisplayName: "Gemini 3.5 Flash (Medium)"},
+		{ID: "gemini-3.5-flash-high", DisplayName: "Gemini 3.5 Flash (High)"},
+		{ID: "gemini-3.5-flash-medium", DisplayName: "Gemini 3.5 Flash (Medium)"},
 	}
 
 	if !hasAntigravity35FlashPair(models) {

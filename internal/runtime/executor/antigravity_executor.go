@@ -2220,9 +2220,9 @@ func antigravityShouldRetryEndpointNotFound(statusCode int) bool {
 func antigravityDefaultThinkingLevel(modelName string) string {
 	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
 	switch normalized {
-	case "gemini-3.5-flash-high", "gemini-3-flash-agent":
+	case "gemini-3.5-flash-high":
 		return "high"
-	case "gemini-3.5-flash-medium", "gemini-3.5-flash-low":
+	case "gemini-3.5-flash-medium":
 		return "medium"
 	default:
 		return ""
