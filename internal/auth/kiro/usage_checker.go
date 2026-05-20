@@ -78,8 +78,12 @@ func (c *UsageChecker) CheckUsage(ctx context.Context, tokenData *KiroTokenData)
 
 	queryParams := map[string]string{
 		"origin":       "AI_EDITOR",
-		"profileArn":   tokenData.ProfileArn,
 		"resourceType": "AGENTIC_REQUEST",
+	}
+	if tokenData.ProfileArn != "" {
+		queryParams["profileArn"] = tokenData.ProfileArn
+	} else {
+		queryParams["isEmailRequired"] = "true"
 	}
 
 	// Use endpoint from profileArn if available

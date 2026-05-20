@@ -22,7 +22,7 @@ const kiroCreditScript = `<script data-cpa-kiro-credit-script>
     label: "AuthFilesPage-module__metaLabel___",
     value: "AuthFilesPage-module__metaValue___"
   };
-  const loaded = new Map();
+  const quotaState = new Map();
   let filesCache = null;
   let filesCacheAt = 0;
 
@@ -134,15 +134,25 @@ const kiroCreditScript = `<script data-cpa-kiro-credit-script>
       if (!name) continue;
       const file = files.find(f => f && (f.name === name || f.id === name));
       const authIndex = file?.auth_index || file?.authIndex;
-      if (!authIndex || loaded.get(name) === authIndex) continue;
-      loaded.set(name, authIndex);
+      if (!authIndex) continue;
+      const cached = quotaState.get(name);
+      if (cached?.authIndex === authIndex) {
+        upsertCredit(card, cached.text, cached.title);
+        if (cached.status === "loading") continue;
+        if (cached.status === "success") continue;
+      }
+      quotaState.set(name, { authIndex, status: "loading", text: "Loading...", title: "Loading Kiro credit usage" });
       upsertCredit(card, "Loading...", "Loading Kiro credit usage");
       getKiroQuota(authIndex).then(quota => {
         const text = formatCredit(quota.credit_used) + " / " + formatCredit(quota.credit_total);
-        upsertCredit(card, text, quota.subscription_title || text);
+        const title = quota.subscription_title || text;
+        quotaState.set(name, { authIndex, status: "success", text, title });
+        upsertCredit(card, text, title);
       }).catch(() => {
-        loaded.delete(name);
-        upsertCredit(card, "Unavailable", "Kiro credit usage is unavailable");
+        const text = "Unavailable";
+        const title = "Kiro credit usage is unavailable";
+        quotaState.set(name, { authIndex, status: "error", text, title });
+        upsertCredit(card, text, title);
       });
     }
   }
