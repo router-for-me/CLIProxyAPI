@@ -71,6 +71,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     fonts-liberation \
     xdg-utils \
+    ping \
+    telnet \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Playwright

@@ -23,6 +23,8 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
+        # 启用 BuildKit 特性
+        BUILDKIT_INLINE_CACHE: 1
     container_name: cli-proxy-api
     env_file:
        - .env
