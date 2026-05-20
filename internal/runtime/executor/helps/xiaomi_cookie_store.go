@@ -22,6 +22,7 @@ type persistedCookies struct {
 
 const (
 	xiaomiCookieFilePrefix = "xiaomi_platform_cookies"
+	xiaomiCookiesSubdir    = "xiaomi_cookies"
 	xiaomiCookieFileTTL    = 12 * time.Hour
 )
 
@@ -30,7 +31,7 @@ var (
 	cookieStoreDir  string
 )
 
-// InitXiaomiCookieStore 初始化 cookie 持久化目录。
+// InitXiaomiCookieStore 初始化 cookie 持久化目录，并将旧位置的 cookie 文件迁移到子目录。
 func InitXiaomiCookieStore(authDir string) {
 	cookieStoreOnce.Do(func() {
 		cookieStoreDir = authDir
@@ -40,7 +41,40 @@ func InitXiaomiCookieStore(authDir string) {
 				cookieStoreDir = filepath.Dir(exe)
 			}
 		}
+		if cookieStoreDir != "" {
+			migrateXiaomiCookieFiles(cookieStoreDir)
+		}
 	})
+}
+
+// migrateXiaomiCookieFiles 将根目录下的 xiaomi_platform_cookies_*.json 移入 xiaomi_cookies/ 子目录。
+func migrateXiaomiCookieFiles(dir string) {
+	subdir := filepath.Join(dir, xiaomiCookiesSubdir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix := xiaomiCookieFilePrefix + "_"
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		src := filepath.Join(dir, name)
+		dst := filepath.Join(subdir, name)
+		if err := os.MkdirAll(subdir, 0755); err != nil {
+			log.Warnf("xiaomi: 创建 cookie 子目录失败: %v", err)
+			return
+		}
+		if err := os.Rename(src, dst); err != nil {
+			log.Warnf("xiaomi: 迁移 cookie 文件失败 %s → %s: %v", src, dst, err)
+		} else {
+			log.Infof("xiaomi: 已迁移 cookie 文件 %s → %s", name, filepath.Join(xiaomiCookiesSubdir, name))
+		}
+	}
 }
 
 // cookieFilePath 返回指定账号的持久化文件路径，email 为空时使用 "global" 作为标识。
@@ -54,7 +88,7 @@ func cookieFilePath(email string) string {
 	}
 	h := sha256.Sum256([]byte(key))
 	suffix := hex.EncodeToString(h[:])[:16]
-	return filepath.Join(cookieStoreDir, xiaomiCookieFilePrefix+"_"+suffix+".json")
+	return filepath.Join(cookieStoreDir, xiaomiCookiesSubdir, xiaomiCookieFilePrefix+"_"+suffix+".json")
 }
 
 func loadXiaomiCookiesFromFile(email string) (string, bool) {

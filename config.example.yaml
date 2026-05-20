@@ -392,6 +392,46 @@ codex-oauth:
 #       - name: "deepseek-reasoner"
 #         alias: "deepseek-reasoner"
 
+# Xiaomi MiMo (OpenAI-compatible) example with balance display:
+# When the provider name is "xiaomi", the management API will automatically
+# fetch token-plan usage from https://platform.xiaomimimo.com/api/v1/tokenPlan/usage.
+#
+# Authentication options (pick one per api-key-entries item):
+#
+# Option 1 — Email + password (recommended for per-key auto-login):
+#   The server automatically obtains platform cookies via Playwright browser login.
+#   Password is MD5-hashed before sending to Xiaomi's login endpoint.
+#   If email verification is required, the management UI shows a verification modal.
+#
+# Option 2 — Cookie (manual browser session):
+#   Extract cookies from browser DevTools (Application → Cookies →
+#   platform.xiaomimimo.com). Must include api-platform_serviceToken, userId,
+#   api-platform_slh, api-platform_ph.
+#
+# Option 3 — Provider-level Cookie header (shared across all entries):
+#   Set Cookie in the provider-level headers. All entries inherit it.
+#
+# openai-compatibility:
+#   - name: "xiaomi"
+#     base-url: "https://api.xiaomimimo.com/v1"
+#     api-key-entries:
+#       # Per-key with email/password (auto-login, no manual cookie extraction)
+#       - api-key: "sk-xiaomi-..."          # optional: inference key (may be empty if cookie-only)
+#         xiaomi-email: "user1@example.com"
+#         xiaomi-password: "hashed_or_plain_password"
+#         balance-token: ""                 # optional: override balance auth token
+#       # Per-key with manual cookie
+#       - api-key: ""
+#         headers:
+#           Cookie: "api-platform_serviceToken=xxx; userId=123; api-platform_slh=yyy; api-platform_ph=zzz"
+#       # Per-key with cookie via balance-token field
+#       - api-key: "sk-xiaomi-..."
+#         headers:
+#           Cookie: "api-platform_serviceToken=xxx; userId=456; api-platform_slh=yyy; api-platform_ph=zzz"
+#     models:
+#       - name: "MiMo"
+#         alias: "mimo"
+
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
