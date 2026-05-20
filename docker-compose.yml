@@ -26,6 +26,7 @@ services:
         # 启用 BuildKit 特性
         BUILDKIT_INLINE_CACHE: 1
     container_name: cli-proxy-api
+    network_mode: host
     env_file:
        - .env
     environment:

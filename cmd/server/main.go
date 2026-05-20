@@ -31,7 +31,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -748,12 +747,8 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
-<<<<<<< HEAD
-			if !localModel {
-=======
 			misc.StartAntigravityVersionUpdater(context.Background())
 			if !localModel && !cfg.Home.Enabled {
->>>>>>> upstream/main
 				registry.StartModelsUpdater(context.Background())
 			} else if cfg.Home.Enabled {
 				log.Info("Home mode: remote model updates disabled")

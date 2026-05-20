@@ -8,13 +8,13 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestOpenAIChatCompletionsWithGitLabDuoOpenAIGateway(t *testing.T) {

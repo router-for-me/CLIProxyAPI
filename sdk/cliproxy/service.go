@@ -953,37 +953,6 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Info("file watcher started for config and auth directory changes")
 	}
 
-<<<<<<< HEAD
-	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
-	if err != nil {
-		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
-	}
-	s.watcher = watcherWrapper
-	s.ensureAuthUpdateQueue(ctx)
-	if s.authUpdates != nil {
-		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
-	}
-	watcherWrapper.SetConfig(s.cfg)
-
-	// 方案 A: 连接 Kiro 后台刷新器回调到 Watcher
-	// 当后台刷新器成功刷新 token 后，立即通知 Watcher 更新内存中的 Auth 对象
-	// 这解决了后台刷新与内存 Auth 对象之间的时间差问题
-	kiroauth.GetRefreshManager().SetOnTokenRefreshed(func(tokenID string, tokenData *kiroauth.KiroTokenData) {
-		if tokenData == nil || watcherWrapper == nil {
-			return
-		}
-		log.Debugf("kiro refresh callback: notifying watcher for token %s", tokenID)
-		watcherWrapper.NotifyTokenRefreshed(tokenID, tokenData.AccessToken, tokenData.RefreshToken, tokenData.ExpiresAt)
-	})
-	log.Debug("kiro: connected background refresh callback to watcher")
-
-	watcherCtx, watcherCancel := context.WithCancel(context.Background())
-	s.watcherCancel = watcherCancel
-	if err = watcherWrapper.Start(watcherCtx); err != nil {
-		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
-	}
-	log.Info("file watcher started for config and auth directory changes")
-
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil && !homeEnabled {
 		interval := 15 * time.Minute
@@ -1215,7 +1184,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
-<<<<<<< HEAD
 	case "cursor":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

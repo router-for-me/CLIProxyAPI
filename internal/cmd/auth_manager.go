@@ -18,16 +18,13 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewAntigravityAuthenticator(),
 		sdkAuth.NewKimiAuthenticator(),
-<<<<<<< HEAD
 		sdkAuth.NewKiroAuthenticator(),
 		sdkAuth.NewGitHubCopilotAuthenticator(),
 		sdkAuth.NewKiloAuthenticator(),
 		sdkAuth.NewGitLabAuthenticator(),
 		sdkAuth.NewCodeBuddyAuthenticator(),
 		sdkAuth.NewCursorAuthenticator(),
-=======
 		sdkAuth.NewXAIAuthenticator(),
->>>>>>> upstream/main
 	)
 	return manager
 }

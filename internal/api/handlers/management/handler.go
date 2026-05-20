@@ -48,6 +48,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	usageStats          *usage.RequestStatistics
 }
 
 // NewHandler creates a new management handler instance.

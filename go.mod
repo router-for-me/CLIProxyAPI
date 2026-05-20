@@ -19,6 +19,7 @@ require (
 	github.com/klauspost/compress v1.17.4
 	github.com/minio/minio-go/v7 v7.0.66
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
+	github.com/redis/go-redis/v9 v9.19.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sirupsen/logrus v1.9.3
 	github.com/tidwall/gjson v1.18.0
@@ -36,7 +37,6 @@ require (
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/redis/go-redis/v9 v9.19.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 )
 

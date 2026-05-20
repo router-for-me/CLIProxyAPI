@@ -3,7 +3,7 @@ package codebuddy_test
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 )
 
 func TestDecodeUserID_ValidJWT(t *testing.T) {

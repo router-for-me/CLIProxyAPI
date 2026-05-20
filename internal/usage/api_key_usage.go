@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 // apiKeyUsageBucketWindow is the width of one rolling-window slot. The

@@ -264,6 +264,9 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	}
 }
 
+// Redact returns a log-safe proxy URL with credentials and path-like data removed.
+func Redact(raw string) string {
+	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return ""
 	}
@@ -281,16 +284,4 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		redacted.User = url.User("redacted")
 	}
 	return redacted.String()
-}
-
-type bufferedConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
-
-func (c *bufferedConn) Read(p []byte) (int, error) {
-	if c.reader.Buffered() > 0 {
-		return c.reader.Read(p)
-	}
-	return c.Conn.Read(p)
 }
