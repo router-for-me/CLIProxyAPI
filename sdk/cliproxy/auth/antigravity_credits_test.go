@@ -97,6 +97,25 @@ func TestStatusCodeFromError_UnwrapsStreamBootstrap429(t *testing.T) {
 	}
 }
 
+func TestRetryAfterFromError_UnwrapsStreamBootstrapRetryAfter(t *testing.T) {
+	retryAfter := 123 * time.Millisecond
+	cause := &retryAfterStatusError{
+		status:     http.StatusTooManyRequests,
+		message:    "Selected model is at capacity. Please try a different model.",
+		retryAfter: retryAfter,
+	}
+	bootstrapErr := newStreamBootstrapError(cause, nil)
+	wrappedErr := fmt.Errorf("conductor stream failed: %w", bootstrapErr)
+
+	got := retryAfterFromError(wrappedErr)
+	if got == nil {
+		t.Fatalf("expected retryAfter, got nil")
+	}
+	if *got != retryAfter {
+		t.Fatalf("retryAfterFromError() = %v, want %v", *got, retryAfter)
+	}
+}
+
 func TestIsAuthBlockedForModel_ClaudeWithCreditsStillBlockedDuringCooldown(t *testing.T) {
 	auth := &Auth{
 		ID:       "ag-1",
