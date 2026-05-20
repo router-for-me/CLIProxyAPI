@@ -1580,7 +1580,7 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	if helps.IsValidUserID(existingUserID) {
 		return payload
 	}
-	if existingUserID != "" {
+	if existingUserID != "" && useCache {
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", helps.DeterministicFakeUserID(existingUserID))
 		return payload
 	}
