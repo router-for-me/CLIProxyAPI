@@ -33,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
 )
 
 const (
@@ -246,34 +247,32 @@ var (
 func getKiroPooledHTTPClient() *http.Client {
 	kiroHTTPClientPoolOnce.Do(func() {
 		transport := &http.Transport{
-			// Connection pool settings
-			MaxIdleConns:        100,              // Max idle connections across all hosts
-			MaxIdleConnsPerHost: 20,               // Max idle connections per host
-			MaxConnsPerHost:     50,               // Max total connections per host
-			IdleConnTimeout:     90 * time.Second, // How long idle connections stay in pool
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			MaxConnsPerHost:     50,
+			IdleConnTimeout:     50 * time.Second,
 
-			// Timeouts for connection establishment
 			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second, // TCP connection timeout
-				KeepAlive: 30 * time.Second, // TCP keep-alive interval
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
 			}).DialContext,
 
-			// TLS handshake timeout
-			TLSHandshakeTimeout: 10 * time.Second,
-
-			// Response header timeout
+			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
-
-			// Expect 100-continue timeout
 			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+		}
 
-			// Enable HTTP/2 when available
-			ForceAttemptHTTP2: true,
+		// HTTP/2 PING 探活：空闲 30s 发 PING，15s 没回则废弃连接
+		if h2, err := http2.ConfigureTransports(transport); err != nil {
+			log.Warnf("kiro: failed to configure HTTP/2 transport: %v", err)
+		} else {
+			h2.ReadIdleTimeout = 30 * time.Second
+			h2.PingTimeout = 15 * time.Second
 		}
 
 		kiroHTTPClientPool = &http.Client{
 			Transport: transport,
-			// No global timeout - let individual requests set their own timeouts via context
 		}
 
 		log.Debugf("kiro: initialized pooled HTTP client (MaxIdleConns=%d, MaxIdleConnsPerHost=%d, MaxConnsPerHost=%d)",
