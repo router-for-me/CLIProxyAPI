@@ -93,6 +93,77 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
+func TestCodexModelRequiresWebsocketsReadsCatalog(t *testing.T) {
+	cases := []struct {
+		name  string
+		model string
+		want  bool
+	}{
+		{"gpt-5.5 in catalog", "gpt-5.5", true},
+		{"gpt-5.4 in catalog", "gpt-5.4", true},
+		{"gpt-5.4-mini in catalog", "gpt-5.4-mini", true},
+		{"gpt-5.3-codex in catalog", "gpt-5.3-codex", true},
+		{"gpt-5.5 with thinking suffix", "gpt-5.5(low)", true},
+		{"gpt-5-codex not in catalog", "gpt-5-codex", false},
+		{"empty model", "", false},
+		{"unknown model", "claude-3-opus", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexModelRequiresWebsockets(tc.model); got != tc.want {
+				t.Fatalf("codexModelRequiresWebsockets(%q) = %v, want %v", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexAutoExecutorForcesWebsocketsForGPT55OnHTTPDownstream(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upgraded := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("request path = %s, want /responses", r.URL.Path)
+			http.Error(w, "wrong path", http.StatusBadRequest)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		upgraded <- struct{}{}
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			return
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		_ = conn.WriteMessage(websocket.TextMessage, completed)
+	}))
+	defer server.Close()
+
+	auto := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "sk-test",
+		"base_url":   server.URL,
+		"websockets": "true",
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg-1"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	if _, err := auto.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	select {
+	case <-upgraded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected websocket upgrade for gpt-5.5 over HTTP downstream; auto executor fell back to HTTP /responses")
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
