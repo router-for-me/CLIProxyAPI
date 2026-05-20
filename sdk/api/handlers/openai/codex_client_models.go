@@ -20,6 +20,14 @@ var (
 	codexClientModelTemplatesErr  error
 )
 
+var codexClientAllowedReasoningLevels = map[string]struct{}{
+	"none":   {},
+	"low":    {},
+	"medium": {},
+	"high":   {},
+	"xhigh":  {},
+}
+
 func (h *OpenAIAPIHandler) codexClientModelsResponse() map[string]any {
 	return CodexClientModelsResponse(h.Models())
 }
@@ -45,6 +53,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
+			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
 			result = append(result, entry)
 			continue
@@ -52,6 +61,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model)
+		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
 	}
@@ -153,12 +163,16 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 
 	levels := make([]any, 0, len(thinking.Levels))
 	defaultLevel := ""
+	firstLevel := ""
 	for _, rawLevel := range thinking.Levels {
-		level := strings.ToLower(strings.TrimSpace(rawLevel))
-		if level == "" || level == "none" {
+		level := normalizeCodexClientReasoningLevel(rawLevel)
+		if level == "" {
 			continue
 		}
-		if defaultLevel == "" || level == "medium" {
+		if firstLevel == "" {
+			firstLevel = level
+		}
+		if (defaultLevel == "" && level != "none") || level == "medium" {
 			defaultLevel = level
 		}
 		levels = append(levels, map[string]any{
@@ -169,15 +183,64 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 	if len(levels) == 0 {
 		return
 	}
+	if defaultLevel == "" {
+		defaultLevel = firstLevel
+	}
 
 	entry["supported_reasoning_levels"] = levels
 	entry["default_reasoning_level"] = defaultLevel
 }
 
+func sanitizeCodexClientReasoningMetadata(entry map[string]any) {
+	rawLevels, ok := entry["supported_reasoning_levels"].([]any)
+	if !ok {
+		return
+	}
+
+	levels := make([]any, 0, len(rawLevels))
+	allowedDefaults := make(map[string]struct{}, len(rawLevels))
+	for _, rawLevelEntry := range rawLevels {
+		levelEntry, ok := rawLevelEntry.(map[string]any)
+		if !ok {
+			continue
+		}
+		level := normalizeCodexClientReasoningLevel(stringModelValue(levelEntry, "effort"))
+		if level == "" {
+			continue
+		}
+		clonedEntry := cloneCodexClientModelMap(levelEntry)
+		clonedEntry["effort"] = level
+		levels = append(levels, clonedEntry)
+		allowedDefaults[level] = struct{}{}
+	}
+
+	if len(levels) == 0 {
+		delete(entry, "supported_reasoning_levels")
+		delete(entry, "default_reasoning_level")
+		return
+	}
+
+	defaultLevel := normalizeCodexClientReasoningLevel(stringModelValue(entry, "default_reasoning_level"))
+	if _, ok := allowedDefaults[defaultLevel]; !ok {
+		defaultLevel = stringModelValue(levels[0].(map[string]any), "effort")
+	}
+
+	entry["supported_reasoning_levels"] = levels
+	entry["default_reasoning_level"] = defaultLevel
+}
+
+func normalizeCodexClientReasoningLevel(rawLevel string) string {
+	level := strings.ToLower(strings.TrimSpace(rawLevel))
+	if _, ok := codexClientAllowedReasoningLevels[level]; !ok {
+		return ""
+	}
+	return level
+}
+
 func codexClientReasoningDescription(level string) string {
 	switch level {
-	case "minimal":
-		return "Fastest responses with minimal reasoning"
+	case "none":
+		return "No reasoning"
 	case "low":
 		return "Fast responses with lighter reasoning"
 	case "medium":

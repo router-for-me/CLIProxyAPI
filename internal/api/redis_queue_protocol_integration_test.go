@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +82,83 @@ func readTestRESPError(r *bufio.Reader) (string, error) {
 	return readTestRESPLine(r)
 }
 
+func readTestRESPSimpleString(r *bufio.Reader) (string, error) {
+	prefix, errRead := r.ReadByte()
+	if errRead != nil {
+		return "", errRead
+	}
+	if prefix != '+' {
+		return "", fmt.Errorf("expected simple string prefix '+', got %q", prefix)
+	}
+	return readTestRESPLine(r)
+}
+
+func readTestRESPBulkString(r *bufio.Reader) ([]byte, error) {
+	prefix, errRead := r.ReadByte()
+	if errRead != nil {
+		return nil, errRead
+	}
+	if prefix != '$' {
+		return nil, fmt.Errorf("expected bulk string prefix '$', got %q", prefix)
+	}
+
+	line, errLine := readTestRESPLine(r)
+	if errLine != nil {
+		return nil, errLine
+	}
+	length, errParse := strconv.Atoi(line)
+	if errParse != nil {
+		return nil, fmt.Errorf("invalid bulk string length %q: %v", line, errParse)
+	}
+	if length == -1 {
+		return nil, nil
+	}
+	if length < -1 {
+		return nil, fmt.Errorf("invalid bulk string length %d", length)
+	}
+
+	payload := make([]byte, length+2)
+	if _, errRead := io.ReadFull(r, payload); errRead != nil {
+		return nil, errRead
+	}
+	if payload[length] != '\r' || payload[length+1] != '\n' {
+		return nil, fmt.Errorf("invalid bulk string terminator")
+	}
+	return payload[:length], nil
+}
+
+func readRESPArrayOfBulkStrings(r *bufio.Reader) ([][]byte, error) {
+	prefix, errRead := r.ReadByte()
+	if errRead != nil {
+		return nil, errRead
+	}
+	if prefix != '*' {
+		return nil, fmt.Errorf("expected array prefix '*', got %q", prefix)
+	}
+
+	line, errLine := readTestRESPLine(r)
+	if errLine != nil {
+		return nil, errLine
+	}
+	count, errParse := strconv.Atoi(line)
+	if errParse != nil {
+		return nil, fmt.Errorf("invalid array length %q: %v", line, errParse)
+	}
+	if count < 0 {
+		return nil, fmt.Errorf("invalid array length %d", count)
+	}
+
+	out := make([][]byte, 0, count)
+	for i := 0; i < count; i++ {
+		item, errItem := readTestRESPBulkString(r)
+		if errItem != nil {
+			return nil, errItem
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
 func TestRedisProtocol_ManagementDisabled_RejectsConnection(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	redisqueue.SetEnabled(false)
@@ -103,19 +182,13 @@ func TestRedisProtocol_ManagementDisabled_RejectsConnection(t *testing.T) {
 		t.Fatalf("failed to write RESP command: %v", errWrite)
 	}
 
-	if msg, err := readTestRESPError(bufio.NewReader(conn)); err != nil {
-		t.Fatalf("failed to read disabled RESP error: %v", err)
-	} else if msg != "ERR RESP AUTH disabled; use mTLS" {
-		t.Fatalf("unexpected disabled RESP error: %q", msg)
-	}
-
 	buf := make([]byte, 1)
 	_, errRead := conn.Read(buf)
 	if errRead == nil {
-		t.Fatalf("expected connection to be closed after disabled RESP error")
+		t.Fatalf("expected connection to be closed when management is disabled")
 	}
 	if ne, ok := errRead.(net.Error); ok && ne.Timeout() {
-		t.Fatalf("expected connection to be closed after disabled RESP error, got timeout: %v", errRead)
+		t.Fatalf("expected connection to be closed when management is disabled, got timeout: %v", errRead)
 	}
 }
 
@@ -147,22 +220,22 @@ func TestRedisProtocol_HomeEnabled_DisablesConnection(t *testing.T) {
 	_ = writeTestRESPCommand(conn, "PING")
 
 	if msg, err := readTestRESPError(bufio.NewReader(conn)); err != nil {
-		t.Fatalf("failed to read disabled RESP error: %v", err)
-	} else if msg != "ERR RESP AUTH disabled; use mTLS" {
+		t.Fatalf("failed to read home-mode RESP error: %v", err)
+	} else if msg != "ERR redis usage output disabled in home mode" {
 		t.Fatalf("unexpected disabled RESP error: %q", msg)
 	}
 
 	buf := make([]byte, 1)
 	_, errRead := conn.Read(buf)
 	if errRead == nil {
-		t.Fatalf("expected connection to be closed after disabled RESP error")
+		t.Fatalf("expected connection to be closed after home-mode RESP error")
 	}
 	if ne, ok := errRead.(net.Error); ok && ne.Timeout() {
-		t.Fatalf("expected connection to be closed after disabled RESP error, got timeout: %v", errRead)
+		t.Fatalf("expected connection to be closed after home-mode RESP error, got timeout: %v", errRead)
 	}
 }
 
-func TestRedisProtocol_AUTH_DisabledAndClosesConnection(t *testing.T) {
+func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	const managementPassword = "test-management-password"
 
 	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
@@ -190,18 +263,67 @@ func TestRedisProtocol_AUTH_DisabledAndClosesConnection(t *testing.T) {
 	if errWrite := writeTestRESPCommand(conn, "AUTH", managementPassword); errWrite != nil {
 		t.Fatalf("failed to write AUTH command: %v", errWrite)
 	}
-	if msg, err := readTestRESPError(reader); err != nil {
-		t.Fatalf("failed to read disabled AUTH error: %v", err)
-	} else if msg != "ERR RESP AUTH disabled; use mTLS" {
-		t.Fatalf("unexpected disabled AUTH error: %q", msg)
+	if msg, errRead := readTestRESPSimpleString(reader); errRead != nil {
+		t.Fatalf("failed to read AUTH response: %v", errRead)
+	} else if msg != "OK" {
+		t.Fatalf("unexpected AUTH response: %q", msg)
 	}
 
-	buf := make([]byte, 1)
-	_, errRead := conn.Read(buf)
-	if errRead == nil {
-		t.Fatalf("expected connection to be closed after disabled AUTH error")
+	if !redisqueue.Enabled() {
+		t.Fatalf("expected redisqueue to be enabled")
 	}
-	if ne, ok := errRead.(net.Error); ok && ne.Timeout() {
-		t.Fatalf("expected connection to be closed after disabled AUTH error, got timeout: %v", errRead)
+	redisqueue.Enqueue([]byte("a"))
+	redisqueue.Enqueue([]byte("b"))
+	redisqueue.Enqueue([]byte("c"))
+
+	if errWrite := writeTestRESPCommand(conn, "RPOP", "usage"); errWrite != nil {
+		t.Fatalf("failed to write RPOP command: %v", errWrite)
+	}
+	if item, errRead := readTestRESPBulkString(reader); errRead != nil {
+		t.Fatalf("failed to read RPOP response: %v", errRead)
+	} else if string(item) != "a" {
+		t.Fatalf("unexpected RPOP item: %q", string(item))
+	}
+
+	if errWrite := writeTestRESPCommand(conn, "LPOP", "usage"); errWrite != nil {
+		t.Fatalf("failed to write LPOP command: %v", errWrite)
+	}
+	if item, errRead := readTestRESPBulkString(reader); errRead != nil {
+		t.Fatalf("failed to read LPOP response: %v", errRead)
+	} else if string(item) != "b" {
+		t.Fatalf("unexpected LPOP item: %q", string(item))
+	}
+
+	if errWrite := writeTestRESPCommand(conn, "RPOP", "usage", "10"); errWrite != nil {
+		t.Fatalf("failed to write RPOP count command: %v", errWrite)
+	}
+	items, errItems := readRESPArrayOfBulkStrings(reader)
+	if errItems != nil {
+		t.Fatalf("failed to read RPOP count response: %v", errItems)
+	}
+	if len(items) != 1 || string(items[0]) != "c" {
+		t.Fatalf("unexpected RPOP count items: %#v", items)
+	}
+
+	if errWrite := writeTestRESPCommand(conn, "LPOP", "usage"); errWrite != nil {
+		t.Fatalf("failed to write LPOP empty command: %v", errWrite)
+	}
+	item, errItem := readTestRESPBulkString(reader)
+	if errItem != nil {
+		t.Fatalf("failed to read LPOP empty response: %v", errItem)
+	}
+	if item != nil {
+		t.Fatalf("expected nil bulk string for empty queue, got %q", string(item))
+	}
+
+	if errWrite := writeTestRESPCommand(conn, "RPOP", "usage", "2"); errWrite != nil {
+		t.Fatalf("failed to write RPOP empty count command: %v", errWrite)
+	}
+	emptyItems, errEmpty := readRESPArrayOfBulkStrings(reader)
+	if errEmpty != nil {
+		t.Fatalf("failed to read RPOP empty count response: %v", errEmpty)
+	}
+	if len(emptyItems) != 0 {
+		t.Fatalf("expected empty array for empty queue with count, got %#v", emptyItems)
 	}
 }
