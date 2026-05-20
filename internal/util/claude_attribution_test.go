@@ -38,3 +38,31 @@ func TestIsClaudeCodeAttributionSystemText(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSDKEntrypoint(t *testing.T) {
+	tests := []struct {
+		name string
+		ep   string
+		want bool
+	}{
+		{"sdk-cli", "sdk-cli", true},
+		{"sdk-py", "sdk-py", true},
+		{"sdk-ts", "sdk-ts", true},
+		{"plain sdk", "sdk", true},
+		{"external-sdk", "external-sdk", true},
+		{"contains -sdk", "vendor-sdk-cli", true},
+		{"uppercase sdk", "SDK-CLI", true},
+		{"whitespace padded", "  sdk-cli  ", true},
+		{"plain cli", "cli", false},
+		{"vscode", "vscode", false},
+		{"empty", "", false},
+		{"sdk prefix matches without dash", "sdkx", true}, // documents the HasPrefix rule
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSDKEntrypoint(tt.ep); got != tt.want {
+				t.Fatalf("IsSDKEntrypoint(%q) = %v, want %v", tt.ep, got, tt.want)
+			}
+		})
+	}
+}

@@ -161,6 +161,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = stripSDKOriginMarkers(e.cfg, body)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -339,6 +340,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = stripSDKOriginMarkers(e.cfg, body)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -990,6 +992,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	// Fast Mode spoof: force the session id so a leaking SDK client cannot
+	// override CPA's deterministic value via gin-forwarded headers.
+	if cfg != nil && cfg.ClaudeFastModeSpoof != nil && *cfg.ClaudeFastModeSpoof {
+		r.Header.Set("X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	if isAnthropicBase {
 		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
@@ -1785,6 +1792,24 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 	return payload
 }
 
+// stripSDKOriginMarkers removes SDK-origin markers Anthropic may use for Fast
+// Mode gating (top-level source, metadata.source, client_source, metadata.client).
+// No-op unless cfg.ClaudeFastModeSpoof is enabled. Sibling to applyCloaking;
+// kept separate so the strip applies regardless of which cloaking branch ran.
+func stripSDKOriginMarkers(cfg *config.Config, body []byte) []byte {
+	if cfg == nil || cfg.ClaudeFastModeSpoof == nil || !*cfg.ClaudeFastModeSpoof {
+		return body
+	}
+	for _, p := range []string{"source", "metadata.source", "client_source", "metadata.client"} {
+		if gjson.GetBytes(body, p).Exists() {
+			if updated, err := sjson.DeleteBytes(body, p); err == nil {
+				body = updated
+			}
+		}
+	}
+	return body
+}
+
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
@@ -1827,6 +1852,18 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
+		// Fast Mode spoof: rewrite SDK-shaped entrypoints to a TTY-style value
+		// when the upstream client leaked sdk-* (Anthropic gates Fast Mode on
+		// entrypoint). Opt-in via config.claude-fast-mode-spoof; default off.
+		if cfg != nil && cfg.ClaudeFastModeSpoof != nil && *cfg.ClaudeFastModeSpoof {
+			if util.IsSDKEntrypoint(entrypoint) {
+				if forced := strings.TrimSpace(cfg.ClaudeFastModeSpoofEntrypoint); forced != "" {
+					entrypoint = forced
+				} else {
+					entrypoint = "cli"
+				}
+			}
+		}
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
 	}
