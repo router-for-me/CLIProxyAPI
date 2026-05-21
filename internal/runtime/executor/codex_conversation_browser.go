@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -92,6 +93,9 @@ func ensureCodexConversationSession(ctx context.Context, client *http.Client, au
 		cfCookie := ensureCfClearance(ctx, authID, cfg, auth, origin, bearerToken)
 		if cfCookie != "" {
 			cookieHeader = injectCfClearanceCookie(cookieHeader, cfCookie)
+			log.Infof("codex: auto-injected cf_clearance for auth %s", authID)
+		} else {
+			log.Warnf("codex: failed to auto-acquire cf_clearance for auth %s", authID)
 		}
 	}
 

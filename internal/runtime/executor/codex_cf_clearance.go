@@ -102,7 +102,7 @@ func warmupCfClearance(ctx context.Context, authID string, cfg *config.Config, a
 				ExpiresAt: time.Now().Add(cfClearanceTTL),
 				Proxy:     proxy,
 			})
-			log.Debugf("codex: acquired cf_clearance for auth %s", authID)
+			log.Infof("codex: acquired cf_clearance for auth %s (proxy=%s)", authID, proxy)
 			return strings.TrimSpace(cookie.Value), nil
 		}
 	}

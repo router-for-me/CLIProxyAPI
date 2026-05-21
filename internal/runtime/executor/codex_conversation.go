@@ -854,9 +854,11 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			preview, _ = readBodyPreview(httpResp)
 			if isCfClearanceChallenge(httpResp.StatusCode, preview) {
+				log.Errorf("codex: CF challenge persists after retry (non-stream) for auth %s", auth.ID)
 				_ = httpResp.Body.Close()
 				return resp, newCodexStatusErr(http.StatusBadGateway, preview)
 			}
+			log.Infof("codex: CF challenge retry succeeded (non-stream) for auth %s", auth.ID)
 		}
 	}
 
@@ -1009,9 +1011,11 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			preview, _ = readBodyPreview(httpResp)
 			if isCfClearanceChallenge(httpResp.StatusCode, preview) {
+				log.Errorf("codex: CF challenge persists after retry (stream) for auth %s", auth.ID)
 				_ = httpResp.Body.Close()
 				return nil, newCodexStatusErr(http.StatusBadGateway, preview)
 			}
+			log.Infof("codex: CF challenge retry succeeded (stream) for auth %s", auth.ID)
 		}
 	}
 
