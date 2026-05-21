@@ -2330,47 +2330,57 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						shouldSuspendModel = true
 					} else {
 						switch statusCode {
-						case 401:
-							state.StatusMessage = "unauthorized"
-							if !quotaCooldownDisabledForAuth(auth) {
-								state.NextRetryAfter = now.Add(30 * time.Minute)
-								suspendReason = "unauthorized"
-								shouldSuspendModel = true
-							}
-						case 402, 403:
-							state.StatusMessage = "payment_required"
-							if !quotaCooldownDisabledForAuth(auth) {
-								state.NextRetryAfter = now.Add(30 * time.Minute)
-								suspendReason = "payment_required"
-								shouldSuspendModel = true
-							}
+case 401:
+						state.StatusMessage = "unauthorized"
+						if !quotaCooldownDisabledForAuth(auth) {
+							state.NextRetryAfter = now.Add(30 * time.Minute)
+							suspendReason = "unauthorized"
+							shouldSuspendModel = true
+						} else {
+							state.NextRetryAfter = time.Time{}
+						}
+					case 402, 403:
+						state.StatusMessage = "payment_required"
+						if !quotaCooldownDisabledForAuth(auth) {
+							state.NextRetryAfter = now.Add(30 * time.Minute)
+							suspendReason = "payment_required"
+							shouldSuspendModel = true
+						} else {
+							state.NextRetryAfter = time.Time{}
+						}
 						case 404:
 							state.StatusMessage = "not_found"
 							state.NextRetryAfter = now.Add(12 * time.Hour)
 							suspendReason = "not_found"
 							shouldSuspendModel = true
-						case 429:
-							state.StatusMessage = "quota"
-							state.Quota = QuotaState{Exceeded: true, Reason: "quota"}
-							if !quotaCooldownDisabledForAuth(auth) {
-								cooldown := defaultQuotaCooldown
-								if result.Error != nil {
-									if parsed, ok := parseQuotaResetDuration(result.Error.Message); ok {
-										cooldown = parsed
-									} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
-										cooldown = *result.RetryAfter
-									}
+case 429:
+						state.StatusMessage = "quota"
+						state.Quota = QuotaState{Exceeded: true, Reason: "quota"}
+						if !quotaCooldownDisabledForAuth(auth) {
+							cooldown := defaultQuotaCooldown
+							if result.Error != nil {
+								if parsed, ok := parseQuotaResetDuration(result.Error.Message); ok {
+									cooldown = parsed
 								} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 									cooldown = *result.RetryAfter
 								}
-								next := now.Add(cooldown)
-								state.NextRetryAfter = next
-								state.Quota.NextRecoverAt = next
-								suspendReason = "quota"
-								shouldSuspendModel = true
+							} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+								cooldown = *result.RetryAfter
 							}
-						case 408, 500, 502, 503, 504:
-							state.StatusMessage = "transient upstream error"
+							next := now.Add(cooldown)
+							state.NextRetryAfter = next
+							state.Quota.NextRecoverAt = next
+							suspendReason = "quota"
+							shouldSuspendModel = true
+						} else {
+							state.NextRetryAfter = time.Time{}
+							state.Quota.NextRecoverAt = time.Time{}
+						}
+case 408, 500, 502, 503, 504:
+						// No cooldown is set for transient upstream errors
+						// because the OAuth refresh path is expected to
+						// resolve 50x responses by obtaining fresh tokens.
+						state.StatusMessage = "transient upstream error"
 						default:
 							state.NextRetryAfter = time.Time{}
 						}
@@ -2872,6 +2882,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			next := now.Add(cooldown)
 			auth.NextRetryAfter = next
 			auth.Quota.NextRecoverAt = next
+		} else {
+			auth.NextRetryAfter = time.Time{}
+			auth.Quota.NextRecoverAt = time.Time{}
 		}
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
@@ -4517,7 +4530,20 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return nil
 	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		return p.PrepareRequest(req, a.Clone())
+		err := p.PrepareRequest(req, a)
+		if err != nil {
+			return err
+		}
+		// Persist the refreshed auth state back into the manager's map
+		// so that in-place credential refreshes performed by executors
+		// (e.g., OAuth token rotation inside PrepareRequest/ensureAccessToken)
+		// are retained and not discarded on the clone.
+		m.mu.Lock()
+		if existing, ok := m.auths[authID]; ok && existing != nil {
+			m.auths[authID] = a
+		}
+		m.mu.Unlock()
+		return nil
 	}
 	return nil
 }

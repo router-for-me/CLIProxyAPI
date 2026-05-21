@@ -28,7 +28,7 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		return
 	}
 	h.mu.RLock()
-	cfg := h.cfg
+	cfg := h.cfg.Snapshot()
 	h.mu.RUnlock()
 	c.JSON(200, cfg)
 }

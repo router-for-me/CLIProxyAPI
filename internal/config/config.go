@@ -970,6 +970,36 @@ func (cfg *Config) SanitizeGeminiKeys() {
 	cfg.GeminiKey = out
 }
 
+// Snapshot returns a deep copy of the Config with all map and slice
+// fields copied so that the returned value can be safely read without
+// holding the manager lock. This prevents concurrent map iteration
+// panics when the config is JSON-encoded while other goroutines
+// mutate fields like OAuthExcludedModels or OAuthModelAlias.
+func (cfg *Config) Snapshot() *Config {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	if cfg.OAuthExcludedModels != nil {
+		out.OAuthExcludedModels = make(map[string][]string, len(cfg.OAuthExcludedModels))
+		for k, v := range cfg.OAuthExcludedModels {
+			out.OAuthExcludedModels[k] = append([]string(nil), v...)
+		}
+	}
+	if cfg.OAuthModelAlias != nil {
+		out.OAuthModelAlias = make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
+		for k, v := range cfg.OAuthModelAlias {
+			out.OAuthModelAlias[k] = append([]OAuthModelAlias(nil), v...)
+		}
+	}
+	out.GeminiKey = append([]GeminiKey(nil), cfg.GeminiKey...)
+	out.CodexKey = append([]CodexKey(nil), cfg.CodexKey...)
+	out.ClaudeKey = append([]ClaudeKey(nil), cfg.ClaudeKey...)
+	out.OpenAICompatibility = append([]OpenAICompatibility(nil), cfg.OpenAICompatibility...)
+	out.VertexCompatAPIKey = append([]VertexCompatKey(nil), cfg.VertexCompatAPIKey...)
+	return &out
+}
+
 func normalizeModelPrefix(prefix string) string {
 	trimmed := strings.TrimSpace(prefix)
 	trimmed = strings.Trim(trimmed, "/")
