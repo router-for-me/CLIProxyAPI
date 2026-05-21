@@ -2346,7 +2346,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if result.Error != nil {
 									if parsed, ok := parseQuotaResetDuration(result.Error.Message); ok {
 										cooldown = parsed
+									} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+										cooldown = *result.RetryAfter
 									}
+								} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+									cooldown = *result.RetryAfter
 								}
 								next := now.Add(cooldown)
 								state.NextRetryAfter = next
