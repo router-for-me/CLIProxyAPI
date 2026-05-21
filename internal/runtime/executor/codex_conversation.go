@@ -803,7 +803,7 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 		return resp, err
 	}
 	applyCodexConversationHeaders(httpReq, auth, apiKey, e.cfg)
-	if err = ensureCodexConversationSession(ctx, httpClient, auth, httpReq, apiKey); err != nil {
+	if err = ensureCodexConversationSession(ctx, httpClient, auth, httpReq, apiKey, e.cfg); err != nil {
 		return resp, err
 	}
 
@@ -830,13 +830,42 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+
+	// CF 挑战检测和重试（只重试一次）
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	preview, _ := readBodyPreview(httpResp)
+	if isCfClearanceChallenge(httpResp.StatusCode, preview) {
+		log.Warnf("codex: CF challenge detected (non-stream) for auth %s, retrying", auth.ID)
+		_ = httpResp.Body.Close()
+		invalidateCfClearance(auth.ID)
+
+		cfCookie := ensureCfClearance(ctx, auth.ID, e.cfg, auth, targetURL, apiKey)
+		retryReq, retryErr := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(conversationBody))
+		if retryErr == nil {
+			retryReq.Header = httpReq.Header.Clone()
+			if cfCookie != "" {
+				retryReq.Header.Set("Cookie", injectCfClearanceCookie(retryReq.Header.Get("Cookie"), cfCookie))
+			}
+			httpResp, err = httpClient.Do(retryReq)
+			if err != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			preview, _ = readBodyPreview(httpResp)
+			if isCfClearanceChallenge(httpResp.StatusCode, preview) {
+				_ = httpResp.Body.Close()
+				return resp, newCodexStatusErr(http.StatusBadGateway, preview)
+			}
+		}
+	}
+
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex conversation bridge: close response body error: %v", errClose)
 		}
 	}()
 
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
@@ -929,7 +958,7 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 		return nil, err
 	}
 	applyCodexConversationHeaders(httpReq, auth, apiKey, e.cfg)
-	if err = ensureCodexConversationSession(ctx, httpClient, auth, httpReq, apiKey); err != nil {
+	if err = ensureCodexConversationSession(ctx, httpClient, auth, httpReq, apiKey, e.cfg); err != nil {
 		return nil, err
 	}
 
@@ -957,7 +986,35 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 		return nil, err
 	}
 
+	// CF 挑战检测和重试（只重试一次）
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	preview, _ := readBodyPreview(httpResp)
+	if isCfClearanceChallenge(httpResp.StatusCode, preview) {
+		log.Warnf("codex: CF challenge detected (stream) for auth %s, retrying", auth.ID)
+		_ = httpResp.Body.Close()
+		invalidateCfClearance(auth.ID)
+
+		cfCookie := ensureCfClearance(ctx, auth.ID, e.cfg, auth, targetURL, apiKey)
+		retryReq, retryErr := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(conversationBody))
+		if retryErr == nil {
+			retryReq.Header = httpReq.Header.Clone()
+			if cfCookie != "" {
+				retryReq.Header.Set("Cookie", injectCfClearanceCookie(retryReq.Header.Get("Cookie"), cfCookie))
+			}
+			httpResp, err = httpClient.Do(retryReq)
+			if err != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, err)
+				return nil, err
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			preview, _ = readBodyPreview(httpResp)
+			if isCfClearanceChallenge(httpResp.StatusCode, preview) {
+				_ = httpResp.Body.Close()
+				return nil, newCodexStatusErr(http.StatusBadGateway, preview)
+			}
+		}
+	}
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {

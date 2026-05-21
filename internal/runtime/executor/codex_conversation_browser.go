@@ -53,7 +53,7 @@ type codexConversationSentinelGenerator struct {
 	random           *rand.Rand
 }
 
-func ensureCodexConversationSession(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth, req *http.Request, bearerToken string) error {
+func ensureCodexConversationSession(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth, req *http.Request, bearerToken string, cfg *config.Config) error {
 	if req == nil {
 		return nil
 	}
@@ -81,6 +81,20 @@ func ensureCodexConversationSession(ctx context.Context, client *http.Client, au
 
 	builtCookieHeader := buildCodexConversationCookieHeader(auth, deviceID, "")
 	cookieHeader := mergeCodexConversationCookies(req.Header.Get("Cookie"), builtCookieHeader)
+
+	// 如果 cookie 中没有 cf_clearance，自动获取
+	if !strings.Contains(cookieHeader, "cf_clearance=") {
+		authID := ""
+		if auth != nil {
+			authID = auth.ID
+		}
+		origin := codexConversationRequestOrigin(req.URL)
+		cfCookie := ensureCfClearance(ctx, authID, cfg, auth, origin, bearerToken)
+		if cfCookie != "" {
+			cookieHeader = injectCfClearanceCookie(cookieHeader, cfCookie)
+		}
+	}
+
 	if cookieHeader != "" {
 		req.Header.Set("Cookie", cookieHeader)
 	}
