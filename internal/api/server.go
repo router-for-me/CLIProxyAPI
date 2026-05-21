@@ -728,6 +728,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/auth-files/ollama-balance/refresh", s.mgmt.RefreshOllamaBalance)
 		mgmt.POST("/auth-files/deepseek-balance/refresh", s.mgmt.RefreshDeepSeekBalance)
+		mgmt.POST("/auth-files/codex-token/refresh", s.mgmt.RefreshCodexToken)
 		mgmt.POST("/openai-compat/balance/refresh", s.mgmt.RefreshOpenAICompatBalance)
 			mgmt.POST("/xiaomi/verify", s.mgmt.SubmitXiaomiVerification)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)

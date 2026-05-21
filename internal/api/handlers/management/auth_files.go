@@ -5038,3 +5038,109 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 		"state":  state,
 	})
 }
+
+// RefreshCodexToken handles a POST request to refresh a Codex OAuth token.
+// It reads the auth file, calls the OpenAI token refresh endpoint, and saves the updated tokens.
+func (h *Handler) RefreshCodexToken(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	// Find auth by name or ID
+	var targetAuth *coreauth.Auth
+	if h.authManager != nil {
+		if auth, ok := h.authManager.GetByID(name); ok {
+			targetAuth = auth
+		} else {
+			auths := h.authManager.List()
+			for _, auth := range auths {
+				if auth.FileName == name {
+					targetAuth = auth
+					break
+				}
+			}
+		}
+	}
+
+	if targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+
+	// Only allow refresh for codex providers
+	if !strings.EqualFold(targetAuth.Provider, "codex") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token refresh is only supported for codex providers"})
+		return
+	}
+
+	// Read the auth file to get the refresh token
+	authFilePath := filepath.Join(h.cfg.AuthDir, targetAuth.FileName)
+	fileData, err := os.ReadFile(authFilePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read auth file: %v", err)})
+		return
+	}
+
+	var tokenStorage codex.CodexTokenStorage
+	if err := json.Unmarshal(fileData, &tokenStorage); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to parse auth file: %v", err)})
+		return
+	}
+
+	refreshToken := strings.TrimSpace(tokenStorage.RefreshToken)
+	if refreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no refresh token available in auth file"})
+		return
+	}
+
+	// Create CodexAuth with proxy if configured
+	proxyURL := strings.TrimSpace(targetAuth.ProxyURL)
+	openaiAuth := codex.NewCodexAuthWithProxyURL(h.cfg, proxyURL)
+
+	// Refresh the token
+	tokenData, err := openaiAuth.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	if err != nil {
+		log.Errorf("Failed to refresh Codex token for %s: %v", name, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to refresh token: %v", err)})
+		return
+	}
+
+	// Update token storage
+	openaiAuth.UpdateTokenStorage(&tokenStorage, tokenData)
+
+	// Save updated token to file
+	if err := tokenStorage.SaveTokenToFile(authFilePath); err != nil {
+		log.Errorf("Failed to save refreshed token for %s: %v", name, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save refreshed token: %v", err)})
+		return
+	}
+
+	// Update auth manager metadata
+	if targetAuth.Metadata == nil {
+		targetAuth.Metadata = make(map[string]any)
+	}
+	targetAuth.Metadata["email"] = tokenData.Email
+	targetAuth.Metadata["account_id"] = tokenData.AccountID
+	targetAuth.LastRefreshedAt = time.Now()
+
+	log.Infof("Codex token refreshed successfully for %s (email=%s)", name, tokenData.Email)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":   "ok",
+		"email":    tokenData.Email,
+		"expire":   tokenData.Expire,
+		"message":  "token refreshed successfully",
+	})
+}

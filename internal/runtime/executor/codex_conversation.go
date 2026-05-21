@@ -10,11 +10,13 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -785,6 +787,57 @@ func codexConversationDoneEvent() []byte {
 	return []byte("data: [DONE]")
 }
 
+// isCodexTokenRefreshNeeded 检测 401 响应是否包含 refresh_token_reused 错误
+func isCodexTokenRefreshNeeded(statusCode int, body []byte) bool {
+	if statusCode != http.StatusUnauthorized {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "refresh_token_reused")
+}
+
+// persistCodexRefreshedAuth 持久化刷新后的 token 到文件
+func persistCodexRefreshedAuth(cfg *config.Config, auth *cliproxyauth.Auth) error {
+	if auth == nil || auth.Metadata == nil {
+		return fmt.Errorf("codex: cannot persist nil auth or metadata")
+	}
+
+	// 确定文件路径
+	var authPath string
+	if auth.Attributes != nil {
+		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
+			authPath = p
+		}
+	}
+	if authPath == "" {
+		fileName := strings.TrimSpace(auth.FileName)
+		if fileName == "" {
+			return fmt.Errorf("codex: auth has no file path or filename")
+		}
+		if filepath.IsAbs(fileName) {
+			authPath = fileName
+		} else if cfg != nil && cfg.AuthDir != "" {
+			authPath = filepath.Join(cfg.AuthDir, fileName)
+		} else {
+			return fmt.Errorf("codex: cannot determine auth file path")
+		}
+	}
+
+	// 构建 CodexTokenStorage
+	storage := &codexauth.CodexTokenStorage{
+		IDToken:      metaStringValue(auth.Metadata, "id_token"),
+		AccessToken:  metaStringValue(auth.Metadata, "access_token"),
+		RefreshToken: metaStringValue(auth.Metadata, "refresh_token"),
+		AccountID:    metaStringValue(auth.Metadata, "account_id"),
+		Email:        metaStringValue(auth.Metadata, "email"),
+		Expire:       metaStringValue(auth.Metadata, "expired"),
+		LastRefresh:  metaStringValue(auth.Metadata, "last_refresh"),
+	}
+
+	// 保存到文件
+	return storage.SaveTokenToFile(authPath)
+}
+
 func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, run codexConversationRunConfig) (resp cliproxyexecutor.Response, err error) {
 	targetURL := resolveCodexConversationURL(auth)
 	apiKey, err = e.resolveCodexConversationBearerToken(ctx, auth, targetURL)
@@ -859,6 +912,56 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 				return resp, newCodexStatusErr(http.StatusBadGateway, preview)
 			}
 			log.Infof("codex: CF challenge retry succeeded (non-stream) for auth %s", auth.ID)
+		}
+	}
+
+	// 401 token 刷新检测和重试
+	if isCodexTokenRefreshNeeded(httpResp.StatusCode, preview) {
+		log.Warnf("codex: refresh_token_reused detected (non-stream) for auth %s, refreshing token", auth.ID)
+		_ = httpResp.Body.Close()
+
+		refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+		if refreshErr != nil {
+			log.Errorf("codex: token refresh failed (non-stream): %v", refreshErr)
+			return resp, newCodexStatusErr(httpResp.StatusCode, preview)
+		}
+
+		if refreshedAuth != nil {
+			auth = refreshedAuth
+			// 持久化刷新后的 token
+			if persistErr := persistCodexRefreshedAuth(e.cfg, auth); persistErr != nil {
+				log.Warnf("codex: failed to persist refreshed auth: %v", persistErr)
+			}
+
+			// 获取新的 access token
+			newToken := codexConversationAccessToken(auth)
+			if newToken == "" {
+				return resp, statusErr{code: http.StatusUnauthorized, msg: "codex: no access token after refresh"}
+			}
+
+			// 重试请求
+			retryReq, retryErr := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(conversationBody))
+			if retryErr != nil {
+				return resp, retryErr
+			}
+			retryReq.Header = httpReq.Header.Clone()
+			retryReq.Header.Set("Authorization", "Bearer "+newToken)
+
+			httpResp, err = httpClient.Do(retryReq)
+			if err != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			preview, _ = readBodyPreview(httpResp)
+
+			// 检查重试后是否仍然 401
+			if isCodexTokenRefreshNeeded(httpResp.StatusCode, preview) {
+				log.Errorf("codex: 401 persists after token refresh (non-stream) for auth %s", auth.ID)
+				_ = httpResp.Body.Close()
+				return resp, newCodexStatusErr(httpResp.StatusCode, preview)
+			}
+			log.Infof("codex: token refresh retry succeeded (non-stream) for auth %s", auth.ID)
 		}
 	}
 
@@ -1016,6 +1119,56 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 				return nil, newCodexStatusErr(http.StatusBadGateway, preview)
 			}
 			log.Infof("codex: CF challenge retry succeeded (stream) for auth %s", auth.ID)
+		}
+	}
+
+	// 401 token 刷新检测和重试
+	if isCodexTokenRefreshNeeded(httpResp.StatusCode, preview) {
+		log.Warnf("codex: refresh_token_reused detected (stream) for auth %s, refreshing token", auth.ID)
+		_ = httpResp.Body.Close()
+
+		refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+		if refreshErr != nil {
+			log.Errorf("codex: token refresh failed (stream): %v", refreshErr)
+			return nil, newCodexStatusErr(httpResp.StatusCode, preview)
+		}
+
+		if refreshedAuth != nil {
+			auth = refreshedAuth
+			// 持久化刷新后的 token
+			if persistErr := persistCodexRefreshedAuth(e.cfg, auth); persistErr != nil {
+				log.Warnf("codex: failed to persist refreshed auth: %v", persistErr)
+			}
+
+			// 获取新的 access token
+			newToken := codexConversationAccessToken(auth)
+			if newToken == "" {
+				return nil, statusErr{code: http.StatusUnauthorized, msg: "codex: no access token after refresh"}
+			}
+
+			// 重试请求
+			retryReq, retryErr := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(conversationBody))
+			if retryErr != nil {
+				return nil, retryErr
+			}
+			retryReq.Header = httpReq.Header.Clone()
+			retryReq.Header.Set("Authorization", "Bearer "+newToken)
+
+			httpResp, err = httpClient.Do(retryReq)
+			if err != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, err)
+				return nil, err
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			preview, _ = readBodyPreview(httpResp)
+
+			// 检查重试后是否仍然 401
+			if isCodexTokenRefreshNeeded(httpResp.StatusCode, preview) {
+				log.Errorf("codex: 401 persists after token refresh (stream) for auth %s", auth.ID)
+				_ = httpResp.Body.Close()
+				return nil, newCodexStatusErr(httpResp.StatusCode, preview)
+			}
+			log.Infof("codex: token refresh retry succeeded (stream) for auth %s", auth.ID)
 		}
 	}
 
