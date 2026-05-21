@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -34,7 +35,11 @@ type modelStore struct {
 
 var modelsCatalogStore = &modelStore{}
 
-var updaterOnce sync.Once
+var (
+	updaterOnce   sync.Once
+	proxyURL      string
+	tlsSkipVerify bool
+)
 
 // ModelRefreshCallback is invoked when startup or periodic model refresh detects changes.
 // changedProviders contains the provider names whose model definitions changed.
@@ -74,8 +79,10 @@ func init() {
 // StartModelsUpdater starts a background updater that fetches models
 // immediately on startup and then refreshes the model catalog every 3 hours.
 // Safe to call multiple times; only one updater will run.
-func StartModelsUpdater(ctx context.Context) {
+func StartModelsUpdater(ctx context.Context, proxy string, skipVerify bool) {
 	updaterOnce.Do(func() {
+		proxyURL = strings.TrimSpace(proxy)
+		tlsSkipVerify = skipVerify
 		go runModelsUpdater(ctx)
 	})
 }
@@ -142,6 +149,15 @@ func tryRefreshModels(ctx context.Context, label string) {
 // along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
 func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 	client := &http.Client{Timeout: modelsFetchTimeout}
+	if transport, errBuild := proxyutil.BuildTransport(proxyURL, tlsSkipVerify); errBuild == nil && transport != nil {
+		client.Transport = transport
+		log.Debugf("models fetch using proxy: %s (tls-skip-verify=%v)", proxyutil.Redact(proxyURL), tlsSkipVerify)
+	} else if errBuild != nil {
+		log.Errorf("models fetch proxy configuration error: %v", errBuild)
+	} else {
+		log.Debug("models fetch using default transport (no explicit proxy)")
+	}
+
 	for _, url := range modelsURLs {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
@@ -150,6 +166,7 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 			log.Debugf("models fetch request creation failed for %s: %v", url, err)
 			continue
 		}
+		req.Header.Set("User-Agent", "CLIProxyAPI-model-updater")
 
 		resp, err := client.Do(req)
 		if err != nil {

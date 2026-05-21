@@ -502,3 +502,205 @@ func TestParseMetaFloat(t *testing.T) {
 		})
 	}
 }
+
+func TestAntigravityIsLongQuotaExhaustion(t *testing.T) {
+	t.Run("quota exhausted with long reset", func(t *testing.T) {
+		body := []byte(`{
+			"error": {
+				"code": 429,
+				"message": "Individual quota reached. Resets in 143h58m14s.",
+				"status": "RESOURCE_EXHAUSTED",
+				"details": [
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED"},
+					{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "518294.127152690s"}
+				]
+			}
+		}`)
+		if !antigravityIsLongQuotaExhaustion(body) {
+			t.Fatal("antigravityIsLongQuotaExhaustion() = false, want true for quota exhausted with 143h reset")
+		}
+	})
+
+	t.Run("quota exhausted with short reset", func(t *testing.T) {
+		body := []byte(`{
+			"error": {
+				"code": 429,
+				"message": "Resource has been exhausted.",
+				"status": "RESOURCE_EXHAUSTED",
+				"details": [
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED"},
+					{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "10s"}
+				]
+			}
+		}`)
+		if antigravityIsLongQuotaExhaustion(body) {
+			t.Fatal("antigravityIsLongQuotaExhaustion() = true, want false for QUOTA_EXHAUSTED with 10s retry")
+		}
+	})
+
+	t.Run("rate limit exceeded with long retry", func(t *testing.T) {
+		body := []byte(`{
+			"error": {
+				"code": 429,
+				"status": "RESOURCE_EXHAUSTED",
+				"details": [
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED"},
+					{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "2m30s"}
+				]
+			}
+		}`)
+		if !antigravityIsLongQuotaExhaustion(body) {
+			t.Fatal("antigravityIsLongQuotaExhaustion() = false, want true for 2m30s retry")
+		}
+	})
+
+	t.Run("transient capacity issue with short retry", func(t *testing.T) {
+		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
+		if antigravityIsLongQuotaExhaustion(body) {
+			t.Fatal("antigravityIsLongQuotaExhaustion() = true, want false for transient capacity issue")
+		}
+	})
+
+	t.Run("quota exhausted with no duration", func(t *testing.T) {
+		body := []byte(`{
+			"error": {
+				"code": 429,
+				"message": "QUOTA_EXHAUSTED",
+				"status": "RESOURCE_EXHAUSTED",
+				"details": [
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED"}
+				]
+			}
+		}`)
+		if antigravityIsLongQuotaExhaustion(body) {
+			t.Fatal("antigravityIsLongQuotaExhaustion() = true, want false for QUOTA_EXHAUSTED with no duration")
+		}
+	})
+
+	t.Run("empty body", func(t *testing.T) {
+		if antigravityIsLongQuotaExhaustion(nil) {
+			t.Fatal("antigravityIsLongQuotaExhaustion(nil) = true, want false")
+		}
+	})
+}
+
+func TestAntigravityExecute_LongQuotaNoFallback(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var primaryRequests int
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryRequests++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{
+			"error": {
+				"code": 429,
+				"message": "Individual quota reached. Resets in 143h58m14s.",
+				"status": "RESOURCE_EXHAUSTED",
+				"details": [
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED"},
+					{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "518294.127152690s"}
+				]
+			}
+		}`))
+	}))
+	defer primaryServer.Close()
+
+	var sandboxRequests int
+	sandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sandboxRequests++
+		t.Fatal("sandbox server should not be called for long quota exhaustion")
+	}))
+	defer sandboxServer.Close()
+
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 0})
+
+	// Monkey-patch the base URL fallback order to use our test servers
+	origFn := antigravityBaseURLFallbackOrder
+	antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
+		return []string{primaryServer.URL, sandboxServer.URL}
+	}
+	defer func() { antigravityBaseURLFallbackOrder = origFn }()
+
+	auth := &cliproxyauth.Auth{
+		ID: "auth-long-quota",
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 429")
+	}
+	if primaryRequests != 1 {
+		t.Fatalf("primary server requests = %d, want 1", primaryRequests)
+	}
+	if sandboxRequests != 0 {
+		t.Fatalf("sandbox server requests = %d, want 0", sandboxRequests)
+	}
+}
+
+func TestAntigravityExecute_TransientCapacityDoesFallback(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var primaryRequests int
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryRequests++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
+	}))
+	defer primaryServer.Close()
+
+	var sandboxRequests int
+	sandboxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sandboxRequests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
+	}))
+	defer sandboxServer.Close()
+
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 0})
+
+	origFn := antigravityBaseURLFallbackOrder
+	antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
+		return []string{primaryServer.URL, sandboxServer.URL}
+	}
+	defer func() { antigravityBaseURLFallbackOrder = origFn }()
+
+	auth := &cliproxyauth.Auth{
+		ID: "auth-transient-capacity",
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute() returned empty payload")
+	}
+	if primaryRequests != 1 {
+		t.Fatalf("primary server requests = %d, want 1", primaryRequests)
+	}
+	if sandboxRequests != 1 {
+		t.Fatalf("sandbox server requests = %d, want 1", sandboxRequests)
+	}
+}

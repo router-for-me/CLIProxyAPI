@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -33,12 +34,16 @@ var (
 	antigravityVersionMu     sync.RWMutex
 	antigravityVersionExpiry time.Time
 	antigravityUpdaterOnce   sync.Once
+	proxyURL                 string
+	tlsSkipVerify            bool
 )
 
 // StartAntigravityVersionUpdater starts a background goroutine that periodically refreshes the cached antigravity version.
 // This is intentionally decoupled from request execution to avoid blocking executors on version lookups.
-func StartAntigravityVersionUpdater(ctx context.Context) {
+func StartAntigravityVersionUpdater(ctx context.Context, proxy string, skipVerify bool) {
 	antigravityUpdaterOnce.Do(func() {
+		proxyURL = strings.TrimSpace(proxy)
+		tlsSkipVerify = skipVerify
 		go runAntigravityVersionUpdater(ctx)
 	})
 }
@@ -175,11 +180,20 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 	}
 
 	client := &http.Client{Timeout: antigravityFetchTimeout}
+	if transport, errBuild := proxyutil.BuildTransport(proxyURL, tlsSkipVerify); errBuild == nil && transport != nil {
+		client.Transport = transport
+		log.Debugf("antigravity version fetch using proxy: %s (tls-skip-verify=%v)", proxyutil.Redact(proxyURL), tlsSkipVerify)
+	} else if errBuild != nil {
+		log.Errorf("antigravity version fetch proxy configuration error: %v", errBuild)
+	} else {
+		log.Debug("antigravity version fetch using default transport (no explicit proxy)")
+	}
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityReleasesURL, nil)
 	if errReq != nil {
 		return "", fmt.Errorf("build antigravity releases request: %w", errReq)
 	}
+	httpReq.Header.Set("User-Agent", "CLIProxyAPI-antigravity-updater")
 
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {

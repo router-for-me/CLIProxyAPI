@@ -96,7 +96,7 @@ func runAutoUpdater(ctx context.Context) {
 
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)
-		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
+		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.TLSSkipVerify, cfg.RemoteManagement.PanelGitHubRepository)
 	}
 
 	runOnce()
@@ -111,10 +111,13 @@ func runAutoUpdater(ctx context.Context) {
 	}
 }
 
-func newHTTPClient(proxyURL string) *http.Client {
+func newHTTPClient(proxyURL string, tlsSkipVerify bool) *http.Client {
 	client := &http.Client{Timeout: 15 * time.Second}
 
-	sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
+	sdkCfg := &sdkconfig.SDKConfig{
+		ProxyURL:      strings.TrimSpace(proxyURL),
+		TLSSkipVerify: tlsSkipVerify,
+	}
 	util.SetProxy(sdkCfg, client)
 
 	return client
@@ -179,7 +182,7 @@ func FilePath(configFilePath string) string {
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
-func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, tlsSkipVerify bool, panelRepository string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -222,7 +225,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		}
 
 		releaseURL := resolveReleaseURL(panelRepository)
-		client := newHTTPClient(proxyURL)
+		client := newHTTPClient(proxyURL, tlsSkipVerify)
 
 		localHash, err := fileSHA256(localPath)
 		if err != nil {

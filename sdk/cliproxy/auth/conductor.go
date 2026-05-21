@@ -2317,9 +2317,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// attempt performs a fresh OAuth exchange. A fresh token resolves
 					// any resource cap imposed on the old one. Skip for 404 (model
 					// not found) and network errors (status 0) which are unrelated
-					// to token validity.
+					// to token validity. Also skip for long quota exhaustion (> 30s)
+					// where the token is valid but the account quota is exhausted.
 					statusCode := statusCodeFromResult(result.Error)
-					if statusCode != 0 && statusCode != 404 {
+					if statusCode != 0 && statusCode != 404 && !isLongQuotaExhaustion(&result) {
 						delete(auth.Metadata, "access_token")
 					}
 					if isModelSupportResultError(result.Error) {
@@ -2758,7 +2759,17 @@ func isRequestInvalidError(err error) bool {
 // does not contain a parseable reset time.
 const defaultQuotaCooldown = 1 * time.Hour
 
-var quotaResetRegex = regexp.MustCompile(`(?i)after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)`)
+// longQuotaCooldownThreshold distinguishes account-level quota exhaustion
+// (long reset) from transient server capacity issues (short retry).
+// Server capacity exhausted messages typically have 0-30s backoff or no time.
+const longQuotaCooldownThreshold = 30 * time.Second
+
+// quotaResetRegex matches a Go-style duration preceded by a space.
+// Captures patterns like " 143h58m14s", " 58m14s", " 14s", " 2h30m".
+// Requires at least one time unit (h, m, or s) to be present.
+// Intentionally broad: if the upstream says "retry 5s" or "wait 2m",
+// we interpret that as the actual retry duration regardless of surrounding text.
+var quotaResetRegex = regexp.MustCompile(`\s(\d+h(?:\d+m)?(?:\d+s)?|\d+m(?:\d+s)?|\d+s)`)
 
 // parseQuotaResetDuration extracts a cooldown duration from a quota error message.
 // It recognises patterns like "after 167h29m46s", "after 42m", "after 30s".
@@ -2776,6 +2787,38 @@ func parseQuotaResetDuration(message string) (time.Duration, bool) {
 		return 0, false
 	}
 	return d, true
+}
+
+// isLongQuotaExhaustion reports whether a 429 error result indicates account-level
+// quota exhaustion with a long cooldown (> 30s). This distinguishes it from
+// transient server capacity issues which typically have 0-30s backoff.
+func isLongQuotaExhaustion(result *Result) bool {
+	if result == nil {
+		return false
+	}
+	if result.RetryAfter != nil && *result.RetryAfter > longQuotaCooldownThreshold {
+		return true
+	}
+	if result.Error != nil && result.Error.Message != "" {
+		if d, ok := parseQuotaResetDuration(result.Error.Message); ok && d > longQuotaCooldownThreshold {
+			return true
+		}
+	}
+	return false
+}
+
+// isLongQuotaExhaustionFromError is a variant of isLongQuotaExhaustion that takes
+// the error and retryAfter directly, for use in applyAuthFailureState.
+func isLongQuotaExhaustionFromError(resultErr *Error, retryAfter *time.Duration) bool {
+	if retryAfter != nil && *retryAfter > longQuotaCooldownThreshold {
+		return true
+	}
+	if resultErr != nil && resultErr.Message != "" {
+		if d, ok := parseQuotaResetDuration(resultErr.Message); ok && d > longQuotaCooldownThreshold {
+			return true
+		}
+	}
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
@@ -2798,8 +2841,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	// Evict the cached access token on HTTP errors so that the next
 	// attempt performs a fresh OAuth exchange. Skip for 404 (model
 	// not found) and network errors (status 0) which are unrelated
-	// to token validity.
-	if statusCode != 0 && statusCode != 404 {
+	// to token validity. Also skip for long quota exhaustion (> 30s)
+	// where the token is valid but the account quota is exhausted.
+	if statusCode != 0 && statusCode != 404 && !isLongQuotaExhaustionFromError(resultErr, retryAfter) {
 		delete(auth.Metadata, "access_token")
 	}
 	switch statusCode {
@@ -3735,32 +3779,53 @@ func hasAntigravityProvider(providers []string) bool {
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
 	status := statusCodeFromError(lastErr)
-	log.WithFields(log.Fields{
+	fields := log.Fields{
 		"lastErr":   errorString(lastErr),
 		"status":    status,
 		"providers": providers,
-	}).Debug("shouldAttemptAntigravityCreditsFallback")
+	}
 	if m == nil || lastErr == nil {
+		log.WithFields(fields).Debug("shouldAttemptAntigravityCreditsFallback: false (no manager or error)")
 		return false
+	}
+	if len(providers) > 0 {
+		hasAntigravity := false
+		for _, p := range providers {
+			if strings.EqualFold(strings.TrimSpace(p), "antigravity") {
+				hasAntigravity = true
+				break
+			}
+		}
+		if !hasAntigravity {
+			log.WithFields(fields).Debug("shouldAttemptAntigravityCreditsFallback: false (no antigravity provider)")
+			return false
+		}
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits {
+		log.WithFields(fields).Debug("shouldAttemptAntigravityCreditsFallback: false (credits disabled)")
 		return false
 	}
 	switch status {
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		log.WithFields(fields).Debug("shouldAttemptAntigravityCreditsFallback: true (429/503)")
 		return true
 	case 0:
 		var authErr *Error
 		if errors.As(lastErr, &authErr) && authErr != nil {
-			return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
+			result := authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
+			log.WithFields(fields).WithField("code", authErr.Code).Debugf("shouldAttemptAntigravityCreditsFallback: %v (auth error)", result)
+			return result
 		}
 		var cooldownErr *modelCooldownError
 		if errors.As(lastErr, &cooldownErr) {
+			log.WithFields(fields).Debug("shouldAttemptAntigravityCreditsFallback: true (model cooldown)")
 			return true
 		}
+		log.WithFields(fields).Debug("shouldAttemptAntigravityCreditsFallback: false (unknown error type)")
 		return false
 	default:
+		log.WithFields(fields).Debug("shouldAttemptAntigravityCreditsFallback: false (unsupported status)")
 		return false
 	}
 }
@@ -4273,10 +4338,10 @@ func (m *Manager) syncRefreshedAuth(executorAuth *Auth) {
 	if executorAuth == nil || executorAuth.ID == "" {
 		return
 	}
-    if executorAuth.Metadata == nil {
-        return
-    }
-    newToken, _ := executorAuth.Metadata["access_token"].(string)
+	if executorAuth.Metadata == nil {
+		return
+	}
+	newToken, _ := executorAuth.Metadata["access_token"].(string)
 	if newToken == "" {
 		return
 	}

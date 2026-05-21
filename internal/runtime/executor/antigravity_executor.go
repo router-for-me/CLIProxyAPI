@@ -56,6 +56,10 @@ const (
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 3 * time.Second
+	// antigravityLongQuotaCooldownThreshold distinguishes account-level quota
+	// exhaustion (long reset) from transient server capacity issues (short retry).
+	// Server capacity exhausted messages typically have 0-30s backoff or no time.
+	antigravityLongQuotaCooldownThreshold = 30 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -440,6 +444,21 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 	return decision
 }
 
+// antigravityIsLongQuotaExhaustion reports whether a 429 response body indicates
+// account-level quota exhaustion with a long cooldown (> 30s). This distinguishes
+// it from transient server capacity issues which typically have 0-30s backoff.
+// Returns false if no duration is parseable (safe default: allow fallback).
+func antigravityIsLongQuotaExhaustion(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	decision := decideAntigravity429(body)
+	if decision.retryAfter != nil && *decision.retryAfter > antigravityLongQuotaCooldownThreshold {
+		return true
+	}
+	return false
+}
+
 func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
@@ -651,7 +670,7 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
@@ -862,7 +881,7 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
@@ -1322,7 +1341,7 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
@@ -1621,7 +1640,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), bodyBytes...)
 		lastErr = nil
-		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
 			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
 		}

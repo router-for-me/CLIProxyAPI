@@ -42,15 +42,22 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
+	skipVerify := false
+	if cfg != nil {
+		skipVerify = cfg.TLSSkipVerify
+	}
+
 	// If we have a proxy URL configured, set up the transport
-	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
-		if transport != nil {
+	if proxyURL != "" || skipVerify {
+		transport, errBuild := proxyutil.BuildTransport(proxyURL, skipVerify)
+		if errBuild == nil && transport != nil {
 			httpClient.Transport = transport
 			return httpClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
-		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
+		if proxyURL != "" {
+			log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
+		}
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
@@ -61,16 +68,9 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	return httpClient
 }
 
-// buildProxyTransport creates an HTTP transport configured for the given proxy URL.
-// It supports SOCKS5, HTTP, and HTTPS proxy protocols.
-//
-// Parameters:
-//   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
-//
-// Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
+// buildProxyTransport is deprecated, use proxyutil.BuildTransport instead.
 func buildProxyTransport(proxyURL string) *http.Transport {
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+	transport, errBuild := proxyutil.BuildTransport(proxyURL, false)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil

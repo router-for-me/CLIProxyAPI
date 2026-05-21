@@ -564,9 +564,9 @@ func main() {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
-				misc.StartAntigravityVersionUpdater(context.Background())
+				misc.StartAntigravityVersionUpdater(context.Background(), cfg.ProxyURL, cfg.TLSSkipVerify)
 				if !localModel && !cfg.Home.Enabled {
-					registry.StartModelsUpdater(context.Background())
+					registry.StartModelsUpdater(context.Background(), cfg.ProxyURL, cfg.TLSSkipVerify)
 				} else if cfg.Home.Enabled {
 					log.Info("Home mode: remote model updates disabled")
 				}
@@ -642,9 +642,9 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
-			misc.StartAntigravityVersionUpdater(context.Background())
+			misc.StartAntigravityVersionUpdater(context.Background(), cfg.ProxyURL, cfg.TLSSkipVerify)
 			if !localModel && !cfg.Home.Enabled {
-				registry.StartModelsUpdater(context.Background())
+				registry.StartModelsUpdater(context.Background(), cfg.ProxyURL, cfg.TLSSkipVerify)
 			} else if cfg.Home.Enabled {
 				log.Info("Home mode: remote model updates disabled")
 			}
