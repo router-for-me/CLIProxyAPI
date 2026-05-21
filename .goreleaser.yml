@@ -16,11 +16,29 @@ builds:
     binary: cli-proxy-api
     ldflags:
       - -s -w -X 'main.Version={{.Version}}' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
+
+  - id: "cli-proxy-api-linux-armv7"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - arm
+    goarm:
+      - "7"
+    main: ./cmd/server/
+    binary: cli-proxy-api
+    ldflags:
+      - -s -w -X 'main.Version={{.Version}}' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
+
 archives:
   - id: "cli-proxy-api"
+    builds:
+      - cli-proxy-api
+      - cli-proxy-api-linux-armv7
     format: tar.gz
     name_template: >-
-      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{- if eq .Arch "arm64" -}}aarch64{{- else -}}{{ .Arch }}{{- end -}}
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{- if eq .Arch "arm64" -}}aarch64{{- else if eq .Arch "arm" -}}armv{{ .Arm }}{{- else -}}{{ .Arch }}{{- end -}}
     format_overrides:
       - goos: windows
         format: zip
