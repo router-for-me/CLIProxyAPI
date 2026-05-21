@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -31,6 +32,16 @@ const (
 	codexImagesGenerationsPath   = "/v1/images/generations"
 	codexImagesEditsPath         = "/v1/images/edits"
 	codexOpenAIImagesMainModel   = "gpt-5.4-mini"
+
+	codexImageSSEMissingCompleted = "missing_response_completed"
+	codexImageSSEStreamClosed     = "upstream_stream_closed"
+	codexImageSSEReadError        = "read_error"
+	codexImageSSEH2Reset          = "h2_stream_reset"
+	codexImageSSEContextTimeout   = "context_timeout"
+	codexImageSSEContextCanceled  = "context_canceled"
+	codexImageSSEUpstreamError    = "upstream_error_event"
+
+	codexStatusClientClosedRequest = 499
 )
 
 type codexOpenAIImagePreparedRequest struct {
@@ -103,13 +114,13 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	}()
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-		return resp, errRead
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		data, errRead := io.ReadAll(httpResp.Body)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			return resp, errRead
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return resp, err
@@ -117,37 +128,312 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		if !bytes.HasPrefix(line, dataTag) {
-			continue
+	eventData, errStream := codexReadOpenAIImageResponsesSSE(ctx, httpResp.Body, outputItemsByIndex, &outputItemsFallback)
+	if errStream != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errStream)
+		return resp, errStream
+	}
+	if detail, ok := helps.ParseCodexUsage(eventData); ok {
+		reporter.Publish(ctx, detail)
+	}
+	publishCodexImageToolUsage(ctx, reporter, body, eventData)
+	completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+	results, createdAt, usageRaw, firstMeta, errExtract := codexExtractImagesFromResponsesCompleted(completedData)
+	if errExtract != nil {
+		return resp, errExtract
+	}
+	if len(results) == 0 {
+		return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+	}
+	out, errOutput := codexBuildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat)
+	if errOutput != nil {
+		return resp, errOutput
+	}
+	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+}
+
+type codexImageSSEStats struct {
+	startedAt            time.Time
+	sawResponseCompleted bool
+	sawFirstEvent        bool
+	sawErrorEvent        bool
+	lastEventType        string
+	lastDataType         string
+	eventCount           int
+	dataCount            int
+	streamEndReason      string
+	readErrorType        string
+}
+
+type codexImageSSEEvent struct {
+	eventType string
+	dataLines [][]byte
+	hasEvent  bool
+}
+
+func codexReadOpenAIImageResponsesSSE(ctx context.Context, r io.Reader, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) ([]byte, error) {
+	stats := &codexImageSSEStats{startedAt: time.Now()}
+	reader := bufio.NewReader(r)
+	var event codexImageSSEEvent
+
+	dispatch := func() ([]byte, bool, error) {
+		if !event.hasPending() {
+			event.reset()
+			return nil, false, nil
 		}
-		eventData := bytes.TrimSpace(line[len(dataTag):])
-		switch gjson.GetBytes(eventData, "type").String() {
-		case "response.output_item.done":
-			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
-				reporter.Publish(ctx, detail)
-			}
-			publishCodexImageToolUsage(ctx, reporter, body, eventData)
-			completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			results, createdAt, usageRaw, firstMeta, errExtract := codexExtractImagesFromResponsesCompleted(completedData)
-			if errExtract != nil {
-				return resp, errExtract
-			}
-			if len(results) == 0 {
-				return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
-			}
-			out, errOutput := codexBuildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat)
-			if errOutput != nil {
-				return resp, errOutput
-			}
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+		stats.sawFirstEvent = true
+		stats.eventCount++
+		stats.lastEventType = codexImageSafeSummaryValue(event.eventType)
+
+		eventData := bytes.TrimSpace(event.data())
+		dataType := ""
+		if len(eventData) > 0 {
+			dataType = strings.TrimSpace(gjson.GetBytes(eventData, "type").String())
+			stats.lastDataType = codexImageSafeSummaryValue(dataType)
 		}
+		if codexIsImageSSEUpstreamError(event.eventType, dataType) {
+			stats.sawErrorEvent = true
+			stats.streamEndReason = codexImageSSEUpstreamError
+			return nil, false, stats.statusErr(codexImageSSEUpstreamError, http.StatusBadGateway)
+		}
+		if len(eventData) > 0 {
+			switch dataType {
+			case "response.output_item.done":
+				collectCodexOutputItemDone(eventData, outputItemsByIndex, outputItemsFallback)
+			case "response.completed":
+				stats.sawResponseCompleted = true
+				return eventData, true, nil
+			}
+		}
+		event.reset()
+		return nil, false, nil
 	}
 
-	err = statusErr{code: http.StatusGatewayTimeout, msg: "stream error: stream disconnected before completion"}
-	return resp, err
+	for {
+		line, errRead := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			codexConsumeImageSSELine(line, &event, stats)
+			if codexIsBlankSSELine(line) {
+				completedData, done, errDispatch := dispatch()
+				if done || errDispatch != nil {
+					return completedData, errDispatch
+				}
+			}
+		}
+		if errRead == nil {
+			continue
+		}
+		if errors.Is(errRead, io.EOF) {
+			completedData, done, errDispatch := dispatch()
+			if done || errDispatch != nil {
+				return completedData, errDispatch
+			}
+			if classification, code, streamEndReason, readErrorType, ok := codexClassifyImageStreamContext(ctx, nil); ok {
+				stats.streamEndReason = streamEndReason
+				stats.readErrorType = readErrorType
+				return nil, stats.statusErr(classification, code)
+			}
+			stats.streamEndReason = "eof"
+			return nil, stats.statusErr(codexImageSSEMissingCompleted, http.StatusBadGateway)
+		}
+
+		completedData, done, errDispatch := dispatch()
+		if done || errDispatch != nil {
+			return completedData, errDispatch
+		}
+		classification, code, streamEndReason, readErrorType := codexClassifyImageStreamReadError(ctx, errRead)
+		stats.streamEndReason = streamEndReason
+		stats.readErrorType = readErrorType
+		return nil, stats.statusErr(classification, code)
+	}
+}
+
+func codexConsumeImageSSELine(line []byte, event *codexImageSSEEvent, stats *codexImageSSEStats) {
+	line = bytes.TrimRight(line, "\r\n")
+	if len(line) == 0 || bytes.HasPrefix(line, []byte(":")) {
+		return
+	}
+
+	field, value := codexSplitSSEField(line)
+	switch field {
+	case "event":
+		event.eventType = strings.TrimSpace(string(value))
+		event.hasEvent = true
+	case "data":
+		stats.dataCount++
+		copied := make([]byte, len(value))
+		copy(copied, value)
+		event.dataLines = append(event.dataLines, copied)
+	case "id", "retry":
+		return
+	default:
+		return
+	}
+}
+
+func codexSplitSSEField(line []byte) (string, []byte) {
+	fieldBytes, value, ok := bytes.Cut(line, []byte(":"))
+	if !ok {
+		return string(line), nil
+	}
+	if len(value) > 0 && value[0] == ' ' {
+		value = value[1:]
+	}
+	return string(fieldBytes), value
+}
+
+func codexIsBlankSSELine(line []byte) bool {
+	return len(bytes.TrimSpace(line)) == 0
+}
+
+func (e *codexImageSSEEvent) hasPending() bool {
+	return e != nil && (e.hasEvent || len(e.dataLines) > 0)
+}
+
+func (e *codexImageSSEEvent) data() []byte {
+	if e == nil || len(e.dataLines) == 0 {
+		return nil
+	}
+	return bytes.Join(e.dataLines, []byte("\n"))
+}
+
+func (e *codexImageSSEEvent) reset() {
+	if e == nil {
+		return
+	}
+	e.eventType = ""
+	e.dataLines = nil
+	e.hasEvent = false
+}
+
+func codexIsImageSSEUpstreamError(eventType string, dataType string) bool {
+	if strings.EqualFold(strings.TrimSpace(eventType), "error") {
+		return true
+	}
+	switch dataType {
+	case "error", "response.failed", "response.incomplete":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexClassifyImageStreamReadError(ctx context.Context, err error) (classification string, code int, streamEndReason string, readErrorType string) {
+	if classification, code, streamEndReason, readErrorType, ok := codexClassifyImageStreamContext(ctx, err); ok {
+		return classification, code, streamEndReason, readErrorType
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return codexImageSSEStreamClosed, http.StatusBadGateway, "unexpected_eof", codexImageSSEStreamClosed
+	}
+	if codexIsHTTP2StreamResetError(err) {
+		return codexImageSSEH2Reset, http.StatusBadGateway, "read_error", codexImageSSEH2Reset
+	}
+	return codexImageSSEReadError, http.StatusBadGateway, "read_error", codexImageSSEReadError
+}
+
+func codexClassifyImageStreamContext(ctx context.Context, err error) (classification string, code int, streamEndReason string, readErrorType string, ok bool) {
+	if ctx != nil {
+		ctxErr := ctx.Err()
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return codexImageSSEContextTimeout, http.StatusGatewayTimeout, codexImageSSEContextTimeout, "context_deadline_exceeded", true
+		}
+		if errors.Is(ctxErr, context.Canceled) {
+			return codexImageSSEContextCanceled, codexStatusClientClosedRequest, codexImageSSEContextCanceled, "context_canceled", true
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) || codexIsTimeoutError(err) {
+		return codexImageSSEContextTimeout, http.StatusGatewayTimeout, codexImageSSEContextTimeout, "context_deadline_exceeded", true
+	}
+	if errors.Is(err, context.Canceled) {
+		return codexImageSSEContextCanceled, codexStatusClientClosedRequest, codexImageSSEContextCanceled, "context_canceled", true
+	}
+	return "", 0, "", "", false
+}
+
+func codexIsTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "context deadline exceeded") ||
+		strings.Contains(lower, "deadline exceeded") ||
+		strings.Contains(lower, "timeout")
+}
+
+func codexIsHTTP2StreamResetError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "stream id") ||
+		strings.Contains(lower, "internal_error") ||
+		strings.Contains(lower, "received from peer") ||
+		strings.Contains(lower, "http2") ||
+		strings.Contains(lower, "rst_stream")
+}
+
+func (s *codexImageSSEStats) statusErr(classification string, code int) statusErr {
+	if s == nil {
+		return statusErr{code: code, msg: fmt.Sprintf("codex image stream error: classification=%s", classification)}
+	}
+	elapsedMS := int64(0)
+	if !s.startedAt.IsZero() {
+		elapsedMS = time.Since(s.startedAt).Milliseconds()
+	}
+	return statusErr{
+		code: code,
+		msg: fmt.Sprintf(
+			"codex image stream error: classification=%s saw_response_completed=%t saw_first_event=%t saw_error_event=%t last_event_type=%s last_data_type=%s event_count=%d data_count=%d elapsed_ms=%d stream_end_reason=%s read_error_type=%s",
+			classification,
+			s.sawResponseCompleted,
+			s.sawFirstEvent,
+			s.sawErrorEvent,
+			codexImageSafeSummaryValue(s.lastEventType),
+			codexImageSafeSummaryValue(s.lastDataType),
+			s.eventCount,
+			s.dataCount,
+			elapsedMS,
+			codexImageSafeSummaryValue(s.streamEndReason),
+			codexImageSafeSummaryValue(s.readErrorType),
+		),
+	}
+}
+
+func codexImageSafeSummaryValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, sensitive := range []string{"authorization", "cookie", "api_key", "access_token", "refresh_token", "bearer", "sk-", "prompt", "base64", "b64"} {
+		if strings.Contains(lower, sensitive) {
+			return "redacted"
+		}
+	}
+	if len(value) > 80 {
+		value = value[:80]
+	}
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.' || r == '_' || r == '-' || r == '/' || r == ':':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
