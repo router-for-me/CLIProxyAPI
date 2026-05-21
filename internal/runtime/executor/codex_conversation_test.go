@@ -23,13 +23,13 @@ func TestCodexUsesConversationAPIForOAuthAuthFile(t *testing.T) {
 		},
 	}
 
-	if !codexUsesConversationAPI(auth) {
-		t.Fatal("expected OAuth auth-file credentials to use conversation bridge")
+	if codexUsesConversationAPI(auth) {
+		t.Fatal("OAuth auth-file credentials should use responses API, not conversation bridge")
 	}
 
-	auth.Attributes = map[string]string{"api_key": "sk-test"}
-	if codexUsesConversationAPI(auth) {
-		t.Fatal("did not expect codex-api-key credentials to use conversation bridge")
+	auth.Attributes = map[string]string{"base_url": "https://chatgpt.com/backend-api/conversation"}
+	if !codexUsesConversationAPI(auth) {
+		t.Fatal("expected explicit conversation base_url to use conversation bridge")
 	}
 }
 

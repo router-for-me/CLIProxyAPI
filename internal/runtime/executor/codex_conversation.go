@@ -96,9 +96,8 @@ func codexUsesConversationAPI(auth *cliproxyauth.Auth) bool {
 		return false
 	}
 
-	var apiKey, baseURL string
+	var baseURL string
 	if auth.Attributes != nil {
-		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
 
@@ -107,21 +106,8 @@ func codexUsesConversationAPI(auth *cliproxyauth.Auth) bool {
 		if strings.Contains(lower, "/backend-api/conversation") {
 			return true
 		}
-		if strings.Contains(lower, "/backend-api/codex") {
-			return false
-		}
 	}
 
-	if apiKey != "" {
-		return false
-	}
-
-	if auth.Metadata == nil {
-		return false
-	}
-	if token, _ := auth.Metadata["access_token"].(string); strings.TrimSpace(token) != "" {
-		return true
-	}
 	return false
 }
 
