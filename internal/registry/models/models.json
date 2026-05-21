@@ -1987,6 +1987,52 @@
       }
     }
   ],
+  "kiro": [
+    {
+      "id": "auto-kiro",
+      "object": "model",
+      "created": 1764547200,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Kiro Auto",
+      "description": "Kiro automatic model routing",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "claude-sonnet-4.5",
+      "object": "model",
+      "created": 1757894400,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Kiro Claude Sonnet 4.5",
+      "description": "Claude Sonnet 4.5 through Kiro",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "claude-opus-4.5",
+      "object": "model",
+      "created": 1762732800,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Kiro Claude Opus 4.5",
+      "description": "Claude Opus 4.5 through Kiro",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "qwen3-coder-next",
+      "object": "model",
+      "created": 1764547200,
+      "owned_by": "kiro",
+      "type": "kiro",
+      "display_name": "Kiro Qwen3 Coder Next",
+      "description": "Qwen3 Coder Next through Kiro",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",

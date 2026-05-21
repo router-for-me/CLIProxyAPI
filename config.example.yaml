@@ -326,7 +326,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, kiro, xai.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
@@ -356,6 +356,9 @@ nonstream-keepalive-interval: 0
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
+#   kiro:
+#     - name: "auto-kiro"
+#       alias: "kiro-auto"
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
@@ -379,6 +382,8 @@ nonstream-keepalive-interval: 0
 #     - "gpt-5-codex-mini"
 #   kimi:
 #     - "kimi-k2-thinking"
+#   kiro:
+#     - "claude-opus-4.5"
 #   xai:
 #     - "grok-3-mini"
 
@@ -387,7 +392,7 @@ nonstream-keepalive-interval: 0
 #   default: # Default rules only set parameters when they are missing in the payload.
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, kiro
 #           from-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, gemini, claude
 #           headers: # all configured request headers must match; values support "*" wildcards
 #             X-Client-Tier: "tenant-*-region-*"
@@ -404,25 +409,25 @@ nonstream-keepalive-interval: 0
 #   default-raw: # Default raw rules set parameters using raw JSON when missing (must be valid JSON).
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, kiro
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
 #   override: # Override rules always set parameters, overwriting any existing values.
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, kiro
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
 #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, kiro
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
 #   filter: # Filter rules remove specified parameters from the payload.
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, kiro
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
