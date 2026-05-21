@@ -970,6 +970,107 @@ func (cfg *Config) SanitizeGeminiKeys() {
 	cfg.GeminiKey = out
 }
 
+func copyStringMap(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func deepCopyGeminiKeys(src []GeminiKey) []GeminiKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]GeminiKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]GeminiModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyCodexKeys(src []CodexKey) []CodexKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]CodexKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]CodexModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyClaudeKeys(src []ClaudeKey) []ClaudeKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]ClaudeKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]ClaudeModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		if k.Cloak != nil {
+			c := *k.Cloak
+			c.SensitiveWords = append([]string(nil), c.SensitiveWords...)
+			if c.CacheUserID != nil {
+				v := *c.CacheUserID
+				c.CacheUserID = &v
+			}
+			k.Cloak = &c
+		}
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyOpenAICompat(src []OpenAICompatibility) []OpenAICompatibility {
+	if src == nil {
+		return nil
+	}
+	out := make([]OpenAICompatibility, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.APIKeyEntries = append([]OpenAICompatibilityAPIKey(nil), k.APIKeyEntries...)
+		if k.Models != nil {
+			models := make([]OpenAICompatibilityModel, len(k.Models))
+			for j, m := range k.Models {
+				if m.Thinking != nil {
+					t := *m.Thinking
+					t.Levels = append([]string(nil), t.Levels...)
+					m.Thinking = &t
+				}
+				models[j] = m
+			}
+			k.Models = models
+		}
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyVertexCompatKeys(src []VertexCompatKey) []VertexCompatKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]VertexCompatKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]VertexCompatModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		out[i] = k
+	}
+	return out
+}
+
 // Snapshot returns a deep copy of the Config with all map and slice
 // fields copied so that the returned value can be safely read without
 // holding the manager lock. This prevents concurrent map iteration
@@ -992,11 +1093,11 @@ func (cfg *Config) Snapshot() *Config {
 			out.OAuthModelAlias[k] = append([]OAuthModelAlias(nil), v...)
 		}
 	}
-	out.GeminiKey = append([]GeminiKey(nil), cfg.GeminiKey...)
-	out.CodexKey = append([]CodexKey(nil), cfg.CodexKey...)
-	out.ClaudeKey = append([]ClaudeKey(nil), cfg.ClaudeKey...)
-	out.OpenAICompatibility = append([]OpenAICompatibility(nil), cfg.OpenAICompatibility...)
-	out.VertexCompatAPIKey = append([]VertexCompatKey(nil), cfg.VertexCompatAPIKey...)
+	out.GeminiKey = deepCopyGeminiKeys(cfg.GeminiKey)
+	out.CodexKey = deepCopyCodexKeys(cfg.CodexKey)
+	out.ClaudeKey = deepCopyClaudeKeys(cfg.ClaudeKey)
+	out.OpenAICompatibility = deepCopyOpenAICompat(cfg.OpenAICompatibility)
+	out.VertexCompatAPIKey = deepCopyVertexCompatKeys(cfg.VertexCompatAPIKey)
 	return &out
 }
 
