@@ -957,7 +957,8 @@ func TestManager_MarkResult_429TransientEvictsToken(t *testing.T) {
 		ID:       "auth-transient",
 		Provider: "antigravity",
 		Metadata: map[string]any{
-			"access_token": "evict-me",
+			"access_token":  "evict-me",
+			"refresh_token": "some-refresh",
 		},
 	}
 	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
@@ -993,7 +994,8 @@ func TestManager_MarkResult_429NoDurationEvictsToken(t *testing.T) {
 		ID:       "auth-no-duration",
 		Provider: "antigravity",
 		Metadata: map[string]any{
-			"access_token": "evict-me",
+			"access_token":  "evict-me",
+			"refresh_token": "some-refresh",
 		},
 	}
 	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {

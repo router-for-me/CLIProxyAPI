@@ -2321,7 +2321,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// where the token is valid but the account quota is exhausted.
 					statusCode := statusCodeFromResult(result.Error)
 					if statusCode != 0 && statusCode != 404 && !isLongQuotaExhaustion(&result) {
-						delete(auth.Metadata, "access_token")
+						if _, hasRefreshToken := auth.Metadata["refresh_token"]; hasRefreshToken {
+							delete(auth.Metadata, "access_token")
+						}
 					}
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
@@ -2854,7 +2856,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	// to token validity. Also skip for long quota exhaustion (> 30s)
 	// where the token is valid but the account quota is exhausted.
 	if statusCode != 0 && statusCode != 404 && !isLongQuotaExhaustionFromError(resultErr, retryAfter) {
-		delete(auth.Metadata, "access_token")
+		if _, hasRefreshToken := auth.Metadata["refresh_token"]; hasRefreshToken {
+			delete(auth.Metadata, "access_token")
+		}
 	}
 	switch statusCode {
 	case 401:
