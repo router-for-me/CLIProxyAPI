@@ -4163,6 +4163,13 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 }
 
 func (m *Manager) lazyRefreshAuth(id string) {
+	// Callers MUST block here until the refresh completes (or fails).
+	// We intentionally ignore the caller's context: even if cancelled,
+	// the caller still needs a valid token to proceed. Bailing out early
+	// would just send the caller back with no token, guaranteeing failure.
+	// It's better to wait and let the refreshed auth benefit all in-flight
+	// and future requests. The singleflight coalesces duplicates so only
+	// one refresh runs per ID at a time.
 	_, err, _ := m.lazyRefreshGroup.Do(id, func() (any, error) {
 		m.refreshAuth(context.Background(), id)
 		return nil, nil
