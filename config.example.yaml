@@ -253,6 +253,30 @@ nonstream-keepalive-interval: 0
 #       - api-key: "sk-or-v1-...b780"
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
+# Astraflow (OpenAI-compatible, 200+ models by UCloud)
+# Global endpoint — sign up at https://astraflow.ucloud-global.com
+# openai-compatibility:
+#   - name: "astraflow"
+#     disabled: false
+#     base-url: "https://api-us-ca.umodelverse.ai/v1"
+#     api-key-entries:
+#       - api-key: "your-astraflow-api-key" # ASTRAFLOW_API_KEY
+#     models:
+#       - name: "deepseek-v3"     # upstream model name on Astraflow
+#         alias: "deepseek-v3"   # client-visible alias
+#       - name: "gpt-4o"
+#         alias: "gpt-4o"
+# China endpoint — sign up at https://astraflow.ucloud.cn
+# openai-compatibility:
+#   - name: "astraflow-cn"
+#     disabled: false
+#     base-url: "https://api.modelverse.cn/v1"
+#     api-key-entries:
+#       - api-key: "your-astraflow-cn-api-key" # ASTRAFLOW_CN_API_KEY
+#     models:
+#       - name: "deepseek-v3"
+#         alias: "deepseek-v3"
+
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
