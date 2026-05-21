@@ -851,3 +851,65 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
 	}
 }
+
+func TestManager_MarkResult_404PreservesAccessToken(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-404",
+		Provider: "openai",
+		Metadata: map[string]any{
+			"access_token": "keep-me",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-4.1",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusNotFound, Message: "not found"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Metadata["access_token"] != "keep-me" {
+		t.Fatalf("expected 404 to preserve access_token, got %v", updated.Metadata["access_token"])
+	}
+}
+
+func TestManager_MarkResult_NetworkErrorPreservesAccessToken(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-net",
+		Provider: "openai",
+		Metadata: map[string]any{
+			"access_token": "keep-me",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-4.1",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 0, Message: "connection refused"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Metadata["access_token"] != "keep-me" {
+		t.Fatalf("expected network error to preserve access_token, got %v", updated.Metadata["access_token"])
+	}
+}

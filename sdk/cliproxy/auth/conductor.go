@@ -2313,8 +2313,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						auth.StatusMessage = result.Error.Message
 					}
 
-					delete(auth.Metadata, "access_token")
+					// Evict the cached access token on HTTP errors so that the next
+					// attempt performs a fresh OAuth exchange. A fresh token resolves
+					// any resource cap imposed on the old one. Skip for 404 (model
+					// not found) and network errors (status 0) which are unrelated
+					// to token validity.
 					statusCode := statusCodeFromResult(result.Error)
+					if statusCode != 0 && statusCode != 404 {
+						delete(auth.Metadata, "access_token")
+					}
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -2324,7 +2331,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						switch statusCode {
 						case 401:
 							state.StatusMessage = "unauthorized"
-							delete(auth.Metadata, "access_token")
 						case 402, 403:
 							state.StatusMessage = "payment_required"
 						case 404:
