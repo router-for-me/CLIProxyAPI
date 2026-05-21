@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -362,6 +363,318 @@ func TestRewriteOpenAICompatImagesMultipartPayloadPreservesStreamAndFileContentT
 	}
 	if got := form.File["image"]; len(got) != 1 || got[0].Header.Get("Content-Type") != "image/webp" {
 		t.Fatalf("image headers = %#v, want image/webp", got)
+	}
+}
+
+func TestOpenAICompatExecutorResponsesUpstreamPreservesResponsesPayload(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":0,"model":"gpt-5.5","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "sub2api-openai",
+			BaseURL:     server.URL + "/v1",
+			UpstreamAPI: "responses",
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name": "sub2api-openai",
+			"base_url":    server.URL + "/v1",
+			"api_key":     "test-key",
+		},
+	}
+	payload := []byte(`{
+		"model":"gpt-5.5",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"reasoning":{"effort":"xhigh"},
+		"stream":true
+	}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want /v1/responses", gotPath)
+	}
+	if gjson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("responses upstream should not receive chat messages: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("input content type = %q, want input_text; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning.effort = %q, want xhigh; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "ok" {
+		t.Fatalf("response output text = %q, payload=%s", got, string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatResponsesCompletedEventExtractsSSE(t *testing.T) {
+	completed, ok := openAICompatResponsesCompletedEvent([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"))
+	if !ok {
+		t.Fatal("expected completed event")
+	}
+	if got := gjson.GetBytes(completed, "response.output.0.content.0.text").String(); got != "ok" {
+		t.Fatalf("completed text = %q, event=%s", got, string(completed))
+	}
+	if got := gjson.GetBytes(completed, "type").String(); got != "response.completed" {
+		t.Fatalf("completed type = %q, event=%s", got, string(completed))
+	}
+	var param any
+	out := sdktranslator.TranslateNonStream(context.Background(), sdktranslator.FromString("codex"), sdktranslator.FromString("openai-response"), "gpt-5.5", nil, nil, completed, &param)
+	if got := gjson.GetBytes(out, "output.0.content.0.text").String(); got != "ok" {
+		t.Fatalf("translated text = %q, payload=%s", got, string(out))
+	}
+}
+
+func TestOpenAICompatExecutorResponsesUpstreamTranslatesClaudeRequest(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":0,"model":"gpt-5.5","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "sub2api-openai",
+			BaseURL:     server.URL + "/v1",
+			UpstreamAPI: "responses",
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name": "sub2api-openai",
+			"base_url":    server.URL + "/v1",
+			"api_key":     "test-key",
+		},
+	}
+	payload := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking":{"type":"adaptive"},
+		"tools":[{"name":"Read","description":"read","input_schema":{"type":"object","properties":{}}}]
+	}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want /v1/responses", gotPath)
+	}
+	if gjson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("responses upstream should not receive Claude or chat messages: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("input content type = %q, want input_text; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning.effort = %q, want xhigh; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "ok" {
+		t.Fatalf("Claude response text = %q, payload=%s", got, string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorResponsesUpstreamFallsBackToChatOnCompatError(t *testing.T) {
+	var paths []string
+	var chatBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path == "/v1/responses" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"unknown parameter: reasoning","type":"invalid_request_error"}}`))
+			return
+		}
+		chatBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","model":"gpt-5.5","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "sub2api-openai",
+			BaseURL:     server.URL + "/v1",
+			UpstreamAPI: "responses",
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name": "sub2api-openai",
+			"base_url":    server.URL + "/v1",
+			"api_key":     "test-key",
+		},
+	}
+	payload := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Read","description":"read","input_schema":{"type":"object","properties":{}}}]}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := strings.Join(paths, ","); got != "/v1/responses,/v1/chat/completions" {
+		t.Fatalf("paths = %s, want fallback sequence", got)
+	}
+	if gjson.GetBytes(chatBody, "input").Exists() {
+		t.Fatalf("fallback chat request should not contain responses input: %s", string(chatBody))
+	}
+	if got := gjson.GetBytes(chatBody, "messages.0.role").String(); got != "user" {
+		t.Fatalf("fallback chat message role = %q; body=%s", got, string(chatBody))
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "ok" {
+		t.Fatalf("Claude response text = %q, payload=%s", got, string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorResponsesUpstreamDoesNotFallbackOnAuthError(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid api key","type":"authentication_error"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "sub2api-openai",
+			BaseURL:     server.URL + "/v1",
+			UpstreamAPI: "responses",
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name": "sub2api-openai",
+			"base_url":    server.URL + "/v1",
+			"api_key":     "bad-key",
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	})
+	if err == nil {
+		t.Fatal("expected auth error")
+	}
+	if got := strings.Join(paths, ","); got != "/v1/responses" {
+		t.Fatalf("paths = %s, want no fallback", got)
+	}
+}
+
+func TestOpenAICompatExecutorStreamResponsesUpstreamFallsBackToChatOnCompatError(t *testing.T) {
+	var paths []string
+	var chatBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path == "/v1/responses" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"unsupported endpoint /v1/responses","type":"invalid_request_error"}}`))
+			return
+		}
+		chatBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-5.5","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:        "sub2api-openai",
+			BaseURL:     server.URL + "/v1",
+			UpstreamAPI: "responses",
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name": "sub2api-openai",
+			"base_url":    server.URL + "/v1",
+			"api_key":     "test-key",
+		},
+	}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if got := strings.Join(paths, ","); got != "/v1/responses,/v1/chat/completions" {
+		t.Fatalf("paths = %s, want fallback sequence", got)
+	}
+	if gjson.GetBytes(chatBody, "input").Exists() {
+		t.Fatalf("fallback chat request should not contain responses input: %s", string(chatBody))
+	}
+	if got := gjson.GetBytes(chatBody, "stream_options.include_usage").Bool(); !got {
+		t.Fatalf("fallback chat stream should request usage; body=%s", string(chatBody))
+	}
+
+	var got strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+	if !strings.Contains(got.String(), `"text":"ok"`) {
+		t.Fatalf("stream output missing translated text: %s", got.String())
 	}
 }
 
