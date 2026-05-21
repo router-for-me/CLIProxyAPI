@@ -67,6 +67,10 @@ type Config struct {
 	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
+	// SuccessLogsMaxFiles limits the number of success request log files retained.
+	// When exceeded, the oldest success log files are deleted. Default is 10. Set to 0 to disable cleanup.
+	SuccessLogsMaxFiles int `yaml:"success-logs-max-files" json:"success-logs-max-files"`
+
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
@@ -805,6 +809,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
+	cfg.SuccessLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
@@ -875,6 +880,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	if cfg.SuccessLogsMaxFiles < 0 {
+		cfg.SuccessLogsMaxFiles = 10
 	}
 
 	if cfg.RedisUsageQueueRetentionSeconds <= 0 {

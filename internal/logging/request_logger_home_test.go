@@ -34,7 +34,7 @@ func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.
 	}
 
 	logsDir := t.TempDir()
-	logger := NewFileRequestLogger(true, logsDir, "", 0)
+	logger := NewFileRequestLogger(true, logsDir, "", 0, 0)
 	logger.SetHomeEnabled(true)
 
 	requestHeaders := map[string][]string{
@@ -105,7 +105,7 @@ func TestFileRequestLogger_HomeEnabled_DoesNotForwardForcedErrorLogsWhenRequestL
 	}
 
 	logsDir := t.TempDir()
-	logger := NewFileRequestLogger(false, logsDir, "", 0)
+	logger := NewFileRequestLogger(false, logsDir, "", 0, 0)
 	logger.SetHomeEnabled(true)
 
 	errLog := logger.LogRequestWithOptions(

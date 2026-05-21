@@ -109,7 +109,8 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
-	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles, cfg.SuccessLogsMaxFiles)
+	logger.SetSuccessEnabled(cfg.RequestLog && cfg.SuccessRequestLog)
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger
 }
@@ -632,10 +633,18 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)
 		mgmt.GET("/request-error-logs/:name", s.mgmt.DownloadRequestErrorLog)
+		mgmt.GET("/request-success-logs", s.mgmt.GetRequestSuccessLogs)
+		mgmt.GET("/request-success-logs/:name", s.mgmt.DownloadRequestSuccessLog)
 		mgmt.GET("/request-log-by-id/:id", s.mgmt.GetRequestLogByID)
 		mgmt.GET("/request-log", s.mgmt.GetRequestLog)
 		mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
 		mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
+		mgmt.GET("/success-request-log", s.mgmt.GetSuccessRequestLog)
+		mgmt.PUT("/success-request-log", s.mgmt.PutSuccessRequestLog)
+		mgmt.PATCH("/success-request-log", s.mgmt.PutSuccessRequestLog)
+		mgmt.GET("/success-logs-max-files", s.mgmt.GetSuccessLogsMaxFiles)
+		mgmt.PUT("/success-logs-max-files", s.mgmt.PutSuccessLogsMaxFiles)
+		mgmt.PATCH("/success-logs-max-files", s.mgmt.PutSuccessLogsMaxFiles)
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
@@ -1445,6 +1454,27 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
 			setter.SetErrorLogsMaxFiles(cfg.ErrorLogsMaxFiles)
+		}
+	}
+
+	if s.requestLogger != nil && (oldCfg == nil || oldCfg.SuccessLogsMaxFiles != cfg.SuccessLogsMaxFiles) {
+		if setter, ok := s.requestLogger.(interface{ SetSuccessLogsMaxFiles(int) }); ok {
+			setter.SetSuccessLogsMaxFiles(cfg.SuccessLogsMaxFiles)
+		}
+	}
+
+	// Update success logging state when request-log or success-request-log changes
+	if s.requestLogger != nil {
+		needUpdate := false
+		if oldCfg == nil {
+			needUpdate = true
+		} else if oldCfg.RequestLog != cfg.RequestLog || oldCfg.SuccessRequestLog != cfg.SuccessRequestLog {
+			needUpdate = true
+		}
+		if needUpdate {
+			if setter, ok := s.requestLogger.(interface{ SetSuccessEnabled(bool) }); ok {
+				setter.SetSuccessEnabled(cfg.RequestLog && cfg.SuccessRequestLog)
+			}
 		}
 	}
 

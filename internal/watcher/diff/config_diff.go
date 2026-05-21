@@ -51,11 +51,17 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}
+	if oldCfg.SuccessRequestLog != newCfg.SuccessRequestLog {
+		changes = append(changes, fmt.Sprintf("success-request-log: %t -> %t", oldCfg.SuccessRequestLog, newCfg.SuccessRequestLog))
+	}
 	if oldCfg.LogsMaxTotalSizeMB != newCfg.LogsMaxTotalSizeMB {
 		changes = append(changes, fmt.Sprintf("logs-max-total-size-mb: %d -> %d", oldCfg.LogsMaxTotalSizeMB, newCfg.LogsMaxTotalSizeMB))
 	}
 	if oldCfg.ErrorLogsMaxFiles != newCfg.ErrorLogsMaxFiles {
 		changes = append(changes, fmt.Sprintf("error-logs-max-files: %d -> %d", oldCfg.ErrorLogsMaxFiles, newCfg.ErrorLogsMaxFiles))
+	}
+	if oldCfg.SuccessLogsMaxFiles != newCfg.SuccessLogsMaxFiles {
+		changes = append(changes, fmt.Sprintf("success-logs-max-files: %d -> %d", oldCfg.SuccessLogsMaxFiles, newCfg.SuccessLogsMaxFiles))
 	}
 	if oldCfg.RequestRetry != newCfg.RequestRetry {
 		changes = append(changes, fmt.Sprintf("request-retry: %d -> %d", oldCfg.RequestRetry, newCfg.RequestRetry))

@@ -161,6 +161,12 @@ type FileRequestLogger struct {
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
 
+	// successEnabled indicates whether success request logging is currently enabled.
+	successEnabled bool
+
+	// successLogsMaxFiles limits the number of success log files retained.
+	successLogsMaxFiles int
+
 	homeEnabled bool
 }
 
@@ -222,10 +228,11 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 //   - configDir: The directory of the configuration file; when logsDir is
 //     relative, it will be resolved relative to this directory
 //   - errorLogsMaxFiles: Maximum number of error log files to retain (0 = no cleanup)
+//   - successLogsMaxFiles: Maximum number of success log files to retain (0 = no cleanup)
 //
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
-func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
+func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int, successLogsMaxFiles int) *FileRequestLogger {
 	// Resolve logsDir relative to the configuration file directory when it's not absolute.
 	if !filepath.IsAbs(logsDir) {
 		// If configDir is provided, resolve logsDir relative to it.
@@ -234,10 +241,12 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 		}
 	}
 	return &FileRequestLogger{
-		enabled:           enabled,
-		logsDir:           logsDir,
-		errorLogsMaxFiles: errorLogsMaxFiles,
-		homeEnabled:       false,
+		enabled:             enabled,
+		logsDir:             logsDir,
+		errorLogsMaxFiles:   errorLogsMaxFiles,
+		successEnabled:      false,
+		successLogsMaxFiles: successLogsMaxFiles,
+		homeEnabled:         false,
 	}
 }
 
@@ -270,6 +279,16 @@ func (l *FileRequestLogger) SetEnabled(enabled bool) {
 // SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
 func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
 	l.errorLogsMaxFiles = maxFiles
+}
+
+// SetSuccessEnabled toggles success request log writing.
+func (l *FileRequestLogger) SetSuccessEnabled(enabled bool) {
+	l.successEnabled = enabled
+}
+
+// SetSuccessLogsMaxFiles updates the maximum number of success log files to retain.
+func (l *FileRequestLogger) SetSuccessLogsMaxFiles(maxFiles int) {
+	l.successLogsMaxFiles = maxFiles
 }
 
 // LogRequest logs a complete non-streaming request/response cycle to a file.
@@ -407,6 +426,46 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		}
 	}
 
+	// Write success log if enabled and response is successful (2xx)
+	if l.successEnabled && statusCode >= 200 && statusCode < 300 && !force {
+		successFilename := l.generateSuccessFilename(url, requestID)
+		successFilePath := filepath.Join(l.logsDir, successFilename)
+
+		successFile, errOpen := os.OpenFile(successFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if errOpen != nil {
+			log.WithError(errOpen).Warn("failed to create success request log file")
+		} else {
+			writeErrSuccess := l.writeNonStreamingLog(
+				successFile,
+				url,
+				method,
+				requestHeaders,
+				body,
+				requestBodyPath,
+				websocketTimeline,
+				apiRequest,
+				apiResponse,
+				apiWebsocketTimeline,
+				apiResponseErrors,
+				statusCode,
+				responseHeaders,
+				responseToWrite,
+				decompressErr,
+				requestTimestamp,
+				apiResponseTimestamp,
+			)
+			if errClose := successFile.Close(); errClose != nil {
+				log.WithError(errClose).Warn("failed to close success request log file")
+			}
+			if writeErrSuccess != nil {
+				log.WithError(writeErrSuccess).Warn("failed to write success request log")
+			}
+			if errCleanup := l.cleanupOldSuccessLogs(); errCleanup != nil {
+				log.WithError(errCleanup).Warn("failed to clean up old success logs")
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -487,6 +546,11 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 // generateErrorFilename creates a filename with an error prefix to differentiate forced error logs.
 func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...string) string {
 	return fmt.Sprintf("error-%s", l.generateFilename(url, requestID...))
+}
+
+// generateSuccessFilename creates a filename with a success prefix to differentiate success logs.
+func (l *FileRequestLogger) generateSuccessFilename(url string, requestID ...string) string {
+	return fmt.Sprintf("success-%s", l.generateFilename(url, requestID...))
 }
 
 // ensureLogsDir creates the logs directory if it doesn't exist.
@@ -616,6 +680,56 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 	for _, file := range files[l.errorLogsMaxFiles:] {
 		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
 			log.WithError(errRemove).Warnf("failed to remove old error log: %s", file.name)
+		}
+	}
+
+	return nil
+}
+
+// cleanupOldSuccessLogs keeps only the newest successLogsMaxFiles success log files.
+func (l *FileRequestLogger) cleanupOldSuccessLogs() error {
+	if l.successLogsMaxFiles <= 0 {
+		return nil
+	}
+
+	entries, errRead := os.ReadDir(l.logsDir)
+	if errRead != nil {
+		return errRead
+	}
+
+	type logFile struct {
+		name    string
+		modTime time.Time
+	}
+
+	var files []logFile
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "success-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			log.WithError(errInfo).Warn("failed to read success log info")
+			continue
+		}
+		files = append(files, logFile{name: name, modTime: info.ModTime()})
+	}
+
+	if len(files) <= l.successLogsMaxFiles {
+		return nil
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
+
+	for _, file := range files[l.successLogsMaxFiles:] {
+		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
+			log.WithError(errRemove).Warnf("failed to remove old success log: %s", file.name)
 		}
 	}
 
