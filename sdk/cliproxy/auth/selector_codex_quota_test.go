@@ -5,38 +5,32 @@ import (
 	"time"
 )
 
-func TestIsAuthBlockedForModel_CodexQuotaReserveBlocksNearLimit(t *testing.T) {
+func TestIsAuthBlockedForModel_CodexQuotaMetadataDoesNotBlockSelection(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-		auth := &Auth{
-			ID:       "codex-1",
-			Provider: "codex",
-			Metadata: map[string]any{
-				"codex_quota": map[string]any{
-					"rate_limit": map[string]any{
-						"primary_window": map[string]any{
-							"used_percent": 80,
-							"reset_at":     now.Add(2 * time.Hour).Format(time.RFC3339),
-						},
+	auth := &Auth{
+		ID:       "codex-1",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"codex_quota": map[string]any{
+				"rate_limit": map[string]any{
+					"primary_window": map[string]any{
+						"used_percent": 99,
+						"reset_at":     now.Add(2 * time.Hour).Format(time.RFC3339),
 					},
 				},
 			},
-		}
+		},
+	}
 
-	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5-codex", now)
-	if !blocked {
-		t.Fatal("expected codex auth to be blocked when used_percent >= 80")
-	}
-	if reason != blockReasonCooldown {
-		t.Fatalf("block reason = %v, want cooldown", reason)
-	}
-	if !next.After(now) {
-		t.Fatalf("next reset time = %v, want future time", next)
+	blocked, reason, _ := isAuthBlockedForModel(auth, "gpt-5-codex", now)
+	if blocked {
+		t.Fatalf("expected codex quota metadata not to block selection, got reason %v", reason)
 	}
 }
 
-func TestIsAuthBlockedForModel_CodexQuotaReserveExpiresAfterReset(t *testing.T) {
+func TestIsAuthBlockedForModel_CodexQuotaMetadataWithExpiredResetDoesNotBlockSelection(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
@@ -61,7 +55,7 @@ func TestIsAuthBlockedForModel_CodexQuotaReserveExpiresAfterReset(t *testing.T) 
 	}
 }
 
-func TestIsAuthBlockedForModel_CodexQuotaReserveDoesNotAffectOtherProviders(t *testing.T) {
+func TestIsAuthBlockedForModel_CodexQuotaMetadataDoesNotAffectOtherProviders(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()

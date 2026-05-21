@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	internalcodex "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	internalcodex "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestFileTokenStoreSave_CodexQuotaMetadataRoundTrip(t *testing.T) {

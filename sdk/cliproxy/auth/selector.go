@@ -23,8 +23,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
-const codexQuotaReserveUsedPercent = 80.0
-
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
 	mu      sync.Mutex
@@ -377,9 +375,6 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
-	if next, ok := codexQuotaReserveUntil(auth, now); ok {
-		return true, blockReasonCooldown, next
-	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
@@ -430,144 +425,6 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
-}
-
-func codexQuotaReserveUntil(auth *Auth, now time.Time) (time.Time, bool) {
-	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || auth.Metadata == nil {
-		return time.Time{}, false
-	}
-	raw, ok := auth.Metadata["codex_quota"]
-	if !ok || raw == nil {
-		return time.Time{}, false
-	}
-	payload, ok := raw.(map[string]any)
-	if !ok {
-		return time.Time{}, false
-	}
-
-	var latest time.Time
-	for _, key := range []string{"rate_limit"} {
-		section, ok := payload[key].(map[string]any)
-		if !ok {
-			continue
-		}
-		for _, windowKey := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
-			window, ok := section[windowKey].(map[string]any)
-			if !ok {
-				continue
-			}
-			usedPercent, ok := parseFloatAny(window["used_percent"])
-			if !ok {
-				usedPercent, ok = parseFloatAny(window["usedPercent"])
-			}
-			if !ok || usedPercent < codexQuotaReserveUsedPercent {
-				continue
-			}
-			resetAt := parseQuotaResetAt(window, now)
-			if resetAt.IsZero() || !resetAt.After(now) {
-				continue
-			}
-			if latest.IsZero() || resetAt.After(latest) {
-				latest = resetAt
-			}
-		}
-	}
-	if latest.IsZero() {
-		return time.Time{}, false
-	}
-	return latest, true
-}
-
-func parseQuotaResetAt(window map[string]any, now time.Time) time.Time {
-	for _, key := range []string{"reset_at", "resetAt"} {
-		if ts, ok := parseTimeAny(window[key]); ok {
-			return ts
-		}
-	}
-	for _, key := range []string{"reset_after_seconds", "resetAfterSeconds"} {
-		if seconds, ok := parseFloatAny(window[key]); ok && seconds > 0 {
-			return now.Add(time.Duration(seconds * float64(time.Second)))
-		}
-	}
-	return time.Time{}
-}
-
-func parseFloatAny(val any) (float64, bool) {
-	switch typed := val.(type) {
-	case float64:
-		if math.IsNaN(typed) || math.IsInf(typed, 0) {
-			return 0, false
-		}
-		return typed, true
-	case float32:
-		parsed := float64(typed)
-		if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
-			return 0, false
-		}
-		return parsed, true
-	case int:
-		return float64(typed), true
-	case int32:
-		return float64(typed), true
-	case int64:
-		return float64(typed), true
-	case json.Number:
-		parsed, err := typed.Float64()
-		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
-			return 0, false
-		}
-		return parsed, true
-	case string:
-		trimmed := strings.TrimSpace(typed)
-		if trimmed == "" {
-			return 0, false
-		}
-		parsed, err := strconv.ParseFloat(trimmed, 64)
-		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
-			return 0, false
-		}
-		return parsed, true
-	default:
-		return 0, false
-	}
-}
-
-func parseTimeAny(val any) (time.Time, bool) {
-	switch typed := val.(type) {
-	case time.Time:
-		if typed.IsZero() {
-			return time.Time{}, false
-		}
-		return typed.UTC(), true
-	case string:
-		trimmed := strings.TrimSpace(typed)
-		if trimmed == "" {
-			return time.Time{}, false
-		}
-		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
-			return parsed.UTC(), true
-		}
-		if unix, err := strconv.ParseInt(trimmed, 10, 64); err == nil && unix > 0 {
-			return time.Unix(unix, 0).UTC(), true
-		}
-	case float64:
-		if typed > 0 {
-			return time.Unix(int64(typed), 0).UTC(), true
-		}
-	case int64:
-		if typed > 0 {
-			return time.Unix(typed, 0).UTC(), true
-		}
-	case int:
-		if typed > 0 {
-			return time.Unix(int64(typed), 0).UTC(), true
-		}
-	case json.Number:
-		if parsed, err := typed.Int64(); err == nil && parsed > 0 {
-			return time.Unix(parsed, 0).UTC(), true
-		}
-	}
-	return time.Time{}, false
 }
 
 // sessionPattern matches Claude Code user_id format:
