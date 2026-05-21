@@ -4253,7 +4253,10 @@ func (m *Manager) syncRefreshedAuth(executorAuth *Auth) {
 	if executorAuth == nil || executorAuth.ID == "" {
 		return
 	}
-	newToken, _ := executorAuth.Metadata["access_token"].(string)
+    if executorAuth.Metadata == nil {
+        return
+    }
+    newToken, _ := executorAuth.Metadata["access_token"].(string)
 	if newToken == "" {
 		return
 	}
