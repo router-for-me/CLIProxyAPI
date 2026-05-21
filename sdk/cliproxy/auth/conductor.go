@@ -2331,8 +2331,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						switch statusCode {
 						case 401:
 							state.StatusMessage = "unauthorized"
+							if !quotaCooldownDisabledForAuth(auth) {
+								state.NextRetryAfter = now.Add(30 * time.Minute)
+								suspendReason = "unauthorized"
+								shouldSuspendModel = true
+							}
 						case 402, 403:
 							state.StatusMessage = "payment_required"
+							if !quotaCooldownDisabledForAuth(auth) {
+								state.NextRetryAfter = now.Add(30 * time.Minute)
+								suspendReason = "payment_required"
+								shouldSuspendModel = true
+							}
 						case 404:
 							state.StatusMessage = "not_found"
 							state.NextRetryAfter = now.Add(12 * time.Hour)
@@ -4482,11 +4492,11 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	authID := auth.ID
 	m.mu.RLock()
 	if fresh, ok := m.auths[authID]; ok && fresh != nil {
-		auth = fresh.Clone()
+		auth = fresh
 	}
 	m.mu.RUnlock()
 
-	return preparer.PrepareRequest(req, auth)
+	return preparer.PrepareRequest(req, auth.Clone())
 }
 
 // NewHttpRequest constructs a new HTTP request and injects provider credentials into it.
