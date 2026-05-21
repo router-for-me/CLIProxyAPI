@@ -240,10 +240,6 @@ func buildCodexConversationRequest(body []byte, auth *cliproxyauth.Auth) ([]byte
 }
 
 func buildCodexConversationPrompt(body []byte) (string, error) {
-	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
-		return "", statusErr{code: http.StatusBadRequest, msg: "codex conversation bridge: tool calls are not supported for OAuth auth-file credentials"}
-	}
-
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() && !input.IsArray() {
 		if input.Type == gjson.String {
@@ -284,7 +280,7 @@ func buildCodexConversationPrompt(body []byte) (string, error) {
 				}
 				segments = append(segments, promptSegment{role: role, parts: parts})
 			case "function_call", "function_call_output":
-				return "", statusErr{code: http.StatusBadRequest, msg: "codex conversation bridge: function tools are not supported for OAuth auth-file credentials"}
+				continue
 			default:
 				return "", statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("codex conversation bridge: unsupported input item type %q", item.Get("type").String())}
 			}
