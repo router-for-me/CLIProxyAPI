@@ -85,10 +85,21 @@ func warmupCfClearance(ctx context.Context, authID string, cfg *config.Config, a
 	if err != nil {
 		return "", fmt.Errorf("cf_clearance: warmup request failed: %w", err)
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+
+	// 读取响应 body 用于调试（然后丢弃）
+	bodyPreview := make([]byte, 512)
+	n, _ := io.ReadFull(resp.Body, bodyPreview)
+	bodyPreview = bodyPreview[:n]
+	_ = resp.Body.Close()
+
+	// 调试日志：记录响应状态、body 预览和所有 Set-Cookie
+	log.Debugf("codex: cf_clearance warmup status=%d, body=%q", resp.StatusCode, string(bodyPreview))
+	for _, c := range resp.Cookies() {
+		log.Debugf("codex: cf_clearance warmup cookie: %s=%s", c.Name, c.Value)
+	}
+	if raw := resp.Header.Values("Set-Cookie"); len(raw) > 0 {
+		log.Debugf("codex: cf_clearance warmup raw Set-Cookie headers: %v", raw)
+	}
 
 	// 从 Set-Cookie 中提取 cf_clearance（只提取 cf_clearance，不提取 __cf_bm）
 	for _, cookie := range resp.Cookies() {
@@ -107,7 +118,7 @@ func warmupCfClearance(ctx context.Context, authID string, cfg *config.Config, a
 		}
 	}
 
-	return "", fmt.Errorf("cf_clearance: no cf_clearance cookie in warmup response (status=%d)", resp.StatusCode)
+	return "", fmt.Errorf("cf_clearance: no cf_clearance cookie in warmup response (status=%d, body=%q)", resp.StatusCode, string(bodyPreview))
 }
 
 // ensureCfClearance 确保有有效的 cf_clearance cookie
