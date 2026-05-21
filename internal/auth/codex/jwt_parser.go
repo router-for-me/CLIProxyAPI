@@ -75,6 +75,15 @@ func ParseJWTToken(token string) (*JWTClaims, error) {
 	return &claims, nil
 }
 
+// PlanTypeFromIDToken extracts the ChatGPT plan type from a Codex ID token.
+func PlanTypeFromIDToken(token string) string {
+	claims, err := ParseJWTToken(strings.TrimSpace(token))
+	if err != nil || claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+}
+
 // base64URLDecode decodes a Base64 URL-encoded string, adding padding if necessary.
 // JWTs use a URL-safe Base64 alphabet and omit padding, so this function ensures
 // correct decoding by re-adding the padding before decoding.
