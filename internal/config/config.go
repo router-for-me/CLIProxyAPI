@@ -196,6 +196,8 @@ type RemoteManagement struct {
 	AllowRemote bool `yaml:"allow-remote"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
+	// SuppressSuccessAccessLogs hides successful management API access logs while keeping 4xx/5xx logs visible.
+	SuppressSuccessAccessLogs bool `yaml:"suppress-success-access-logs"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
 	// DisableAutoUpdatePanel disables automatic periodic background updates of the management panel asset from GitHub.

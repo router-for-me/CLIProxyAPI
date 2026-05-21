@@ -265,6 +265,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RemoteManagement.AllowRemote != newCfg.RemoteManagement.AllowRemote {
 		changes = append(changes, fmt.Sprintf("remote-management.allow-remote: %t -> %t", oldCfg.RemoteManagement.AllowRemote, newCfg.RemoteManagement.AllowRemote))
 	}
+	if oldCfg.RemoteManagement.SuppressSuccessAccessLogs != newCfg.RemoteManagement.SuppressSuccessAccessLogs {
+		changes = append(changes, fmt.Sprintf("remote-management.suppress-success-access-logs: %t -> %t", oldCfg.RemoteManagement.SuppressSuccessAccessLogs, newCfg.RemoteManagement.SuppressSuccessAccessLogs))
+	}
 	if oldCfg.RemoteManagement.DisableControlPanel != newCfg.RemoteManagement.DisableControlPanel {
 		changes = append(changes, fmt.Sprintf("remote-management.disable-control-panel: %t -> %t", oldCfg.RemoteManagement.DisableControlPanel, newCfg.RemoteManagement.DisableControlPanel))
 	}

@@ -180,6 +180,8 @@ type Server struct {
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
 	managementRoutesEnabled atomic.Bool
+	// managementSuccessAccessLogsSuppressed hides successful management access logs while preserving failures.
+	managementSuccessAccessLogsSuppressed atomic.Bool
 
 	// envManagementSecret indicates whether MANAGEMENT_PASSWORD is configured.
 	envManagementSecret bool
@@ -221,9 +223,33 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		optionState.engineConfigurator(engine)
 	}
 
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = configFilePath
+	}
+
+	envAdminPassword, envAdminPasswordSet := os.LookupEnv("MANAGEMENT_PASSWORD")
+	envAdminPassword = strings.TrimSpace(envAdminPassword)
+	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
+
+	// Create server instance early so middleware can read hot-reloadable state from it.
+	s := &Server{
+		engine:              engine,
+		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
+		cfg:                 cfg,
+		accessManager:       accessManager,
+		configFilePath:      configFilePath,
+		currentPath:         wd,
+		envManagementSecret: envManagementSecret,
+		wsRoutes:            make(map[string]struct{}),
+	}
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.managementSuccessAccessLogsSuppressed.Store(cfg.RemoteManagement.SuppressSuccessAccessLogs)
+
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(s.suppressSuccessfulManagementAccessLogs())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -243,31 +269,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 			}
 		}
 	}
+	s.requestLogger = requestLogger
+	s.loggerToggle = toggle
 
 	engine.Use(corsMiddleware())
-	wd, err := os.Getwd()
-	if err != nil {
-		wd = configFilePath
-	}
-
-	envAdminPassword, envAdminPasswordSet := os.LookupEnv("MANAGEMENT_PASSWORD")
-	envAdminPassword = strings.TrimSpace(envAdminPassword)
-	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
-
-	// Create server instance
-	s := &Server{
-		engine:              engine,
-		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
-		cfg:                 cfg,
-		accessManager:       accessManager,
-		requestLogger:       requestLogger,
-		loggerToggle:        toggle,
-		configFilePath:      configFilePath,
-		currentPath:         wd,
-		envManagementSecret: envManagementSecret,
-		wsRoutes:            make(map[string]struct{}),
-	}
-	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
@@ -341,9 +346,9 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if c != nil && c.Request != nil {
+		if c != nil && c.Request != nil && c.Request.URL != nil {
 			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || path == "/management.html" {
+			if isManagementAPIPath(path) || path == "/management.html" {
 				c.Next()
 				return
 			}
@@ -355,6 +360,29 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func (s *Server) suppressSuccessfulManagementAccessLogs() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+
+		if s == nil || !s.managementSuccessAccessLogsSuppressed.Load() || c == nil || c.Request == nil || c.Request.URL == nil {
+			return
+		}
+		if c.Writer.Status() >= http.StatusBadRequest {
+			return
+		}
+		if isManagementAPIPath(c.Request.URL.Path) {
+			// The access logger runs after this middleware unwinds, so marking here
+			// suppresses only successful dashboard polling while failed polls stay visible.
+			logging.SkipGinRequestLogging(c)
+		}
+	}
+}
+
+func isManagementAPIPath(path string) bool {
+	const managementAPIPath = "/v0/management"
+	return path == managementAPIPath || strings.HasPrefix(path, managementAPIPath+"/")
 }
 
 // setupRoutes configures the API routes for the server.
@@ -1351,6 +1379,8 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if len(s.oldConfigYaml) > 0 {
 		_ = yaml.Unmarshal(s.oldConfigYaml, &oldCfg)
 	}
+
+	s.managementSuccessAccessLogsSuppressed.Store(cfg.RemoteManagement.SuppressSuccessAccessLogs)
 
 	// Update request logger enabled state if it has changed
 	previousRequestLog := false

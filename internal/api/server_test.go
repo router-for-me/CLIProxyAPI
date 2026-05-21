@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -84,6 +86,69 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestSuppressSuccessfulManagementAccessLogs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var output bytes.Buffer
+	logger := log.StandardLogger()
+	previousOutput := logger.Out
+	previousFormatter := logger.Formatter
+	previousLevel := log.GetLevel()
+	log.SetOutput(&output)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFormatter(previousFormatter)
+		log.SetLevel(previousLevel)
+	})
+
+	server := &Server{}
+	server.managementSuccessAccessLogsSuppressed.Store(true)
+
+	engine := gin.New()
+	engine.Use(internallogging.GinLogrusLogger())
+	engine.Use(server.suppressSuccessfulManagementAccessLogs())
+	engine.GET("/v0/management/config", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+	engine.GET("/v0/management/fail", func(c *gin.Context) {
+		c.AbortWithStatus(http.StatusUnauthorized)
+	})
+	engine.GET("/v0/managementish", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	serve := func(path string, wantStatus int) string {
+		t.Helper()
+		output.Reset()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rr := httptest.NewRecorder()
+		engine.ServeHTTP(rr, req)
+		if rr.Code != wantStatus {
+			t.Fatalf("%s status = %d, want %d", path, rr.Code, wantStatus)
+		}
+		return output.String()
+	}
+
+	if got := serve("/v0/management/config", http.StatusOK); strings.TrimSpace(got) != "" {
+		t.Fatalf("expected successful management access log to be suppressed, got %q", got)
+	}
+
+	if got := serve("/v0/management/fail", http.StatusUnauthorized); !strings.Contains(got, "/v0/management/fail") {
+		t.Fatalf("expected failed management access log to remain visible, got %q", got)
+	}
+
+	if got := serve("/v0/managementish", http.StatusOK); !strings.Contains(got, "/v0/managementish") {
+		t.Fatalf("expected lookalike non-management path to remain visible, got %q", got)
+	}
+
+	server.managementSuccessAccessLogsSuppressed.Store(false)
+	if got := serve("/v0/management/config", http.StatusOK); !strings.Contains(got, "/v0/management/config") {
+		t.Fatalf("expected management access log when suppression is disabled, got %q", got)
+	}
 }
 
 func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
