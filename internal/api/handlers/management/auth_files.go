@@ -5085,8 +5085,24 @@ func (h *Handler) RefreshCodexToken(c *gin.Context) {
 		return
 	}
 
-	// Read the auth file to get the refresh token
-	authFilePath := filepath.Join(h.cfg.AuthDir, targetAuth.FileName)
+	// Resolve auth file path — prefer Attributes["path"], fallback to AuthDir + FileName
+	authFilePath := strings.TrimSpace(authAttribute(targetAuth, "path"))
+	if authFilePath == "" {
+		baseName := strings.TrimSpace(targetAuth.FileName)
+		if baseName == "" {
+			baseName = targetAuth.ID
+		}
+		if baseName == "" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot determine auth file path"})
+			return
+		}
+		if filepath.IsAbs(baseName) {
+			authFilePath = baseName
+		} else {
+			authFilePath = filepath.Join(h.cfg.AuthDir, baseName)
+		}
+	}
+
 	fileData, err := os.ReadFile(authFilePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read auth file: %v", err)})
