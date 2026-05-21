@@ -2784,8 +2784,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = resultErr.Message
 		}
 	}
-	delete(auth.Metadata, "access_token")
 	statusCode := statusCodeFromResult(resultErr)
+	// Evict the cached access token on HTTP errors so that the next
+	// attempt performs a fresh OAuth exchange. Skip for 404 (model
+	// not found) and network errors (status 0) which are unrelated
+	// to token validity.
+	if statusCode != 0 && statusCode != 404 {
+		delete(auth.Metadata, "access_token")
+	}
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
@@ -2803,7 +2809,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			if resultErr != nil {
 				if parsed, ok := parseQuotaResetDuration(resultErr.Message); ok {
 					cooldown = parsed
+				} else if retryAfter != nil && *retryAfter > 0 {
+					cooldown = *retryAfter
 				}
+			} else if retryAfter != nil && *retryAfter > 0 {
+				cooldown = *retryAfter
 			}
 			next := now.Add(cooldown)
 			auth.NextRetryAfter = next
