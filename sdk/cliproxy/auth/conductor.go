@@ -2744,6 +2744,8 @@ func isRequestInvalidError(err error) bool {
 // does not contain a parseable reset time.
 const defaultQuotaCooldown = 1 * time.Hour
 
+var quotaResetRegex = regexp.MustCompile(`(?i)after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)`)
+
 // parseQuotaResetDuration extracts a cooldown duration from a quota error message.
 // It recognises patterns like "after 167h29m46s", "after 42m", "after 30s".
 // Returns the parsed duration and true on success, or (0, false) if unparseable.
@@ -2751,8 +2753,7 @@ func parseQuotaResetDuration(message string) (time.Duration, bool) {
 	if message == "" {
 		return 0, false
 	}
-	re := regexp.MustCompile(`(?i)after\s+((?:\d+h)?(?:\d+m)?(?:\d+s)?)`)
-	matches := re.FindStringSubmatch(message)
+	matches := quotaResetRegex.FindStringSubmatch(message)
 	if len(matches) < 2 {
 		return 0, false
 	}

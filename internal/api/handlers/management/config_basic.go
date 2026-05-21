@@ -29,9 +29,9 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		return
 	}
 	h.mu.RLock()
-	cfg := *h.cfg
+	cfg := h.cfg
 	h.mu.RUnlock()
-	c.JSON(200, &cfg)
+	c.JSON(200, cfg)
 }
 
 type releaseInfo struct {
