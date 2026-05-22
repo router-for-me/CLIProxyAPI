@@ -29,6 +29,8 @@ var keccakRoundConstants = [24]uint64{
 	0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
 }
 
+const keccakRate = 136
+
 func rotateLeft64(v uint64, k uint) uint64 { return v<<k | v>>(64-k) }
 
 func keccakF23(s *[25]uint64) {
@@ -38,7 +40,7 @@ func keccakF23(s *[25]uint64) {
 	a15, a16, a17, a18, a19 := s[15], s[16], s[17], s[18], s[19]
 	a20, a21, a22, a23, a24 := s[20], s[21], s[22], s[23], s[24]
 
-	for r := 1; r < 24; r++ {
+	for r := 0; r < 24; r++ {
 		c0 := a0 ^ a5 ^ a10 ^ a15 ^ a20
 		c1 := a1 ^ a6 ^ a11 ^ a16 ^ a21
 		c2 := a2 ^ a7 ^ a12 ^ a17 ^ a22
@@ -138,23 +140,22 @@ func keccakF23(s *[25]uint64) {
 }
 
 func DeepSeekHashV1(data []byte) [32]byte {
-	const rate = 136
 	var s [25]uint64
 
 	off := 0
-	for off+rate <= len(data) {
-		for i := 0; i < rate/8; i++ {
+	for off+keccakRate <= len(data) {
+		for i := 0; i < keccakRate/8; i++ {
 			s[i] ^= binary.LittleEndian.Uint64(data[off+i*8:])
 		}
 		keccakF23(&s)
-		off += rate
+		off += keccakRate
 	}
 
-	var final [rate]byte
+	var final [keccakRate]byte
 	copy(final[:], data[off:])
 	final[len(data)-off] = 0x06
-	final[rate-1] |= 0x80
-	for i := 0; i < rate/8; i++ {
+	final[keccakRate-1] |= 0x80
+	for i := 0; i < keccakRate/8; i++ {
 		s[i] ^= binary.LittleEndian.Uint64(final[i*8:])
 	}
 	keccakF23(&s)
@@ -183,18 +184,17 @@ func SolvePow(ctx context.Context, challengeHex, salt string, expireAt, difficul
 	t3 := binary.LittleEndian.Uint64(ta[24:])
 
 	prefix := []byte(salt + "_" + strconv.FormatInt(expireAt, 10) + "_")
-	const rate = 136
 	var baseState [25]uint64
 	off := 0
-	for off+rate <= len(prefix) {
-		for i := 0; i < rate/8; i++ {
+	for off+keccakRate <= len(prefix) {
+		for i := 0; i < keccakRate/8; i++ {
 			baseState[i] ^= binary.LittleEndian.Uint64(prefix[off+i*8:])
 		}
 		keccakF23(&baseState)
-		off += rate
+		off += keccakRate
 	}
 	tailLen := len(prefix) - off
-	var tail [rate]byte
+	var tail [keccakRate]byte
 	copy(tail[:], prefix[off:])
 
 	var numBuf [20]byte
@@ -220,30 +220,30 @@ func SolvePow(ctx context.Context, challengeHex, salt string, expireAt, difficul
 		numLen := 20 - pos
 		s := baseState
 		totalTail := tailLen + numLen
-		if totalTail < rate {
-			var buf [rate]byte
+		if totalTail < keccakRate {
+			var buf [keccakRate]byte
 			copy(buf[:tailLen], tail[:tailLen])
 			copy(buf[tailLen:totalTail], numBuf[pos:])
 			buf[totalTail] = 0x06
-			buf[rate-1] |= 0x80
-			for i := 0; i < rate/8; i++ {
+			buf[keccakRate-1] |= 0x80
+			for i := 0; i < keccakRate/8; i++ {
 				s[i] ^= binary.LittleEndian.Uint64(buf[i*8:])
 			}
 			keccakF23(&s)
 		} else {
-			var buf [rate]byte
+			var buf [keccakRate]byte
 			copy(buf[:tailLen], tail[:tailLen])
-			copy(buf[tailLen:rate], numBuf[pos:pos+(rate-tailLen)])
-			for i := 0; i < rate/8; i++ {
+			copy(buf[tailLen:keccakRate], numBuf[pos:pos+(keccakRate-tailLen)])
+			for i := 0; i < keccakRate/8; i++ {
 				s[i] ^= binary.LittleEndian.Uint64(buf[i*8:])
 			}
 			keccakF23(&s)
-			var buf2 [rate]byte
-			rem := totalTail - rate
-			copy(buf2[:rem], numBuf[pos+(rate-tailLen):pos+(rate-tailLen)+rem])
+			var buf2 [keccakRate]byte
+			rem := totalTail - keccakRate
+			copy(buf2[:rem], numBuf[pos+(keccakRate-tailLen):pos+(keccakRate-tailLen)+rem])
 			buf2[rem] = 0x06
-			buf2[rate-1] |= 0x80
-			for i := 0; i < rate/8; i++ {
+			buf2[keccakRate-1] |= 0x80
+			for i := 0; i < keccakRate/8; i++ {
 				s[i] ^= binary.LittleEndian.Uint64(buf2[i*8:])
 			}
 			keccakF23(&s)

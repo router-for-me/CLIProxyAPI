@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,11 +35,13 @@ const (
 )
 
 type DeepSeekExecutor struct {
-	cfg *config.Config
+	cfg          *config.Config
+	clientsMu    sync.Mutex
+	clientsCache map[string]dshelp.Clients
 }
 
 func NewDeepSeekExecutor(cfg *config.Config) *DeepSeekExecutor {
-	return &DeepSeekExecutor{cfg: cfg}
+	return &DeepSeekExecutor{cfg: cfg, clientsCache: make(map[string]dshelp.Clients)}
 }
 
 func (e *DeepSeekExecutor) Identifier() string { return "deepseek" }
@@ -68,7 +71,7 @@ func (e *DeepSeekExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	clients := dshelp.NewClients(e.cfg, auth)
+	clients := e.clientsForAuth(auth)
 	return clients.Regular.Do(httpReq)
 }
 
@@ -109,7 +112,12 @@ func (e *DeepSeekExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, flow.response.StatusCode, flow.response.Header.Clone())
 	if flow.response.StatusCode < 200 || flow.response.StatusCode >= 300 {
-		body, _ := dshelp.ReadResponseBody(flow.response)
+		body, errRead := dshelp.ReadResponseBody(flow.response)
+		if errRead != nil {
+			err = fmt.Errorf("deepseek executor: read error response body: %w", errRead)
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		err = statusErr{code: flow.response.StatusCode, msg: string(body)}
 		return resp, err
@@ -148,9 +156,14 @@ func (e *DeepSeekExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, flow.response.StatusCode, flow.response.Header.Clone())
 	if flow.response.StatusCode < 200 || flow.response.StatusCode >= 300 {
-		body, _ := dshelp.ReadResponseBody(flow.response)
+		body, errRead := dshelp.ReadResponseBody(flow.response)
 		if errClose := flow.response.Body.Close(); errClose != nil {
 			log.Errorf("deepseek executor: close response body error: %v", errClose)
+		}
+		if errRead != nil {
+			errRead = fmt.Errorf("deepseek executor: read error response body: %w", errRead)
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			return nil, errRead
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		return nil, statusErr{code: flow.response.StatusCode, msg: string(body)}
@@ -269,7 +282,7 @@ func (e *DeepSeekExecutor) startCompletion(ctx context.Context, auth *cliproxyau
 	if token == "" {
 		return deepSeekFlow{}, statusErr{code: http.StatusUnauthorized, msg: "missing DeepSeek token"}
 	}
-	clients := dshelp.NewClients(e.cfg, auth)
+	clients := e.clientsForAuth(auth)
 	sessionID, err := e.createSession(ctx, auth, clients, baseURL, token, useFingerprint)
 	if err != nil {
 		return deepSeekFlow{}, err
@@ -585,7 +598,7 @@ func (e *DeepSeekExecutor) refreshWithLogin(ctx context.Context, auth *cliproxya
 		return auth, nil
 	}
 	_, baseURL, useFingerprint := e.resolveCredentials(auth)
-	clients := dshelp.NewClients(e.cfg, auth)
+	clients := e.clientsForAuth(auth)
 	payload := map[string]any{
 		"password":  password,
 		"device_id": "cli_proxy_api",
@@ -642,6 +655,25 @@ func (e *DeepSeekExecutor) resolveCredentials(auth *cliproxyauth.Auth) (token st
 		}
 	}
 	return token, strings.TrimRight(baseURL, "/"), isDefaultDeepSeekBaseURL(baseURL)
+}
+
+func (e *DeepSeekExecutor) clientsForAuth(auth *cliproxyauth.Auth) dshelp.Clients {
+	proxyURL := ""
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && e.cfg != nil {
+		proxyURL = strings.TrimSpace(e.cfg.ProxyURL)
+	}
+
+	e.clientsMu.Lock()
+	defer e.clientsMu.Unlock()
+	if clients, ok := e.clientsCache[proxyURL]; ok {
+		return clients
+	}
+	clients := dshelp.NewClients(e.cfg, auth)
+	e.clientsCache[proxyURL] = clients
+	return clients
 }
 
 func deepSeekEndpoint(baseURL, path string) string {

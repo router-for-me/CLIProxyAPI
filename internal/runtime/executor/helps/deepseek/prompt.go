@@ -13,6 +13,11 @@ import (
 	"github.com/google/uuid"
 )
 
+var (
+	toolCallBlockRE = regexp.MustCompile(`(?is)<(?:\|DSML\|)?tool_calls\b[^>]*>.*?</(?:\|DSML\|)?tool_calls>`)
+	xmlTagRE        = regexp.MustCompile(`(?s)<[^>]+>`)
+)
+
 type RequestSpec struct {
 	Prompt          string
 	ToolsRaw        any
@@ -391,8 +396,7 @@ func ParseToolCalls(text string, availableToolNames []string) ([]map[string]any,
 }
 
 func findToolCallBlock(text string) (string, int, int) {
-	re := regexp.MustCompile(`(?is)<(?:\|DSML\|)?tool_calls\b[^>]*>.*?</(?:\|DSML\|)?tool_calls>`)
-	locs := re.FindAllStringIndex(text, -1)
+	locs := toolCallBlockRE.FindAllStringIndex(text, -1)
 	if len(locs) == 0 {
 		return "", -1, -1
 	}
@@ -503,8 +507,7 @@ func parseToolParamValue(inner string) any {
 }
 
 func stripXMLTags(s string) string {
-	re := regexp.MustCompile(`(?s)<[^>]+>`)
-	return re.ReplaceAllString(s, "")
+	return xmlTagRE.ReplaceAllString(s, "")
 }
 
 func numericText(s string) bool {
