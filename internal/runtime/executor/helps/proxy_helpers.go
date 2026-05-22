@@ -48,21 +48,27 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	// If we have a proxy URL configured, set up the transport
-	if proxyURL != "" || skipVerify {
+	if proxyURL != "" {
 		transport, errBuild := proxyutil.BuildTransport(proxyURL, skipVerify)
 		if errBuild == nil && transport != nil {
 			httpClient.Transport = transport
 			return httpClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
-		if proxyURL != "" {
-			log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
-		}
+		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+	}
+
+	// Final fallback: if no transport set but skipVerify is requested, use a clean transport with skipVerify
+	if httpClient.Transport == nil && skipVerify {
+		transport, _ := proxyutil.BuildTransport("", true)
+		if transport != nil {
+			httpClient.Transport = transport
+		}
 	}
 
 	return httpClient

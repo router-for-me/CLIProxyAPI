@@ -1474,6 +1474,9 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if e.cfg != nil && e.cfg.AntigravityUseDefaultProjectID {
+		return false
+	}
 	return antigravityProjectIDFromAuth(auth) == ""
 }
 
@@ -1888,6 +1891,9 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 func (e *AntigravityExecutor) projectIDForRequest(_ context.Context, auth *cliproxyauth.Auth, _ string) (string, error) {
 	if projectID := antigravityProjectIDFromAuth(auth); projectID != "" {
 		return projectID, nil
+	}
+	if e.cfg != nil && e.cfg.AntigravityUseDefaultProjectID {
+		return "", nil
 	}
 	return "", missingAntigravityProjectIDError(nil)
 }
