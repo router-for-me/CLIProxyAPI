@@ -522,10 +522,13 @@ func TestServeManagementControlPanel_DisablesCaching(t *testing.T) {
 		t.Fatalf("expected Cache-Control to contain no-store, got %q", rr.Header().Get("Cache-Control"))
 	}
 	body := rr.Body.String()
+	if !strings.Contains(body, "__cpa_auth_warning_filter_patch__") {
+		t.Fatalf("expected auth warning patch marker in management response, got %s", body)
+	}
 	if !strings.Contains(body, "__cpa_model_price_dropdown_clip_patch__") {
 		t.Fatalf("expected dropdown patch marker in management response, got %s", body)
 	}
-	if !strings.Contains(body, "__cpa_usage_pagination_patch__") {
-		t.Fatalf("expected usage pagination patch marker in management response, got %s", body)
+	if strings.Contains(body, "__cpa_api_key_usage_dashboard_patch__") {
+		t.Fatalf("expected API key usage dashboard patch marker to be absent from management response, got %s", body)
 	}
 }

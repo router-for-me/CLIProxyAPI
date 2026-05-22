@@ -157,51 +157,6 @@ func TestInjectModelPriceDropdownClipPatch_IncludesSelectModelFallbackLabels(t *
 	}
 }
 
-func TestInjectAPIKeyUsageDashboardPatch_InsertsBeforeBodyClose(t *testing.T) {
-	input := []byte("<html><body><div>content</div></body></html>")
-	out := injectAPIKeyUsageDashboardPatch(input)
-	result := string(out)
-
-	if !strings.Contains(result, "__cpa_api_key_usage_dashboard_patch__") {
-		t.Fatal("expected API key usage dashboard patch marker in output")
-	}
-
-	idxBody := strings.LastIndex(result, "</body>")
-	idxMarker := strings.Index(result, "__cpa_api_key_usage_dashboard_patch__")
-	if idxBody < 0 || idxMarker < 0 || idxMarker > idxBody {
-		t.Fatal("expected API key usage dashboard patch to be injected before </body>")
-	}
-}
-
-func TestInjectAPIKeyUsageDashboardPatch_OnlyInjectsOnce(t *testing.T) {
-	input := []byte("<html><body><div>content</div></body></html>")
-	first := injectAPIKeyUsageDashboardPatch(input)
-	second := injectAPIKeyUsageDashboardPatch(first)
-	result := string(second)
-
-	if strings.Count(result, "__cpa_api_key_usage_dashboard_patch__") != 1 {
-		t.Fatal("expected API key usage dashboard patch marker to appear exactly once")
-	}
-}
-
-func TestInjectAPIKeyUsageDashboardPatch_UsesLightweightEndpoint(t *testing.T) {
-	input := []byte("<html><body><div>content</div></body></html>")
-	out := injectAPIKeyUsageDashboardPatch(input)
-	result := string(out)
-
-	for _, needle := range []string{
-		"/v0/management/api-key-usage",
-		"recent_requests",
-		"cpa-api-key-usage-dashboard",
-		"Authorization",
-		"X-Management-Key",
-	} {
-		if !strings.Contains(result, needle) {
-			t.Fatalf("expected API key usage dashboard patch to include %q", needle)
-		}
-	}
-}
-
 func TestInjectModelPriceDropdownClipPatch_DoesNotRegisterGlobalTriggerHooks(t *testing.T) {
 	input := []byte("<html><body><div>content</div></body></html>")
 	out := injectModelPriceDropdownClipPatch(input)
@@ -224,7 +179,6 @@ func TestManagementPatchChain_ContainsBothMarkers(t *testing.T) {
 	input := []byte("<html><body><div>content</div></body></html>")
 	out := injectAuthFilesWarningFilterPatch(input)
 	out = injectModelPriceDropdownClipPatch(out)
-	out = injectAPIKeyUsageDashboardPatch(out)
 	result := string(out)
 
 	if !strings.Contains(result, "__cpa_auth_warning_filter_patch__") {
@@ -232,8 +186,5 @@ func TestManagementPatchChain_ContainsBothMarkers(t *testing.T) {
 	}
 	if !strings.Contains(result, "__cpa_model_price_dropdown_clip_patch__") {
 		t.Fatal("expected model price dropdown patch marker in chained output")
-	}
-	if !strings.Contains(result, "__cpa_api_key_usage_dashboard_patch__") {
-		t.Fatal("expected API key usage dashboard patch marker in chained output")
 	}
 }
