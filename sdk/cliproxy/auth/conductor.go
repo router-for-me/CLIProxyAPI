@@ -2354,9 +2354,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						case 404:
 							state.StatusMessage = "not_found"
-							state.NextRetryAfter = now.Add(12 * time.Hour)
-							suspendReason = "not_found"
-							shouldSuspendModel = true
+							if !quotaCooldownDisabledForAuth(auth) {
+								state.NextRetryAfter = now.Add(12 * time.Hour)
+								suspendReason = "not_found"
+								shouldSuspendModel = true
+							} else {
+								state.NextRetryAfter = time.Time{}
+							}
 						case 429:
 							state.StatusMessage = "quota"
 							state.Quota = QuotaState{Exceeded: true, Reason: "quota"}
@@ -2881,7 +2885,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	case 404:
 		auth.StatusMessage = "not_found"
-		auth.NextRetryAfter = now.Add(12 * time.Hour)
+		if !quotaCooldownDisabledForAuth(auth) {
+			auth.NextRetryAfter = now.Add(12 * time.Hour)
+		} else {
+			auth.NextRetryAfter = time.Time{}
+		}
 	case 429:
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
