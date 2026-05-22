@@ -40,6 +40,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -257,9 +258,10 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
+	counts := usage.GetRequestStatistics().AuthIndexCountsSnapshot()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		if entry := h.buildAuthFileEntry(auth); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, counts); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -336,7 +338,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			continue
 		}
 		if info, errInfo := e.Info(); errInfo == nil {
-			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
+			fileData := gin.H{
+				"name":    name,
+				"size":    info.Size(),
+				"modtime": info.ModTime(),
+				"stats":   gin.H{"success": int64(0), "failure": int64(0)},
+			}
 
 			// Read file to get type field
 			full := filepath.Join(h.cfg.AuthDir, name)
@@ -368,7 +375,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, counts map[string]usage.AuthIndexCounts) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -399,6 +406,12 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
+		"stats":          gin.H{"success": int64(0), "failure": int64(0)},
+	}
+	if counts != nil {
+		if c, ok := counts[auth.Index]; ok {
+			entry["stats"] = gin.H{"success": c.Success, "failure": c.Failure}
+		}
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email

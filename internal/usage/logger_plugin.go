@@ -67,10 +67,23 @@ type RequestStatistics struct {
 
 	apis map[string]*apiStats
 
+	authIndex map[string]*authIndexStats
+
 	requestsByDay  map[string]int64
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+}
+
+type authIndexStats struct {
+	Success int64
+	Failure int64
+}
+
+// AuthIndexCounts is the per-auth snapshot shape returned to handlers.
+type AuthIndexCounts struct {
+	Success int64
+	Failure int64
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -146,6 +159,7 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
 		apis:           make(map[string]*apiStats),
+		authIndex:      make(map[string]*authIndexStats),
 		requestsByDay:  make(map[string]int64),
 		requestsByHour: make(map[int]int64),
 		tokensByDay:    make(map[string]int64),
@@ -212,6 +226,36 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+
+	if authIdx := strings.TrimSpace(record.AuthIndex); authIdx != "" {
+		entry, ok := s.authIndex[authIdx]
+		if !ok {
+			entry = &authIndexStats{}
+			s.authIndex[authIdx] = entry
+		}
+		if success {
+			entry.Success++
+		} else {
+			entry.Failure++
+		}
+	}
+}
+
+// AuthIndexCountsSnapshot returns a copy of all per-auth counters keyed by auth index.
+func (s *RequestStatistics) AuthIndexCountsSnapshot() map[string]AuthIndexCounts {
+	if s == nil {
+		return map[string]AuthIndexCounts{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]AuthIndexCounts, len(s.authIndex))
+	for k, v := range s.authIndex {
+		if v == nil {
+			continue
+		}
+		out[k] = AuthIndexCounts{Success: v.Success, Failure: v.Failure}
+	}
+	return out
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
