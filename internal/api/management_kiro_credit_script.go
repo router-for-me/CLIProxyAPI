@@ -198,7 +198,7 @@ const kiroCreditScript = `<script data-cpa-auth-card-script>
     return Number.isInteger(n) ? String(n) : n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
   }
 
-  function upsertCredit(card, text, title) {
+  function upsertCredit(card, text, title, opts) {
     const meta = queryByClassPrefix(card, "meta");
     if (!meta) return;
     let item = meta.querySelector("[data-kiro-credit]");
@@ -208,12 +208,39 @@ const kiroCreditScript = `<script data-cpa-auth-card-script>
       item.dataset.kiroCredit = "true";
       const labelClass = classNameWithPrefix(document, "label");
       const valueClass = classNameWithPrefix(document, "value");
-      item.innerHTML = '<span class="' + labelClass + '">Credit Used</span><span class="' + valueClass + '"></span>';
+      const btnStyle = "background:transparent;border:none;cursor:pointer;padding:0 4px;font-size:14px;line-height:1;color:inherit;opacity:0.7;margin-left:4px;";
+      item.innerHTML = '<span class="' + labelClass + '">Credit Used</span><span class="' + valueClass + '" data-kiro-credit-value></span><button type="button" data-kiro-refresh title="刷新" style="' + btnStyle + '">↻</button>';
       meta.appendChild(item);
     }
+    const btn = item.querySelector("[data-kiro-refresh]");
+    if (btn && opts) {
+      if (opts.authIndex) btn.dataset.authIndex = opts.authIndex;
+      if (opts.name) btn.dataset.fileName = opts.name;
+      btn.disabled = !!opts.refreshing;
+      btn.style.opacity = opts.refreshing ? "0.4" : "0.7";
+    }
     item.title = title || text;
-    const value = queryByClassPrefix(item, "value") || item.querySelector("span:last-child");
+    const value = item.querySelector("[data-kiro-credit-value]") || queryByClassPrefix(item, "value");
     if (value) value.textContent = text;
+  }
+
+  async function refreshKiroQuota(card, authIndex, name) {
+    const cached = quotaState.get(name);
+    if (cached && cached.inflight) return;
+    quotaState.set(name, { authIndex, status: "loading", text: "Refreshing...", title: "Refreshing Kiro credit usage", inflight: true });
+    upsertCredit(card, "Refreshing...", "Refreshing Kiro credit usage", { authIndex, name, refreshing: true });
+    try {
+      const quota = await getKiroQuota(authIndex);
+      const text = formatCredit(quota.credit_used) + " / " + formatCredit(quota.credit_total);
+      const title = quota.subscription_title || text;
+      quotaState.set(name, { authIndex, status: "success", text, title });
+      upsertCredit(card, text, title, { authIndex, name });
+    } catch {
+      const text = "Unavailable";
+      const title = "Kiro credit usage is unavailable";
+      quotaState.set(name, { authIndex, status: "error", text, title });
+      upsertCredit(card, text, title, { authIndex, name });
+    }
   }
 
   async function hydrateKiroCredits() {
@@ -235,22 +262,22 @@ const kiroCreditScript = `<script data-cpa-auth-card-script>
       if (!authIndex) continue;
       const cached = quotaState.get(name);
       if (cached?.authIndex === authIndex) {
-        upsertCredit(card, cached.text, cached.title);
+        upsertCredit(card, cached.text, cached.title, { authIndex, name });
         if (cached.status === "loading") continue;
         if (cached.status === "success") continue;
       }
       quotaState.set(name, { authIndex, status: "loading", text: "Loading...", title: "Loading Kiro credit usage" });
-      upsertCredit(card, "Loading...", "Loading Kiro credit usage");
+      upsertCredit(card, "Loading...", "Loading Kiro credit usage", { authIndex, name });
       getKiroQuota(authIndex).then(quota => {
         const text = formatCredit(quota.credit_used) + " / " + formatCredit(quota.credit_total);
         const title = quota.subscription_title || text;
         quotaState.set(name, { authIndex, status: "success", text, title });
-        upsertCredit(card, text, title);
+        upsertCredit(card, text, title, { authIndex, name });
       }).catch(() => {
         const text = "Unavailable";
         const title = "Kiro credit usage is unavailable";
         quotaState.set(name, { authIndex, status: "error", text, title });
-        upsertCredit(card, text, title);
+        upsertCredit(card, text, title, { authIndex, name });
       });
     }
   }
@@ -259,6 +286,18 @@ const kiroCreditScript = `<script data-cpa-auth-card-script>
     if (!canCall()) return;
     hydrateKiroCredits();
   }
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest && e.target.closest("[data-kiro-refresh]");
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const authIndex = btn.dataset.authIndex;
+    const name = btn.dataset.fileName;
+    const card = btn.closest(buildSelector("card"));
+    if (!authIndex || !name || !card) return;
+    refreshKiroQuota(card, authIndex, name);
+  }, true);
 
   const observer = new MutationObserver(() => {
     window.clearTimeout(observer.timer);
