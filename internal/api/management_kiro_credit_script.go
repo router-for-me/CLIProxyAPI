@@ -5,47 +5,112 @@ import (
 	"strings"
 )
 
-const kiroCreditScriptMarker = "data-cpa-kiro-credit-script"
+const kiroCreditScriptMarker = "data-cpa-auth-card-script"
 
-const kiroCreditScript = `<script data-cpa-kiro-credit-script>
+const kiroCreditScript = `<script data-cpa-auth-card-script>
 (() => {
   const API_BASE = "/v0/management";
   const AUTH_STORE = "cli-proxy-auth";
   const ENC_PREFIX = "enc::v1::";
   const STORE_KEY = "cli-proxy-api-webui::secure-storage";
   const CLASS_PREFIX = {
-    card: "AuthFilesPage-module__fileCard___",
-    type: "AuthFilesPage-module__typeBadge___",
-    name: "AuthFilesPage-module__fileName___",
-    meta: "AuthFilesPage-module__cardMeta___",
-    item: "AuthFilesPage-module__metaItem___",
-    label: "AuthFilesPage-module__metaLabel___",
-    value: "AuthFilesPage-module__metaValue___"
+    card: ["AuthFilesPage-module__fileCard___", "AuthFilesPage_fileCard__", "fileCard___", "fileCard__"],
+    type: ["AuthFilesPage-module__typeBadge___", "AuthFilesPage_typeBadge__", "typeBadge___", "typeBadge__"],
+    name: ["AuthFilesPage-module__fileName___", "AuthFilesPage_fileName__", "fileName___", "fileName__"],
+    meta: ["AuthFilesPage-module__cardMeta___", "AuthFilesPage_cardMeta__", "cardMeta___", "cardMeta__"],
+    item: ["AuthFilesPage-module__metaItem___", "AuthFilesPage_metaItem__", "metaItem___", "metaItem__"],
+    label: ["AuthFilesPage-module__metaLabel___", "AuthFilesPage_metaLabel__", "metaLabel___", "metaLabel__"],
+    value: ["AuthFilesPage-module__metaValue___", "AuthFilesPage_metaValue__", "metaValue___", "metaValue__"]
   };
   const quotaState = new Map();
   let filesCache = null;
   let filesCacheAt = 0;
+  let pauseUntil = 0;
+  let capturedAuthHeader = "";
+
+  function rememberAuth(value, url) {
+    if (typeof value !== "string") return;
+    if (!value.toLowerCase().startsWith("bearer ")) return;
+    if (typeof url === "string" && url && !url.includes("/v0/management/")) return;
+    capturedAuthHeader = value;
+  }
+
+  const originalFetch = window.fetch ? window.fetch.bind(window) : null;
+  if (originalFetch) {
+    window.fetch = function (input, init) {
+      try {
+        const url = typeof input === "string" ? input : (input && input.url) || "";
+        if (init && init.headers) {
+          if (init.headers instanceof Headers) {
+            const auth = init.headers.get("Authorization") || init.headers.get("authorization");
+            if (auth) rememberAuth(auth, url);
+          } else if (Array.isArray(init.headers)) {
+            for (const pair of init.headers) {
+              if (Array.isArray(pair) && pair.length === 2 && String(pair[0]).toLowerCase() === "authorization") {
+                rememberAuth(pair[1], url);
+              }
+            }
+          } else if (typeof init.headers === "object") {
+            for (const k of Object.keys(init.headers)) {
+              if (k.toLowerCase() === "authorization") rememberAuth(init.headers[k], url);
+            }
+          }
+        } else if (input && typeof input === "object" && input.headers && input.headers.get) {
+          const auth = input.headers.get("Authorization") || input.headers.get("authorization");
+          if (auth) rememberAuth(auth, url);
+        }
+      } catch {}
+      return originalFetch(input, init);
+    };
+  }
+
+  const originalSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    try {
+      if (typeof name === "string" && name.toLowerCase() === "authorization") {
+        rememberAuth(value, this._cpaUrl || "");
+      }
+    } catch {}
+    return originalSetHeader.apply(this, arguments);
+  };
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    try { this._cpaUrl = typeof url === "string" ? url : ""; } catch {}
+    return originalOpen.apply(this, arguments);
+  };
+
+  function prefixesFor(key) {
+    const value = CLASS_PREFIX[key];
+    if (!value) return [];
+    return Array.isArray(value) ? value : [value];
+  }
+
+  function buildSelector(key) {
+    return prefixesFor(key).map(p => '[class*="' + p + '"]').join(",");
+  }
 
   function classNameWithPrefix(root, key) {
-    const prefix = CLASS_PREFIX[key];
-    if (!prefix) return "";
-    const scoped = root?.querySelector?.('[class*="' + prefix + '"]');
-    if (scoped) {
-      const found = Array.from(scoped.classList).find(cls => cls.startsWith(prefix));
-      if (found) return found;
+    const prefixes = prefixesFor(key);
+    if (prefixes.length === 0) return "";
+    const selector = buildSelector(key);
+    const scoped = root && root.querySelector ? root.querySelector(selector) : null;
+    const candidates = scoped ? [scoped] : Array.from(document.querySelectorAll(selector));
+    for (const el of candidates) {
+      for (const cls of Array.from(el.classList)) {
+        if (prefixes.some(p => cls.startsWith(p))) return cls;
+      }
     }
-    const global = document.querySelector('[class*="' + prefix + '"]');
-    return global ? Array.from(global.classList).find(cls => cls.startsWith(prefix)) || "" : "";
+    return "";
   }
 
   function queryByClassPrefix(root, key) {
-    const prefix = CLASS_PREFIX[key];
-    return prefix ? root.querySelector('[class*="' + prefix + '"]') : null;
+    const selector = buildSelector(key);
+    return selector ? root.querySelector(selector) : null;
   }
 
   function elementsByClassPrefix(key) {
-    const prefix = CLASS_PREFIX[key];
-    return prefix ? Array.from(document.querySelectorAll('[class*="' + prefix + '"]')) : [];
+    const selector = buildSelector(key);
+    return selector ? Array.from(document.querySelectorAll(selector)) : [];
   }
 
   function xorBytes(bytes, key) {
@@ -71,27 +136,60 @@ const kiroCreditScript = `<script data-cpa-kiro-credit-script>
     }
   }
 
-  function authHeaders() {
+  function readManagementKey() {
+    const direct = decodeStorage(localStorage.getItem("managementKey"));
+    if (typeof direct === "string" && direct.trim() !== "") return direct.trim();
     const stored = decodeStorage(localStorage.getItem(AUTH_STORE));
-    const key = stored?.state?.managementKey || stored?.managementKey || "";
-    return key ? { Authorization: "Bearer " + key } : {};
+    const fromStore = stored && (stored.state && stored.state.managementKey || stored.managementKey);
+    if (typeof fromStore === "string" && fromStore.trim() !== "") return fromStore.trim();
+    return "";
+  }
+
+  function authHeaders() {
+    if (capturedAuthHeader) return { Authorization: capturedAuthHeader };
+    const key = readManagementKey();
+    return key ? { Authorization: "Bearer " + key } : null;
+  }
+
+  function canCall() {
+    if (Date.now() < pauseUntil) return false;
+    if (!capturedAuthHeader && !readManagementKey()) return false;
+    return true;
+  }
+
+  function noteAuthFailure(status) {
+    if (status === 401 || status === 403) {
+      pauseUntil = Date.now() + 60000;
+    }
+  }
+
+  async function getKiroQuota(authIndex) {
+    if (!canCall()) throw new Error("kiro-quota paused");
+    const headers = authHeaders();
+    if (!headers) throw new Error("kiro-quota no key");
+    const res = await originalFetch(API_BASE + "/kiro-quota?auth_index=" + encodeURIComponent(authIndex), { headers });
+    if (!res.ok) {
+      noteAuthFailure(res.status);
+      throw new Error("kiro-quota " + res.status);
+    }
+    return res.json();
   }
 
   async function getAuthFiles() {
     const now = Date.now();
     if (filesCache && now - filesCacheAt < 10000) return filesCache;
-    const res = await fetch(API_BASE + "/auth-files", { headers: authHeaders() });
-    if (!res.ok) throw new Error("auth-files " + res.status);
+    if (!canCall()) throw new Error("auth-files paused");
+    const headers = authHeaders();
+    if (!headers) throw new Error("auth-files no key");
+    const res = await originalFetch(API_BASE + "/auth-files", { headers });
+    if (!res.ok) {
+      noteAuthFailure(res.status);
+      throw new Error("auth-files " + res.status);
+    }
     const body = await res.json();
     filesCache = Array.isArray(body.files) ? body.files : [];
     filesCacheAt = now;
     return filesCache;
-  }
-
-  async function getKiroQuota(authIndex) {
-    const res = await fetch(API_BASE + "/kiro-quota?auth_index=" + encodeURIComponent(authIndex), { headers: authHeaders() });
-    if (!res.ok) throw new Error("kiro-quota " + res.status);
-    return res.json();
   }
 
   function formatCredit(value) {
@@ -157,13 +255,18 @@ const kiroCreditScript = `<script data-cpa-kiro-credit-script>
     }
   }
 
+  function hydrateAll() {
+    if (!canCall()) return;
+    hydrateKiroCredits();
+  }
+
   const observer = new MutationObserver(() => {
     window.clearTimeout(observer.timer);
-    observer.timer = window.setTimeout(hydrateKiroCredits, 250);
+    observer.timer = window.setTimeout(hydrateAll, 250);
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener("hashchange", hydrateKiroCredits);
-  window.setInterval(hydrateKiroCredits, 5000);
+  window.addEventListener("hashchange", hydrateAll);
+  window.setInterval(hydrateAll, 15000);
 })();
 </script>`
 
