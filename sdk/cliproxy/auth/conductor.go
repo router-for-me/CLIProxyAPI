@@ -2321,8 +2321,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// where the token is valid but the account quota is exhausted.
 					statusCode := statusCodeFromResult(result.Error)
 					if statusCode != 0 && statusCode != 404 && !isLongQuotaExhaustion(&result) {
-						if _, hasRefreshToken := auth.Metadata["refresh_token"]; hasRefreshToken {
-							delete(auth.Metadata, "access_token")
+						if auth.Metadata != nil {
+							if _, hasRefreshToken := auth.Metadata["refresh_token"]; hasRefreshToken {
+								delete(auth.Metadata, "access_token")
+							}
 						}
 					}
 					if isModelSupportResultError(result.Error) {
@@ -2856,8 +2858,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	// to token validity. Also skip for long quota exhaustion (> 30s)
 	// where the token is valid but the account quota is exhausted.
 	if statusCode != 0 && statusCode != 404 && !isLongQuotaExhaustionFromError(resultErr, retryAfter) {
-		if _, hasRefreshToken := auth.Metadata["refresh_token"]; hasRefreshToken {
-			delete(auth.Metadata, "access_token")
+		if auth.Metadata != nil {
+			if _, hasRefreshToken := auth.Metadata["refresh_token"]; hasRefreshToken {
+				delete(auth.Metadata, "access_token")
+			}
 		}
 	}
 	switch statusCode {
@@ -4534,19 +4538,12 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return nil
 	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		err := p.PrepareRequest(req, a)
+		authClone := a.Clone()
+		err := p.PrepareRequest(req, authClone)
 		if err != nil {
 			return err
 		}
-		// Persist the refreshed auth state back into the manager's map
-		// so that in-place credential refreshes performed by executors
-		// (e.g., OAuth token rotation inside PrepareRequest/ensureAccessToken)
-		// are retained and not discarded on the clone.
-		m.mu.Lock()
-		if existing, ok := m.auths[authID]; ok && existing != nil {
-			m.auths[authID] = a
-		}
-		m.mu.Unlock()
+		m.syncRefreshedAuth(authClone)
 		return nil
 	}
 	return nil
@@ -4591,7 +4588,12 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	}
 	m.mu.RUnlock()
 
-	return preparer.PrepareRequest(req, auth.Clone())
+	authClone := auth.Clone()
+	err := preparer.PrepareRequest(req, authClone)
+	if err == nil {
+		m.syncRefreshedAuth(authClone)
+	}
+	return err
 }
 
 // NewHttpRequest constructs a new HTTP request and injects provider credentials into it.

@@ -41,8 +41,13 @@ type releaseInfo struct {
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	if h != nil && h.cfg != nil {
-		util.SetProxy(&h.cfg.SDKConfig, client)
+	if h != nil {
+		h.mu.RLock()
+		cfg := h.cfg
+		h.mu.RUnlock()
+		if cfg != nil {
+			util.SetProxy(&cfg.SDKConfig, client)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)

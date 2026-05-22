@@ -662,11 +662,16 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	}
 	clone := transport.Clone()
 	clone.Proxy = nil
-	if h != nil && h.cfg != nil && h.cfg.TLSSkipVerify {
-		if clone.TLSClientConfig == nil {
-			clone.TLSClientConfig = &tls.Config{}
+	if h != nil {
+		h.mu.RLock()
+		skipVerify := h.cfg != nil && h.cfg.TLSSkipVerify
+		h.mu.RUnlock()
+		if skipVerify {
+			if clone.TLSClientConfig == nil {
+				clone.TLSClientConfig = &tls.Config{}
+			}
+			clone.TLSClientConfig.InsecureSkipVerify = true
 		}
-		clone.TLSClientConfig.InsecureSkipVerify = true
 	}
 	return clone
 }
@@ -793,8 +798,12 @@ func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, 
 
 func (h *Handler) buildProxyTransport(proxyStr string) *http.Transport {
 	skipVerify := false
-	if h != nil && h.cfg != nil {
-		skipVerify = h.cfg.TLSSkipVerify
+	if h != nil {
+		h.mu.RLock()
+		if h.cfg != nil {
+			skipVerify = h.cfg.TLSSkipVerify
+		}
+		h.mu.RUnlock()
 	}
 	transport, errBuild := proxyutil.BuildTransport(proxyStr, skipVerify)
 	if errBuild != nil {
