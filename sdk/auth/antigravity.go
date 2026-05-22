@@ -177,11 +177,14 @@ waitForCallback:
 	if accessToken != "" {
 		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 		if errProject != nil {
-			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
+			return nil, fmt.Errorf("antigravity: failed to fetch project ID: %w", errProject)
 		} else {
 			projectID = fetchedProjectID
-			log.Infof("antigravity: obtained project ID %s", projectID)
+			log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
 		}
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
 	}
 
 	now := time.Now()
@@ -208,7 +211,7 @@ waitForCallback:
 
 	fmt.Println("Antigravity authentication successful")
 	if projectID != "" {
-		fmt.Printf("Using GCP project: %s\n", projectID)
+		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
 	return &coreauth.Auth{
 		ID:       fileName,
