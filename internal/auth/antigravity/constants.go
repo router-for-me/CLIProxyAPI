@@ -10,6 +10,7 @@ const (
 
 // Scopes defines the OAuth scopes required for Antigravity authentication
 var Scopes = []string{
+	"openid",
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
 	"https://www.googleapis.com/auth/userinfo.profile",
@@ -26,7 +27,12 @@ const (
 
 // Antigravity API configuration
 const (
-	APIEndpoint      = "https://cloudcode-pa.googleapis.com"
-	DailyAPIEndpoint = "https://daily-cloudcode-pa.googleapis.com"
-	APIVersion       = "v1internal"
+	APIEndpoint             = "https://cloudcode-pa.googleapis.com"
+	DailyAPIEndpoint        = "https://daily-cloudcode-pa.googleapis.com"
+	DailySandboxAPIEndpoint = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	APIVersion              = "v1internal"
 )
+
+// TokenRefreshSkewSeconds is the window before expiry when a token should be refreshed.
+// Mirrors Rust: TOKEN_REFRESH_SKEW_SECONDS = 900
+const TokenRefreshSkewSeconds = 900

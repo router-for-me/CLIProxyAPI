@@ -209,6 +209,68 @@ func TestIsAuthBlockedForModel_ClaudeWithCreditsStillBlockedDuringCooldown(t *te
 	}
 }
 
+func TestIsAntigravityRelevantModel_AllowedPrefixes(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected bool
+	}{
+		{"gemini-2.5-pro", true},
+		{"gemini-3-flash", true},
+		{"claude-sonnet-4-6", true},
+		{"claude-opus-4-7", true},
+		{"gpt-5.5", true},
+		{"image-gen-3", true},
+		{"imagen-3", true},
+		{"mistral-large", false},
+		{"llama-4", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsAntigravityRelevantModel(tt.name); got != tt.expected {
+				t.Fatalf("IsAntigravityRelevantModel(%q) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSetAndGetAntigravityQuotaData(t *testing.T) {
+	authID := "test-auth-quota"
+	data := AntigravityQuotaData{
+		Models: []AntigravityModelQuota{
+			{Name: "gemini-2.5-pro", Percentage: 85, ResetTime: "2026-05-21T12:00:00Z"},
+			{Name: "claude-sonnet-4-6", Percentage: 50, ResetTime: "2026-05-21T12:00:00Z"},
+		},
+		LastUpdated: time.Now().Unix(),
+		IsForbidden: false,
+		ModelForwardingRules: map[string]string{
+			"old-model": "new-model",
+		},
+	}
+
+	SetAntigravityQuotaData(authID, data)
+	got, ok := GetAntigravityQuotaData(authID)
+	if !ok {
+		t.Fatal("GetAntigravityQuotaData returned false")
+	}
+	if len(got.Models) != 2 {
+		t.Fatalf("models = %d, want 2", len(got.Models))
+	}
+	if got.Models[0].Name != "gemini-2.5-pro" || got.Models[0].Percentage != 85 {
+		t.Fatalf("first model = %+v", got.Models[0])
+	}
+	if got.ModelForwardingRules["old-model"] != "new-model" {
+		t.Fatalf("forwarding rules = %v", got.ModelForwardingRules)
+	}
+}
+
+func TestGetAntigravityQuotaData_NotFound(t *testing.T) {
+	_, ok := GetAntigravityQuotaData("nonexistent")
+	if ok {
+		t.Fatal("expected false for nonexistent auth")
+	}
+}
+
 func TestIsAuthBlockedForModel_KeepsGeminiBlockedWithoutCreditsBypass(t *testing.T) {
 	auth := &Auth{
 		ID:       "ag-2",

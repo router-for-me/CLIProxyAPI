@@ -88,3 +88,74 @@ func antigravityCreditsAvailableForModel(auth *Auth, model string) bool {
 	}
 	return hint.Available
 }
+
+// AntigravityModelQuota holds per-model quota details from the fetchAvailableModels API.
+// Mirrors Rust: models::quota::ModelQuota
+type AntigravityModelQuota struct {
+	Name               string
+	Percentage         int    // 0-100, derived from remainingFraction * 100
+	ResetTime          string // ISO8601
+	DisplayName        string
+	SupportsImages     bool
+	SupportsThinking   bool
+	ThinkingBudget     int
+	Recommended        bool
+	MaxTokens          int
+	MaxOutputTokens    int
+	SupportedMimeTypes map[string]bool
+}
+
+// AntigravityQuotaData holds the full quota snapshot from fetchAvailableModels.
+// Mirrors Rust: models::quota::QuotaData
+type AntigravityQuotaData struct {
+	Models               []AntigravityModelQuota
+	LastUpdated          int64
+	IsForbidden          bool
+	ForbiddenReason      string
+	SubscriptionTier     string
+	ModelForwardingRules map[string]string // old_model_id -> new_model_id
+}
+
+var antigravityQuotaDataByAuth sync.Map
+
+// SetAntigravityQuotaData stores the latest quota snapshot for an auth.
+func SetAntigravityQuotaData(authID string, data AntigravityQuotaData) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	antigravityQuotaDataByAuth.Store(authID, data)
+}
+
+// GetAntigravityQuotaData returns the latest quota snapshot for an auth.
+func GetAntigravityQuotaData(authID string) (AntigravityQuotaData, bool) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return AntigravityQuotaData{}, false
+	}
+	value, ok := antigravityQuotaDataByAuth.Load(authID)
+	if !ok {
+		return AntigravityQuotaData{}, false
+	}
+	data, ok := value.(AntigravityQuotaData)
+	if !ok {
+		antigravityQuotaDataByAuth.Delete(authID)
+		return AntigravityQuotaData{}, false
+	}
+	return data, true
+}
+
+// antigravityAllowedModelPrefixes defines which model names are relevant.
+// Mirrors Rust filter in quota.rs: only models starting with these prefixes are recorded.
+var antigravityAllowedModelPrefixes = []string{"gemini", "claude", "gpt", "image", "imagen"}
+
+// IsAntigravityRelevantModel reports whether a model name should be tracked.
+func IsAntigravityRelevantModel(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, prefix := range antigravityAllowedModelPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}

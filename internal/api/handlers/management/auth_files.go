@@ -2074,15 +2074,16 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 
-		projectID := ""
-		if accessToken != "" {
-			fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
-			if errProject != nil {
-				log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
-			} else {
-				projectID = fetchedProjectID
-				log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
-			}
+		projectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
+		if errProject != nil {
+			log.Warnf("antigravity: failed to fetch project ID (non-fatal): %v", errProject)
+		}
+		projectID = strings.TrimSpace(projectID)
+		if projectID != "" {
+			log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
+		} else {
+			projectID = "bamboo-precept-lgxtn"
+			log.Warn("antigravity: using hardcoded fallback project_id (matching Rust token_manager.rs)")
 		}
 
 		now := time.Now()
@@ -2093,12 +2094,8 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			"expires_in":    tokenResp.ExpiresIn,
 			"timestamp":     now.UnixMilli(),
 			"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-		}
-		if email != "" {
-			metadata["email"] = email
-		}
-		if projectID != "" {
-			metadata["project_id"] = projectID
+			"email":         email,
+			"project_id":    projectID,
 		}
 
 		fileName := antigravity.CredentialFileName(email)

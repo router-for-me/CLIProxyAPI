@@ -177,14 +177,17 @@ waitForCallback:
 	if accessToken != "" {
 		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 		if errProject != nil {
-			return nil, fmt.Errorf("antigravity: failed to fetch project ID: %w", errProject)
-		} else {
+			log.Warnf("antigravity: failed to fetch project ID (non-fatal): %v", errProject)
+		}
+		fetchedProjectID = strings.TrimSpace(fetchedProjectID)
+		if fetchedProjectID != "" {
 			projectID = fetchedProjectID
 			log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
 		}
 	}
 	if strings.TrimSpace(projectID) == "" {
-		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
+		projectID = "bamboo-precept-lgxtn"
+		log.Warn("antigravity: using hardcoded fallback project_id (matching Rust token_manager.rs)")
 	}
 
 	now := time.Now()
@@ -232,10 +235,15 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	if port <= 0 {
 		port = antigravity.CallbackPort
 	}
+
+	// Try requested port first; fall back to ephemeral if unavailable.
 	addr := fmt.Sprintf(":%d", port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, 0, nil, err
+		listener, err = net.Listen("tcp", ":0")
+		if err != nil {
+			return nil, 0, nil, err
+		}
 	}
 	port = listener.Addr().(*net.TCPAddr).Port
 	resultCh := make(chan callbackResult, 1)
@@ -248,11 +256,17 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 			Error: strings.TrimSpace(q.Get("error")),
 			State: strings.TrimSpace(q.Get("state")),
 		}
-		resultCh <- res
+		select {
+		case resultCh <- res:
+		default:
+		}
 		if res.Code != "" && res.Error == "" {
-			_, _ = w.Write([]byte("<h1>Login successful</h1><p>You can close this window.</p>"))
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Antigravity</title></head><body style="background:#1e1e1e;color:#4ec94e;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h1>Authorization Successful!</h1><p>You may close this window.</p></div><script>setTimeout(function(){window.close()},2000)</script></body></html>`))
 		} else {
-			_, _ = w.Write([]byte("<h1>Login failed</h1><p>Please check the CLI output.</p>"))
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Antigravity</title></head><body style="background:#1e1e1e;color:#e04848;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h1>Authorization Failed</h1><p>Please check the CLI output and try again.</p></div></body></html>`))
 		}
 	})
 
@@ -262,6 +276,17 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 			log.Warnf("antigravity callback server error: %v", errServe)
 		}
 	}()
+
+	// Wait for the server to be ready before returning (eliminates race condition).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, errDial := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 100*time.Millisecond)
+		if errDial == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	return srv, port, resultCh, nil
 }

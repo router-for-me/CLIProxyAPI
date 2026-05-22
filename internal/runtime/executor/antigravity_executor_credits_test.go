@@ -400,14 +400,23 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 		},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		switch {
+		case req.URL.String() == "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
+			}, nil
+		case strings.Contains(req.URL.String(), "fetchAvailableModels"):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"models":{},"deprecatedModelIds":{}}`)),
+			}, nil
+		default:
 			t.Fatalf("unexpected request url %s", req.URL.String())
+			return nil, nil
 		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
-		}, nil
 	}))
 
 	token, updatedAuth, err := exec.ensureAccessToken(ctx, auth)
@@ -451,25 +460,34 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 		Attributes: map[string]string{"user_agent": configuredUserAgent},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		switch {
+		case req.URL.String() == "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist":
+			if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {
+				t.Fatalf("User-Agent = %q, want %q", got, loadCodeAssistUserAgent)
+			}
+			if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
+				t.Fatalf("X-Goog-Api-Client = %q, want empty", got)
+			}
+			body, _ := io.ReadAll(req.Body)
+			_ = req.Body.Close()
+			if string(body) != `{"metadata":{"ideType":"ANTIGRAVITY"}}` {
+				t.Fatalf("loadCodeAssist body = %s", string(body))
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
+			}, nil
+		case strings.Contains(req.URL.String(), "fetchAvailableModels"):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"models":{},"deprecatedModelIds":{}}`)),
+			}, nil
+		default:
 			t.Fatalf("unexpected request url %s", req.URL.String())
+			return nil, nil
 		}
-		if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {
-			t.Fatalf("User-Agent = %q, want %q", got, loadCodeAssistUserAgent)
-		}
-		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
-			t.Fatalf("X-Goog-Api-Client = %q, want empty", got)
-		}
-		body, _ := io.ReadAll(req.Body)
-		_ = req.Body.Close()
-		if string(body) != `{"metadata":{"ideType":"ANTIGRAVITY"}}` {
-			t.Fatalf("loadCodeAssist body = %s", string(body))
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
-		}, nil
 	}))
 
 	exec.updateAntigravityCreditsBalance(ctx, auth, "token")
