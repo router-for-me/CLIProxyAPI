@@ -342,12 +342,12 @@ func TestEstimateKiroCacheUsage_BranchA_Sonnet(t *testing.T) {
 }
 
 func TestEstimateKiroCacheUsage_BranchA_Opus(t *testing.T) {
-	// Opus 4.x MSRP: in=5, out=25, cw=6.25, cr=0.50; opus $/credit = 0.225.
+	// Opus 4.x MSRP: in=5, out=25, cw=6.25, cr=0.50; opus $/credit = 0.135.
 	// uncached=100, output=200, total=10300 → cached_total=10000
 	// known_USD = (100×5 + 200×25)/1M = 0.0055
-	// target_USD = 0.20 × 0.225 = 0.045 → remaining = 0.0395 → cache_value = 39500
-	// CW = (39500 - 0.50×10000) / (6.25 - 0.50) = 34500 / 5.75 = 6000
-	// CR = 10000 - 6000 = 4000
+	// target_USD = 0.20 × 0.135 = 0.027 → remaining = 0.0215 → cache_value = 21500
+	// CW = (21500 - 0.50×10000) / (6.25 - 0.50) = 16500 / 5.75 ≈ 2870
+	// CR = 10000 - 2870 = 7130
 	detail, estCR, estCW := estimateKiroCacheUsage("claude-opus-4.5", usage.Detail{
 		InputTokens:  100,
 		OutputTokens: 200,
@@ -356,11 +356,11 @@ func TestEstimateKiroCacheUsage_BranchA_Opus(t *testing.T) {
 	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
-	if detail.CacheCreationInputTokens != 6000 {
-		t.Fatalf("CacheCreationInputTokens = %d, want 6000", detail.CacheCreationInputTokens)
+	if detail.CacheCreationInputTokens != 2870 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 2870", detail.CacheCreationInputTokens)
 	}
-	if detail.CacheReadInputTokens != 4000 {
-		t.Fatalf("CacheReadInputTokens = %d, want 4000", detail.CacheReadInputTokens)
+	if detail.CacheReadInputTokens != 7130 {
+		t.Fatalf("CacheReadInputTokens = %d, want 7130", detail.CacheReadInputTokens)
 	}
 }
 
@@ -697,8 +697,8 @@ func TestKiroCreditUSDForModel(t *testing.T) {
 		{"claude-sonnet-4.5", 0.135},
 		{"claude-sonnet-4.6", 0.135},
 		{"claude-haiku-4.5", 0.37},
-		{"claude-opus-4.5", 0.225},
-		{"claude-opus-4.6", 0.225},
+		{"claude-opus-4.5", 0.135},
+		{"claude-opus-4.6", 0.135},
 		{"unknown-model", 0.135}, // falls through to sonnet default
 	}
 	for _, tc := range cases {

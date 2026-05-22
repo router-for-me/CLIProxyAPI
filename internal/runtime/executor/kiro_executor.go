@@ -1812,14 +1812,14 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 //
 //	sonnet : 0.135  (10 sample rows, range 0.12-0.14)
 //	haiku  : 0.37   (4  sample rows, range 0.30-0.40)
-//	opus   : 0.225  (no live data; placeholder = sonnet × MSRP-ratio 5/3)
+//	opus   : 0.135  (aligned with sonnet)
 func kiroCreditUSDForModel(model string) float64 {
 	modelLower := strings.ToLower(model)
 	switch {
 	case strings.Contains(modelLower, "haiku"):
 		return 0.37
 	case strings.Contains(modelLower, "opus"):
-		return 0.225
+		return 0.135
 	default:
 		return 0.135
 	}
@@ -1883,13 +1883,13 @@ func kiroTokenPriceForModel(model string) kiroTokenPrice {
 //
 // Inputs:
 //   - detail.InputTokens    — semantics depend on hasUncached:
-//                             hasUncached=true  → uncached input only
-//                             hasUncached=false → flat "total input"
-//                                                  (uncached + CR + CW)
+//     hasUncached=true  → uncached input only
+//     hasUncached=false → flat "total input"
+//     (uncached + CR + CW)
 //   - detail.OutputTokens   — output tokens
 //   - detail.ReasoningTokens
 //   - detail.TotalTokens    — optional grand total of all token classes;
-//                             only meaningful when hasUncached=true.
+//     only meaningful when hasUncached=true.
 //   - credits               — accumulated upstream credit usage (0 if absent)
 //   - hasUncached           — see above
 //
