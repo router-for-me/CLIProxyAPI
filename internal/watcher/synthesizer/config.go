@@ -10,7 +10,7 @@ import (
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
-// It handles Gemini, Claude, Codex, OpenAI-compat, and Vertex-compat providers.
+// It handles Gemini, Claude, Codex, DeepSeek, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
@@ -31,6 +31,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
+	// DeepSeek Web tokens
+	out = append(out, s.synthesizeDeepSeekKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -201,6 +203,62 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeDeepSeekKeys creates Auth entries for DeepSeek Web tokens.
+func (s *ConfigSynthesizer) synthesizeDeepSeekKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.DeepSeekKey))
+	for i := range cfg.DeepSeekKey {
+		dk := cfg.DeepSeekKey[i]
+		key := strings.TrimSpace(dk.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(dk.Prefix)
+		base := strings.TrimSpace(dk.BaseURL)
+		proxyURL := strings.TrimSpace(dk.ProxyURL)
+		id, token := idGen.Next("deepseek:apikey", key, base)
+		attrs := map[string]string{
+			"source":  fmt.Sprintf("config:deepseek[%s]", token),
+			"api_key": key,
+		}
+		metadata := map[string]any{}
+		if dk.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
+		if dk.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(dk.Priority)
+		}
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if hash := diff.ComputeDeepSeekModelsHash(dk.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(dk.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "deepseek",
+			Label:      "deepseek-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, dk.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}

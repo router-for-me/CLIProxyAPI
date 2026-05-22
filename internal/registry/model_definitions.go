@@ -24,6 +24,7 @@ type staticModelsJSON struct {
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
+	DeepSeek    []*ModelInfo `json:"deepseek"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
@@ -56,7 +57,7 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexFree))
+	return removeModelInfos(WithCodexBuiltins(cloneModelInfos(getModels().CodexFree)), "gpt-5.5")
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
@@ -72,6 +73,11 @@ func GetCodexPlusModels() []*ModelInfo {
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
+}
+
+// GetDeepSeekModels returns the standard DeepSeek Web model definitions.
+func GetDeepSeekModels() []*ModelInfo {
+	return WithDeepSeekBuiltins(cloneModelInfos(getModels().DeepSeek))
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -102,6 +108,18 @@ func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo())
 }
 
+// WithDeepSeekBuiltins injects DeepSeek Web model definitions independent of models.json updates.
+func WithDeepSeekBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models,
+		deepSeekBuiltinModelInfo("deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek Web default model with thinking enabled."),
+		deepSeekBuiltinModelInfo("deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek Web expert model with thinking enabled."),
+		deepSeekBuiltinModelInfo("deepseek-v4-flash-search", "DeepSeek V4 Flash Search", "DeepSeek Web default model with native web search."),
+		deepSeekBuiltinModelInfo("deepseek-v4-pro-search", "DeepSeek V4 Pro Search", "DeepSeek Web expert model with native web search."),
+		deepSeekBuiltinModelInfo("deepseek-v4-flash-nothinking", "DeepSeek V4 Flash No Thinking", "DeepSeek Web default model with thinking disabled."),
+		deepSeekBuiltinModelInfo("deepseek-v4-pro-nothinking", "DeepSeek V4 Pro No Thinking", "DeepSeek Web expert model with thinking disabled."),
+	)
+}
+
 func codexBuiltinImageModelInfo() *ModelInfo {
 	return &ModelInfo{
 		ID:          codexBuiltinImageModelID,
@@ -111,6 +129,20 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func deepSeekBuiltinModelInfo(id, displayName, description string) *ModelInfo {
+	return &ModelInfo{
+		ID:          id,
+		Object:      "model",
+		Created:     1767225600, // 2026-01-01
+		OwnedBy:     "deepseek",
+		Type:        "deepseek",
+		DisplayName: displayName,
+		Name:        id,
+		Description: description,
+		Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 	}
 }
 
@@ -199,6 +231,33 @@ func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 	return filtered
 }
 
+func removeModelInfos(models []*ModelInfo, ids ...string) []*ModelInfo {
+	if len(models) == 0 || len(ids) == 0 {
+		return models
+	}
+	remove := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id != "" {
+			remove[id] = struct{}{}
+		}
+	}
+	if len(remove) == 0 {
+		return models
+	}
+	out := models[:0]
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if _, exists := remove[strings.ToLower(strings.TrimSpace(model.ID))]; exists {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -221,6 +280,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - gemini-cli
 //   - aistudio
 //   - codex
+//   - deepseek
 //   - kimi
 //   - antigravity
 //   - xai
@@ -239,6 +299,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
+	case "deepseek":
+		return GetDeepSeekModels()
 	case "kimi":
 		return GetKimiModels()
 	case "antigravity":
@@ -265,6 +327,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
+		GetDeepSeekModels(),
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
