@@ -118,7 +118,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 			switch itemType {
 			case "message":
-				if strings.EqualFold(itemRole, "system") {
+				if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := []byte(`{"parts":[]}`)
 						if systemInstructionResult := gjson.GetBytes(out, "systemInstruction"); systemInstructionResult.Exists() {
@@ -299,7 +299,6 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionCall := []byte(`{"functionCall":{"name":"","args":{}}}`)
 				functionCall, _ = sjson.SetBytes(functionCall, "functionCall.name", name)
 				functionCall, _ = sjson.SetBytes(functionCall, "thoughtSignature", geminiResponsesThoughtSignature)
-				functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", item.Get("call_id").String())
 
 				// Parse arguments JSON string and set as args object
 				if arguments != "" {
@@ -337,7 +336,6 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionName = util.SanitizeFunctionName(functionName)
 
 				functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.name", functionName)
-				functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.id", callID)
 
 				// Set the raw JSON output directly (preserves string encoding)
 				if outputRaw != "" && outputRaw != "null" {
