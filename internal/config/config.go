@@ -1039,6 +1039,8 @@ func deepCopyOpenAICompat(src []OpenAICompatibility) []OpenAICompatibility {
 	out := make([]OpenAICompatibility, len(src))
 	for i, k := range src {
 		k.Headers = copyStringMap(k.Headers)
+		// Deep copy APIKeyEntries: each entry is a struct, slice needs copy if containing pointers or ref types.
+		// OpenAICompatibilityAPIKey is a struct with string fields, so shallow slice copy is fine if struct is value.
 		k.APIKeyEntries = append([]OpenAICompatibilityAPIKey(nil), k.APIKeyEntries...)
 		if k.Models != nil {
 			models := make([]OpenAICompatibilityModel, len(k.Models))
