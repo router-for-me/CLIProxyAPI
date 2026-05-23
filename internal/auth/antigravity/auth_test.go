@@ -43,7 +43,7 @@ func TestFetchProjectIDFallsBackToDailyOnboardUser(t *testing.T) {
 		case "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser":
 			sawOnboard = true
 			assertOnboardUserHeaders(t, req)
-			assertJSONContains(t, req, `"tier_id":"free-tier (Restricted)"`)
+			assertJSONContains(t, req, `"tier_id":"free-tier"`)
 			assertJSONContains(t, req, `"ide_type":"ANTIGRAVITY"`)
 			return jsonResponse(`{
 				"done": true,
@@ -78,8 +78,8 @@ func assertLoadCodeAssistHeaders(t *testing.T, req *http.Request) {
 	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
 		t.Fatalf("Authorization = %q", got)
 	}
-	if got := req.Header.Get("Accept"); got != "*/*" {
-		t.Fatalf("Accept = %q", got)
+	if got := req.Header.Get("Accept"); got != "" {
+		t.Fatalf("Accept = %q, want empty", got)
 	}
 	if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
 		t.Fatalf("X-Goog-Api-Client = %q, want empty", got)
@@ -94,8 +94,8 @@ func assertOnboardUserHeaders(t *testing.T, req *http.Request) {
 	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
 		t.Fatalf("Authorization = %q", got)
 	}
-	if got := req.Header.Get("Accept"); got != "*/*" {
-		t.Fatalf("Accept = %q", got)
+	if got := req.Header.Get("Accept"); got != "" {
+		t.Fatalf("Accept = %q, want empty", got)
 	}
 	if got := req.Header.Get("X-Goog-Api-Client"); got != "gl-node/22.21.1" {
 		t.Fatalf("X-Goog-Api-Client = %q", got)
@@ -213,8 +213,8 @@ func TestResolveSubscriptionTier_CurrentTierSkippedWhenIneligible(t *testing.T) 
 		},
 	}
 	tier := resolveSubscriptionTier(resp)
-	if tier != "Free Tier (Restricted)" {
-		t.Fatalf("tier = %q, want Free Tier (Restricted)", tier)
+	if tier != "Free Tier" {
+		t.Fatalf("tier = %q, want Free Tier", tier)
 	}
 }
 

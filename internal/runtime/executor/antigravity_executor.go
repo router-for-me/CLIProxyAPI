@@ -1,4 +1,4 @@
-﻿// Package executor provides runtime execution capabilities for various AI service providers.
+// Package executor provides runtime execution capabilities for various AI service providers.
 // This file implements the Antigravity executor that proxies requests to the antigravity
 // upstream using OAuth credentials.
 package executor
@@ -88,8 +88,8 @@ var (
 	randSourceMutex                   sync.Mutex
 	antigravityCreditsFailureByAuth   sync.Map
 	antigravityShortCooldownByAuth    sync.Map
-	antigravityCreditsBalanceByAuth   sync.Map // auth.ID â†’ antigravityCreditsBalance
-	antigravityCreditsHintRefreshByID sync.Map // auth.ID â†’ *antigravityCreditsHintRefreshState
+	antigravityCreditsBalanceByAuth   sync.Map // auth.ID ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ antigravityCreditsBalance
+	antigravityCreditsHintRefreshByID sync.Map // auth.ID ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ *antigravityCreditsHintRefreshState
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
 		"quota exhausted",
@@ -1822,9 +1822,9 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 		return projectID, nil
 	}
 	// Hardcoded fallback matching Rust token_manager.rs:
-	//   .unwrap_or_else(|_| "bamboo-precept-lgxtn".to_string())
-	log.Warn("antigravity executor: using hardcoded fallback project_id")
-	return "bamboo-precept-lgxtn", nil
+	//   .unwrap_or_else(|_| antigravity.FallbackProjectID.to_string())
+	log.Warn("antigravity executor: using fallback project_id")
+	return antigravity.FallbackProjectID, nil
 }
 
 func (e *AntigravityExecutor) projectIDForRequest(_ context.Context, auth *cliproxyauth.Auth, _ string) (string, error) {
@@ -1853,8 +1853,8 @@ func missingAntigravityProjectIDError(cause error) statusErr {
 }
 
 // fetchAntigravityQuota calls fetchAvailableModels across a 3-tier fallback chain,
-// mirroring Rust's quota::fetch_quota. It handles 429/5xx â†’ next endpoint,
-// 403 â†’ retry without project ID, and parses the full QuotaResponse.
+// mirroring Rust's quota::fetch_quota. It handles 429/5xx ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ next endpoint,
+// 403 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ retry without project ID, and parses the full QuotaResponse.
 func (e *AntigravityExecutor) fetchAntigravityQuota(ctx context.Context, auth *cliproxyauth.Auth, accessToken, projectID string) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
@@ -1875,7 +1875,7 @@ func (e *AntigravityExecutor) fetchAntigravityQuota(ctx context.Context, auth *c
 		payload["project"] = pid
 	}
 
-	userAgent := fmt.Sprintf("vscode/1.X.X (Antigravity/%s)", misc.AntigravityLatestVersion())
+	userAgent := antigravity.OAuthUserAgent()
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	for _, endpoint := range quotaEndpoints {
@@ -1883,7 +1883,11 @@ func (e *AntigravityExecutor) fetchAntigravityQuota(ctx context.Context, auth *c
 		retriedWithoutProject := false
 
 		for {
-			body, _ := json.Marshal(currentPayload)
+			body, errMarshal := json.Marshal(currentPayload)
+            if errMarshal != nil {
+                log.Debugf("antigravity executor: fetchAvailableModels marshal error: %v", errMarshal)
+                break
+            }
 			req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 			if errReq != nil {
 				log.Debugf("antigravity executor: fetchAvailableModels create request error: %v", errReq)

@@ -1,4 +1,4 @@
-﻿// Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
+// Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
 import (
@@ -48,6 +48,13 @@ func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *Antigravit
 	// Order matters: SetProxy replaces the transport, so HTTP/1.1 must be
 	// enforced after. Matches the executor's newAntigravityHTTPClient.
 	client := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	forceHTTP1Transport(client)
+	return &AntigravityAuth{httpClient: client}
+}
+
+// forceHTTP1Transport configures the client's transport to use HTTP/1.1 only,
+// disabling HTTP/2. This is required for Google Cloud Code Companion API compatibility.
+func forceHTTP1Transport(client *http.Client) {
 	if client.Transport == nil {
 		base, ok := http.DefaultTransport.(*http.Transport)
 		if !ok {
@@ -69,7 +76,6 @@ func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *Antigravit
 		}
 		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	}
-	return &AntigravityAuth{httpClient: client}
 }
 
 func (o *AntigravityAuth) shortUserAgent() string {
@@ -83,6 +89,12 @@ func (o *AntigravityAuth) nodeUserAgent() string {
 // oauthUserAgent returns the User-Agent for OAuth HTTP calls (token exchange, refresh, userinfo).
 // Mirrors Rust: NATIVE_OAUTH_USER_AGENT = "vscode/1.X.X (Antigravity/<version>)"
 func (o *AntigravityAuth) oauthUserAgent() string {
+	return OAuthUserAgent()
+}
+
+// OAuthUserAgent returns the canonical OAuth User-Agent string.
+// Mirrors Rust: NATIVE_OAUTH_USER_AGENT = "vscode/1.X.X (Antigravity/<version>)"
+func OAuthUserAgent() string {
 	return fmt.Sprintf("vscode/1.X.X (Antigravity/%s)", misc.AntigravityLatestVersion())
 }
 
@@ -123,8 +135,9 @@ func extractCloudaicompanionProject(data map[string]any) string {
 
 // resolveSubscriptionTier extracts the subscription tier from a loadCodeAssist response.
 // Priority mirrors Rust: paid_tier -> current_tier (if not ineligible) -> default from allowed_tiers.
+// Returns a canonical tier ID suitable for use as tier_id in onboardUser requests.
 func resolveSubscriptionTier(loadResp map[string]any) string {
-	// 1. Paid Tier (Google One AI Premium etc.) â€” highest priority
+	// 1. Paid Tier (Google One AI Premium etc.) -- highest priority
 	if paidTier, ok := loadResp["paidTier"].(map[string]any); ok {
 		if name, ok := paidTier["name"].(string); ok && strings.TrimSpace(name) != "" {
 			return strings.TrimSpace(name)
@@ -134,7 +147,7 @@ func resolveSubscriptionTier(loadResp map[string]any) string {
 		}
 	}
 
-	// 2. Current Tier â€” only if not ineligible
+	// 2. Current Tier -- only if not ineligible
 	isIneligible := false
 	if ineligible, ok := loadResp["ineligibleTiers"].([]any); ok && len(ineligible) > 0 {
 		isIneligible = true
@@ -161,10 +174,10 @@ func resolveSubscriptionTier(loadResp map[string]any) string {
 				continue
 			}
 			if name, ok := tier["name"].(string); ok && strings.TrimSpace(name) != "" {
-				return strings.TrimSpace(name) + " (Restricted)"
+				return strings.TrimSpace(name)
 			}
 			if id, ok := tier["id"].(string); ok && strings.TrimSpace(id) != "" {
-				return strings.TrimSpace(id) + " (Restricted)"
+				return strings.TrimSpace(id)
 			}
 		}
 	}
@@ -235,7 +248,7 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 }
 
 // RefreshAccessToken refreshes an access token using a refresh token.
-// Mirrors Rust: refresh_access_token_once â€” POST to TokenEndpoint with refresh_token grant.
+// Mirrors Rust: refresh_access_token_once ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â POST to TokenEndpoint with refresh_token grant.
 func (o *AntigravityAuth) RefreshAccessToken(ctx context.Context, refreshToken string) (*TokenResponse, error) {
 	refreshToken = strings.TrimSpace(refreshToken)
 	if refreshToken == "" {

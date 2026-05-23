@@ -186,8 +186,8 @@ waitForCallback:
 		}
 	}
 	if strings.TrimSpace(projectID) == "" {
-		projectID = "bamboo-precept-lgxtn"
-		log.Warn("antigravity: using hardcoded fallback project_id (matching Rust token_manager.rs)")
+		projectID = antigravity.FallbackProjectID
+		log.Warn("antigravity: using fallback project_id")
 	}
 
 	now := time.Now()
