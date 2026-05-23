@@ -3,6 +3,7 @@
 package chat_completions
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -384,6 +385,20 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						fnRaw = string(fnRawBytes)
 					}
+
+					if params := gjson.Get(fnRaw, "parametersJsonSchema"); params.Exists() {
+						sanitized, errSanitize := sanitizeAntigravityJSONSchema([]byte(params.Raw))
+						if errSanitize != nil {
+							log.Warnf("Failed to sanitize schema for tool '%s': %v", fn.Get("name").String(), errSanitize)
+						} else {
+							updated, errSet := sjson.SetRawBytes([]byte(fnRaw), "parametersJsonSchema", sanitized)
+							if errSet != nil {
+								log.Warnf("Failed to set sanitized schema for tool '%s': %v", fn.Get("name").String(), errSet)
+							} else {
+								fnRaw = string(updated)
+							}
+						}
+					}
 					fnRawBytes := []byte(fnRaw)
 					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.SanitizeFunctionName(fn.Get("name").String()))
 					fnRaw, _ = sjson.Delete(string(fnRawBytes), "strict")
@@ -449,6 +464,81 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
+}
+
+// sanitizeAntigravityJSONSchema converts boolean subschemas into object
+// schemas accepted by Google's function declaration schema representation.
+func sanitizeAntigravityJSONSchema(raw []byte) ([]byte, error) {
+	var schema any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(sanitizeAntigravitySchemaNode(schema))
+}
+
+func sanitizeAntigravitySchemaNode(schema any) any {
+	switch node := schema.(type) {
+	case bool:
+		return map[string]any{}
+
+	case map[string]any:
+		for _, keyword := range []string{
+			"additionalProperties",
+			"contains",
+			"contentSchema",
+			"else",
+			"if",
+			"items",
+			"not",
+			"propertyNames",
+			"then",
+			"unevaluatedItems",
+			"unevaluatedProperties",
+		} {
+			if child, ok := node[keyword]; ok {
+				node[keyword] = sanitizeAntigravitySchemaNode(child)
+			}
+		}
+
+		for _, keyword := range []string{
+			"properties",
+			"patternProperties",
+			"dependentSchemas",
+			"$defs",
+			"definitions",
+		} {
+			children, ok := node[keyword].(map[string]any)
+			if !ok {
+				continue
+			}
+
+			for name, child := range children {
+				children[name] = sanitizeAntigravitySchemaNode(child)
+			}
+		}
+
+		for _, keyword := range []string{
+			"allOf",
+			"anyOf",
+			"oneOf",
+			"prefixItems",
+		} {
+			children, ok := node[keyword].([]any)
+			if !ok {
+				continue
+			}
+
+			for i, child := range children {
+				children[i] = sanitizeAntigravitySchemaNode(child)
+			}
+		}
+
+		return node
+
+	default:
+		return schema
+	}
 }
 
 // itoa converts int to string without strconv import for few usages.
