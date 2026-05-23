@@ -58,3 +58,4 @@ _bmad-output/*
 *.bak
 .codex
 .gocache/
+.firecrawl

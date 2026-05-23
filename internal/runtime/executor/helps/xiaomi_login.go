@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	xiaomiLoginTimeout       = 30 * time.Second
+	xiaomiLoginTimeout       = 60 * time.Second
 	xiaomiLoginPageURL       = "https://account.xiaomi.com/fe/service/login/password"
 	xiaomiServiceLoginURL    = "https://account.xiaomi.com/pass/serviceLoginAuth2"
 	xiaomiPlatformBalanceURL = "https://platform.xiaomimimo.com/console/balance"
@@ -184,7 +184,7 @@ func performBrowserLogin(cfg *config.Config) error {
 		case "need_verification":
 			return &BrowserVerificationRequired{
 				SessionID: goSessionID,
-					Email:     cfg.XiaomiPlatform.Email,
+				Email:     cfg.XiaomiPlatform.Email,
 				Message:   "需要输入邮箱验证码完成登录",
 			}
 		case "cookies":
@@ -215,7 +215,7 @@ func performBrowserLoginWithEmail(email, password string) error {
 			log.Infof("xiaomi: 邮箱 %s 已有进行中的浏览器登录 session=%s，复用", email, sessID)
 			return &BrowserVerificationRequired{
 				SessionID: sessID,
-					Email:     email,
+				Email:     email,
 				Message:   "需要输入邮箱验证码完成登录",
 			}
 		}
@@ -237,7 +237,7 @@ func performBrowserLoginWithEmail(email, password string) error {
 			// 而非 Python 侧的 UUID，确保 SubmitVerificationCode 能找到 session。
 			return &BrowserVerificationRequired{
 				SessionID: goSessionID,
-					Email:     email,
+				Email:     email,
 				Message:   "需要输入邮箱验证码完成登录",
 			}
 		case "cookies":

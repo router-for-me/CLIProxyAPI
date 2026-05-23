@@ -48,7 +48,7 @@ func (c XiaomiCredentials) HasAny() bool {
 
 const (
 	xiaomiBalanceRefreshInterval = 10 * time.Minute
-	xiaomiBalanceFetchTimeout    = 30 * time.Second
+	xiaomiBalanceFetchTimeout    = 60 * time.Second
 	xiaomiTokenPlanUsageURL      = "https://platform.xiaomimimo.com/api/v1/tokenPlan/usage"
 )
 
