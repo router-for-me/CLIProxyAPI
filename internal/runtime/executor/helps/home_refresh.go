@@ -87,6 +87,40 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 	}
 	updated.Index = authIndex
 	updated.EnsureIndex()
+
+	// Preserve fields from the original auth that are not returned by home control plane.
+	// Attributes contains priority, source, path, and other runtime config.
+	if updated.Attributes == nil && auth.Attributes != nil {
+		updated.Attributes = make(map[string]string, len(auth.Attributes))
+		for k, v := range auth.Attributes {
+			updated.Attributes[k] = v
+		}
+	} else if auth.Attributes != nil {
+		for k, v := range auth.Attributes {
+			if _, exists := updated.Attributes[k]; !exists {
+				updated.Attributes[k] = v
+			}
+		}
+	}
+	// Preserve provider, proxy, label, and disabled state if not set by home.
+	if updated.Provider == "" {
+		updated.Provider = auth.Provider
+	}
+	if updated.ProxyURL == "" {
+		updated.ProxyURL = auth.ProxyURL
+	}
+	if updated.Label == "" {
+		updated.Label = auth.Label
+	}
+	if !updated.Disabled && updated.Status != cliproxyauth.StatusDisabled {
+		updated.Disabled = auth.Disabled
+		updated.Status = auth.Status
+	}
+	// Preserve ID to ensure Update() matches the existing entry.
+	if updated.ID == "" {
+		updated.ID = auth.ID
+	}
+
 	return &updated, true, nil
 }
 
