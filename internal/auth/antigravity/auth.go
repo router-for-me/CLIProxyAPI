@@ -248,7 +248,7 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 }
 
 // RefreshAccessToken refreshes an access token using a refresh token.
-// Mirrors Rust: refresh_access_token_once ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â POST to TokenEndpoint with refresh_token grant.
+// Mirrors Rust: refresh_access_token_once — POST to TokenEndpoint with refresh_token grant.
 func (o *AntigravityAuth) RefreshAccessToken(ctx context.Context, refreshToken string) (*TokenResponse, error) {
 	refreshToken = strings.TrimSpace(refreshToken)
 	if refreshToken == "" {

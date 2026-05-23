@@ -88,8 +88,8 @@ var (
 	randSourceMutex                   sync.Mutex
 	antigravityCreditsFailureByAuth   sync.Map
 	antigravityShortCooldownByAuth    sync.Map
-	antigravityCreditsBalanceByAuth   sync.Map // auth.ID ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ antigravityCreditsBalance
-	antigravityCreditsHintRefreshByID sync.Map // auth.ID ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ *antigravityCreditsHintRefreshState
+	antigravityCreditsBalanceByAuth   sync.Map // auth.ID → antigravityCreditsBalance
+	antigravityCreditsHintRefreshByID sync.Map // auth.ID → *antigravityCreditsHintRefreshState
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
 		"quota exhausted",
@@ -1853,8 +1853,8 @@ func missingAntigravityProjectIDError(cause error) statusErr {
 }
 
 // fetchAntigravityQuota calls fetchAvailableModels across a 3-tier fallback chain,
-// mirroring Rust's quota::fetch_quota. It handles 429/5xx ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ next endpoint,
-// 403 ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ retry without project ID, and parses the full QuotaResponse.
+// mirroring Rust's quota::fetch_quota. It handles 429/5xx → next endpoint,
+// 403 → retry without project ID, and parses the full QuotaResponse.
 func (e *AntigravityExecutor) fetchAntigravityQuota(ctx context.Context, auth *cliproxyauth.Auth, accessToken, projectID string) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
