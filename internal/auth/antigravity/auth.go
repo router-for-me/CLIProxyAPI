@@ -143,6 +143,9 @@ func resolveSubscriptionTier(loadResp map[string]any) string {
 			return strings.TrimSpace(id)
 		}
 		if name, ok := paidTier["name"].(string); ok && strings.TrimSpace(name) != "" {
+			if id := lookupTierIDByName(loadResp, name); id != "" {
+				return id
+			}
 			return strings.TrimSpace(name)
 		}
 	}
@@ -158,6 +161,9 @@ func resolveSubscriptionTier(loadResp map[string]any) string {
 				return strings.TrimSpace(id)
 			}
 			if name, ok := currentTier["name"].(string); ok && strings.TrimSpace(name) != "" {
+				if id := lookupTierIDByName(loadResp, name); id != "" {
+					return id
+				}
 				return strings.TrimSpace(name)
 			}
 		}
@@ -183,6 +189,34 @@ func resolveSubscriptionTier(loadResp map[string]any) string {
 	}
 
 	return "free-tier"
+}
+
+// lookupTierIDByName searches allowedTiers for a tier whose id or name matches
+// the given label (case-insensitive) and returns its machine id.
+func lookupTierIDByName(loadResp map[string]any, label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	tiers, ok := loadResp["allowedTiers"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, rawTier := range tiers {
+		tier, okTier := rawTier.(map[string]any)
+		if !okTier {
+			continue
+		}
+		if id, okID := tier["id"].(string); okID && strings.EqualFold(strings.TrimSpace(id), label) {
+			return strings.TrimSpace(id)
+		}
+		if tierName, okName := tier["name"].(string); okName && strings.EqualFold(strings.TrimSpace(tierName), label) {
+			if id, okID := tier["id"].(string); okID && strings.TrimSpace(id) != "" {
+				return strings.TrimSpace(id)
+			}
+		}
+	}
+	return ""
 }
 
 // BuildAuthURL generates the OAuth authorization URL.

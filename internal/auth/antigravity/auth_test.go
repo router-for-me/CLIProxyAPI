@@ -195,8 +195,8 @@ func TestResolveSubscriptionTier_CurrentTierWhenNotIneligible(t *testing.T) {
 		},
 	}
 	tier := resolveSubscriptionTier(resp)
-	if tier != "Pro" {
-		t.Fatalf("tier = %q, want Pro", tier)
+	if tier != "pro" {
+		t.Fatalf("tier = %q, want pro", tier)
 	}
 }
 
