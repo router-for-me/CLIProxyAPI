@@ -112,6 +112,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	originalTranslated = helps.PreserveDeepSeekReasoningContent(baseModel, originalTranslated, originalPayload)
+	translated = helps.PreserveDeepSeekReasoningContent(baseModel, translated, req.Payload)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -307,6 +309,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated = helps.PreserveDeepSeekReasoningContent(baseModel, originalTranslated, originalPayload)
+	translated = helps.PreserveDeepSeekReasoningContent(baseModel, translated, req.Payload)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -570,6 +574,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translated = helps.PreserveDeepSeekReasoningContent(baseModel, translated, req.Payload)
 
 	modelForCounting := baseModel
 
