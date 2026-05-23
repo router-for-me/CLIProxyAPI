@@ -493,6 +493,52 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	exec.updateAntigravityCreditsBalance(ctx, auth, "token")
 }
 
+func TestUpdateAntigravityCreditsBalance_FallsBackToNextEndpoint(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	var sawDaily, sawProd bool
+	auth := &cliproxyauth.Auth{
+		ID: "auth-load-code-assist-fallback",
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.String() == "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist":
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		case req.URL.String() == "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist":
+			sawDaily = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
+			}, nil
+		case strings.Contains(req.URL.String(), "fetchAvailableModels"):
+			sawProd = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"models":{},"deprecatedModelIds":{}}`)),
+			}, nil
+		default:
+			t.Fatalf("unexpected request url %s", req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+	if !sawDaily {
+		t.Fatal("expected fallback to daily endpoint after sandbox 403")
+	}
+	if !sawProd {
+		t.Fatal("expected quota fetch after loadCodeAssist success on daily")
+	}
+}
+
 func TestParseMetaFloat(t *testing.T) {
 	tests := []struct {
 		name    string

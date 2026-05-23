@@ -1884,10 +1884,10 @@ func (e *AntigravityExecutor) fetchAntigravityQuota(ctx context.Context, auth *c
 
 		for {
 			body, errMarshal := json.Marshal(currentPayload)
-            if errMarshal != nil {
-                log.Debugf("antigravity executor: fetchAvailableModels marshal error: %v", errMarshal)
-                break
-            }
+			if errMarshal != nil {
+				log.Debugf("antigravity executor: fetchAvailableModels marshal error: %v", errMarshal)
+				break
+			}
 			req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 			if errReq != nil {
 				log.Debugf("antigravity executor: fetchAvailableModels create request error: %v", errReq)
@@ -2042,32 +2042,38 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		log.Debugf("antigravity executor: marshal loadCodeAssist request error: %v", errMarshal)
 		return
 	}
-	baseURL := antigravityLoadCodeAssistBaseURL(auth)
-	endpointURL := strings.TrimSuffix(baseURL, "/") + "/v1internal:loadCodeAssist"
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
-	if errReq != nil {
-		log.Debugf("antigravity executor: create loadCodeAssist request error: %v", errReq)
-		return
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", userAgent)
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		log.Debugf("antigravity executor: loadCodeAssist request error: %v", errDo)
-		return
-	}
-	defer func() {
+	var bodyBytes []byte
+	for _, baseURL := range antigravityBaseURLFallbackOrder(auth) {
+		endpointURL := strings.TrimSuffix(baseURL, "/") + "/v1internal:loadCodeAssist"
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
+		if errReq != nil {
+			log.Debugf("antigravity executor: create loadCodeAssist request error: %v", errReq)
+			continue
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("User-Agent", userAgent)
+
+		httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			log.Debugf("antigravity executor: loadCodeAssist request error on %s: %v", baseURL, errDo)
+			continue
+		}
+
+		respBody, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close loadCodeAssist response body error: %v", errClose)
 		}
-	}()
-
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil || httpResp.StatusCode > 299 {
-		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
+		if errRead != nil || httpResp.StatusCode > 299 {
+			log.Debugf("antigravity executor: loadCodeAssist on %s returned status %d, err=%v", baseURL, httpResp.StatusCode, errRead)
+			continue
+		}
+		bodyBytes = respBody
+		break
+	}
+	if len(bodyBytes) == 0 {
 		return
 	}
 
@@ -2334,13 +2340,6 @@ func buildBaseURL(auth *cliproxyauth.Auth) string {
 		return baseURLs[0]
 	}
 	return antigravityBaseURLDaily
-}
-
-func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
-	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
-		return base
-	}
-	return antigravitySandboxBaseURLDaily
 }
 
 func resolveHost(base string) string {
