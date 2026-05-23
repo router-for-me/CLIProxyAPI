@@ -294,8 +294,21 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									}
 
 									nonImageCount++
-									lastNonImageRaw = fr.Raw
-									filteredJSON, _ = sjson.SetRawBytes(filteredJSON, "-1", []byte(fr.Raw))
+									itemRaw := fr.Raw
+									partTypeResult := fr.Get("type")
+									// Only trigger fallback if the child element is a JSON object and has a non-standard, non-empty type
+									if fr.IsObject() && partTypeResult.Exists() && partTypeResult.Type == gjson.String {
+										partType := partTypeResult.String()
+										if partType != "text" && partType != "image" && partType != "" {
+											// Fallback for unknown / private control types (e.g. tool_reference)
+											// Convert them to a safe plain text part to prevent upstream schema validation failure
+											textPart := []byte(`{"type":"text","text":""}`)
+											textPart, _ = sjson.SetBytes(textPart, "text", itemRaw)
+											itemRaw = string(textPart)
+										}
+									}
+									lastNonImageRaw = itemRaw
+									filteredJSON, _ = sjson.SetRawBytes(filteredJSON, "-1", []byte(itemRaw))
 								}
 
 								if nonImageCount == 1 {
@@ -330,7 +343,19 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "parts", imagePartsJSON)
 									functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "response.result", "")
 								} else {
-									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", []byte(functionResponseResult.Raw))
+									partTypeResult := functionResponseResult.Get("type")
+									// Only escape the object raw JSON string if it explicitly specifies a non-standard type
+									if partTypeResult.Exists() && partTypeResult.Type == gjson.String {
+										partType := partTypeResult.String()
+										if partType != "" && partType != "text" && partType != "image" {
+											// Fallback for unknown object types: write raw JSON as a safe string to prevent validation error
+											functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "response.result", functionResponseResult.Raw)
+										} else {
+											functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", []byte(functionResponseResult.Raw))
+										}
+									} else {
+										functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", []byte(functionResponseResult.Raw))
+									}
 								}
 							} else if functionResponseResult.Raw != "" {
 								functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", []byte(functionResponseResult.Raw))
