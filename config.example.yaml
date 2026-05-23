@@ -271,6 +271,16 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#
+#   - name: "deepseek" # Example DeepSeek OpenAI-compatible provider.
+#     base-url: "https://api.deepseek.com"
+#     api-key-entries:
+#       - api-key: "sk-..."
+#     models:
+#       - name: "deepseek-v4-pro"
+#         alias: "deepseek-v4-pro"
+#       - name: "deepseek-v4-flash"
+#         alias: "deepseek-v4-flash"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
