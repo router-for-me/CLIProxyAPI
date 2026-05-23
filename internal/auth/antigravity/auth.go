@@ -139,11 +139,11 @@ func extractCloudaicompanionProject(data map[string]any) string {
 func resolveSubscriptionTier(loadResp map[string]any) string {
 	// 1. Paid Tier (Google One AI Premium etc.) -- highest priority
 	if paidTier, ok := loadResp["paidTier"].(map[string]any); ok {
-		if name, ok := paidTier["name"].(string); ok && strings.TrimSpace(name) != "" {
-			return strings.TrimSpace(name)
-		}
 		if id, ok := paidTier["id"].(string); ok && strings.TrimSpace(id) != "" {
 			return strings.TrimSpace(id)
+		}
+		if name, ok := paidTier["name"].(string); ok && strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
 		}
 	}
 
@@ -154,11 +154,11 @@ func resolveSubscriptionTier(loadResp map[string]any) string {
 	}
 	if !isIneligible {
 		if currentTier, ok := loadResp["currentTier"].(map[string]any); ok {
-			if name, ok := currentTier["name"].(string); ok && strings.TrimSpace(name) != "" {
-				return strings.TrimSpace(name)
-			}
 			if id, ok := currentTier["id"].(string); ok && strings.TrimSpace(id) != "" {
 				return strings.TrimSpace(id)
+			}
+			if name, ok := currentTier["name"].(string); ok && strings.TrimSpace(name) != "" {
+				return strings.TrimSpace(name)
 			}
 		}
 	}
@@ -173,11 +173,11 @@ func resolveSubscriptionTier(loadResp map[string]any) string {
 			if isDefault, okDefault := tier["isDefault"].(bool); !okDefault || !isDefault {
 				continue
 			}
-			if name, ok := tier["name"].(string); ok && strings.TrimSpace(name) != "" {
-				return strings.TrimSpace(name)
-			}
 			if id, ok := tier["id"].(string); ok && strings.TrimSpace(id) != "" {
 				return strings.TrimSpace(id)
+			}
+			if name, ok := tier["name"].(string); ok && strings.TrimSpace(name) != "" {
+				return strings.TrimSpace(name)
 			}
 		}
 	}

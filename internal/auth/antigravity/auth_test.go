@@ -180,8 +180,8 @@ func TestResolveSubscriptionTier_PaidTierFirst(t *testing.T) {
 		},
 	}
 	tier := resolveSubscriptionTier(resp)
-	if tier != "Google One AI Premium" {
-		t.Fatalf("tier = %q, want Google One AI Premium", tier)
+	if tier != "paid-tier-id" {
+		t.Fatalf("tier = %q, want paid-tier-id", tier)
 	}
 }
 

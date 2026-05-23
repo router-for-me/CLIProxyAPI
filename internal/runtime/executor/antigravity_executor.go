@@ -1921,13 +1921,13 @@ func (e *AntigravityExecutor) fetchAntigravityQuota(ctx context.Context, auth *c
 						IsForbidden:     true,
 						ForbiddenReason: fmt.Sprintf("HTTP %d", resp.StatusCode),
 					})
-					return
+					break
 				}
 				if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 					break
 				}
 				log.Debugf("antigravity executor: fetchAvailableModels failed: status %d", resp.StatusCode)
-				return
+				break
 			}
 
 			var quotaResp struct {
@@ -2539,9 +2539,9 @@ var antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
 		return []string{base}
 	}
 	return []string{
-		antigravitySandboxBaseURLDaily,
 		antigravityBaseURLDaily,
 		antigravityBaseURLProd,
+		antigravitySandboxBaseURLDaily,
 	}
 }
 
