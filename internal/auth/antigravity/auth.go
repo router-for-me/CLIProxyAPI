@@ -439,6 +439,9 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 // OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	userAgent := o.nodeUserAgent()
 	requestBody := map[string]any{
 		"tier_id":  tierID,
@@ -460,12 +463,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		default:
 		}
 
-		reqCtx := ctx
-		var cancel context.CancelFunc
-		if reqCtx == nil {
-			reqCtx = context.Background()
-		}
-		reqCtx, cancel = context.WithTimeout(reqCtx, 30*time.Second)
+		reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 
 		endpointURL := fmt.Sprintf("%s/%s:onboardUser", DailyAPIEndpoint, APIVersion)
 		req, errRequest := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
