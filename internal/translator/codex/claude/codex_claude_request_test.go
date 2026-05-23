@@ -43,6 +43,18 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 			wantTexts:        []string{"Be helpful"},
 		},
 		{
+			name: "System role in messages",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [
+					{"role": "system", "content": "Follow the project instructions"},
+					{"role": "user", "content": "hello"}
+				]
+			}`,
+			wantHasDeveloper: true,
+			wantTexts:        []string{"Follow the project instructions"},
+		},
+		{
 			name: "Array system field with filtered billing header",
 			inputJSON: `{
 				"model": "claude-3-opus",
