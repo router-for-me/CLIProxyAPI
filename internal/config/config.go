@@ -611,45 +611,34 @@ func LoadConfig(configFile string) (*Config, error) {
 }
 
 // LoadConfigOptional reads YAML from configFile.
-// If optional is true and the file is missing, it returns an empty Config.
-// If optional is true and the file is empty or invalid, it returns an empty Config.
+// If optional is true and the file is missing, empty, or invalid, it returns a Config with defaults.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
-				// Missing and optional: return empty config (cloud deploy standby).
-				return &Config{}, nil
+				// Missing and optional: return defaults for cloud deploy standby.
+				cfg := defaultConfig()
+				return &cfg, nil
 			}
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
+	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return defaults.
 	if optional && len(data) == 0 {
-		return &Config{}, nil
+		cfg := defaultConfig()
+		return &cfg, nil
 	}
 
 	// Unmarshal the YAML data into the Config struct.
-	var cfg Config
-	// Set defaults before unmarshal so that absent keys keep defaults.
-	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
-	cfg.LoggingToFile = false
-	cfg.LogsMaxTotalSizeMB = 0
-	cfg.ErrorLogsMaxFiles = 10
-	cfg.UsageStatisticsEnabled = false
-	cfg.RedisUsageQueueRetentionSeconds = 60
-	cfg.DisableCooling = false
-	cfg.DisableImageGeneration = DisableImageGenerationOff
-	cfg.Pprof.Enable = false
-	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
-	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg := defaultConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
-			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			return &Config{}, nil
+			// In cloud deploy mode, if YAML parsing fails, return defaults instead of error.
+			cfg := defaultConfig()
+			return &cfg, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
@@ -1362,18 +1351,37 @@ func appendPath(path []string, key string) []string {
 // isKnownDefaultValue returns true if the given node at the specified path
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
-func isKnownDefaultValue(path []string, node *yaml.Node) bool {
-	// First check if it's a zero value
-	if isZeroValueNode(node) {
-		return true
-	}
+func defaultConfig() Config {
+	var cfg Config
+	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
+	cfg.LoggingToFile = false
+	cfg.LogsMaxTotalSizeMB = 0
+	cfg.ErrorLogsMaxFiles = 10
+	cfg.UsageStatisticsEnabled = false
+	cfg.RedisUsageQueueRetentionSeconds = 60
+	cfg.DisableCooling = false
+	cfg.DisableImageGeneration = DisableImageGenerationChat
+	cfg.Pprof.Enable = false
+	cfg.Pprof.Addr = DefaultPprofAddr
+	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
+	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	return cfg
+}
 
-	// Match known non-zero defaults by exact dotted path.
+func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if len(path) == 0 {
-		return false
+		return isZeroValueNode(node)
 	}
 
 	fullPath := strings.Join(path, ".")
+	if fullPath == "disable-image-generation" {
+		return node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!str" && node.Value == "chat"
+	}
+
+	// First check if it's a zero value.
+	if isZeroValueNode(node) {
+		return true
+	}
 
 	// Check string defaults
 	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
