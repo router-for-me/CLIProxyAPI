@@ -100,6 +100,103 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 	return completedDataPatched
 }
 
+func codexTerminalStreamContextLengthErr(eventData []byte) (statusErr, bool) {
+	eventType := gjson.GetBytes(eventData, "type").String()
+	var body []byte
+	switch eventType {
+	case "error":
+		body = codexTerminalErrorBody(eventData, "error")
+		if len(body) == 0 {
+			body = codexTerminalTopLevelErrorBody(eventData)
+		}
+	case "response.failed":
+		body = codexTerminalErrorBody(eventData, "response.error")
+		if len(body) == 0 {
+			body = codexTerminalErrorBody(eventData, "error")
+		}
+	default:
+		return statusErr{}, false
+	}
+	if len(body) == 0 {
+		return statusErr{}, false
+	}
+	if !codexTerminalErrorIsContextLength(body) {
+		return statusErr{}, false
+	}
+	return newCodexStatusErr(http.StatusBadRequest, body), true
+}
+
+func codexTerminalErrorBody(eventData []byte, path string) []byte {
+	errorResult := gjson.GetBytes(eventData, path)
+	if !errorResult.Exists() {
+		return nil
+	}
+	body := []byte(`{"error":{}}`)
+	if errorResult.Type == gjson.JSON {
+		body, _ = sjson.SetRawBytes(body, "error", []byte(errorResult.Raw))
+	} else if message := strings.TrimSpace(errorResult.String()); message != "" {
+		body, _ = sjson.SetBytes(body, "error.message", message)
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
+		if message := strings.TrimSpace(gjson.GetBytes(eventData, "response.error.message").String()); message != "" {
+			body, _ = sjson.SetBytes(body, "error.message", message)
+		}
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
+		if code := strings.TrimSpace(gjson.GetBytes(body, "error.code").String()); code != "" {
+			body, _ = sjson.SetBytes(body, "error.message", code)
+		}
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
+		if errorType := strings.TrimSpace(gjson.GetBytes(body, "error.type").String()); errorType != "" {
+			body, _ = sjson.SetBytes(body, "error.message", errorType)
+		}
+	}
+	return body
+}
+
+func codexTerminalTopLevelErrorBody(eventData []byte) []byte {
+	message := strings.TrimSpace(gjson.GetBytes(eventData, "message").String())
+	code := strings.TrimSpace(gjson.GetBytes(eventData, "code").String())
+	errorType := strings.TrimSpace(gjson.GetBytes(eventData, "error_type").String())
+	param := strings.TrimSpace(gjson.GetBytes(eventData, "param").String())
+	if message == "" && code == "" && errorType == "" && param == "" {
+		return nil
+	}
+
+	body := []byte(`{"error":{}}`)
+	if message != "" {
+		body, _ = sjson.SetBytes(body, "error.message", message)
+	}
+	if code != "" {
+		body, _ = sjson.SetBytes(body, "error.code", code)
+	}
+	if errorType != "" {
+		body, _ = sjson.SetBytes(body, "error.type", errorType)
+	}
+	if param != "" {
+		body, _ = sjson.SetBytes(body, "error.param", param)
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
+		if code != "" {
+			body, _ = sjson.SetBytes(body, "error.message", code)
+		} else if errorType != "" {
+			body, _ = sjson.SetBytes(body, "error.message", errorType)
+		}
+	}
+	return body
+}
+
+func codexTerminalErrorIsContextLength(body []byte) bool {
+	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	return errorCode == "context_length_exceeded" ||
+		errorCode == "context_too_large" ||
+		strings.Contains(message, "context window") ||
+		strings.Contains(message, "context length") ||
+		strings.Contains(message, "too many tokens")
+}
+
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type CodexExecutor struct {
@@ -146,6 +243,9 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
+	}
+	if isCodexOpenAIImageRequest(opts) {
+		return e.executeOpenAIImage(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -245,6 +345,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 		eventData := bytes.TrimSpace(line[5:])
 		eventType := gjson.GetBytes(eventData, "type").String()
+
+		if streamErr, ok := codexTerminalStreamContextLengthErr(eventData); ok {
+			err = streamErr
+			return resp, err
+		}
 
 		if eventType == "response.output_item.done" {
 			itemResult := gjson.GetBytes(eventData, "item")
@@ -397,6 +502,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
+	if isCodexOpenAIImageRequest(opts) {
+		return e.executeOpenAIImageStream(ctx, auth, req, opts)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
@@ -500,6 +608,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
+				if streamErr, ok := codexTerminalStreamContextLengthErr(data); ok {
+					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					reporter.PublishFailure(ctx, streamErr)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				switch gjson.GetBytes(data, "type").String() {
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)

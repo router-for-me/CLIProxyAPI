@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"time"
 
@@ -47,6 +48,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
+	}
 
 	tokens := tokenStats{
 		InputTokens:         record.Detail.InputTokens,
@@ -71,24 +76,26 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	fail := resolveFail(ctx, record, failed)
 
 	detail := requestDetail{
-		Timestamp: timestamp,
-		LatencyMs: record.Latency.Milliseconds(),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    tokens,
-		Failed:    failed,
-		Fail:      fail,
+		Timestamp:       timestamp,
+		LatencyMs:       record.Latency.Milliseconds(),
+		Source:          record.Source,
+		AuthIndex:       record.AuthIndex,
+		Tokens:          tokens,
+		Failed:          failed,
+		Fail:            fail,
+		ResponseHeaders: record.ResponseHeaders,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		requestDetail: detail,
-		Provider:      provider,
-		Model:         modelName,
-		Alias:         aliasName,
-		Endpoint:      resolveEndpoint(ctx),
-		AuthType:      authType,
-		APIKey:        apiKey,
-		RequestID:     requestID,
+		requestDetail:   detail,
+		Provider:        provider,
+		Model:           modelName,
+		Alias:           aliasName,
+		Endpoint:        resolveEndpoint(ctx),
+		AuthType:        authType,
+		APIKey:          apiKey,
+		RequestID:       requestID,
+		ReasoningEffort: reasoningEffort,
 	})
 	if err != nil {
 		return
@@ -98,23 +105,25 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Alias     string `json:"alias"`
-	Endpoint  string `json:"endpoint"`
-	AuthType  string `json:"auth_type"`
-	APIKey    string `json:"api_key"`
-	RequestID string `json:"request_id"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	Alias           string `json:"alias"`
+	Endpoint        string `json:"endpoint"`
+	AuthType        string `json:"auth_type"`
+	APIKey          string `json:"api_key"`
+	RequestID       string `json:"request_id"`
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 type requestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    tokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
-	Fail      failDetail `json:"fail"`
+	Timestamp       time.Time   `json:"timestamp"`
+	LatencyMs       int64       `json:"latency_ms"`
+	Source          string      `json:"source"`
+	AuthIndex       string      `json:"auth_index"`
+	Tokens          tokenStats  `json:"tokens"`
+	Failed          bool        `json:"failed"`
+	Fail            failDetail  `json:"fail"`
+	ResponseHeaders http.Header `json:"response_headers,omitempty"`
 }
 
 type tokenStats struct {
