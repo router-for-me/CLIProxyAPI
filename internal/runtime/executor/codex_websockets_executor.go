@@ -258,7 +258,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if respHS != nil {
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
 		}
-		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
+		if canFallbackToCodexHTTPAfterWebsocketDialFailure(body) {
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
@@ -461,7 +461,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		if respHS != nil {
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
 		}
-		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
+		if canFallbackToCodexHTTPAfterWebsocketDialFailure(body) {
+			if sess != nil {
+				sess.reqMu.Unlock()
+			}
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
@@ -685,6 +688,10 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	fallback := bytes.Clone(body)
 	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
 	return fallback
+}
+
+func canFallbackToCodexHTTPAfterWebsocketDialFailure(body []byte) bool {
+	return strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) == ""
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {

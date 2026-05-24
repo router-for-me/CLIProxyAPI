@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,6 +91,95 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamFallsBackToHTTPOnUpgradeFailureWithoutPreviousResponseID(t *testing.T) {
+	var websocketAttempts int32
+	var httpFallbackCalls int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("request path = %s, want /responses", r.URL.Path)
+		}
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+			atomic.AddInt32(&websocketAttempts, 1)
+			http.Error(w, "websocket unavailable", http.StatusBadRequest)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("fallback request method = %s, want POST", r.Method)
+		}
+		atomic.AddInt32(&httpFallbackCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-http\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	foundCompleted := false
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		if bytes.Contains(chunk.Payload, []byte(`"response.completed"`)) {
+			foundCompleted = true
+		}
+	}
+	if !foundCompleted {
+		t.Fatalf("fallback stream did not produce response.completed chunk")
+	}
+	if got := atomic.LoadInt32(&websocketAttempts); got == 0 {
+		t.Fatalf("websocket attempts = %d, want at least 1", got)
+	}
+	if got := atomic.LoadInt32(&httpFallbackCalls); got != 1 {
+		t.Fatalf("http fallback calls = %d, want 1", got)
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamDoesNotFallbackWhenPreviousResponseIDIsPresent(t *testing.T) {
+	var httpFallbackCalls int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+			http.Error(w, "websocket unavailable", http.StatusBadRequest)
+			return
+		}
+		atomic.AddInt32(&httpFallbackCalls, 1)
+		http.Error(w, "unexpected fallback", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	_, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err == nil {
+		t.Fatalf("expected dial failure to be returned when previous_response_id is present")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status = %#v, want 400", err)
+	}
+	if got := atomic.LoadInt32(&httpFallbackCalls); got != 0 {
+		t.Fatalf("http fallback calls = %d, want 0", got)
 	}
 }
 

@@ -76,6 +76,13 @@ type websocketPinnedFailoverExecutor struct {
 	payloads map[string][][]byte
 }
 
+type websocketPreviousResponseReplayExecutor struct {
+	mu       sync.Mutex
+	authIDs  []string
+	calls    map[string]int
+	payloads map[string][][]byte
+}
+
 type websocketPinnedFailoverStatusError struct {
 	status int
 	msg    string
@@ -255,6 +262,76 @@ func (e *websocketPinnedFailoverExecutor) AuthIDs() []string {
 }
 
 func (e *websocketPinnedFailoverExecutor) Payloads(authID string) [][]byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	src := e.payloads[authID]
+	out := make([][]byte, len(src))
+	for i := range src {
+		out[i] = bytes.Clone(src[i])
+	}
+	return out
+}
+
+func (e *websocketPreviousResponseReplayExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketPreviousResponseReplayExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketPreviousResponseReplayExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+
+	e.mu.Lock()
+	if e.calls == nil {
+		e.calls = make(map[string]int)
+	}
+	if e.payloads == nil {
+		e.payloads = make(map[string][][]byte)
+	}
+	e.authIDs = append(e.authIDs, authID)
+	e.calls[authID]++
+	call := e.calls[authID]
+	e.payloads[authID] = append(e.payloads[authID], bytes.Clone(req.Payload))
+	e.mu.Unlock()
+
+	if call == 2 {
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+			status: http.StatusBadRequest,
+			msg:    `{"error":{"message":"No response found for previous_response_id resp-auth-a-1","type":"invalid_request_error","code":"previous_response_not_found"}}`,
+		}}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%s-%d","output":[{"type":"message","id":"out-%s-%d"}]}}`, authID, call, authID, call))}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketPreviousResponseReplayExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketPreviousResponseReplayExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketPreviousResponseReplayExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketPreviousResponseReplayExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketPreviousResponseReplayExecutor) Payloads(authID string) [][]byte {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	src := e.payloads[authID]
@@ -1431,6 +1508,89 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterQuotaError(t *testing.T) {
 	authBInput := gjson.GetBytes(authBPayload, "input").Raw
 	if !strings.Contains(authBInput, `"id":"msg-1"`) || !strings.Contains(authBInput, `"id":"msg-3"`) {
 		t.Fatalf("auth-b replay input missing expected transcript items: %s", authBInput)
+	}
+}
+
+func TestResponsesWebsocketReplaysTranscriptAfterPreviousResponseNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketPreviousResponseReplayExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:         "auth-a",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "replay-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	requests := []string{
+		`{"type":"response.create","model":"replay-model","input":[{"type":"message","id":"msg-1"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-2"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-3"}]}`,
+	}
+	wantTypes := []string{wsEventTypeCompleted, wsEventTypeError, wsEventTypeCompleted}
+	for i := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wantTypes[i] {
+			t.Fatalf("message %d payload type = %s, want %s: %s", i+1, got, wantTypes[i], payload)
+		}
+		if i == 1 && int(gjson.GetBytes(payload, "status").Int()) != http.StatusBadRequest {
+			t.Fatalf("error payload status = %d, want %d: %s", gjson.GetBytes(payload, "status").Int(), http.StatusBadRequest, payload)
+		}
+	}
+
+	if got := executor.AuthIDs(); len(got) != 3 || got[0] != "auth-a" || got[1] != "auth-a" || got[2] != "auth-a" {
+		t.Fatalf("selected auth IDs = %v, want [auth-a auth-a auth-a]", got)
+	}
+
+	authPayloads := executor.Payloads("auth-a")
+	if len(authPayloads) != 3 {
+		t.Fatalf("auth payload count = %d, want 3", len(authPayloads))
+	}
+	replayPayload := authPayloads[2]
+	if gjson.GetBytes(replayPayload, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id leaked after replay recovery: %s", replayPayload)
+	}
+	replayInput := gjson.GetBytes(replayPayload, "input").Raw
+	if !strings.Contains(replayInput, `"id":"msg-1"`) || !strings.Contains(replayInput, `"id":"msg-3"`) {
+		t.Fatalf("replay input missing expected transcript items: %s", replayInput)
+	}
+	if strings.Contains(replayInput, `"id":"msg-2"`) {
+		t.Fatalf("failed turn input leaked into replay transcript: %s", replayInput)
 	}
 }
 

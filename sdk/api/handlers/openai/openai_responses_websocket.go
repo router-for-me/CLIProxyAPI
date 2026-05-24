@@ -261,6 +261,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseOutput = previousLastResponseOutput
 			continue
 		}
+		if shouldReplayResponsesWebsocketTranscript(forwardErrMsg) {
+			forceTranscriptReplayNextRequest = true
+			lastRequest = previousLastRequest
+			lastResponseOutput = previousLastResponseOutput
+			continue
+		}
 		lastResponseOutput = completedOutput
 	}
 }
@@ -973,8 +979,54 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 }
 
 func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) bool {
-	if errMsg == nil {
+	status := responsesWebsocketErrorStatus(errMsg)
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
 		return false
+	}
+}
+
+func shouldReplayResponsesWebsocketTranscript(errMsg *interfaces.ErrorMessage) bool {
+	if responsesWebsocketErrorStatus(errMsg) != http.StatusBadRequest || errMsg == nil || errMsg.Error == nil {
+		return false
+	}
+
+	raw := strings.TrimSpace(errMsg.Error.Error())
+	if raw == "" {
+		return false
+	}
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "previous_response_not_found") {
+		return true
+	}
+	if strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not found") {
+		return true
+	}
+	if !json.Valid([]byte(raw)) {
+		return false
+	}
+
+	code := strings.TrimSpace(gjson.Get(raw, "error.code").String())
+	if code == "" {
+		code = strings.TrimSpace(gjson.Get(raw, "code").String())
+	}
+	if strings.EqualFold(code, "previous_response_not_found") {
+		return true
+	}
+
+	message := strings.TrimSpace(gjson.Get(raw, "error.message").String())
+	if message == "" {
+		message = strings.TrimSpace(gjson.Get(raw, "message").String())
+	}
+	lowerMessage := strings.ToLower(message)
+	return strings.Contains(lowerMessage, "previous_response_id") && strings.Contains(lowerMessage, "not found")
+}
+
+func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
+	if errMsg == nil {
+		return 0
 	}
 	status := errMsg.StatusCode
 	if status <= 0 && errMsg.Error != nil {
@@ -982,12 +1034,7 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 			status = se.StatusCode()
 		}
 	}
-	switch status {
-	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
-		return true
-	default:
-		return false
-	}
+	return status
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
