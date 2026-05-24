@@ -13,6 +13,13 @@ type StreamForwardOptions struct {
 	// If nil, the configured default is used. If set to <= 0, keep-alives are disabled.
 	KeepAliveInterval *time.Duration
 
+	// SetHeaders is called before the first body write, including keep-alive heartbeats.
+	// It lets streaming handlers commit SSE headers before the upstream sends data.
+	SetHeaders func()
+
+	// WriteInitialError writes an error response when upstream fails before headers are committed.
+	WriteInitialError func(errMsg *interfaces.ErrorMessage)
+
 	// WriteChunk writes a single data chunk to the response body. It should not flush.
 	WriteChunk func(chunk []byte)
 
@@ -49,6 +56,17 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		}
 	}
 
+	headersCommitted := false
+	commitHeaders := func() {
+		if headersCommitted {
+			return
+		}
+		headersCommitted = true
+		if opts.SetHeaders != nil {
+			opts.SetHeaders()
+		}
+	}
+
 	keepAliveInterval := StreamingKeepAliveInterval(h.Cfg)
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
@@ -80,13 +98,19 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					}
 				}
 				if terminalErr != nil {
-					if opts.WriteTerminalError != nil {
-						opts.WriteTerminalError(terminalErr)
+					if !headersCommitted && opts.WriteInitialError != nil {
+						opts.WriteInitialError(terminalErr)
+					} else {
+						commitHeaders()
+						if opts.WriteTerminalError != nil {
+							opts.WriteTerminalError(terminalErr)
+						}
 					}
 					flusher.Flush()
 					cancel(terminalErr.Error)
 					return
 				}
+				commitHeaders()
 				if opts.WriteDone != nil {
 					opts.WriteDone()
 				}
@@ -94,6 +118,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				cancel(nil)
 				return
 			}
+			commitHeaders()
 			writeChunk(chunk)
 			flusher.Flush()
 		case errMsg, ok := <-errs:
@@ -102,10 +127,15 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			}
 			if errMsg != nil {
 				terminalErr = errMsg
-				if opts.WriteTerminalError != nil {
-					opts.WriteTerminalError(errMsg)
-					flusher.Flush()
+				if !headersCommitted && opts.WriteInitialError != nil {
+					opts.WriteInitialError(errMsg)
+				} else {
+					commitHeaders()
+					if opts.WriteTerminalError != nil {
+						opts.WriteTerminalError(errMsg)
+					}
 				}
+				flusher.Flush()
 			}
 			var execErr error
 			if errMsg != nil {
@@ -114,6 +144,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			cancel(execErr)
 			return
 		case <-keepAliveC:
+			commitHeaders()
 			writeKeepAlive()
 			flusher.Flush()
 		}

@@ -197,59 +197,51 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
-	// Peek at the first chunk
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				// Err channel closed cleanly; wait for data channel.
-				errChan = nil
-				continue
-			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				// Closed without data
-				if alt == "" {
-					setSSEHeaders()
-				}
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				flusher.Flush()
-				cliCancel(nil)
-				return
-			}
+	var keepAliveInterval *time.Duration
+	if alt != "" {
+		keepAliveInterval = new(time.Duration)
+	}
 
-			// Success! Set headers.
-			if alt == "" {
-				setSSEHeaders()
-			}
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			// Write first chunk
-			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
-			} else {
-				_, _ = c.Writer.Write(chunk)
-			}
-			flusher.Flush()
-
-			// Continue
-			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)
-			return
+	var forwardOpts handlers.StreamForwardOptions
+	forwardOpts.KeepAliveInterval = keepAliveInterval
+	forwardOpts.SetHeaders = func() {
+		if alt == "" {
+			setSSEHeaders()
+		}
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	}
+	forwardOpts.WriteInitialError = func(errMsg *interfaces.ErrorMessage) {
+		h.WriteErrorResponse(c, errMsg)
+	}
+	forwardOpts.WriteChunk = func(chunk []byte) {
+		if alt == "" {
+			_, _ = c.Writer.Write([]byte("data: "))
+			_, _ = c.Writer.Write(chunk)
+			_, _ = c.Writer.Write([]byte("\n\n"))
+		} else {
+			_, _ = c.Writer.Write(chunk)
 		}
 	}
+	forwardOpts.WriteTerminalError = func(errMsg *interfaces.ErrorMessage) {
+		if errMsg == nil {
+			return
+		}
+		status := http.StatusInternalServerError
+		if errMsg.StatusCode > 0 {
+			status = errMsg.StatusCode
+		}
+		errText := http.StatusText(status)
+		if errMsg.Error != nil && errMsg.Error.Error() != "" {
+			errText = errMsg.Error.Error()
+		}
+		body := handlers.BuildErrorResponseBody(status, errText)
+		if alt == "" {
+			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+		} else {
+			_, _ = c.Writer.Write(body)
+		}
+	}
+	h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, forwardOpts)
 }
 
 // handleCountTokens handles token counting requests for Gemini models.
@@ -299,43 +291,4 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
-}
-
-func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-	var keepAliveInterval *time.Duration
-	if alt != "" {
-		keepAliveInterval = new(time.Duration(0))
-	}
-
-	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		KeepAliveInterval: keepAliveInterval,
-		WriteChunk: func(chunk []byte) {
-			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
-			} else {
-				_, _ = c.Writer.Write(chunk)
-			}
-		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			body := handlers.BuildErrorResponseBody(status, errText)
-			if alt == "" {
-				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
-			} else {
-				_, _ = c.Writer.Write(body)
-			}
-		},
-	})
 }

@@ -1118,45 +1118,18 @@ func (h *OpenAIAPIHandler) streamRoutedImages(c *gin.Context, imageReq []byte, i
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				errChan = nil
-				continue
-			}
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-				cliCancel(nil)
-				return
-			}
-
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-			_, _ = c.Writer.Write(chunk)
-			flusher.Flush()
-			h.forwardRawImageStream(cliCtx, c, func(err error) { cliCancel(err) }, dataChan, errChan)
-			return
-		}
+	var forwardOpts handlers.StreamForwardOptions
+	forwardOpts.SetHeaders = func() {
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	}
-}
-
-func (h *OpenAIAPIHandler) forwardRawImageStream(ctx context.Context, c *gin.Context, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-	emitError := func(errMsg *interfaces.ErrorMessage) {
+	forwardOpts.WriteInitialError = func(errMsg *interfaces.ErrorMessage) {
+		h.WriteErrorResponse(c, errMsg)
+	}
+	forwardOpts.WriteChunk = func(chunk []byte) {
+		_, _ = c.Writer.Write(chunk)
+	}
+	forwardOpts.WriteTerminalError = func(errMsg *interfaces.ErrorMessage) {
 		if errMsg == nil {
 			return
 		}
@@ -1170,37 +1143,13 @@ func (h *OpenAIAPIHandler) forwardRawImageStream(ctx context.Context, c *gin.Con
 		}
 		body := handlers.BuildErrorResponseBody(status, errText)
 		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
-		if flusher, ok := c.Writer.(http.Flusher); ok {
-			flusher.Flush()
-		}
 	}
+	forwardOpts.WriteDone = func() {
+		_, _ = c.Writer.Write([]byte("\n"))
+		flusher.Flush()
+	}
+	h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, forwardOpts)
 
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
-			return
-		case <-ctx.Done():
-			cancel(ctx.Err())
-			return
-		case errMsg, ok := <-errs:
-			if ok && errMsg != nil {
-				emitError(errMsg)
-				cancel(errMsg.Error)
-				return
-			}
-			errs = nil
-		case chunk, ok := <-data:
-			if !ok {
-				cancel(nil)
-				return
-			}
-			_, _ = c.Writer.Write(chunk)
-			if flusher, ok := c.Writer.(http.Flusher); ok {
-				flusher.Flush()
-			}
-		}
-	}
 }
 
 func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []byte, imageModel string) {
@@ -1226,59 +1175,33 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				errChan = nil
-				continue
-			}
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				flusher.Flush()
-				cliCancel(nil)
-				return
-			}
-
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-			_, _ = c.Writer.Write(chunk)
-			flusher.Flush()
-			h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, handlers.StreamForwardOptions{
-				WriteChunk: func(next []byte) {
-					_, _ = c.Writer.Write(next)
-				},
-				WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-					if errMsg == nil {
-						return
-					}
-					status := http.StatusInternalServerError
-					if errMsg.StatusCode > 0 {
-						status = errMsg.StatusCode
-					}
-					errText := http.StatusText(status)
-					if errMsg.Error != nil && errMsg.Error.Error() != "" {
-						errText = errMsg.Error.Error()
-					}
-					body := handlers.BuildErrorResponseBody(status, errText)
-					_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
-				},
-			})
+	var forwardOpts handlers.StreamForwardOptions
+	forwardOpts.SetHeaders = func() {
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	}
+	forwardOpts.WriteInitialError = func(errMsg *interfaces.ErrorMessage) {
+		h.WriteErrorResponse(c, errMsg)
+	}
+	forwardOpts.WriteChunk = func(next []byte) {
+		_, _ = c.Writer.Write(next)
+	}
+	forwardOpts.WriteTerminalError = func(errMsg *interfaces.ErrorMessage) {
+		if errMsg == nil {
 			return
 		}
+		status := http.StatusInternalServerError
+		if errMsg.StatusCode > 0 {
+			status = errMsg.StatusCode
+		}
+		errText := http.StatusText(status)
+		if errMsg.Error != nil && errMsg.Error.Error() != "" {
+			errText = errMsg.Error.Error()
+		}
+		body := handlers.BuildErrorResponseBody(status, errText)
+		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
 	}
+	h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, forwardOpts)
 }
 
 func (h *OpenAIAPIHandler) collectXAIImages(c *gin.Context, xaiReq []byte, responseFormat string) {
@@ -1610,50 +1533,13 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 		flusher.Flush()
 	}
 
-	// Peek for first chunk/error so we can still return a JSON error body.
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				errChan = nil
-				continue
-			}
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-				cliCancel(nil)
-				return
-			}
-
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			h.forwardImagesStream(cliCtx, c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, chunk, responseFormat, streamPrefix, writeEvent)
-			return
-		}
-	}
-}
-
-func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, firstChunk []byte, responseFormat string, streamPrefix string, writeEvent func(string, []byte)) {
 	acc := &sseFrameAccumulator{}
-
 	responseFormat = strings.ToLower(strings.TrimSpace(responseFormat))
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
+
+	streamDone := false
 
 	emitError := func(errMsg *interfaces.ErrorMessage) {
 		if errMsg == nil {
@@ -1732,42 +1618,38 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 		return false
 	}
 
-	for _, frame := range acc.AddChunk(firstChunk) {
-		if processFrame(frame) {
-			cancel(nil)
+	var forwardOpts handlers.StreamForwardOptions
+	forwardOpts.SetHeaders = func() {
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	}
+	forwardOpts.WriteInitialError = func(errMsg *interfaces.ErrorMessage) {
+		h.WriteErrorResponse(c, errMsg)
+	}
+	forwardOpts.WriteChunk = func(chunk []byte) {
+		if streamDone {
 			return
 		}
-	}
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errs:
-			if ok && errMsg != nil {
-				emitError(errMsg)
-				cancel(errMsg.Error)
+		for _, frame := range acc.AddChunk(chunk) {
+			if processFrame(frame) {
+				streamDone = true
+				cliCancel(nil)
 				return
-			}
-			errs = nil
-		case chunk, ok := <-data:
-			if !ok {
-				for _, frame := range acc.Flush() {
-					if processFrame(frame) {
-						cancel(nil)
-						return
-					}
-				}
-				cancel(nil)
-				return
-			}
-			for _, frame := range acc.AddChunk(chunk) {
-				if processFrame(frame) {
-					cancel(nil)
-					return
-				}
 			}
 		}
 	}
+	forwardOpts.WriteTerminalError = func(errMsg *interfaces.ErrorMessage) {
+		emitError(errMsg)
+	}
+	forwardOpts.WriteDone = func() {
+		if streamDone {
+			return
+		}
+		for _, frame := range acc.Flush() {
+			if processFrame(frame) {
+				return
+			}
+		}
+	}
+	h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, forwardOpts)
 }
