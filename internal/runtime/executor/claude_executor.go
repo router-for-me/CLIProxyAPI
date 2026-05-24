@@ -2404,10 +2404,20 @@ func parseClaudeRetryAfter(header http.Header) *time.Duration {
 	if val == "" {
 		return nil
 	}
+
 	secs, err := strconv.ParseFloat(val, 64)
-	if err != nil || secs <= 0 {
+	if err == nil && secs > 0 {
+		d := time.Duration(secs * float64(time.Second))
+		return &d
+	}
+
+	t, err := http.ParseTime(val)
+	if err != nil {
 		return nil
 	}
-	d := time.Duration(secs * float64(time.Second))
+	d := time.Until(t)
+	if d <= 0 {
+		return nil
+	}
 	return &d
 }
