@@ -81,6 +81,23 @@ func TestPreserveDeepSeekReasoningContent_UsesAssistantOrdinal(t *testing.T) {
 	}
 }
 
+func TestPreserveDeepSeekReasoningContent_PrefersFullContentOverSummary(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"short summary"}],"content":[{"type":"reasoning_text","text":"full reasoning trace"}]},
+			{"type":"function_call","call_id":"call_1","name":"tool","arguments":"{}"}
+		]
+	}`)
+	translated := responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-pro", raw, true)
+	out := PreserveDeepSeekReasoningContent("deepseek-v4-pro", translated, raw)
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "full reasoning trace" {
+		t.Fatalf("messages.0.reasoning_content = %q, want full reasoning trace", got)
+	}
+}
+
 func TestPreserveDeepSeekReasoningContent_SkipsOtherModels(t *testing.T) {
 	t.Parallel()
 

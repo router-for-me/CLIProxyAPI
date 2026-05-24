@@ -1,7 +1,6 @@
 package helps
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 
@@ -44,7 +43,7 @@ func PreserveDeepSeekReasoningContent(modelName string, translatedChatCompletion
 		return translatedChatCompletions
 	}
 
-	out := bytes.Clone(translatedChatCompletions)
+	out := translatedChatCompletions
 	assistantOrdinal := 0
 	for messageIndex, message := range messages.Array() {
 		if strings.TrimSpace(message.Get("role").String()) != "assistant" {
@@ -125,9 +124,9 @@ func deepSeekReasoningTargetsByAssistantOrdinal(sourceRawJSON []byte) map[int]st
 }
 
 func responseReasoningItemText(item gjson.Result) string {
-	parts := collectReasoningTextParts(item.Get("summary"))
+	parts := collectReasoningTextParts(item.Get("content"))
 	if len(parts) == 0 {
-		parts = collectReasoningTextParts(item.Get("content"))
+		parts = collectReasoningTextParts(item.Get("summary"))
 	}
 	if len(parts) == 0 {
 		for _, path := range []string{"text", "reasoning_content"} {
