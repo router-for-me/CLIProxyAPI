@@ -21,6 +21,9 @@ func TestParseRetryDelay_RetryInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if d == nil {
+		t.Fatal("expected non-nil duration")
+	}
 	if *d != 5*time.Second {
 		t.Fatalf("expected 5s, got %v", *d)
 	}
@@ -42,8 +45,11 @@ func TestParseRetryDelay_RetryInfoDecimal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if *d == 0 {
-		t.Fatal("expected non-zero duration")
+	if d == nil {
+		t.Fatal("expected non-nil duration")
+	}
+	if *d != 847655010*time.Nanosecond {
+		t.Errorf("expected 847655010ns, got %v", *d)
 	}
 }
 
@@ -65,6 +71,9 @@ func TestParseRetryDelay_QuotaResetDelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if d == nil {
+		t.Fatal("expected non-nil duration")
+	}
 	if *d != 373*time.Millisecond {
 		t.Fatalf("expected 373ms, got %v", *d)
 	}
@@ -80,6 +89,9 @@ func TestParseRetryDelay_MessageFallback(t *testing.T) {
 	d, err := parseRetryDelay(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if d == nil {
+		t.Fatal("expected non-nil duration")
 	}
 	if *d != 60*time.Second {
 		t.Fatalf("expected 60s, got %v", *d)
