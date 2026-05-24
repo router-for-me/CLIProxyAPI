@@ -166,18 +166,70 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
+	defer func(body io.Closer) {
+		if errClose := body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-	}()
+	}(httpResp.Body)
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
+		if opts.Alt == "responses/compact" && isInvalidResponsesEncryptedContentError(httpResp.StatusCode, b) {
+			if strippedTranslated, changed := stripInvalidEncryptedContentFromResponsesBody(translated); changed {
+				helps.LogWithRequestID(ctx).Warn("openai compat executor: upstream rejected encrypted_content; retrying once without encrypted reasoning context")
+				retryReq, retryBuildErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(strippedTranslated))
+				if retryBuildErr != nil {
+					err = retryBuildErr
+					return resp, err
+				}
+				retryReq.Header.Set("Content-Type", "application/json")
+				if apiKey != "" {
+					retryReq.Header.Set("Authorization", "Bearer "+apiKey)
+				}
+				retryReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+				util.ApplyCustomHeadersFromAttrs(retryReq, attrs)
+				helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+					URL:       url,
+					Method:    http.MethodPost,
+					Headers:   retryReq.Header.Clone(),
+					Body:      strippedTranslated,
+					Provider:  e.Identifier(),
+					AuthID:    authID,
+					AuthLabel: authLabel,
+					AuthType:  authType,
+					AuthValue: authValue,
+				})
+				retryResp, retryErr := httpClient.Do(retryReq)
+				if retryErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+					err = retryErr
+					return resp, err
+				}
+				defer func(body io.Closer) {
+					if errClose := body.Close(); errClose != nil {
+						log.Errorf("openai compat executor: close retry response body error: %v", errClose)
+					}
+				}(retryResp.Body)
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, retryResp.StatusCode, retryResp.Header.Clone())
+				if retryResp.StatusCode < 200 || retryResp.StatusCode >= 300 {
+					b, _ = io.ReadAll(retryResp.Body)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+					helps.LogWithRequestID(ctx).Debugf("request retry error, error status: %d, error message: %s", retryResp.StatusCode, helps.SummarizeErrorBody(retryResp.Header.Get("Content-Type"), b))
+					err = statusErr{code: retryResp.StatusCode, msg: string(b)}
+					return resp, err
+				}
+				translated = strippedTranslated
+				httpResp = retryResp
+			} else {
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return resp, err
+			}
+		} else {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			return resp, err
+		}
 	}
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
