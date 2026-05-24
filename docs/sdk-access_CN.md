@@ -146,9 +146,8 @@ svc, _ := cliproxy.NewBuilder().
 当配置发生变化时，刷新依赖配置的 provider，然后重置 manager 的 provider 链：
 
 ```go
-// configaccess is github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access
-configaccess.Register(&newCfg.SDKConfig)
+
 accessManager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
-这一流程与 `internal/access.ApplyAccessProviders` 保持一致，避免为更新访问策略而重启进程。
+cliproxy.Service 会自动处理基于配置的 provider 注册。手动管理 access manager 时，配置重新加载后调用 SetProviders 刷新快照即可。
