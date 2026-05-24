@@ -33,7 +33,22 @@ type RoundRobinSelector struct {
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
-type FillFirstSelector struct{}
+type FillFirstSelector struct {
+	seedMu sync.Mutex
+	seed   uint64
+}
+
+func (s *FillFirstSelector) shuffleSeed() uint64 {
+	if s == nil {
+		return fillFirstShuffleSeed()
+	}
+	s.seedMu.Lock()
+	defer s.seedMu.Unlock()
+	if s.seed == 0 {
+		s.seed = fillFirstShuffleSeed()
+	}
+	return s.seed
+}
 
 type blockReason int
 
@@ -365,6 +380,15 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	seed := s.shuffleSeed()
+	sort.SliceStable(available, func(i, j int) bool {
+		left := fillFirstShuffleRank(seed, available[i].ID)
+		right := fillFirstShuffleRank(seed, available[j].ID)
+		if left == right {
+			return available[i].ID < available[j].ID
+		}
+		return left < right
+	})
 	return available[0], nil
 }
 

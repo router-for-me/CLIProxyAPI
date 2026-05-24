@@ -14,25 +14,32 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
-func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
+func TestFillFirstSelectorPick_StablePerProcess(t *testing.T) {
 	t.Parallel()
 
-	selector := &FillFirstSelector{}
+	selector := &FillFirstSelector{seed: 42}
 	auths := []*Auth{
 		{ID: "b"},
 		{ID: "a"},
 		{ID: "c"},
 	}
 
-	got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
-	if err != nil {
-		t.Fatalf("Pick() error = %v", err)
+	want := expectedFillFirstAuthID(42, auths)
+	if want == "" {
+		t.Fatal("expected a fill-first auth ID")
 	}
-	if got == nil {
-		t.Fatalf("Pick() auth = nil")
-	}
-	if got.ID != "a" {
-		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "a")
+
+	for i := 0; i < 3; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != want {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, want)
+		}
 	}
 }
 
@@ -121,6 +128,62 @@ func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	}
 	if got.ID != "low" {
 		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "low")
+	}
+}
+
+func TestFillFirstSelectorPick_Concurrent(t *testing.T) {
+	selector := &FillFirstSelector{}
+	auths := []*Auth{
+		{ID: "b"},
+		{ID: "a"},
+		{ID: "c"},
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+
+	goroutines := 32
+	iterations := 100
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+				if got == nil {
+					select {
+					case errCh <- errors.New("Pick() returned nil auth"):
+					default:
+					}
+					return
+				}
+				if got.ID == "" {
+					select {
+					case errCh <- errors.New("Pick() returned auth with empty ID"):
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("concurrent Pick() error = %v", err)
+	default:
 	}
 }
 
@@ -555,7 +618,7 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 func TestSessionAffinitySelector_NoSessionFallback(t *testing.T) {
 	t.Parallel()
 
-	fallback := &FillFirstSelector{}
+	fallback := &FillFirstSelector{seed: 42}
 	selector := NewSessionAffinitySelector(fallback)
 
 	auths := []*Auth{
@@ -564,16 +627,17 @@ func TestSessionAffinitySelector_NoSessionFallback(t *testing.T) {
 		{ID: "auth-c"},
 	}
 
-	// No session in payload, should fallback to FillFirstSelector (picks "auth-a" after sorting)
+	// No session in payload, should fallback to FillFirstSelector using the shuffled process-local order.
 	payload := []byte(`{"model":"claude-3"}`)
 	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+	want := expectedFillFirstAuthID(42, auths)
 
 	got, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
-	if got.ID != "auth-a" {
-		t.Fatalf("Pick() auth.ID = %q, want %q (should fallback to FillFirst)", got.ID, "auth-a")
+	if got.ID != want {
+		t.Fatalf("Pick() auth.ID = %q, want %q (should fallback to FillFirst)", got.ID, want)
 	}
 }
 

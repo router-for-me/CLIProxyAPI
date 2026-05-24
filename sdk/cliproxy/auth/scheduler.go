@@ -34,6 +34,7 @@ const (
 type authScheduler struct {
 	mu            sync.Mutex
 	strategy      schedulerStrategy
+	fillFirstSeed uint64
 	providers     map[string]*providerScheduler
 	authProviders map[string]string
 	mixedCursors  map[string]int
@@ -41,9 +42,11 @@ type authScheduler struct {
 
 // providerScheduler stores auth metadata and model shards for a single provider.
 type providerScheduler struct {
-	providerKey string
-	auths       map[string]*scheduledAuthMeta
-	modelShards map[string]*modelScheduler
+	providerKey   string
+	strategy      schedulerStrategy
+	fillFirstSeed uint64
+	auths         map[string]*scheduledAuthMeta
+	modelShards   map[string]*modelScheduler
 }
 
 // scheduledAuthMeta stores the immutable scheduling fields derived from an auth snapshot.
@@ -59,6 +62,8 @@ type scheduledAuthMeta struct {
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
 type modelScheduler struct {
 	modelKey        string
+	strategy        schedulerStrategy
+	fillFirstSeed   uint64
 	entries         map[string]*scheduledAuth
 	priorityOrder   []int
 	readyByPriority map[int]*readyBucket
@@ -165,8 +170,10 @@ func normalizeCursor(cursor, size int) int {
 
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
+	strategy, seed := schedulerConfigForSelector(selector)
 	return &authScheduler{
-		strategy:      selectorStrategy(selector),
+		strategy:      strategy,
+		fillFirstSeed: seed,
 		providers:     make(map[string]*providerScheduler),
 		authProviders: make(map[string]string),
 		mixedCursors:  make(map[string]int),
@@ -185,14 +192,40 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	}
 }
 
+func schedulerConfigForSelector(selector Selector) (schedulerStrategy, uint64) {
+	strategy := selectorStrategy(selector)
+	seed := fillFirstShuffleSeed()
+	if fillSelector, ok := selector.(*FillFirstSelector); ok {
+		seed = fillSelector.shuffleSeed()
+	}
+	return strategy, seed
+}
+
 // setSelector updates the active built-in strategy and resets mixed-provider cursors.
 func (s *authScheduler) setSelector(selector Selector) {
 	if s == nil {
 		return
 	}
+	strategy, seed := schedulerConfigForSelector(selector)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.strategy = selectorStrategy(selector)
+	s.strategy = strategy
+	s.fillFirstSeed = seed
+	for _, provider := range s.providers {
+		if provider == nil {
+			continue
+		}
+		provider.strategy = s.strategy
+		provider.fillFirstSeed = s.fillFirstSeed
+		for _, shard := range provider.modelShards {
+			if shard == nil {
+				continue
+			}
+			shard.strategy = s.strategy
+			shard.fillFirstSeed = s.fillFirstSeed
+			shard.rebuildIndexesLocked()
+		}
+	}
 	clear(s.mixedCursors)
 }
 
@@ -252,6 +285,8 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	providerState.strategy = s.strategy
+	providerState.fillFirstSeed = s.fillFirstSeed
 	shard := providerState.ensureModelLocked(modelKey, time.Now())
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -312,6 +347,8 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
+		providerState.strategy = s.strategy
+		providerState.fillFirstSeed = s.fillFirstSeed
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := func(entry *scheduledAuth) bool {
 			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
@@ -339,6 +376,8 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			continue
 		}
+		providerState.strategy = s.strategy
+		providerState.fillFirstSeed = s.fillFirstSeed
 		shard := providerState.ensureModelLocked(modelKey, now)
 		candidateShards[providerIndex] = shard
 		if shard == nil {
@@ -438,6 +477,8 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if providerState == nil {
 			continue
 		}
+		providerState.strategy = s.strategy
+		providerState.fillFirstSeed = s.fillFirstSeed
 		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
 		if shard == nil {
 			continue
@@ -522,7 +563,10 @@ func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 	}
 	meta := buildScheduledAuthMeta(auth)
 	s.authProviders[authID] = providerKey
-	s.ensureProviderLocked(providerKey).upsertAuthLocked(meta, now)
+	providerState := s.ensureProviderLocked(providerKey)
+	providerState.strategy = s.strategy
+	providerState.fillFirstSeed = s.fillFirstSeed
+	providerState.upsertAuthLocked(meta, now)
 }
 
 // removeAuthLocked removes one auth from the scheduler while the scheduler mutex is held.
@@ -606,6 +650,8 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 		if shard == nil {
 			continue
 		}
+		shard.strategy = p.strategy
+		shard.fillFirstSeed = p.fillFirstSeed
 		if !meta.supportsModel(modelKey) {
 			shard.removeEntryLocked(meta.auth.ID)
 			continue
@@ -622,6 +668,8 @@ func (p *providerScheduler) removeAuthLocked(authID string) {
 	delete(p.auths, authID)
 	for _, shard := range p.modelShards {
 		if shard != nil {
+			shard.strategy = p.strategy
+			shard.fillFirstSeed = p.fillFirstSeed
 			shard.removeEntryLocked(authID)
 		}
 	}
@@ -634,11 +682,15 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	}
 	modelKey = canonicalModelKey(modelKey)
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
+		shard.strategy = p.strategy
+		shard.fillFirstSeed = p.fillFirstSeed
 		shard.promoteExpiredLocked(now)
 		return shard
 	}
 	shard := &modelScheduler{
 		modelKey:        modelKey,
+		strategy:        p.strategy,
+		fillFirstSeed:   p.fillFirstSeed,
 		entries:         make(map[string]*scheduledAuth),
 		readyByPriority: make(map[int]*readyBucket),
 	}
@@ -919,7 +971,17 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 	}
 	for priority, entries := range priorityBuckets {
 		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].auth.ID < entries[j].auth.ID
+			switch m.strategy {
+			case schedulerStrategyFillFirst:
+				left := fillFirstShuffleRank(m.fillFirstSeed, entries[i].auth.ID)
+				right := fillFirstShuffleRank(m.fillFirstSeed, entries[j].auth.ID)
+				if left == right {
+					return entries[i].auth.ID < entries[j].auth.ID
+				}
+				return left < right
+			default:
+				return entries[i].auth.ID < entries[j].auth.ID
+			}
 		})
 		bucket := buildReadyBucket(entries)
 		if cursorState, ok := cursorStates[priority]; ok && bucket != nil {

@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,15 +97,23 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
+func TestSchedulerPick_FillFirstSticksToProcessLocalOrder(t *testing.T) {
 	t.Parallel()
 
+	auths := []*Auth{
+		{ID: "b", Provider: "gemini"},
+		{ID: "a", Provider: "gemini"},
+		{ID: "c", Provider: "gemini"},
+	}
 	scheduler := newSchedulerForTest(
-		&FillFirstSelector{},
-		&Auth{ID: "b", Provider: "gemini"},
-		&Auth{ID: "a", Provider: "gemini"},
-		&Auth{ID: "c", Provider: "gemini"},
+		&FillFirstSelector{seed: 42},
+		auths...,
 	)
+
+	want := expectedFillFirstAuthID(42, auths)
+	if want == "" {
+		t.Fatal("expected a fill-first auth ID")
+	}
 
 	for index := 0; index < 3; index++ {
 		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
@@ -113,9 +123,95 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 		if got == nil {
 			t.Fatalf("pickSingle() #%d auth = nil", index)
 		}
-		if got.ID != "a" {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "a")
+		if got.ID != want {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, want)
 		}
+	}
+}
+
+func TestSchedulerSetSelectorUpdatesFillFirstSeed(t *testing.T) {
+	t.Parallel()
+
+	auths := []*Auth{
+		{ID: "b", Provider: "gemini"},
+		{ID: "a", Provider: "gemini"},
+		{ID: "c", Provider: "gemini"},
+	}
+	scheduler := newSchedulerForTest(&RoundRobinSelector{}, auths...)
+	scheduler.setSelector(&FillFirstSelector{seed: 42})
+
+	want := expectedFillFirstAuthID(42, auths)
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != want {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q after setSelector", got.ID, want)
+	}
+}
+
+func TestSchedulerSetSelectorConcurrentWithPick(t *testing.T) {
+	auths := []*Auth{
+		{ID: "b", Provider: "gemini"},
+		{ID: "a", Provider: "gemini"},
+		{ID: "c", Provider: "gemini"},
+	}
+	scheduler := newSchedulerForTest(&RoundRobinSelector{}, auths...)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+
+	for i := 0; i < 16; i++ {
+		wg.Add(2)
+		go func(seed uint64) {
+			defer wg.Done()
+			<-start
+			scheduler.setSelector(&FillFirstSelector{seed: seed})
+		}(uint64(100 + i))
+		go func() {
+			defer wg.Done()
+			<-start
+			got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+			if errPick != nil {
+				select {
+				case errCh <- errPick:
+				default:
+				}
+				return
+			}
+			if got == nil || got.ID == "" {
+				select {
+				case errCh <- errors.New("pickSingle() returned empty auth during concurrent selector updates"):
+				default:
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	select {
+	case errPick := <-errCh:
+		t.Fatalf("concurrent setSelector/pickSingle error = %v", errPick)
+	default:
+	}
+
+	scheduler.setSelector(&FillFirstSelector{seed: 999})
+	want := expectedFillFirstAuthID(999, auths)
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after concurrent updates error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() after concurrent updates auth = nil")
+	}
+	if got.ID != want {
+		t.Fatalf("pickSingle() after concurrent updates auth.ID = %q, want %q", got.ID, want)
 	}
 }
 
