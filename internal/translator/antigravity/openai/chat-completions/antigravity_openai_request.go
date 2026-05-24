@@ -3,6 +3,7 @@
 package chat_completions
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -466,11 +467,14 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
 }
 
-// sanitizeAntigravityJSONSchema converts boolean subschemas into object
+// sanitizeAntigravityJSONSchema converts true boolean subschemas into object
 // schemas accepted by Google's function declaration schema representation.
 func sanitizeAntigravityJSONSchema(raw []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+
 	var schema any
-	if err := json.Unmarshal(raw, &schema); err != nil {
+	if err := decoder.Decode(&schema); err != nil {
 		return nil, err
 	}
 
@@ -480,7 +484,20 @@ func sanitizeAntigravityJSONSchema(raw []byte) ([]byte, error) {
 func sanitizeAntigravitySchemaNode(schema any) any {
 	switch node := schema.(type) {
 	case bool:
-		return map[string]any{}
+		if node {
+			// JSON Schema `true` is equivalent to an empty schema object.
+			return map[string]any{}
+		}
+
+		// Preserve `false` because converting it to `{}` would change an
+		// always-rejecting schema into an always-accepting schema.
+		return false
+
+	case []any:
+		for i, child := range node {
+			node[i] = sanitizeAntigravitySchemaNode(child)
+		}
+		return node
 
 	case map[string]any:
 		for _, keyword := range []string{
@@ -495,6 +512,10 @@ func sanitizeAntigravitySchemaNode(schema any) any {
 			"then",
 			"unevaluatedItems",
 			"unevaluatedProperties",
+			"allOf",
+			"anyOf",
+			"oneOf",
+			"prefixItems",
 		} {
 			if child, ok := node[keyword]; ok {
 				node[keyword] = sanitizeAntigravitySchemaNode(child)
@@ -505,6 +526,7 @@ func sanitizeAntigravitySchemaNode(schema any) any {
 			"properties",
 			"patternProperties",
 			"dependentSchemas",
+			"dependencies",
 			"$defs",
 			"definitions",
 		} {
@@ -515,22 +537,6 @@ func sanitizeAntigravitySchemaNode(schema any) any {
 
 			for name, child := range children {
 				children[name] = sanitizeAntigravitySchemaNode(child)
-			}
-		}
-
-		for _, keyword := range []string{
-			"allOf",
-			"anyOf",
-			"oneOf",
-			"prefixItems",
-		} {
-			children, ok := node[keyword].([]any)
-			if !ok {
-				continue
-			}
-
-			for i, child := range children {
-				children[i] = sanitizeAntigravitySchemaNode(child)
 			}
 		}
 
