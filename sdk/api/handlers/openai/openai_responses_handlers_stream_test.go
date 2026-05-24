@@ -40,6 +40,21 @@ func forwardResponsesStreamForTest(h *OpenAIResponsesAPIHandler, c *gin.Context,
 		WriteChunk: func(chunk []byte) {
 			framer.WriteChunk(c.Writer, chunk)
 		},
+		WriteInitialError: func(errMsg *interfaces.ErrorMessage) {
+			if errMsg == nil {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
+			}
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+			_, _ = c.Writer.Write(chunk)
+		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
 			if errMsg == nil {

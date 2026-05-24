@@ -575,12 +575,26 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	convertedChan := make(chan []byte, 1)
 	go func() {
 		defer close(convertedChan)
-		for data := range dataChan {
-			converted := convertChatCompletionsStreamChunkToCompletions(data)
-			if converted == nil {
-				continue
+		for {
+			select {
+			case <-c.Request.Context().Done():
+				return
+			case data, ok := <-dataChan:
+				if !ok {
+					return
+				}
+
+				converted := convertChatCompletionsStreamChunkToCompletions(data)
+				if converted == nil {
+					continue
+				}
+
+				select {
+				case <-c.Request.Context().Done():
+					return
+				case convertedChan <- converted:
+				}
 			}
-			convertedChan <- converted
 		}
 	}()
 

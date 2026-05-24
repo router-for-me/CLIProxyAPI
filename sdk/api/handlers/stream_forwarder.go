@@ -56,6 +56,13 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		}
 	}
 
+	writeInitialError := opts.WriteInitialError
+	if writeInitialError == nil {
+		writeInitialError = func(errMsg *interfaces.ErrorMessage) {
+			h.WriteErrorResponse(c, errMsg)
+		}
+	}
+
 	headersCommitted := false
 	commitHeaders := func() {
 		if headersCommitted {
@@ -98,8 +105,8 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					}
 				}
 				if terminalErr != nil {
-					if !headersCommitted && opts.WriteInitialError != nil {
-						opts.WriteInitialError(terminalErr)
+					if !headersCommitted {
+						writeInitialError(terminalErr)
 					} else {
 						commitHeaders()
 						if opts.WriteTerminalError != nil {
@@ -127,8 +134,8 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			}
 			if errMsg != nil {
 				terminalErr = errMsg
-				if !headersCommitted && opts.WriteInitialError != nil {
-					opts.WriteInitialError(errMsg)
+				if !headersCommitted {
+					writeInitialError(errMsg)
 				} else {
 					commitHeaders()
 					if opts.WriteTerminalError != nil {
