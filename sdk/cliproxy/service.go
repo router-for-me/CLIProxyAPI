@@ -312,7 +312,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
 		current, ok := s.coreManager.GetByID(auth.ID)
 		if !ok || current.Disabled {
-			GlobalModelRegistry().UnregisterClient(auth.ID)
+			registry.UnregisterAuth(auth.ID)
 			return
 		}
 		auth = current
@@ -338,7 +338,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if s.coreManager == nil {
 		return
 	}
-	GlobalModelRegistry().UnregisterClient(id)
+	registry.UnregisterAuth(id)
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		existing.Disabled = true
 		existing.Status = coreauth.StatusDisabled
@@ -441,6 +441,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
+	case "grok":
+		s.coreManager.RegisterExecutor(executor.NewGrokExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -455,7 +457,7 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		return
 	}
 	if len(models) == 0 {
-		GlobalModelRegistry().UnregisterClient(a.ID)
+		registry.UnregisterAuth(a.ID)
 		return
 	}
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, models)
@@ -1054,7 +1056,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		return
 	}
 	if a.Disabled {
-		GlobalModelRegistry().UnregisterClient(a.ID)
+		registry.UnregisterAuth(a.ID)
 		return
 	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
@@ -1065,7 +1067,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 	if a.Attributes != nil {
 		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
-			GlobalModelRegistry().UnregisterClient(a.ID)
+			registry.UnregisterAuth(a.ID)
 			return
 		}
 	}
@@ -1073,7 +1075,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a.Runtime != nil {
 		if idGetter, ok := a.Runtime.(interface{ GetClientID() string }); ok {
 			if rid := idGetter.GetClientID(); rid != "" && rid != a.ID {
-				GlobalModelRegistry().UnregisterClient(rid)
+				registry.UnregisterAuth(rid)
 			}
 		}
 	}
@@ -1177,6 +1179,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
+	case "grok":
+		models = registry.GetGrokModels()
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -1233,14 +1237,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
 					} else {
 						// Ensure stale registrations are cleared when model list becomes empty.
-						GlobalModelRegistry().UnregisterClient(a.ID)
+						registry.UnregisterAuth(a.ID)
 					}
 					return
 				}
 			}
 			if isCompatAuth {
 				// No matching provider found or models removed entirely; drop any prior registration.
-				GlobalModelRegistry().UnregisterClient(a.ID)
+				registry.UnregisterAuth(a.ID)
 				return
 			}
 		}
@@ -1255,7 +1259,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		return
 	}
 
-	GlobalModelRegistry().UnregisterClient(a.ID)
+	registry.UnregisterAuth(a.ID)
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for
@@ -1278,7 +1282,7 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
 	if !ok || latest.Disabled {
-		GlobalModelRegistry().UnregisterClient(current.ID)
+		registry.UnregisterAuth(current.ID)
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false
 	}

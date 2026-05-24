@@ -20,6 +20,10 @@ auths/*
 logs/*
 conv/*
 config.yaml
+.omc/*
+.omx/*
+.env
+.env.local
 
 # Development/editor
 bin/*

@@ -14,6 +14,7 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      MANAGEMENT_STATIC_PATH: ${MANAGEMENT_STATIC_PATH:-}
     ports:
       - "8317:8317"
       - "8085:8085"

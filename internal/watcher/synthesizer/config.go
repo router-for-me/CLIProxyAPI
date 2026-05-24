@@ -37,6 +37,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeAnthropicCompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// Grok OAuth
+	out = append(out, s.synthesizeGrokAuth(ctx)...)
 
 	return out, nil
 }
@@ -345,10 +347,10 @@ func (s *ConfigSynthesizer) synthesizeAnthropicCompat(ctx *SynthesisContext) []*
 			idKind := fmt.Sprintf("anthropic-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, key, base, proxyURL)
 			attrs := map[string]string{
-				"source":          fmt.Sprintf("config:%s[%s]", providerName, token),
-				"base_url":        base,
-				"compat_name":     compat.Name,
-				"provider_key":    providerName,
+				"source":           fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":         base,
+				"compat_name":      compat.Name,
+				"provider_key":     providerName,
 				"anthropic_compat": "true",
 			}
 			if compat.Priority != 0 {
@@ -381,10 +383,10 @@ func (s *ConfigSynthesizer) synthesizeAnthropicCompat(ctx *SynthesisContext) []*
 			idKind := fmt.Sprintf("anthropic-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, base)
 			attrs := map[string]string{
-				"source":          fmt.Sprintf("config:%s[%s]", providerName, token),
-				"base_url":        base,
-				"compat_name":     compat.Name,
-				"provider_key":    providerName,
+				"source":           fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":         base,
+				"compat_name":      compat.Name,
+				"provider_key":     providerName,
 				"anthropic_compat": "true",
 			}
 			if compat.Priority != 0 {
@@ -455,6 +457,68 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeGrokAuth creates Auth entries for Grok (xAI SuperGrok) OAuth accounts.
+func (s *ConfigSynthesizer) synthesizeGrokAuth(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.GrokAuth))
+	for i := range cfg.GrokAuth {
+		entry := cfg.GrokAuth[i]
+		accessToken := strings.TrimSpace(entry.AccessToken)
+		if accessToken == "" {
+			continue
+		}
+
+		// Build a stable ID seed: prefer account-id, fall back to email, then name, then index.
+		idSeed := entry.AccountID
+		if idSeed == "" {
+			idSeed = entry.Email
+		}
+		if idSeed == "" {
+			idSeed = entry.Name
+		}
+		if idSeed == "" {
+			idSeed = strconv.Itoa(i)
+		}
+		id, token := idGen.Next("grok:oauth", idSeed)
+
+		attrs := map[string]string{
+			"source":        fmt.Sprintf("config:grok[%s]", token),
+			"access_token":  accessToken,
+			"refresh_token": strings.TrimSpace(entry.RefreshToken),
+		}
+		if entry.IDToken != "" {
+			attrs["id_token"] = strings.TrimSpace(entry.IDToken)
+		}
+		if entry.Email != "" {
+			attrs["email"] = strings.TrimSpace(entry.Email)
+		}
+		if entry.AccountID != "" {
+			attrs["account_id"] = strings.TrimSpace(entry.AccountID)
+		}
+		if entry.ExpiresAt != "" {
+			attrs["expired"] = strings.TrimSpace(entry.ExpiresAt)
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "grok",
+			Label:      "grok-oauth",
+			Status:     coreauth.StatusActive,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
 		out = append(out, a)
 	}
 	return out

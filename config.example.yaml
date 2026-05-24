@@ -290,6 +290,20 @@ nonstream-keepalive-interval: 0
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 
+# Grok (xAI) OAuth accounts.
+# Authentication is via SuperGrok OAuth (browser loopback at 127.0.0.1:56121
+# or RFC 8628 device-code at https://x.ai/device). These entries are
+# normally populated by `./cli-proxy-api --grok-login`; manual editing is
+# possible but the rotating refresh_token means hand-managed entries will
+# break after the first refresh.
+# grok-auth:
+#   - name: "alice-supergrok"
+#     email: "alice@example.com"
+#     access-token: "<JWT access token, populated by --grok-login>"
+#     refresh-token: "<opaque refresh token, populated by --grok-login>"
+#     expires-at: "2026-05-23T18:00:00Z"
+#     priority: 1
+
 # Amp Integration
 # ampcode:
 #   # Configure upstream URL for Amp CLI OAuth and management features

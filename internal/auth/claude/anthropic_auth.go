@@ -446,6 +446,13 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 	return storage
 }
 
+// TODO(oauthflight): port shared single-flight helper here when next material
+// edit lands; see internal/auth/oauthflight/singleflight.go for the
+// generic Do[T any](authID, fn) pattern that Codex and Grok use to collapse
+// concurrent rotating-refresh-token requests. Claude currently has the same
+// race in production; deferral is documented in
+// .omc/plans/grok-opencode-oauth-plan-v2.md "Deferred Refactoring Backlog".
+
 // RefreshTokensWithRetry refreshes tokens with automatic retry logic.
 // This method implements exponential backoff retry logic for token refresh operations,
 // providing resilience against temporary network or service issues.

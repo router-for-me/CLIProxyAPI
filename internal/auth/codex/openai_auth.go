@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/oauthflight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -274,33 +275,41 @@ func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStora
 // RefreshTokensWithRetry refreshes tokens with a built-in retry mechanism.
 // It attempts to refresh the tokens up to a specified maximum number of retries,
 // with an exponential backoff strategy to handle transient network errors.
-func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*CodexTokenData, error) {
-	var lastErr error
+//
+// All concurrent calls for the same authID collapse into one in-flight execution
+// via oauthflight.Do, so a rotating refresh_token is never replayed by N
+// goroutines concurrently (which would burn it and poison the credential).
+// Late waiters receive whatever result the in-flight call produced — including
+// refresh_token_reused errors — and should NOT independently retry on top.
+func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, authID, refreshToken string, maxRetries int) (*CodexTokenData, error) {
+	return oauthflight.Do[*CodexTokenData](authID, func() (*CodexTokenData, error) {
+		var lastErr error
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			// Wait before retry
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				// Wait before retry
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(attempt) * time.Second):
+				}
 			}
+
+			tokenData, err := o.RefreshTokens(ctx, refreshToken)
+			if err == nil {
+				return tokenData, nil
+			}
+			if isNonRetryableRefreshErr(err) {
+				log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
+				return nil, err
+			}
+
+			lastErr = err
+			log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
 		}
 
-		tokenData, err := o.RefreshTokens(ctx, refreshToken)
-		if err == nil {
-			return tokenData, nil
-		}
-		if isNonRetryableRefreshErr(err) {
-			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
-			return nil, err
-		}
-
-		lastErr = err
-		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
-	}
-
-	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+		return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+	})
 }
 
 func isNonRetryableRefreshErr(err error) bool {
