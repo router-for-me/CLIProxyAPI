@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,7 +253,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+
+		sErr := statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if httpResp.StatusCode == http.StatusTooManyRequests || httpResp.StatusCode == 529 {
+			sErr.retryAfter = parseClaudeRetryAfter(httpResp.Header)
+		}
+		err = sErr
+
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -429,7 +436,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		sErr := statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if httpResp.StatusCode == http.StatusTooManyRequests || httpResp.StatusCode == 529 {
+			sErr.retryAfter = parseClaudeRetryAfter(httpResp.Header)
+		}
+		err = sErr
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -663,7 +674,11 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
+		sErr := statusErr{code: resp.StatusCode, msg: string(b)}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 529 {
+			sErr.retryAfter = parseClaudeRetryAfter(resp.Header)
+		}
+		return cliproxyexecutor.Response{}, sErr
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -1721,7 +1736,7 @@ Prefer acting on the user's task over describing product-specific workflows.`)
 func buildTextBlock(text string, cacheControl map[string]string) string {
 	block := []byte(`{"type":"text"}`)
 	block, _ = sjson.SetBytes(block, "text", text)
-	if cacheControl != nil && len(cacheControl) > 0 {
+	if len(cacheControl) > 0 {
 		// Build cache_control JSON manually to avoid sjson map marshaling issues.
 		// sjson.SetBytes with map[string]string may not produce expected structure.
 		cc := `{"type":"ephemeral"`
@@ -2382,4 +2397,27 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 	}
 
 	return body
+}
+
+func parseClaudeRetryAfter(header http.Header) *time.Duration {
+	val := header.Get("Retry-After")
+	if val == "" {
+		return nil
+	}
+
+	secs, err := strconv.ParseFloat(val, 64)
+	if err == nil && secs > 0 {
+		d := time.Duration(secs * float64(time.Second))
+		return &d
+	}
+
+	t, err := http.ParseTime(val)
+	if err != nil {
+		return nil
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return nil
+	}
+	return &d
 }
