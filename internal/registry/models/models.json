@@ -2225,6 +2225,27 @@
   ],
   "xai": [
     {
+      "id": "grok-build-0.1",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Build 0.1",
+      "name": "grok-build-0.1",
+      "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
+      "context_length": 256000,
+      "max_completion_tokens": 256000,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "grok-4.3",
       "object": "model",
       "created": 1775606400,
