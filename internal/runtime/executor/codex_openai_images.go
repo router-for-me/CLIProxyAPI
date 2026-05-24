@@ -128,7 +128,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
-	eventData, errStream := codexReadOpenAIImageResponsesSSE(ctx, httpResp.Body, outputItemsByIndex, &outputItemsFallback)
+	eventData, errStream := codexReadOpenAIImageResponsesSSEWithHeaders(ctx, httpResp.Body, httpResp.Header, outputItemsByIndex, &outputItemsFallback)
 	if errStream != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errStream)
 		return resp, errStream
@@ -161,8 +161,11 @@ type codexImageSSEStats struct {
 	lastDataType         string
 	eventCount           int
 	dataCount            int
+	imageCount           int
+	partialImageCount    int
 	streamEndReason      string
 	readErrorType        string
+	upstream             codexImageSSEUpstreamErrorSummary
 }
 
 type codexImageSSEEvent struct {
@@ -171,8 +174,30 @@ type codexImageSSEEvent struct {
 	hasEvent  bool
 }
 
+type codexImageSSEUpstreamErrorSummary struct {
+	eventType        string
+	dataType         string
+	errorType        string
+	errorCode        string
+	errorStatus      string
+	errorParam       string
+	errorReason      string
+	incompleteReason string
+	failedReason     string
+	upstreamResponse string
+	upstreamRequest  string
+	retryAfter       string
+	responseID       string
+	errorCategory    string
+}
+
 func codexReadOpenAIImageResponsesSSE(ctx context.Context, r io.Reader, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) ([]byte, error) {
+	return codexReadOpenAIImageResponsesSSEWithHeaders(ctx, r, nil, outputItemsByIndex, outputItemsFallback)
+}
+
+func codexReadOpenAIImageResponsesSSEWithHeaders(ctx context.Context, r io.Reader, headers http.Header, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) ([]byte, error) {
 	stats := &codexImageSSEStats{startedAt: time.Now()}
+	stats.captureSafeHeaders(headers)
 	reader := bufio.NewReader(r)
 	var event codexImageSSEEvent
 
@@ -194,12 +219,16 @@ func codexReadOpenAIImageResponsesSSE(ctx context.Context, r io.Reader, outputIt
 		if codexIsImageSSEUpstreamError(event.eventType, dataType) {
 			stats.sawErrorEvent = true
 			stats.streamEndReason = codexImageSSEUpstreamError
+			stats.captureUpstreamError(event.eventType, dataType, eventData)
 			return nil, false, stats.statusErr(codexImageSSEUpstreamError, http.StatusBadGateway)
 		}
 		if len(eventData) > 0 {
 			switch dataType {
 			case "response.output_item.done":
+				stats.captureImageOutput(eventData)
 				collectCodexOutputItemDone(eventData, outputItemsByIndex, outputItemsFallback)
+			case "response.image_generation_call.partial_image":
+				stats.partialImageCount++
 			case "response.completed":
 				stats.sawResponseCompleted = true
 				return eventData, true, nil
@@ -246,6 +275,211 @@ func codexReadOpenAIImageResponsesSSE(ctx context.Context, r io.Reader, outputIt
 		stats.readErrorType = readErrorType
 		return nil, stats.statusErr(classification, code)
 	}
+}
+
+func (s *codexImageSSEStats) captureSafeHeaders(headers http.Header) {
+	if s == nil || headers == nil {
+		return
+	}
+	s.upstream.retryAfter = codexImageSafeSummaryValue(headers.Get("Retry-After"))
+	s.upstream.upstreamRequest = codexImageFirstSafeHeader(headers,
+		"X-Request-Id",
+		"Openai-Request-Id",
+		"X-Openai-Request-Id",
+		"Cf-Ray",
+	)
+}
+
+func codexImageFirstSafeHeader(headers http.Header, names ...string) string {
+	for _, name := range names {
+		if value := codexImageSafeSummaryValue(headers.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (s *codexImageSSEStats) captureImageOutput(payload []byte) {
+	if s == nil || len(payload) == 0 {
+		return
+	}
+	item := gjson.GetBytes(payload, "item")
+	if item.Get("type").String() == "image_generation_call" {
+		s.imageCount++
+		return
+	}
+	if gjson.GetBytes(payload, "type").String() == "image_generation_call" {
+		s.imageCount++
+	}
+}
+
+func (s *codexImageSSEStats) captureUpstreamError(eventType string, dataType string, payload []byte) {
+	if s == nil {
+		return
+	}
+	summary := &s.upstream
+	summary.eventType = codexImageSafeSummaryValue(eventType)
+	summary.dataType = codexImageSafeSummaryValue(dataType)
+	summary.errorType = codexImagePayloadFirstSafeValue(payload,
+		"error.type",
+		"response.error.type",
+	)
+	summary.errorCode = codexImagePayloadFirstSafeValue(payload,
+		"error.code",
+		"response.error.code",
+		"code",
+	)
+	summary.errorStatus = codexImagePayloadFirstSafeValue(payload,
+		"error.status",
+		"error.status_code",
+		"response.error.status",
+		"response.error.status_code",
+		"status",
+		"response.status",
+	)
+	summary.errorParam = codexImagePayloadFirstSafeValue(payload,
+		"error.param",
+		"response.error.param",
+		"param",
+	)
+	summary.errorReason = codexImagePayloadFirstSafeValue(payload,
+		"error.reason",
+		"response.error.reason",
+		"reason",
+	)
+	summary.incompleteReason = codexImagePayloadFirstSafeValue(payload,
+		"response.incomplete_details.reason",
+		"incomplete_details.reason",
+		"response.incomplete_reason",
+		"incomplete_reason",
+	)
+	summary.failedReason = codexImagePayloadFirstSafeValue(payload,
+		"response.failed_reason",
+		"failed_reason",
+		"response.status_details.reason",
+	)
+	if summary.failedReason == "" && strings.EqualFold(dataType, "response.failed") {
+		summary.failedReason = firstNonEmpty(summary.errorReason, summary.errorCode, summary.errorType)
+	}
+	if summary.incompleteReason == "" && strings.EqualFold(dataType, "response.incomplete") {
+		summary.incompleteReason = firstNonEmpty(summary.errorReason, summary.errorCode, summary.errorType)
+	}
+	summary.upstreamResponse = codexImagePayloadFirstSafeValue(payload,
+		"response.id",
+		"id",
+	)
+	summary.responseID = summary.upstreamResponse
+	summary.errorCategory = codexImageClassifyUpstreamError(eventType, dataType, payload, *summary)
+}
+
+func codexImagePayloadFirstSafeValue(payload []byte, paths ...string) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, path := range paths {
+		result := gjson.GetBytes(payload, path)
+		if !result.Exists() || result.Type == gjson.Null {
+			continue
+		}
+		if value := codexImageSafeSummaryValue(result.String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexImagePayloadFirstRawValue(payload []byte, paths ...string) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, path := range paths {
+		result := gjson.GetBytes(payload, path)
+		if !result.Exists() || result.Type == gjson.Null {
+			continue
+		}
+		if value := strings.TrimSpace(result.String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexImageClassifyUpstreamError(eventType string, dataType string, payload []byte, summary codexImageSSEUpstreamErrorSummary) string {
+	status := strings.TrimSpace(summary.errorStatus)
+	structuredText := strings.ToLower(strings.Join([]string{
+		eventType,
+		dataType,
+		summary.errorType,
+		summary.errorCode,
+		summary.errorStatus,
+		summary.errorReason,
+		summary.incompleteReason,
+		summary.failedReason,
+	}, " "))
+	messageText := strings.ToLower(codexImagePayloadFirstRawValue(payload, "error.message", "response.error.message", "message"))
+
+	switch {
+	case codexImageContainsAny(structuredText, "quota", "insufficient_quota", "usage_limit", "usage limit"):
+		return "quota"
+	case codexImageContainsAny(structuredText, "capacity"):
+		return "capacity"
+	case codexImageContainsAny(structuredText, "overloaded", "overload"):
+		return "overloaded"
+	case codexImageContainsAny(structuredText, "rate_limit", "rate limit", "too_many_requests", "too many requests") || status == "429":
+		return "rate_limit"
+	case codexImageContainsAny(structuredText, "safety", "policy", "content_filter", "content filter"):
+		return "safety"
+	case codexImageContainsAny(structuredText, "timeout", "deadline"):
+		return "timeout"
+	case codexImageContainsAny(structuredText, "unauthorized", "forbidden", "authentication", "auth") || status == "401" || status == "403":
+		return "auth"
+	case codexImageContainsAny(structuredText, "invalid_request", "invalid request", "bad_request", "bad request", "unprocessable", "malformed") || status == "400" || status == "422":
+		return "invalid_request"
+	case strings.EqualFold(dataType, "response.failed"):
+		return "upstream_failed"
+	case strings.EqualFold(dataType, "response.incomplete"):
+		return "upstream_incomplete"
+	case codexImageContainsAny(structuredText, "internal_error", "internal error", "server_error", "server error") || strings.HasPrefix(status, "5"):
+		return "internal_error"
+	case codexImageContainsAny(messageText, "quota", "insufficient_quota", "usage_limit", "usage limit"):
+		return "quota"
+	case codexImageContainsAny(messageText, "capacity"):
+		return "capacity"
+	case codexImageContainsAny(messageText, "overloaded", "overload"):
+		return "overloaded"
+	case codexImageContainsAny(messageText, "rate_limit", "rate limit", "too_many_requests", "too many requests"):
+		return "rate_limit"
+	case codexImageContainsAny(messageText, "safety", "policy", "content_filter", "content filter"):
+		return "safety"
+	case codexImageContainsAny(messageText, "timeout", "deadline"):
+		return "timeout"
+	case codexImageContainsAny(messageText, "unauthorized", "forbidden", "authentication"):
+		return "auth"
+	case codexImageContainsAny(messageText, "invalid_request", "invalid request", "bad_request", "bad request", "unprocessable", "malformed"):
+		return "invalid_request"
+	case codexImageContainsAny(messageText, "internal_error", "internal error", "server_error", "server error"):
+		return "internal_error"
+	default:
+		return "unknown"
+	}
+}
+
+func codexImageContainsAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexConsumeImageSSELine(line []byte, event *codexImageSSEEvent, stats *codexImageSSEStats) {
@@ -387,15 +621,31 @@ func (s *codexImageSSEStats) statusErr(classification string, code int) statusEr
 	return statusErr{
 		code: code,
 		msg: fmt.Sprintf(
-			"codex image stream error: classification=%s saw_response_completed=%t saw_first_event=%t saw_error_event=%t last_event_type=%s last_data_type=%s event_count=%d data_count=%d elapsed_ms=%d stream_end_reason=%s read_error_type=%s",
+			"codex image stream error: classification=%s saw_response_completed=%t saw_first_event=%t saw_error_event=%t last_event_type=%s last_data_type=%s upstream_event_type=%s upstream_data_type=%s upstream_error_type=%s upstream_error_code=%s upstream_error_status=%s upstream_error_param=%s upstream_error_reason=%s upstream_incomplete_reason=%s upstream_failed_reason=%s upstream_response_id=%s upstream_request_id=%s retry_after=%s response_id=%s error_category=%s event_count=%d data_count=%d image_count=%d partial_image_count=%d elapsed_ms=%d stream_end_reason=%s read_error_type=%s",
 			classification,
 			s.sawResponseCompleted,
 			s.sawFirstEvent,
 			s.sawErrorEvent,
 			codexImageSafeSummaryValue(s.lastEventType),
 			codexImageSafeSummaryValue(s.lastDataType),
+			codexImageSafeSummaryValue(s.upstream.eventType),
+			codexImageSafeSummaryValue(s.upstream.dataType),
+			codexImageSafeSummaryValue(s.upstream.errorType),
+			codexImageSafeSummaryValue(s.upstream.errorCode),
+			codexImageSafeSummaryValue(s.upstream.errorStatus),
+			codexImageSafeSummaryValue(s.upstream.errorParam),
+			codexImageSafeSummaryValue(s.upstream.errorReason),
+			codexImageSafeSummaryValue(s.upstream.incompleteReason),
+			codexImageSafeSummaryValue(s.upstream.failedReason),
+			codexImageSafeSummaryValue(s.upstream.upstreamResponse),
+			codexImageSafeSummaryValue(s.upstream.upstreamRequest),
+			codexImageSafeSummaryValue(s.upstream.retryAfter),
+			codexImageSafeSummaryValue(s.upstream.responseID),
+			codexImageSafeSummaryValue(s.upstream.errorCategory),
 			s.eventCount,
 			s.dataCount,
+			s.imageCount,
+			s.partialImageCount,
 			elapsedMS,
 			codexImageSafeSummaryValue(s.streamEndReason),
 			codexImageSafeSummaryValue(s.readErrorType),
@@ -409,7 +659,7 @@ func codexImageSafeSummaryValue(value string) string {
 		return ""
 	}
 	lower := strings.ToLower(value)
-	for _, sensitive := range []string{"authorization", "cookie", "api_key", "access_token", "refresh_token", "bearer", "sk-", "prompt", "base64", "b64"} {
+	for _, sensitive := range []string{"authorization", "cookie", "api_key", "access_token", "refresh_token", "id_token", "bearer", "sk-", "prompt", "base64", "b64"} {
 		if strings.Contains(lower, sensitive) {
 			return "redacted"
 		}

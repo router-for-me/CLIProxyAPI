@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,239 @@ data: {"type":"Authorization-Bearer-sk-secret-prompt-base64","prompt":"secret pr
 	}
 }
 
+func TestCodexOpenAIImageSSEUpstreamErrorEventExtractsSafeFields(t *testing.T) {
+	raw := `event: error
+data: {"type":"error","id":"resp_123","error":{"type":"server_error","code":"internal_error","status":500,"param":"image","reason":"generator_failed","message":"do not expose this message"}}
+
+`
+	headers := http.Header{
+		"Retry-After":             {"17"},
+		"X-Openai-Request-Id":     {"req_123"},
+		"Authorization":           {"Bearer forbidden"},
+		"Cookie":                  {"forbidden"},
+		"Set-Cookie":              {"forbidden"},
+		"X-Ignored-Unsafe-Header": {"forbidden"},
+	}
+	_, err := codexReadOpenAIImageResponsesSSEWithHeaders(context.Background(), strings.NewReader(raw), headers, map[int64][]byte{}, &[][]byte{})
+	assertCodexImageStreamStatus(t, err, http.StatusBadGateway, codexImageSSEUpstreamError)
+	msg := err.Error()
+
+	for _, want := range []string{
+		"upstream_event_type=error",
+		"upstream_data_type=error",
+		"upstream_error_type=server_error",
+		"upstream_error_code=internal_error",
+		"upstream_error_status=500",
+		"upstream_error_param=image",
+		"upstream_error_reason=generator_failed",
+		"upstream_response_id=resp_123",
+		"response_id=resp_123",
+		"retry_after=17",
+		"upstream_request_id=req_123",
+		"error_category=internal_error",
+	} {
+		assertCodexImageErrContains(t, msg, want)
+	}
+	for _, forbidden := range []string{"do not expose this message", "Authorization", "Cookie", "Set-Cookie", "Bearer forbidden", "X-Ignored-Unsafe-Header"} {
+		assertCodexImageErrNotContains(t, msg, forbidden)
+	}
+}
+
+func TestCodexOpenAIImageSSEDataTypeErrorExtractsSafeFields(t *testing.T) {
+	raw := `data: {"type":"error","response":{"id":"resp_data_error"},"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","status_code":429,"param":"requests","reason":"rate_limit"}}
+
+`
+	_, err := codexReadOpenAIImageResponsesSSE(context.Background(), strings.NewReader(raw), map[int64][]byte{}, &[][]byte{})
+	assertCodexImageStreamStatus(t, err, http.StatusBadGateway, codexImageSSEUpstreamError)
+	msg := err.Error()
+	for _, want := range []string{
+		"upstream_data_type=error",
+		"upstream_error_type=rate_limit_error",
+		"upstream_error_code=rate_limit_exceeded",
+		"upstream_error_status=429",
+		"upstream_error_param=requests",
+		"upstream_error_reason=rate_limit",
+		"upstream_response_id=resp_data_error",
+		"error_category=rate_limit",
+	} {
+		assertCodexImageErrContains(t, msg, want)
+	}
+}
+
+func TestCodexOpenAIImageSSEResponseFailedAndIncompleteSummaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wants   []string
+	}{
+		{
+			name:    "failed",
+			payload: `{"type":"response.failed","response":{"id":"resp_failed","failed_reason":"tool_generation_failed","error":{"code":"generation_failed","type":"server_error"}}}`,
+			wants: []string{
+				"upstream_data_type=response.failed",
+				"upstream_failed_reason=tool_generation_failed",
+				"upstream_error_code=generation_failed",
+				"upstream_error_type=server_error",
+				"upstream_response_id=resp_failed",
+				"error_category=upstream_failed",
+			},
+		},
+		{
+			name:    "incomplete",
+			payload: `{"type":"response.incomplete","response":{"id":"resp_incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`,
+			wants: []string{
+				"upstream_data_type=response.incomplete",
+				"upstream_incomplete_reason=max_output_tokens",
+				"upstream_response_id=resp_incomplete",
+				"error_category=upstream_incomplete",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := "data: " + tt.payload + "\n\n"
+			_, err := codexReadOpenAIImageResponsesSSE(context.Background(), strings.NewReader(raw), map[int64][]byte{}, &[][]byte{})
+			assertCodexImageStreamStatus(t, err, http.StatusBadGateway, codexImageSSEUpstreamError)
+			msg := err.Error()
+			for _, want := range tt.wants {
+				assertCodexImageErrContains(t, msg, want)
+			}
+			assertCodexImageErrNotContains(t, msg, tt.payload)
+		})
+	}
+}
+
+func TestCodexOpenAIImageSSEUpstreamErrorCategories(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		category string
+	}{
+		{
+			name:     "rate limit",
+			payload:  `{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","status":429,"reason":"rate_limit"}}`,
+			category: "rate_limit",
+		},
+		{
+			name:     "quota",
+			payload:  `{"type":"error","error":{"type":"billing_error","code":"insufficient_quota","status":429,"reason":"quota"}}`,
+			category: "quota",
+		},
+		{
+			name:     "capacity",
+			payload:  `{"type":"error","error":{"type":"server_error","code":"capacity_exceeded","status":503,"reason":"capacity"}}`,
+			category: "capacity",
+		},
+		{
+			name:     "overloaded",
+			payload:  `{"type":"error","error":{"type":"server_error","code":"model_overloaded","status":503,"reason":"overloaded"}}`,
+			category: "overloaded",
+		},
+		{
+			name:     "safety",
+			payload:  `{"type":"error","error":{"type":"policy_violation","code":"safety_policy","status":400,"reason":"safety"}}`,
+			category: "safety",
+		},
+		{
+			name:     "timeout",
+			payload:  `{"type":"error","error":{"type":"server_error","code":"upstream_timeout","status":504,"reason":"timeout"}}`,
+			category: "timeout",
+		},
+		{
+			name:     "invalid request",
+			payload:  `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","status":400,"reason":"invalid_request"}}`,
+			category: "invalid_request",
+		},
+		{
+			name:     "auth",
+			payload:  `{"type":"error","error":{"type":"authentication_error","code":"unauthorized","status":401,"reason":"auth"}}`,
+			category: "auth",
+		},
+		{
+			name:     "unknown",
+			payload:  `{"type":"error","error":{"type":"mystery","code":"unknown","status":418,"message":"classified only in memory"}}`,
+			category: "unknown",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := codexReadOpenAIImageResponsesSSE(context.Background(), strings.NewReader("data: "+tt.payload+"\n\n"), map[int64][]byte{}, &[][]byte{})
+			assertCodexImageStreamStatus(t, err, http.StatusBadGateway, codexImageSSEUpstreamError)
+			msg := err.Error()
+			assertCodexImageErrContains(t, msg, "error_category="+tt.category)
+			assertCodexImageErrNotContains(t, msg, "classified only in memory")
+		})
+	}
+}
+
+func TestCodexOpenAIImageSSEUpstreamErrorCountsImagesAndPartials(t *testing.T) {
+	raw := `data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"AA=="}}
+
+data: {"type":"response.image_generation_call.partial_image","partial_image_index":0,"partial_image_b64":"secret-b64"}
+
+data: {"type":"error","error":{"code":"capacity","reason":"capacity"}}
+
+`
+	_, err := codexReadOpenAIImageResponsesSSE(context.Background(), strings.NewReader(raw), map[int64][]byte{}, &[][]byte{})
+	assertCodexImageStreamStatus(t, err, http.StatusBadGateway, codexImageSSEUpstreamError)
+	msg := err.Error()
+	assertCodexImageErrContains(t, msg, "image_count=1")
+	assertCodexImageErrContains(t, msg, "partial_image_count=1")
+	assertCodexImageErrNotContains(t, msg, "secret-b64")
+}
+
+func TestCodexOpenAIImageSSEUpstreamErrorDoesNotLeakSensitivePayload(t *testing.T) {
+	raw := `event: error
+data: {"type":"error","id":"resp_safe","error":{"type":"rate_limit_error","code":"rate_limit","status":429,"message":"prompt raw user content base64 token Authorization Cookie api_key sk-secret access_token refresh_token id_token"},"prompt":"secret prompt","partial_image_b64":"raw-b64","user_content":"raw user content","image_content":"raw image content","Authorization":"Bearer secret","Cookie":"secret","api_key":"sk-secret","access_token":"secret","refresh_token":"secret","id_token":"secret"}
+
+`
+	_, err := codexReadOpenAIImageResponsesSSE(context.Background(), strings.NewReader(raw), map[int64][]byte{}, &[][]byte{})
+	assertCodexImageStreamStatus(t, err, http.StatusBadGateway, codexImageSSEUpstreamError)
+	msg := err.Error()
+	for _, forbidden := range []string{
+		"secret prompt",
+		"raw-b64",
+		"raw user content",
+		"raw image content",
+		"Authorization",
+		"Cookie",
+		"sk-secret",
+		"access_token",
+		"refresh_token",
+		"id_token",
+		"Bearer",
+		"prompt",
+		"base64",
+		"user content",
+		"image content",
+	} {
+		assertCodexImageErrNotContains(t, msg, forbidden)
+	}
+	assertCodexImageErrContains(t, msg, "upstream_response_id=resp_safe")
+	assertCodexImageErrContains(t, msg, "error_category=rate_limit")
+}
+
+func TestCodexOpenAIImageExecuteSuccessDoesNotIncludeUpstreamErrorSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Retry-After", "11")
+		w.Header().Set("X-Request-Id", "req_success")
+		_, _ = w.Write(codexBuildSSEFrame("", codexImageCompletedPayload("AA==")))
+	}))
+	defer server.Close()
+
+	resp, err := codexTestImageExecutor(server.URL).Execute(context.Background(), codexTestImageAuth(server.URL), codexTestImageRequest(), codexTestImageOptions())
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	payload := string(resp.Payload)
+	for _, forbidden := range []string{"upstream_error", "error_category", "retry_after", "req_success"} {
+		if strings.Contains(payload, forbidden) {
+			t.Fatalf("success payload leaked upstream error summary %q: %s", forbidden, payload)
+		}
+	}
+}
+
 func TestCodexOpenAIImageSSESupportsLargeDataLine(t *testing.T) {
 	largeResult := strings.Repeat("A", 70*1024)
 	data, err := codexReadOpenAIImageResponsesSSE(context.Background(), strings.NewReader("data: "+string(codexImageCompletedPayload(largeResult))+"\n\n"), map[int64][]byte{}, &[][]byte{})
@@ -218,5 +452,25 @@ func assertCodexImageStreamStatus(t *testing.T, err error, wantStatus int, wantC
 	}
 	if !strings.Contains(err.Error(), "classification="+wantClassification) {
 		t.Fatalf("error missing classification %q: %v", wantClassification, err)
+	}
+}
+
+func assertCodexImageErrContains(t *testing.T, msg string, want string) {
+	t.Helper()
+	if !strings.Contains(msg, want) {
+		t.Fatalf("error missing %q: %s", want, msg)
+	}
+}
+
+func assertCodexImageErrNotContains(t *testing.T, msg string, forbidden string) {
+	t.Helper()
+	if strings.Contains(msg, forbidden) {
+		t.Fatalf("error leaked forbidden content %q: %s", forbidden, msg)
+	}
+}
+
+func TestCodexImageSafeSummaryValueRejectsStatusLikeSecrets(t *testing.T) {
+	if got := codexImageSafeSummaryValue("status-" + strconv.Itoa(http.StatusTooManyRequests)); got != "status-429" {
+		t.Fatalf("safe summary = %q, want status-429", got)
 	}
 }
