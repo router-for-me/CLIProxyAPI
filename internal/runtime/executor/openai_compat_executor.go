@@ -100,7 +100,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	endpoint := "/chat/completions"
+	endpoint := openAICompatEndpointPath(opts)
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
@@ -614,6 +614,17 @@ func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
 		return openAICompatImagesGenerationsPath
 	}
 	return openAICompatDefaultImageEndpoint
+}
+
+func openAICompatEndpointPath(opts cliproxyexecutor.Options) string {
+	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
+		return endpointPath
+	}
+	path := helps.PayloadRequestPath(opts)
+	if strings.HasSuffix(path, "/embeddings") {
+		return "/embeddings"
+	}
+	return "/chat/completions"
 }
 
 func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool) ([]byte, string, error) {

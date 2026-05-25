@@ -27,7 +27,9 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
 	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
-		if v.String() != "priority" {
+		// Allow both "priority" and "fast" as valid service_tier values
+		if v.String() != "priority" && v.String() != "fast" {
+			// Remove any other unsupported service_tier values
 			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
 		}
 	}
