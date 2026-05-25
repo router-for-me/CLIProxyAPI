@@ -168,6 +168,11 @@ const (
 	quotaHalfOpenActiveTTL   = 20 * time.Second
 	health429OpenFailures    = 20
 
+	channelBreakerOpenFailures  = 3
+	channelBreakerStateLimit    = 4096
+	channelBreakerErrorCode     = "channel_circuit_open"
+	channelBreakerStatusMessage = "channel temporarily unavailable after consecutive failures"
+
 	spreadLoadHalfLife          = 20 * time.Second
 	spreadLoadInflightWeight    = 4
 	spreadLoadOverTargetPower   = 3

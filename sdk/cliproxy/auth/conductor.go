@@ -222,6 +222,7 @@ type Manager struct {
 	halfOpenProbeMu          sync.Mutex
 	halfOpenProbeNext        map[string]time.Time
 	halfOpenProbeActiveUntil map[string]time.Time
+	channelBreakers          map[string]HealthState
 
 	codexModelLoadMu sync.Mutex
 	codexModelLoads  map[string]int
@@ -249,6 +250,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		dynamicSelectors:         make(map[string]Selector),
 		halfOpenProbeNext:        make(map[string]time.Time),
 		halfOpenProbeActiveUntil: make(map[string]time.Time),
+		channelBreakers:          make(map[string]HealthState),
 		codexModelLoads:          make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
@@ -3263,6 +3265,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	setModelQuota := false
 	var modelQuotaRecoverAt time.Time
 	var authSnapshot *Auth
+	var schedulerSnapshots []*Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -3450,15 +3453,27 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
 		}
+		schedulerSnapshots = append(schedulerSnapshots, m.applyChannelBreakerResultLocked(auth, result, now)...)
 
 		if errPersist := m.persist(ctx, auth); errPersist != nil {
 			logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth result state: %v", errPersist)
 		}
 		authSnapshot = auth.Clone()
+		schedulerSnapshots = append(schedulerSnapshots, authSnapshot)
 	}
 	m.mu.Unlock()
-	if m.scheduler != nil && authSnapshot != nil {
-		m.scheduler.upsertAuth(authSnapshot)
+	if m.scheduler != nil {
+		seenSnapshots := make(map[string]struct{}, len(schedulerSnapshots))
+		for _, snapshot := range schedulerSnapshots {
+			if snapshot == nil || snapshot.ID == "" {
+				continue
+			}
+			if _, seen := seenSnapshots[snapshot.ID]; seen {
+				continue
+			}
+			seenSnapshots[snapshot.ID] = struct{}{}
+			m.scheduler.upsertAuth(snapshot)
+		}
 	}
 
 	if shouldUnregisterAuth {
@@ -3480,6 +3495,206 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.logAuthResultMetric(ctx, authSnapshot, result)
 	}
 	m.hook.OnResult(ctx, result)
+}
+
+func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, now time.Time) []*Auth {
+	if m == nil || auth == nil || quotaCooldownDisabledForAuth(auth) {
+		return nil
+	}
+	key := channelBreakerKey(auth, result.Model)
+	if key == "" {
+		return nil
+	}
+	m.pruneChannelBreakersLocked(now)
+	if result.Success {
+		m.recordChannelBreakerSuccessLocked(key, now)
+		return nil
+	}
+	if !shouldCountChannelBreakerFailure(result) {
+		return nil
+	}
+
+	statusCode := statusCodeFromResult(result.Error)
+	health := m.channelBreakers[key]
+	applyHealthFailure(&health, now, statusCode)
+	if health.ConsecutiveFailures >= channelBreakerOpenFailures {
+		cooldown := healthOpenCooldown(statusCode, health.ConsecutiveFailures)
+		if result.RetryAfter != nil && *result.RetryAfter > cooldown {
+			cooldown = *result.RetryAfter
+		}
+		if cooldown > quotaBackoffMax {
+			cooldown = quotaBackoffMax
+		}
+		if cooldown <= 0 {
+			cooldown = healthOpenCooldown(0, health.ConsecutiveFailures)
+		}
+		health.BreakerState = HealthBreakerOpen
+		health.OpenUntil = now.Add(cooldown)
+	}
+	if health.BreakerState == HealthBreakerClosed && health.ConsecutiveFailures == 0 {
+		delete(m.channelBreakers, key)
+		return nil
+	}
+	if m.channelBreakers == nil {
+		m.channelBreakers = make(map[string]HealthState)
+	}
+	m.channelBreakers[key] = health
+	if health.BreakerState != HealthBreakerOpen || health.OpenUntil.IsZero() || !health.OpenUntil.After(now) {
+		return nil
+	}
+	return m.applyChannelBreakerCooldownLocked(auth, result, health, now)
+}
+
+func (m *Manager) recordChannelBreakerSuccessLocked(key string, now time.Time) {
+	if m == nil || key == "" || len(m.channelBreakers) == 0 {
+		return
+	}
+	health, ok := m.channelBreakers[key]
+	if !ok {
+		return
+	}
+	applyHealthSuccess(&health, now)
+	if health.BreakerState == HealthBreakerClosed {
+		delete(m.channelBreakers, key)
+		return
+	}
+	m.channelBreakers[key] = health
+}
+
+func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, health HealthState, now time.Time) []*Auth {
+	baseKey := channelBreakerBaseKey(auth)
+	if m == nil || baseKey == "" || result.Model == "" {
+		return nil
+	}
+	statusCode := statusCodeFromResult(result.Error)
+	message := channelBreakerStatusMessage
+	if result.Error != nil && strings.TrimSpace(result.Error.Message) != "" {
+		message = channelBreakerStatusMessage + ": " + result.Error.Message
+	}
+	snapshots := make([]*Auth, 0)
+	for _, peer := range m.auths {
+		if peer == nil || peer.Disabled || peer.Status == StatusDisabled {
+			continue
+		}
+		if channelBreakerBaseKey(peer) != baseKey {
+			continue
+		}
+		state := ensureModelState(peer, result.Model)
+		if state == nil || state.Status == StatusDisabled {
+			continue
+		}
+		state.Unavailable = true
+		state.Status = StatusError
+		state.StatusMessage = message
+		state.LastError = &Error{
+			Code:       channelBreakerErrorCode,
+			Message:    message,
+			Retryable:  true,
+			HTTPStatus: statusCode,
+		}
+		state.NextRetryAfter = laterTime(state.NextRetryAfter, health.OpenUntil)
+		state.Health = health
+		state.UpdatedAt = now
+		if peer.Status != StatusDisabled {
+			peer.Status = StatusError
+		}
+		peer.StatusMessage = message
+		peer.LastError = cloneError(state.LastError)
+		peer.UpdatedAt = now
+		updateAggregatedAvailability(peer, now)
+		snapshots = append(snapshots, peer.Clone())
+	}
+	return snapshots
+}
+
+func shouldCountChannelBreakerFailure(result Result) bool {
+	if result.Success || result.Error == nil {
+		return false
+	}
+	if isRequestScopedNotFoundResultError(result.Error) || isRequestScopedFeatureUnsupportedResultError(result.Error) {
+		return false
+	}
+	if isModelSupportResultError(result.Error) || isBalanceExhaustedResultError(result.Error) {
+		return false
+	}
+	statusCode := statusCodeFromResult(result.Error)
+	if statusCode == 0 {
+		return true
+	}
+	if statusCode == http.StatusTooManyRequests || isTransientUpstreamStatus(statusCode) {
+		return true
+	}
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusNotFound {
+		return false
+	}
+	return isRetryableAvailabilityErrorMessage(result.Error.Code + " " + result.Error.Message)
+}
+
+func channelBreakerBaseKey(auth *Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	if authProviderFamilyKey(auth) != "openai-compatibility" &&
+		strings.TrimSpace(auth.Attributes["provider_key"]) == "" &&
+		strings.TrimSpace(auth.Attributes["compat_name"]) == "" {
+		return ""
+	}
+	providerKey := normalizeRoutingGroupKey(auth.Attributes["provider_key"])
+	if providerKey == "" {
+		providerKey = normalizeRoutingGroupKey(auth.Provider)
+	}
+	compatName := normalizeRoutingGroupKey(auth.Attributes["compat_name"])
+	baseURL := normalizeChannelBreakerURL(auth.Attributes["base_url"])
+	proxyURL := normalizeChannelBreakerURL(auth.ProxyURL)
+	prefix := strings.ToLower(strings.TrimSpace(auth.Prefix))
+	routingGroup := normalizeRoutingGroupKey(auth.Attributes["routing_group"])
+	return strings.Join([]string{
+		"openai-compatibility",
+		providerKey,
+		compatName,
+		baseURL,
+		proxyURL,
+		prefix,
+		routingGroup,
+	}, "\x00")
+}
+
+func channelBreakerKey(auth *Auth, model string) string {
+	baseKey := channelBreakerBaseKey(auth)
+	modelKey := canonicalModelKey(model)
+	if modelKey == "" {
+		modelKey = strings.ToLower(strings.TrimSpace(model))
+	}
+	if baseKey == "" || modelKey == "" {
+		return ""
+	}
+	return baseKey + "\x00model=" + modelKey
+}
+
+func normalizeChannelBreakerURL(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	for strings.HasSuffix(raw, "/") {
+		raw = strings.TrimSuffix(raw, "/")
+	}
+	return raw
+}
+
+func (m *Manager) pruneChannelBreakersLocked(now time.Time) {
+	if m == nil || len(m.channelBreakers) <= channelBreakerStateLimit {
+		return
+	}
+	for key, health := range m.channelBreakers {
+		if health.BreakerState == HealthBreakerOpen && !health.OpenUntil.IsZero() && health.OpenUntil.After(now) {
+			continue
+		}
+		delete(m.channelBreakers, key)
+	}
+	for len(m.channelBreakers) > channelBreakerStateLimit {
+		for key := range m.channelBreakers {
+			delete(m.channelBreakers, key)
+			break
+		}
+	}
 }
 
 func (m *Manager) markSelectorLoadDone(authID, model string) {

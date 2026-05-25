@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -534,6 +535,91 @@ func TestManager_Execute_RetryQueueDelayDelaysCredentialFallback(t *testing.T) {
 	calls := executor.ExecuteCalls()
 	if len(calls) != 2 || calls[0] != "bad" || calls[1] != "good" {
 		t.Fatalf("execute calls = %v, want [bad good]", calls)
+	}
+}
+
+func TestManager_Execute_OpenAICompatChannelBreakerBypassesHigherPriorityChannel(t *testing.T) {
+	model := "gpt-5-channel-breaker"
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 1)
+
+	failingExecutor := &authFallbackExecutor{
+		id: "xixiapi-plus",
+		executeErrors: map[string]error{
+			"xixi-1": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "no available channel"},
+			"xixi-2": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "no available channel"},
+			"xixi-3": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "no available channel"},
+		},
+	}
+	backupExecutor := &authFallbackExecutor{id: "backup-gpt"}
+	manager.RegisterExecutor(failingExecutor)
+	manager.RegisterExecutor(backupExecutor)
+
+	auths := []*Auth{
+		openAICompatChannelBreakerAuth("xixi-1", "xixiapi-plus", "https://xixiapi.cc/v1", 10),
+		openAICompatChannelBreakerAuth("xixi-2", "xixiapi-plus", "https://xixiapi.cc/v1", 10),
+		openAICompatChannelBreakerAuth("xixi-3", "xixiapi-plus", "https://xixiapi.cc/v1", 10),
+		openAICompatChannelBreakerAuth("backup-1", "backup-gpt", "https://backup.example.com/v1", 1),
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	_, errFirst := manager.Execute(context.Background(), []string{"xixiapi-plus", "backup-gpt"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errFirst == nil {
+		t.Fatal("first execute unexpectedly succeeded before the channel breaker opened")
+	}
+	if got := failingExecutor.ExecuteCalls(); len(got) != 2 {
+		t.Fatalf("first execute calls = %v, want two high-priority attempts", got)
+	}
+
+	resp, errSecond := manager.Execute(context.Background(), []string{"xixiapi-plus", "backup-gpt"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errSecond != nil {
+		t.Fatalf("second execute error = %v, want fallback channel success", errSecond)
+	}
+	if string(resp.Payload) != "backup-1" {
+		t.Fatalf("payload = %q, want backup-1", string(resp.Payload))
+	}
+	if got := failingExecutor.ExecuteCalls(); len(got) != channelBreakerOpenFailures {
+		t.Fatalf("failing channel calls = %v, want %d before breaker bypass", got, channelBreakerOpenFailures)
+	}
+	if got := backupExecutor.ExecuteCalls(); len(got) != 1 || got[0] != "backup-1" {
+		t.Fatalf("backup calls = %v, want [backup-1]", got)
+	}
+	for _, authID := range []string{"xixi-1", "xixi-2", "xixi-3"} {
+		updated, ok := manager.GetByID(authID)
+		if !ok {
+			t.Fatalf("auth %s not found", authID)
+		}
+		blocked, reason, next := isAuthBlockedForModel(updated, model, time.Now())
+		if !blocked || reason != blockReasonCooldown || next.IsZero() {
+			t.Fatalf("auth %s blocked=%v reason=%v next=%v, want channel cooldown", authID, blocked, reason, next)
+		}
+	}
+}
+
+func openAICompatChannelBreakerAuth(id, provider, baseURL string, priority int) *Auth {
+	return &Auth{
+		ID:       id,
+		Provider: provider,
+		Prefix:   provider,
+		Attributes: map[string]string{
+			"base_url":        baseURL,
+			"compat_name":     provider,
+			"provider_family": "openai-compatibility",
+			"provider_key":    provider,
+			"priority":        strconv.Itoa(priority),
+		},
 	}
 }
 
