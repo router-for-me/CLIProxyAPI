@@ -104,13 +104,34 @@ func trimCodexInputIfNeeded(cfg *config.Config, body []byte, baseModel string) [
 	}
 
 	firstKeep := turns[dropCount].startIdx
+
+	keptCallIDs := make(map[string]struct{})
+	for i := firstKeep; i < len(items); i++ {
+		if items[i].Get("type").String() == "function_call" {
+			if id := items[i].Get("call_id").String(); id != "" {
+				keptCallIDs[id] = struct{}{}
+			}
+		}
+	}
+
 	var buf bytes.Buffer
 	buf.WriteByte('[')
+	first := true
+	var orphaned int
 	for i := firstKeep; i < len(items); i++ {
-		if i > firstKeep {
+		if items[i].Get("type").String() == "function_call_output" {
+			if id := items[i].Get("call_id").String(); id != "" {
+				if _, ok := keptCallIDs[id]; !ok {
+					orphaned++
+					continue
+				}
+			}
+		}
+		if !first {
 			buf.WriteByte(',')
 		}
 		buf.WriteString(items[i].Raw)
+		first = false
 	}
 	buf.WriteByte(']')
 
@@ -119,8 +140,13 @@ func trimCodexInputIfNeeded(cfg *config.Config, body []byte, baseModel string) [
 		log.Warnf("codex input trim: failed to rebuild input array: %v", err)
 		return body
 	}
-	log.Infof("codex input trimmed: dropped %d/%d turns (%d tokens), %d -> ~%d tokens (ceiling %d)",
-		dropCount, len(turns), shed, total, total-shed, ceiling)
+	if orphaned > 0 {
+		log.Infof("codex input trimmed: dropped %d/%d turns (%d tokens, %d orphaned outputs), %d -> ~%d tokens (ceiling %d)",
+			dropCount, len(turns), shed, orphaned, total, total-shed, ceiling)
+	} else {
+		log.Infof("codex input trimmed: dropped %d/%d turns (%d tokens), %d -> ~%d tokens (ceiling %d)",
+			dropCount, len(turns), shed, total, total-shed, ceiling)
+	}
 	return trimmed
 }
 
