@@ -40,8 +40,15 @@ func TestEnrichWithPerAuthGrokModelsRegistersDiscoveredModelsForRouting(t *testi
 		OwnedBy: "xai",
 		Type:    "grok",
 	}}}, false, seen)
-	if len(models) != 1 || models[0].ID != modelID {
-		t.Fatalf("unexpected enriched models: %#v", models)
+	foundModel := false
+	for _, m := range models {
+		if m.ID == modelID {
+			foundModel = true
+			break
+		}
+	}
+	if !foundModel {
+		t.Fatalf("expected enriched models to include %s: %#v", modelID, models)
 	}
 
 	providers := registry.GetGlobalRegistry().GetModelProviders(modelID)
@@ -50,7 +57,56 @@ func TestEnrichWithPerAuthGrokModelsRegistersDiscoveredModelsForRouting(t *testi
 	}
 
 	clientModels := registry.GetGlobalRegistry().GetModelsForClient(authID)
-	if len(clientModels) != 1 || clientModels[0].ID != modelID {
+	foundClientModel := false
+	for _, m := range clientModels {
+		if m.ID == modelID {
+			foundClientModel = true
+			break
+		}
+	}
+	if !foundClientModel {
 		t.Fatalf("expected discovered model registered for auth, got %#v", clientModels)
+	}
+}
+
+func TestEnrichWithPerAuthGrokModelsKeepsStaticGrokModelsWhenLiveFetchOmitsThem(t *testing.T) {
+	const authID = "grok-static-merge-registration-test"
+	const liveModelID = "grok-4.3-live-test"
+	const staticModelID = "grok-code-fast-1"
+
+	registry.UnregisterAuth(authID)
+	t.Cleanup(func() { registry.UnregisterAuth(authID) })
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "grok",
+		Status:   cliproxyauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	seen := map[string]struct{}{}
+	models := enrichWithPerAuthGrokModels(context.Background(), manager, fakeGrokModelFetcher{models: []*registry.ModelInfo{{
+		ID:      liveModelID,
+		Object:  "model",
+		OwnedBy: "xai",
+		Type:    "grok",
+	}}}, false, seen)
+
+	ids := make(map[string]struct{}, len(models))
+	for _, m := range models {
+		ids[m.ID] = struct{}{}
+	}
+	if _, ok := ids[liveModelID]; !ok {
+		t.Fatalf("expected live model %s in enriched models", liveModelID)
+	}
+	if _, ok := ids[staticModelID]; !ok {
+		t.Fatalf("expected static model %s to remain available", staticModelID)
+	}
+
+	providers := registry.GetGlobalRegistry().GetModelProviders(staticModelID)
+	if len(providers) != 1 || providers[0] != "grok" {
+		t.Fatalf("expected static model to route via grok, got providers %v", providers)
 	}
 }

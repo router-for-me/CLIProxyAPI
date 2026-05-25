@@ -889,6 +889,7 @@ func enrichWithPerAuthGrokModels(ctx context.Context, authManager *cliproxyauth.
 		if err != nil {
 			log.Warnf("unifiedModels: per-auth grok model fetch failed for auth %s: %v", auth.ID, err)
 		}
+		models = mergeGrokModelsWithStatic(models)
 		if len(models) > 0 {
 			registry.GetGlobalRegistry().RegisterClient(auth.ID, "grok", models)
 		}
@@ -900,6 +901,29 @@ func enrichWithPerAuthGrokModels(ctx context.Context, authManager *cliproxyauth.
 		}
 	}
 	return out
+}
+
+func mergeGrokModelsWithStatic(models []*registry.ModelInfo) []*registry.ModelInfo {
+	merged := make([]*registry.ModelInfo, 0, len(models)+len(registry.GetGrokModels()))
+	seen := make(map[string]struct{}, len(models))
+	appendModel := func(m *registry.ModelInfo) {
+		if m == nil || strings.TrimSpace(m.ID) == "" {
+			return
+		}
+		key := strings.ToLower(strings.TrimSpace(m.ID))
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, m)
+	}
+	for _, m := range models {
+		appendModel(m)
+	}
+	for _, m := range registry.GetGrokModels() {
+		appendModel(m)
+	}
+	return merged
 }
 
 // unifiedModelsHandler creates a unified handler for the /v1/models endpoint
