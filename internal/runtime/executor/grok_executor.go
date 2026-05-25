@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 // GrokExecutor is a stateless executor for the xAI Grok API using OpenAI-compatible
@@ -126,6 +128,13 @@ func (e *GrokExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 // the v1 architectural defect where OpenAICompatExecutor.resolveCredentials()
 // would 401 on OAuth auths that have no base_url attribute.
 func (e *GrokExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if endpointPath := xaiImageEndpointPath(opts); endpointPath != "" {
+		return e.executeImages(ctx, auth, req, endpointPath)
+	}
+	if xaiIsVideoRequest(opts) {
+		return e.executeVideos(ctx, auth, req, opts)
+	}
+
 	from := opts.SourceFormat
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -212,6 +221,133 @@ func (e *GrokExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func (e *GrokExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	if endpointPath == "" {
+		endpointPath = xaiDefaultImageEndpointPath
+	}
+	requestURL := strings.TrimSuffix(e.baseURL, "/") + endpointPath
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(req.Payload))
+	if err != nil {
+		return resp, err
+	}
+	applyGrokHeaders(httpReq, grokCreds(auth), false)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	e.recordGrokRequest(ctx, auth, requestURL, httpReq.Header.Clone(), req.Payload)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("grok executor: close image response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+}
+
+func (e *GrokExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	method := http.MethodPost
+	endpointPath := xaiVideosGenerationsPath
+	var body io.Reader = bytes.NewReader(req.Payload)
+
+	switch path := xaiVideoEndpointPath(opts); path {
+	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
+		endpointPath = path
+	default:
+		if requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String()); requestID != "" {
+			method = http.MethodGet
+			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
+			body = nil
+		}
+	}
+
+	requestURL := strings.TrimSuffix(e.baseURL, "/") + endpointPath
+	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, body)
+	if err != nil {
+		return resp, err
+	}
+	applyGrokHeaders(httpReq, grokCreds(auth), false)
+	if method == http.MethodPost {
+		key := xaiMetadataString(opts.Metadata, xaiIdempotencyKeyMetaKey)
+		if key == "" && opts.Headers != nil {
+			key = strings.TrimSpace(opts.Headers.Get("x-idempotency-key"))
+		}
+		if key != "" {
+			httpReq.Header.Set("x-idempotency-key", key)
+		}
+	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	e.recordGrokRequest(ctx, auth, requestURL, httpReq.Header.Clone(), req.Payload)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("grok executor: close video response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+}
+
+func (e *GrokExecutor) recordGrokRequest(ctx context.Context, auth *cliproxyauth.Auth, url string, headers http.Header, body []byte) {
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   headers,
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
 }
 
 // ExecuteStream performs a streaming chat completion request to Grok.

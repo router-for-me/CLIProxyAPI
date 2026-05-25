@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -305,5 +306,79 @@ func TestGrokExecutor_CountTokensNotSupported(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not supported") {
 		t.Errorf("expected 'not supported' error, got: %v", err)
+	}
+}
+
+func TestGrokExecutor_ExecuteRoutesImageRequestsToImagesEndpoint(t *testing.T) {
+	const wantToken = "image-token"
+	var gotPath, gotAuthHeader, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthHeader = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"AA==","mime_type":"image/png"}]}`))
+	}))
+	defer srv.Close()
+
+	e := NewGrokExecutor(&config.Config{})
+	e.baseURL = srv.URL
+	auth := &cliproxyauth.Auth{Provider: "grok", Attributes: map[string]string{"access_token": wantToken}}
+	req := cliproxyexecutor.Request{Model: "grok-imagine-image", Payload: []byte(`{"model":"grok-imagine-image","prompt":"draw"}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-image")}
+
+	resp, err := e.Execute(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute() returned unexpected error: %v", err)
+	}
+	if gotPath != "/images/generations" {
+		t.Fatalf("path = %q, want /images/generations", gotPath)
+	}
+	if gotAuthHeader != "Bearer "+wantToken {
+		t.Fatalf("Authorization = %q, want bearer token", gotAuthHeader)
+	}
+	if gotBody != string(req.Payload) {
+		t.Fatalf("body = %s, want %s", gotBody, string(req.Payload))
+	}
+	if string(resp.Payload) == "" {
+		t.Fatal("expected response payload")
+	}
+}
+
+func TestGrokExecutor_ExecuteRoutesVideoRequestsToVideosEndpoint(t *testing.T) {
+	const wantToken = "video-token"
+	var gotPath, gotAuthHeader, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthHeader = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"request_id":"vid_123","status":"pending"}`))
+	}))
+	defer srv.Close()
+
+	e := NewGrokExecutor(&config.Config{})
+	e.baseURL = srv.URL
+	auth := &cliproxyauth.Auth{Provider: "grok", Attributes: map[string]string{"access_token": wantToken}}
+	req := cliproxyexecutor.Request{Model: "grok-imagine-video", Payload: []byte(`{"model":"grok-imagine-video","prompt":"animate","duration":4}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-video")}
+
+	resp, err := e.Execute(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute() returned unexpected error: %v", err)
+	}
+	if gotPath != "/videos/generations" {
+		t.Fatalf("path = %q, want /videos/generations", gotPath)
+	}
+	if gotAuthHeader != "Bearer "+wantToken {
+		t.Fatalf("Authorization = %q, want bearer token", gotAuthHeader)
+	}
+	if gotBody != string(req.Payload) {
+		t.Fatalf("body = %s, want %s", gotBody, string(req.Payload))
+	}
+	if string(resp.Payload) == "" {
+		t.Fatal("expected response payload")
 	}
 }

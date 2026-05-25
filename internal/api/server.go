@@ -889,6 +889,9 @@ func enrichWithPerAuthGrokModels(ctx context.Context, authManager *cliproxyauth.
 		if err != nil {
 			log.Warnf("unifiedModels: per-auth grok model fetch failed for auth %s: %v", auth.ID, err)
 		}
+		if len(models) > 0 {
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, "grok", models)
+		}
 		for _, m := range models {
 			if _, dup := seen[m.ID]; !dup {
 				seen[m.ID] = struct{}{}
