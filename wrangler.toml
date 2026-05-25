@@ -1,0 +1,16 @@
+name = "cli-proxy-api"
+main = "src/index.js"
+compatibility_date = "2026-05-23"
+
+[[containers]]
+class_name = "ProxyContainer"
+image = "./Dockerfile"
+max_instances = 1
+
+[[durable_objects.bindings]]
+class_name = "ProxyContainer"
+name = "PROXY_CONTAINER"
+
+[[migrations]]
+new_sqlite_classes = [ "ProxyContainer" ]
+tag = "v1"
