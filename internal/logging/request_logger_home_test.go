@@ -77,6 +77,7 @@ func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.
 
 	var got struct {
 		Headers    map[string][]string `json:"headers"`
+		RequestID  string              `json:"request_id"`
 		RequestLog string              `json:"request_log"`
 	}
 	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
@@ -87,6 +88,62 @@ func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.
 	}
 	if got.Headers == nil || got.Headers["Authorization"][0] != "Bearer secret" {
 		t.Fatalf("headers.authorization = %+v, want Bearer secret", got.Headers["Authorization"])
+	}
+	if got.RequestID != "req-1" {
+		t.Fatalf("request_id = %q, want req-1", got.RequestID)
+	}
+	if got.RequestLog == "" {
+		t.Fatalf("request_log empty, want non-empty")
+	}
+}
+
+func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) {
+	original := currentHomeRequestLogClient
+	defer func() {
+		currentHomeRequestLogClient = original
+	}()
+
+	stub := &stubHomeRequestLogClient{heartbeatOK: true}
+	currentHomeRequestLogClient = func() homeRequestLogClient {
+		return stub
+	}
+
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+	logger.SetHomeEnabled(true)
+
+	writer, errLog := logger.LogStreamingRequest(
+		"/v1/responses",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		"stream-req-1",
+	)
+	if errLog != nil {
+		t.Fatalf("LogStreamingRequest error: %v", errLog)
+	}
+
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus error: %v", errStatus)
+	}
+	writer.WriteChunkAsync([]byte("data: ok\n\n"))
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close error: %v", errClose)
+	}
+
+	if len(stub.pushed) != 1 {
+		t.Fatalf("home pushed records = %d, want 1", len(stub.pushed))
+	}
+
+	var got struct {
+		RequestID  string `json:"request_id"`
+		RequestLog string `json:"request_log"`
+	}
+	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v payload=%s", errUnmarshal, string(stub.pushed[0]))
+	}
+	if got.RequestID != "stream-req-1" {
+		t.Fatalf("request_id = %q, want stream-req-1", got.RequestID)
 	}
 	if got.RequestLog == "" {
 		t.Fatalf("request_log empty, want non-empty")
