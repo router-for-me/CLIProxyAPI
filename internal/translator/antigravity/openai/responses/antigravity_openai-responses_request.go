@@ -1,8 +1,8 @@
 package responses
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/gemini"
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/responses"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

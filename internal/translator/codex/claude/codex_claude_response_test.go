@@ -459,6 +459,70 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 	}
 }
 
+func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
+	longCallID := "call_" + strings.Repeat("a", 62)
+	if len(longCallID) <= 64 {
+		t.Fatalf("test setup error: longCallID length = %d, want > 64", len(longCallID))
+	}
+
+	t.Run("stream", func(t *testing.T) {
+		ctx := context.Background()
+		originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+		var param any
+
+		outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"`+longCallID+`","name":"lookup"}}`), &param)
+
+		toolID := ""
+		for _, out := range outputs {
+			for _, line := range strings.Split(string(out), "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+				if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "tool_use" {
+					toolID = data.Get("content_block.id").String()
+				}
+			}
+		}
+
+		if toolID == "" {
+			t.Fatalf("missing stream tool_use block. Outputs=%q", outputs)
+		}
+		if len(toolID) > 64 {
+			t.Fatalf("stream tool_use id length = %d, want <= 64: %q", len(toolID), toolID)
+		}
+		if toolID == longCallID {
+			t.Fatalf("stream tool_use id was not shortened: %q", toolID)
+		}
+	})
+
+	t.Run("nonstream", func(t *testing.T) {
+		ctx := context.Background()
+		originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+		response := []byte(`{
+			"type":"response.completed",
+			"response":{
+				"id":"resp_1",
+				"model":"gpt-5",
+				"usage":{"input_tokens":1,"output_tokens":1},
+				"output":[{"type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{}"}]
+			}
+		}`)
+
+		out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+		toolID := gjson.GetBytes(out, "content.0.id").String()
+		if toolID == "" {
+			t.Fatalf("missing nonstream tool_use id. Output: %s", string(out))
+		}
+		if len(toolID) > 64 {
+			t.Fatalf("nonstream tool_use id length = %d, want <= 64: %q", len(toolID), toolID)
+		}
+		if toolID == longCallID {
+			t.Fatalf("nonstream tool_use id was not shortened: %q", toolID)
+		}
+	})
+}
+
 func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
 	tests := []struct {
 		name       string

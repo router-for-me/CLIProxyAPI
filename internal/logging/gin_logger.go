@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,6 +21,7 @@ var aiAPIPrefixes = []string{
 	"/v1/chat/completions",
 	"/v1/completions",
 	"/v1/images",
+	"/v1/videos",
 	"/v1/messages",
 	"/v1/responses",
 	"/v1beta/models/",

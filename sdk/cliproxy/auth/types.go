@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -295,15 +296,12 @@ func (a *Auth) indexSeed() string {
 		return ""
 	}
 
-	if fileName := strings.TrimSpace(a.FileName); fileName != "" {
-		return "file:" + fileName
-	}
-
 	providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatName := ""
 	baseURL := ""
 	apiKey := ""
 	source := ""
+	filePath := ""
 	if a.Attributes != nil {
 		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
 			providerKey = strings.ToLower(value)
@@ -312,6 +310,39 @@ func (a *Auth) indexSeed() string {
 		baseURL = strings.TrimSpace(a.Attributes["base_url"])
 		apiKey = strings.TrimSpace(a.Attributes["api_key"])
 		source = strings.TrimSpace(a.Attributes["source"])
+		filePath = strings.TrimSpace(a.Attributes["path"])
+	}
+
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.FileName)
+	}
+	if filePath == "" && strings.HasSuffix(strings.ToLower(source), ".json") {
+		filePath = source
+	}
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.ID)
+	}
+
+	if filePath != "" && strings.HasSuffix(strings.ToLower(filePath), ".json") {
+		abs, errAbs := filepath.Abs(filePath)
+		if errAbs == nil && strings.TrimSpace(abs) != "" {
+			filePath = abs
+		}
+		filePath = filepath.Clean(filePath)
+
+		authType := ""
+		if a.Metadata != nil {
+			if rawType, ok := a.Metadata["type"].(string); ok {
+				authType = strings.TrimSpace(rawType)
+			}
+		}
+		if authType == "" {
+			authType = strings.TrimSpace(providerKey)
+		}
+		authType = strings.ToLower(strings.TrimSpace(authType))
+		if authType != "" {
+			return authType + ":" + filePath
+		}
 	}
 
 	proxyURL := strings.TrimSpace(a.ProxyURL)
@@ -394,19 +425,28 @@ func (a *Auth) ProxyInfo() string {
 	return "via proxy"
 }
 
-// DisableCoolingOverride returns the auth-file scoped disable_cooling override when present.
+// DisableCoolingOverride returns the auth scoped disable_cooling override when present.
 // The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
+//
+// NOTE: This override is intentionally "true-only". When the metadata value is false, it is treated
+// as "not set" so the global disable-cooling flag can still take effect.
 func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	if a == nil || a.Metadata == nil {
 		return false, false
 	}
 	if val, ok := a.Metadata["disable_cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
+			if !parsed {
+				return false, false
+			}
 			return parsed, true
 		}
 	}
 	if val, ok := a.Metadata["disable-cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
+			if !parsed {
+				return false, false
+			}
 			return parsed, true
 		}
 	}

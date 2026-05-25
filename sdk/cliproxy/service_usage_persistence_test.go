@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestRun_FallsBackWhenUsagePersistencePostgresInitFails(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 )
 
 func TestManagerMarkResult_DisablesSOCKS5AuthOnProxyDialFailure(t *testing.T) {

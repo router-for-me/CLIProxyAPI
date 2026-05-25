@@ -696,3 +696,28 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"system": [
+			{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=12345;"},
+			{"type": "text", "text": "User system prompt"}
+		],
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+	}`)
+
+	output := ConvertClaudeRequestToOpenAI("gpt-5", inputJSON, false)
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) == 0 || messages[0].Get("role").String() != "system" {
+		t.Fatalf("Expected first message to be system, got: %s", gjson.GetBytes(output, "messages").Raw)
+	}
+
+	content := messages[0].Get("content").Array()
+	if len(content) != 1 {
+		t.Fatalf("Expected 1 system content item after attribution strip, got %d: %s", len(content), messages[0].Get("content").Raw)
+	}
+	if got := content[0].Get("text").String(); got != "User system prompt" {
+		t.Fatalf("Unexpected system content: %q", got)
+	}
+}

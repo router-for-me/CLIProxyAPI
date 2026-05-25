@@ -1,9 +1,8 @@
 package cliproxy
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
 // ModelInfo re-exports the registry model info structure.

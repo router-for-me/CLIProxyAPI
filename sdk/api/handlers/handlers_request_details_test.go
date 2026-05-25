@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
@@ -164,15 +164,15 @@ func TestFilterProvidersByToolCompatibility(t *testing.T) {
 	}
 }
 
-func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
+func TestGetRequestDetails_ImageModelReturns400(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
 	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
 	if errMsg == nil {
 		t.Fatalf("expected error for gpt-image-2, got nil")
 	}
-	if errMsg.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+	if errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusBadRequest)
 	}
 	if errMsg.Error == nil {
 		t.Fatalf("expected error message, got nil")

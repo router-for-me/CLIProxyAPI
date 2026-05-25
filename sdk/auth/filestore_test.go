@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestExtractAccessToken(t *testing.T) {
