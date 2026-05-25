@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,6 +95,160 @@ func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.
 	}
 	if got.RequestLog == "" {
 		t.Fatalf("request_log empty, want non-empty")
+	}
+}
+
+func TestFileRequestLogger_LogRequestWithSourcesWritesLocalLogAndCleansParts(t *testing.T) {
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+
+	timelineSource, errSource := logger.NewFileBodySource("websocket-timeline-test")
+	if errSource != nil {
+		t.Fatalf("logger.NewFileBodySource: %v", errSource)
+	}
+	if errAppend := timelineSource.AppendPart([]byte("Timestamp: 2026-05-25T12:00:00Z\nEvent: websocket.request\n{}")); errAppend != nil {
+		t.Fatalf("AppendPart request: %v", errAppend)
+	}
+	if errAppend := timelineSource.AppendPart([]byte("Timestamp: 2026-05-25T12:00:01Z\nEvent: websocket.response\n{}")); errAppend != nil {
+		t.Fatalf("AppendPart response: %v", errAppend)
+	}
+	partPaths := timelineSource.Paths()
+	for _, path := range partPaths {
+		if !strings.HasPrefix(path, logsDir+string(os.PathSeparator)) {
+			t.Fatalf("part path %s is not under logs dir %s", path, logsDir)
+		}
+	}
+
+	errLog := logger.LogRequestWithOptionsAndSources(
+		"/v1/responses/ws",
+		http.MethodGet,
+		map[string][]string{"Upgrade": {"websocket"}},
+		nil,
+		http.StatusSwitchingProtocols,
+		map[string][]string{"Upgrade": {"websocket"}},
+		nil,
+		nil,
+		timelineSource,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		false,
+		"ws-req-1",
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("LogRequestWithOptionsAndSources error: %v", errLog)
+	}
+
+	for _, path := range partPaths {
+		if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+			t.Fatalf("expected part %s to be removed, stat err=%v", path, errStat)
+		}
+	}
+
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatalf("failed to read logs dir: %v", errRead)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		logPath = logsDir + string(os.PathSeparator) + entry.Name()
+		break
+	}
+	if logPath == "" {
+		t.Fatal("expected local request log file")
+	}
+	raw, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	if !bytes.Contains(raw, []byte("=== WEBSOCKET TIMELINE ===")) {
+		t.Fatalf("websocket timeline section missing: %s", string(raw))
+	}
+	if !bytes.Contains(raw, []byte("Event: websocket.request")) || !bytes.Contains(raw, []byte("Event: websocket.response")) {
+		t.Fatalf("merged websocket events missing: %s", string(raw))
+	}
+}
+
+func TestFileRequestLogger_HomeEnabled_ForwardsSourceLogAndCleansParts(t *testing.T) {
+	original := currentHomeRequestLogClient
+	defer func() {
+		currentHomeRequestLogClient = original
+	}()
+
+	stub := &stubHomeRequestLogClient{heartbeatOK: true}
+	currentHomeRequestLogClient = func() homeRequestLogClient {
+		return stub
+	}
+
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+	logger.SetHomeEnabled(true)
+
+	timelineSource, errSource := logger.NewFileBodySource("home-websocket-timeline-test")
+	if errSource != nil {
+		t.Fatalf("logger.NewFileBodySource: %v", errSource)
+	}
+	if errAppend := timelineSource.AppendPart([]byte("Timestamp: 2026-05-25T12:00:00Z\nEvent: websocket.request\n{}")); errAppend != nil {
+		t.Fatalf("AppendPart request: %v", errAppend)
+	}
+	partPaths := timelineSource.Paths()
+	for _, path := range partPaths {
+		if !strings.HasPrefix(path, logsDir+string(os.PathSeparator)) {
+			t.Fatalf("part path %s is not under logs dir %s", path, logsDir)
+		}
+	}
+
+	errLog := logger.LogRequestWithOptionsAndSources(
+		"/v1/responses/ws",
+		http.MethodGet,
+		map[string][]string{"Upgrade": {"websocket"}},
+		nil,
+		http.StatusSwitchingProtocols,
+		map[string][]string{"Upgrade": {"websocket"}},
+		nil,
+		nil,
+		timelineSource,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		false,
+		"home-ws-req-1",
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("LogRequestWithOptionsAndSources error: %v", errLog)
+	}
+	if len(stub.pushed) != 1 {
+		t.Fatalf("home pushed records = %d, want 1", len(stub.pushed))
+	}
+
+	var got struct {
+		RequestID  string `json:"request_id"`
+		RequestLog string `json:"request_log"`
+	}
+	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v payload=%s", errUnmarshal, string(stub.pushed[0]))
+	}
+	if got.RequestID != "home-ws-req-1" {
+		t.Fatalf("request_id = %q, want home-ws-req-1", got.RequestID)
+	}
+	if !strings.Contains(got.RequestLog, "Event: websocket.request") {
+		t.Fatalf("forwarded request_log missing websocket request: %s", got.RequestLog)
+	}
+	for _, path := range partPaths {
+		if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+			t.Fatalf("expected part %s to be removed, stat err=%v", path, errStat)
+		}
 	}
 }
 
