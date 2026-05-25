@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -45,7 +46,14 @@ func codexInputTokenCeiling(modelID string) int {
 	return 0
 }
 
-func trimCodexInputIfNeeded(body []byte, baseModel string) []byte {
+func autoTrimEnabled(cfg *config.Config) bool {
+	return cfg == nil || cfg.AutoTrimInput == nil || *cfg.AutoTrimInput
+}
+
+func trimCodexInputIfNeeded(cfg *config.Config, body []byte, baseModel string) []byte {
+	if !autoTrimEnabled(cfg) {
+		return body
+	}
 	ceiling := codexInputTokenCeiling(baseModel)
 	if ceiling <= 0 {
 		return body
