@@ -504,6 +504,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
+		if requestPath, strict := sessionAffinityStrictLeasePath(opts); strict {
+			entry.Warnf("session-affinity: cache hit but auth unavailable, failing fast for stateful endpoint | session=%s auth=%s provider=%s model=%s path=%s", truncateSessionID(primaryID), cachedAuthID, provider, model, requestPath)
+			return nil, &Error{
+				Code:       "session_auth_unavailable",
+				Message:    "session-affinity pinned auth is temporarily unavailable for stateful /v1/responses continuation",
+				Retryable:  true,
+				HTTPStatus: http.StatusServiceUnavailable,
+			}
+		}
 		// Cached auth not available, reselect via fallback selector for even distribution
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
 		if err != nil {
@@ -534,6 +543,23 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	s.cache.Set(cacheKey, auth.ID)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
+}
+
+func sessionAffinityStrictLeasePath(opts cliproxyexecutor.Options) (string, bool) {
+	if len(opts.Metadata) == 0 {
+		return "", false
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.RequestPathMetadataKey]
+	if !ok || raw == nil {
+		return "", false
+	}
+
+	path := strings.TrimSpace(fmt.Sprint(raw))
+	if path == "" {
+		return "", false
+	}
+	path = strings.TrimRight(path, "/")
+	return path, path == "/v1/responses"
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {

@@ -700,6 +700,122 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_FailsFastForResponsesWhenAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Session-Id": []string{"responses-strict-test"},
+		},
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/responses",
+		},
+	}
+
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+
+	availableWithoutFirst := make([]*Auth, 0, len(auths)-1)
+	for _, a := range auths {
+		if a.ID != first.ID {
+			availableWithoutFirst = append(availableWithoutFirst, a)
+		}
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5", opts, availableWithoutFirst)
+	if err == nil {
+		t.Fatalf("Pick() error = nil, auth = %#v", got)
+	}
+	if got != nil {
+		t.Fatalf("Pick() auth = %#v, want nil", got)
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("Pick() error type = %T, want *Error", err)
+	}
+	if authErr.Code != "session_auth_unavailable" {
+		t.Fatalf("error code = %q, want %q", authErr.Code, "session_auth_unavailable")
+	}
+	if authErr.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("HTTPStatus = %d, want %d", authErr.HTTPStatus, http.StatusServiceUnavailable)
+	}
+	if !authErr.Retryable {
+		t.Fatalf("Retryable = false, want true")
+	}
+
+	restored, err := selector.Pick(context.Background(), "codex", "gpt-5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() after auth restore error = %v", err)
+	}
+	if restored.ID != first.ID {
+		t.Fatalf("Pick() after auth restore ID = %q, want original %q", restored.ID, first.ID)
+	}
+}
+
+func TestSessionAffinitySelector_ReselectsForNonResponsesWhenAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Session-Id": []string{"non-responses-test"},
+		},
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/chat/completions",
+		},
+	}
+
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+
+	availableWithoutFirst := make([]*Auth, 0, len(auths)-1)
+	for _, a := range auths {
+		if a.ID != first.ID {
+			availableWithoutFirst = append(availableWithoutFirst, a)
+		}
+	}
+
+	second, err := selector.Pick(context.Background(), "codex", "gpt-5", opts, availableWithoutFirst)
+	if err != nil {
+		t.Fatalf("Pick() after reselect error = %v", err)
+	}
+	if second == nil {
+		t.Fatalf("Pick() after reselect auth = nil")
+	}
+	if second.ID == first.ID {
+		t.Fatalf("Pick() after reselect returned same auth %q, expected different", first.ID)
+	}
+}
+
 func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *testing.T) {
 	t.Parallel()
 
