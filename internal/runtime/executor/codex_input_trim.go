@@ -58,7 +58,7 @@ func trimCodexInputIfNeeded(cfg *config.Config, body []byte, baseModel string) [
 	if ceiling <= 0 {
 		return body
 	}
-	if len(body)/4 < ceiling {
+	if len(body) < ceiling {
 		return body
 	}
 
