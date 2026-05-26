@@ -305,6 +305,13 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 				continue
 			}
 
+			if allowOrphanOutputs {
+				// previous_response_id frames are incremental; the upstream response history
+				// already owns the function_call, so replaying a cached call here duplicates it.
+				filtered = append(filtered, item)
+				continue
+			}
+
 			if callCache != nil {
 				if cached, ok := callCache.get(sessionKey, callID); ok {
 					if _, already := insertedCalls[callID]; !already {
@@ -315,11 +322,6 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 					filtered = append(filtered, item)
 					continue
 				}
-			}
-
-			if allowOrphanOutputs {
-				filtered = append(filtered, item)
-				continue
 			}
 
 			// Drop orphaned function_call_output items; upstream rejects transcripts with missing calls.
