@@ -247,6 +247,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
+#     openai-responses-preserve-reasoning-content: false # optional: preserve Responses API reasoning summaries as Chat Completions assistant.reasoning_content for this provider
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
