@@ -195,24 +195,34 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 		return "", false, nil
 	}
 
-	// Dispatch on Content-Type. Missing/unparseable Content-Type is treated
-	// as JSON for backward compatibility — every model-routing client we ship
-	// today either sets application/json explicitly or omits the header on
-	// JSON bodies, and falling back to JSON inspection here is what the
-	// middleware did before content-type gating.
+	// Dispatch on Content-Type. We only branch off the JSON path for
+	// content types we explicitly know are not JSON (currently
+	// multipart/form-data, which the stdlib parses with disk-spooled
+	// file fields). Everything else — including missing, unparseable,
+	// or deliberately misleading Content-Type values — runs through the
+	// JSON peek path, because the model-executing route handlers parse
+	// the body as JSON regardless of header. Failing open on non-JSON
+	// content types would otherwise let a restricted key send
+	// Content-Type: text/plain with a JSON body and bypass the ACL.
 	mediaType := parseRequestMediaType(c.Request.Header.Get("Content-Type"))
-	switch {
-	case mediaType == "" || mediaType == "application/json" || strings.HasSuffix(mediaType, "+json"):
-		return extractModelFromJSONBody(c)
-	case mediaType == "multipart/form-data":
+	switch mediaType {
+	case "multipart/form-data":
 		return extractModelFromMultipartBody(c)
 	default:
-		// Unknown body shape (text/plain, application/octet-stream, etc.).
-		// We do not buffer or parse; the route handler enforces its own
-		// contract. No model identified => allow through, consistent with
-		// the existing "no extractable model" path used by listing and
-		// websocket-upgrade routes.
-		return "", false, nil
+		// Default to JSON-style extraction. Several model-executing routes
+		// (ChatCompletions, Completions, Responses, ClaudeMessages) parse
+		// the body as JSON regardless of Content-Type, so failing open on
+		// a non-JSON content type would let a restricted key bypass the ACL
+		// by sending Content-Type: text/plain with a JSON body. Routing the
+		// content types we explicitly recognise as not-JSON (multipart,
+		// above) keeps large uploads cheap; everything else gets the same
+		// peek+JSON inspection as application/json. Bodies whose first
+		// bytes are not JSON (e.g. true binary octet-stream) still pass
+		// through: extractModelFromJSONBody returns ok=false when gjson
+		// cannot find a "model" string, and the middleware treats that as
+		// "no extractable model => allow", consistent with the listing /
+		// websocket-upgrade path.
+		return extractModelFromJSONBody(c)
 	}
 }
 

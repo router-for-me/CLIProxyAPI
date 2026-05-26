@@ -150,6 +150,13 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 // structured form described on PutAPIKeys. It returns the bearer values, the
 // matching policy entries (only for keys that supplied a non-empty
 // AllowedModels list), and ok=false on parse failure.
+//
+// Duplicate keys in the structured form are rejected (ok=false). Silently
+// keeping the first occurrence would let a caller broaden access by sending
+// an unrestricted row before a restricted duplicate of the same key — the
+// restricted row would be dropped and the key would fall back to the
+// default policy (usually allow-all). Reject loudly so callers fix their
+// payload instead of getting a surprise widening.
 func parseAPIKeysPayload(data []byte) (keys []string, policies []config.APIKeyPolicy, ok bool) {
 	// Try plain []string first.
 	var plain []string
@@ -167,10 +174,10 @@ func parseAPIKeysPayload(data []byte) (keys []string, policies []config.APIKeyPo
 
 	// Try the structured form: []{key, allowedModels|allowed-models}.
 	type structuredEntry struct {
-		Key                  string   `json:"key"`
-		AllowedModelsCamel   []string `json:"allowedModels"`
-		AllowedModelsHyphen  []string `json:"allowed-models"`
-		AllowedModelsSnake   []string `json:"allowed_models"`
+		Key                 string   `json:"key"`
+		AllowedModelsCamel  []string `json:"allowedModels"`
+		AllowedModelsHyphen []string `json:"allowed-models"`
+		AllowedModelsSnake  []string `json:"allowed_models"`
 	}
 	var entries []structuredEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
@@ -191,7 +198,10 @@ func parseAPIKeysPayload(data []byte) (keys []string, policies []config.APIKeyPo
 			continue
 		}
 		if _, dup := seen[key]; dup {
-			continue
+			// Reject duplicate structured rows rather than silently
+			// dropping their allowedModels list. See the function-level
+			// comment for the security rationale.
+			return nil, nil, false
 		}
 		seen[key] = struct{}{}
 		keys = append(keys, key)
@@ -253,6 +263,7 @@ func dedupeKeyList(in []string) []string {
 	}
 	return out
 }
+
 // PatchAPIKeys mutates the bearer-key list in place (rename via old/new,
 // overwrite via index/value) AND keeps APIKeyPolicies in sync so that renamed
 // keys do not silently shed their model-allowlist (see issue flagged by the

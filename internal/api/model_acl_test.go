@@ -718,11 +718,14 @@ func TestModelACLMiddleware_MultipartWithoutModelFieldAllowed(t *testing.T) {
 
 func TestModelACLMiddleware_NonJSONContentTypeAllowedThrough(t *testing.T) {
 	// A POST with Content-Type: application/octet-stream (or any non-JSON,
-	// non-multipart media type) must NOT be buffered for "model" inspection.
-	// The middleware allows the request through so the route handler sees an
-	// untouched body. Without this gating, large binary uploads would be
-	// buffered up to the 10 MiB cap on every request even when there is no
-	// JSON "model" field to find.
+	// non-multipart media type) is now also subject to JSON-shaped
+	// inspection — several model-executing routes parse the body as JSON
+	// regardless of header, so failing open here would let a restricted
+	// key bypass the ACL with a misleading Content-Type. The middleware
+	// runs the same peek+gjson path on this body; if no JSON "model"
+	// string is visible, the request is allowed through. The size cap
+	// still applies so genuinely large opaque uploads cannot become an
+	// inspection-amplification vector.
 	cfg := &config.Config{
 		SDKConfig: config.SDKConfig{
 			APIKeys: []string{"sk-narrow"},
@@ -733,16 +736,16 @@ func TestModelACLMiddleware_NonJSONContentTypeAllowedThrough(t *testing.T) {
 	}
 	router := newTestRouterWithCodexAlias(cfg, "sk-narrow")
 
-	// Body is large enough that buffering would be observable; if the
-	// middleware were still buffering octet-stream, this would trip the
-	// 10 MiB cap and 413 instead of 200.
-	payload := bytes.Repeat([]byte{0x01}, int(modelACLMaxBodyBytes)+1024)
+	// Small opaque body: contains no JSON "model" field, so the ACL
+	// allows the request through. The route handler then enforces its
+	// own contract.
+	payload := bytes.Repeat([]byte{0x01}, 4096)
 	req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/octet-stream")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 for non-JSON content-type, got %d body-prefix=%q", w.Code, w.Body.String()[:min(160, w.Body.Len())])
+		t.Fatalf("expected 200 for opaque non-JSON body without model, got %d body-prefix=%q", w.Code, w.Body.String()[:min(160, w.Body.Len())])
 	}
 }
 
@@ -809,5 +812,140 @@ func TestModelACLMiddleware_ListEndpointAlwaysAllowed(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 on listing endpoint, got %d", w.Code)
+	}
+}
+
+func TestModelACLMiddleware_NonJSONContentTypeWithJSONBodyStillEnforces(t *testing.T) {
+	// A restricted key must not be able to bypass the ACL by sending a JSON
+	// body with a misleading Content-Type. Several model-executing routes
+	// parse the body as JSON regardless of Content-Type, so the middleware
+	// must apply JSON inspection on every non-multipart content type.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := []byte(`{"model":"claude-3-5-sonnet-20241022"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "text/plain")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for misleading Content-Type with disallowed model, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "model_not_allowed_for_key") {
+		t.Fatalf("expected ACL denial body, got %s", w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_OctetStreamWithoutModelAllowed(t *testing.T) {
+	// A truly opaque body (no parseable JSON, no "model" field) under the
+	// default branch must still be allowed through — the route handler
+	// owns enforcement past that point. This pins down that the new
+	// JSON-default does not over-enforce on legitimate non-JSON traffic.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := bytes.Repeat([]byte{0x00, 0x01, 0x02, 0x03}, 64)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for opaque body without model, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// Adversarial / red-team coverage of the round-4 (commit 9369170b) fixes.
+// These probe edge cases that the round-4 unit tests don't already cover:
+// empty / malformed / mixed-case Content-Type values, and verify that the
+// default-to-JSON branch enforces correctly.
+
+func TestModelACLMiddleware_EmptyContentTypeWithDisallowedJSONStillEnforces(t *testing.T) {
+	// Round-4 contract: a request with no Content-Type at all but a JSON
+	// body containing a disallowed model must be rejected. The route
+	// handlers parse JSON regardless of header, so the middleware must
+	// too. This was the historic "common case" path before content-type
+	// gating shipped, so it must still enforce.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := []byte("{\"model\":\"claude-3-5-sonnet-20241022\"}")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	// Intentionally do not set Content-Type.
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing Content-Type with disallowed model, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_UnparseableContentTypeStillEnforces(t *testing.T) {
+	// mime.ParseMediaType returns an error on malformed Content-Type
+	// values. parseRequestMediaType returns "" in that case, and the
+	// default branch must still apply JSON inspection — not fail open.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := []byte("{\"model\":\"claude-3-5-sonnet-20241022\"}")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	// Garbage Content-Type that mime.ParseMediaType will reject.
+	req.Header.Set("Content-Type", "not a real media type / / /")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for unparseable Content-Type, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_MixedCaseContentTypeStillDispatches(t *testing.T) {
+	// parseRequestMediaType lowercases the parsed media type, so
+	// "APPLICATION/JSON" must dispatch through the JSON path and the
+	// disallowed model must be rejected. Pin this down so a future
+	// refactor that drops ToLower would surface as a test failure here
+	// rather than a silent ACL bypass.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := []byte("{\"model\":\"claude-3-5-sonnet-20241022\"}")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "APPLICATION/JSON")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for mixed-case JSON Content-Type, got %d body=%s", w.Code, w.Body.String())
 	}
 }
