@@ -509,7 +509,7 @@ func buildClaudeSampleSSE(rawJSON []byte, now time.Time) []byte {
 	messageStart, _ = sjson.SetBytes(messageStart, "message.id", responseID)
 	messageStart, _ = sjson.SetBytes(messageStart, "message.model", modelName)
 
-	messageDelta := []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":8,"output_tokens":0}}`)
+	messageDelta := []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":0}}`)
 	messageStop := []byte(`{"type":"message_stop"}`)
 
 	var out []byte
