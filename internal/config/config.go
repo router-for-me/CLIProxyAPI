@@ -98,6 +98,12 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// AutoTrimInput enables automatic trimming of conversation input when the
+	// payload exceeds the model's context window. Oldest turns are dropped to
+	// fit within the limit. Enabled by default (nil or true); set to false to
+	// disable and let the upstream provider reject oversized requests.
+	AutoTrimInput *bool `yaml:"auto-trim-input,omitempty" json:"auto-trim-input,omitempty"`
+
 	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
 	// When true (default), cached signatures are preferred and validated.
 	// When false, client signatures are used directly after normalization (bypass mode).

@@ -125,6 +125,10 @@ routing:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 
+# Auto-trim oversized input: when a request exceeds the model's context window,
+# drop the oldest conversation turns to fit. Enabled by default.
+# auto-trim-input: true
+
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.
 enable-gemini-cli-endpoint: false
