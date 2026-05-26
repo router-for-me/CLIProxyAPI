@@ -22,6 +22,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -124,6 +125,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	translated = adaptOpenAICompatTTSPayload(baseModel, from.String(), translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -205,6 +207,45 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func isOpenAICompatTTSModel(model string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(model)), "tts")
+}
+
+func adaptOpenAICompatTTSPayload(model string, sourceFormat string, payload []byte) []byte {
+	if sourceFormat != "claude" || !isOpenAICompatTTSModel(model) {
+		return payload
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	for _, message := range messages.Array() {
+		if message.Get("role").String() == "assistant" {
+			return payload
+		}
+	}
+	userText := ""
+	for _, message := range messages.Array() {
+		if message.Get("role").String() == "user" {
+			userText = strings.TrimSpace(message.Get("content").String())
+			if userText != "" {
+				break
+			}
+		}
+	}
+	if userText == "" {
+		return payload
+	}
+	updated, err := sjson.SetBytes(payload, "messages", []map[string]string{{
+		"role":    "assistant",
+		"content": userText,
+	}})
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
@@ -319,6 +360,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	translated = adaptOpenAICompatTTSPayload(baseModel, from.String(), translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

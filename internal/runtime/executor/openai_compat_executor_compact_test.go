@@ -19,6 +19,45 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestOpenAICompatExecutorConvertsClaudeTTSUserTextToAssistant(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"mimo-v2.5-tts","max_tokens":8192,"messages":[{"role":"user","content":"我要下班生成tts发给我"}],"stream":false}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "mimo-v2.5-tts",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.role").String(); got != "assistant" {
+		t.Fatalf("role = %q, want assistant; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.content").String(); got != "我要下班生成tts发给我" {
+		t.Fatalf("content = %q; body=%s", got, string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
