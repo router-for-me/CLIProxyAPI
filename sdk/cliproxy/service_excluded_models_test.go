@@ -132,3 +132,40 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 		t.Fatal("expected chat model to keep default thinking support")
 	}
 }
+
+func TestBuildOpenAICompatibilityConfigModels_InheritsStaticThinking(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "gpt-5.5"},
+			{
+				Name:  "gpt-5.5",
+				Alias: "explicit-gpt-5.5",
+				Thinking: &internalregistry.ThinkingSupport{
+					Levels: []string{"low"},
+				},
+			},
+		},
+	})
+	if len(models) != 2 {
+		t.Fatalf("models len = %d, want 2", len(models))
+	}
+
+	if models[0].Thinking == nil {
+		t.Fatal("expected gpt-5.5 to inherit static thinking support")
+	}
+	hasXHigh := false
+	for _, level := range models[0].Thinking.Levels {
+		if level == "xhigh" {
+			hasXHigh = true
+			break
+		}
+	}
+	if !hasXHigh {
+		t.Fatalf("gpt-5.5 thinking levels = %v, want xhigh", models[0].Thinking.Levels)
+	}
+
+	if got := models[1].Thinking.Levels; len(got) != 1 || got[0] != "low" {
+		t.Fatalf("explicit thinking levels = %v, want [low]", got)
+	}
+}
