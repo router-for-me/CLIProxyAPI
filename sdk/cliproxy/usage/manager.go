@@ -2,6 +2,8 @@ package usage
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,26 +12,99 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider    string
-	Model       string
-	APIKey      string
-	AuthID      string
-	AuthIndex   string
-	AuthType    string
-	Source      string
-	RequestedAt time.Time
-	Latency     time.Duration
-	Failed      bool
-	Detail      Detail
+	Provider  string
+	Model     string
+	Alias     string
+	APIKey    string
+	AuthID    string
+	AuthIndex string
+	AuthType  string
+	Source    string
+	// ReasoningEffort stores the client-requested thinking level for request event logs.
+	ReasoningEffort string
+	RequestedAt     time.Time
+	Latency         time.Duration
+	Failed          bool
+	Fail            Failure
+	Detail          Detail
+	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
+	ResponseHeaders http.Header
+}
+
+// Failure holds HTTP failure metadata for an upstream request attempt.
+type Failure struct {
+	StatusCode int
+	Body       string
 }
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	InputTokens         int64
+	OutputTokens        int64
+	ReasoningTokens     int64
+	CachedTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	TotalTokens         int64
+}
+
+type requestedModelAliasContextKey struct{}
+type reasoningEffortContextKey struct{}
+
+// WithRequestedModelAlias stores the client-requested model name for usage sinks.
+func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestedModelAliasContextKey{}, alias)
+}
+
+// RequestedModelAliasFromContext returns the client-requested model name stored in ctx.
+func RequestedModelAliasFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(requestedModelAliasContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// WithReasoningEffort stores the client-requested reasoning effort for usage sinks.
+func WithReasoningEffort(ctx context.Context, effort string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, reasoningEffortContextKey{}, effort)
+}
+
+// ReasoningEffortFromContext returns the client-requested reasoning effort stored in ctx.
+func ReasoningEffortFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(reasoningEffortContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.

@@ -19,6 +19,8 @@ builds:
 archives:
   - id: "cli-proxy-api"
     format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{- if eq .Arch "arm64" -}}aarch64{{- else -}}{{ .Arch }}{{- end -}}
     format_overrides:
       - goos: windows
         format: zip

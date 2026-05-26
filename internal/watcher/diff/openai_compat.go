@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 // DiffOpenAICompatibility produces human-readable change descriptions.
@@ -153,7 +153,7 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 		if name == "" && alias == "" {
 			continue
 		}
-		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias))
+		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias)+"|"+fmt.Sprintf("image=%t", model.Image))
 	}
 	if len(models) > 0 {
 		sort.Strings(models)

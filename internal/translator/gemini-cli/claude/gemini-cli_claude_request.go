@@ -8,8 +8,8 @@ package claude
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -49,6 +49,9 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 			if systemPromptResult.Get("type").String() == "text" {
 				textResult := systemPromptResult.Get("text")
 				if textResult.Type == gjson.String {
+					if util.IsClaudeCodeAttributionSystemText(textResult.String()) {
+						return true
+					}
 					part := []byte(`{"text":""}`)
 					part, _ = sjson.SetBytes(part, "text", textResult.String())
 					systemInstruction, _ = sjson.SetRawBytes(systemInstruction, "parts.-1", part)
@@ -60,7 +63,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 		if hasSystemParts {
 			out, _ = sjson.SetRawBytes(out, "request.systemInstruction", systemInstruction)
 		}
-	} else if systemResult.Type == gjson.String {
+	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
 		out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.-1.text", systemResult.String())
 	}
 

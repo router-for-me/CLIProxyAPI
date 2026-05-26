@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -99,35 +99,19 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	// Gemini-specific handling for non-Claude models:
-	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
-	// - Also mark thinking parts with the same sentinel when present (we keep the parts; we only annotate them).
-	if !strings.Contains(modelName, "claude") {
+	// - Replace client-provided thoughtSignature values with the skip sentinel.
+	// - Add the same sentinel to functionCall and thinking parts so upstream can bypass signature validation.
+	if !strings.Contains(strings.ToLower(modelName), "claude") {
 		const skipSentinel = "skip_thought_signature_validator"
 
 		gjson.GetBytes(rawJSON, "request.contents").ForEach(func(contentIdx, content gjson.Result) bool {
 			if content.Get("role").String() == "model" {
-				// First pass: collect indices of thinking parts to mark with skip sentinel
-				var thinkingIndicesToSkipSignature []int64
 				content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
-					// Collect indices of thinking blocks to mark with skip sentinel
-					if part.Get("thought").Bool() {
-						thinkingIndicesToSkipSignature = append(thinkingIndicesToSkipSignature, partIdx.Int())
-					}
-					// Add skip sentinel to functionCall parts
-					if part.Get("functionCall").Exists() {
-						existingSig := part.Get("thoughtSignature").String()
-						if existingSig == "" || len(existingSig) < 50 {
-							rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), partIdx.Int()), skipSentinel)
-						}
+					if part.Get("functionCall").Exists() || part.Get("thought").Exists() || part.Get("thoughtSignature").Exists() {
+						rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), partIdx.Int()), skipSentinel)
 					}
 					return true
 				})
-
-				// Add skip_thought_signature_validator sentinel to thinking blocks in reverse order to preserve indices
-				for i := len(thinkingIndicesToSkipSignature) - 1; i >= 0; i-- {
-					idx := thinkingIndicesToSkipSignature[i]
-					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), idx), skipSentinel)
-				}
 			}
 			return true
 		})

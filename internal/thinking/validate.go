@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -357,7 +357,7 @@ func isGeminiFamily(provider string) bool {
 
 func isOpenAIFamily(provider string) bool {
 	switch provider {
-	case "openai", "openai-response", "codex":
+	case "openai", "openai-response", "codex", "xai":
 		return true
 	default:
 		return false

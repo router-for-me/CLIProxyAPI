@@ -3,7 +3,7 @@ package diff
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -22,6 +22,17 @@ func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
 	changed := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-4"}, {Name: "gpt-4.1"}})
 	if hash1 == changed {
 		t.Fatal("hash should change when model list changes")
+	}
+}
+
+func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
+	textModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-image", Alias: "image"}})
+	imageModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-image", Alias: "image", Image: true}})
+	if textModel == "" || imageModel == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if textModel == imageModel {
+		t.Fatal("hash should change when image flag changes")
 	}
 }
 

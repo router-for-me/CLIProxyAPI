@@ -43,6 +43,18 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 			wantTexts:        []string{"Be helpful"},
 		},
 		{
+			name: "System role in messages",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [
+					{"role": "system", "content": "Follow the project instructions"},
+					{"role": "user", "content": "hello"}
+				]
+			}`,
+			wantHasDeveloper: true,
+			wantTexts:        []string{"Follow the project instructions"},
+		},
+		{
 			name: "Array system field with filtered billing header",
 			inputJSON: `{
 				"model": "claude-3-opus",
@@ -133,6 +145,190 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 				t.Fatalf("parallel_tool_calls = %v, want %v. Output: %s", got, tt.wantParallelToolCalls, string(result))
 			}
 		})
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
+	longID := "toolu_" + strings.Repeat("a", 62)
+	if len(longID) <= 64 {
+		t.Fatalf("test setup error: longID length = %d, want > 64", len(longID))
+	}
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{"role": "user", "content": [{"type":"text","text":"run pwd"}]},
+			{"role": "assistant", "content": [
+				{"type":"tool_use","id":"` + longID + `","name":"Bash","input":{"cmd":"pwd"}}
+			]},
+			{"role": "user", "content": [
+				{"type":"tool_result","tool_use_id":"` + longID + `","content":"ok"}
+			]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+
+	var callID string
+	var outputCallID string
+	for _, item := range inputs {
+		switch item.Get("type").String() {
+		case "function_call":
+			callID = item.Get("call_id").String()
+		case "function_call_output":
+			outputCallID = item.Get("call_id").String()
+		}
+	}
+
+	if callID == "" {
+		t.Fatalf("missing function_call item. Output: %s", string(result))
+	}
+	if outputCallID == "" {
+		t.Fatalf("missing function_call_output item. Output: %s", string(result))
+	}
+	if callID != outputCallID {
+		t.Fatalf("call_id mismatch: function_call=%q function_call_output=%q. Output: %s", callID, outputCallID, string(result))
+	}
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if callID == longID {
+		t.Fatalf("long call_id was not shortened: %q", callID)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ToolChoiceModeMapping(t *testing.T) {
+	tests := []struct {
+		name                string
+		claudeToolChoice    string
+		wantCodexToolChoice string
+	}{
+		{
+			name:                "Any requires at least one tool",
+			claudeToolChoice:    `{"type":"any"}`,
+			wantCodexToolChoice: "required",
+		},
+		{
+			name:                "None disables tools",
+			claudeToolChoice:    `{"type":"none"}`,
+			wantCodexToolChoice: "none",
+		},
+		{
+			name:                "Auto stays auto",
+			claudeToolChoice:    `{"type":"auto"}`,
+			wantCodexToolChoice: "auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := `{
+				"model": "claude-3-opus",
+				"tools": [
+					{"name": "lookup", "description": "Lookup", "input_schema": {"type":"object","properties":{}}}
+				],
+				"tool_choice": ` + tt.claudeToolChoice + `,
+				"messages": [{"role": "user", "content": "hello"}]
+			}`
+
+			result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+			resultJSON := gjson.ParseBytes(result)
+
+			if got := resultJSON.Get("tool_choice").String(); got != tt.wantCodexToolChoice {
+				t.Fatalf("tool_choice = %q, want %q. Output: %s", got, tt.wantCodexToolChoice, string(result))
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ToolChoiceSpecificFunctionUsesConvertedName(t *testing.T) {
+	longName := "mcp__server_with_a_very_long_name_that_exceeds_sixty_four_characters__search"
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"tools": [
+			{"name": "` + longName + `", "description": "Search", "input_schema": {"type":"object","properties":{}}}
+		],
+		"tool_choice": {"type":"tool","name":"` + longName + `"},
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(result))
+	}
+	toolName := resultJSON.Get("tools.0.name").String()
+	choiceName := resultJSON.Get("tool_choice.name").String()
+	if choiceName != toolName {
+		t.Fatalf("tool_choice.name = %q, want converted tool name %q. Output: %s", choiceName, toolName, string(result))
+	}
+	if choiceName == longName {
+		t.Fatalf("tool_choice.name should use shortened Codex tool name. Output: %s", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_WebSearchToolMapping(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"tools": [
+			{
+				"type": "web_search_20260209",
+				"name": "web_search",
+				"allowed_domains": ["example.com"],
+				"blocked_domains": ["blocked.example"],
+				"user_location": {
+					"type": "approximate",
+					"city": "Beijing",
+					"country": "CN",
+					"timezone": "Asia/Shanghai"
+				}
+			}
+		],
+		"tool_choice": {"type":"tool","name":"web_search"},
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.filters.allowed_domains.0").String(); got != "example.com" {
+		t.Fatalf("tools.0.filters.allowed_domains.0 = %q, want example.com. Output: %s", got, string(result))
+	}
+	if resultJSON.Get("tools.0.blocked_domains").Exists() {
+		t.Fatalf("tools.0.blocked_domains should not be forwarded to Codex. Output: %s", string(result))
+	}
+	if got := resultJSON.Get("tools.0.user_location.city").String(); got != "Beijing" {
+		t.Fatalf("tools.0.user_location.city = %q, want Beijing. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.type = %q, want web_search. Output: %s", got, string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_WebSearchToolChoiceUsesDeclaredTypedToolName(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-opus-4-7",
+		"tools": [
+			{"type": "web_search_20250305", "name": "browser_search"},
+			{"name": "web_search", "description": "Local search", "input_schema": {"type":"object","properties":{}}}
+		],
+		"tool_choice": {"type":"tool","name":"web_search"},
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.name").String(); got != "web_search" {
+		t.Fatalf("tool_choice.name = %q, want web_search. Output: %s", got, string(result))
 	}
 }
 

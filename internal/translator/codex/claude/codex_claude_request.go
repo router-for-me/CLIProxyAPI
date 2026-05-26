@@ -6,12 +6,15 @@
 package claude
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -40,6 +43,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template := []byte(`{"model":"","instructions":"","input":[]}`)
 
 	rootResult := gjson.ParseBytes(rawJSON)
+	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
 
 	// Process system messages and convert them to input content format.
@@ -49,7 +53,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		contentIndex := 0
 
 		appendSystemText := func(text string) {
-			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+			if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
 				return
 			}
 
@@ -83,6 +87,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
+			if messageRole == "system" {
+				messageRole = "developer"
+			}
 
 			newMessage := func() []byte {
 				msg := []byte(`{"type":"message","role":"","content":[]}`)
@@ -171,11 +178,10 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "tool_use":
 						flushMessage()
 						functionCallMessage := []byte(`{"type":"function_call"}`)
-						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", messageContentResult.Get("id").String())
+						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String()))
 						{
 							name := messageContentResult.Get("name").String()
-							toolMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
-							if short, ok := toolMap[name]; ok {
+							if short, ok := toolNameMap[name]; ok {
 								name = short
 							} else {
 								name = shortenNameIfNeeded(name)
@@ -187,7 +193,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "tool_result":
 						flushMessage()
 						functionCallOutputMessage := []byte(`{"type":"function_call_output"}`)
-						functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String())
+						functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("tool_use_id").String()))
 
 						contentResult := messageContentResult.Get("content")
 						if contentResult.IsArray() {
@@ -249,23 +255,14 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	toolsResult := rootResult.Get("tools")
 	if toolsResult.IsArray() {
 		template, _ = sjson.SetRawBytes(template, "tools", []byte(`[]`))
-		template, _ = sjson.SetBytes(template, "tool_choice", `auto`)
+		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
+		template, _ = sjson.SetRawBytes(template, "tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
 		toolResults := toolsResult.Array()
-		// Build short name map from declared tools
-		var names []string
-		for i := 0; i < len(toolResults); i++ {
-			n := toolResults[i].Get("name").String()
-			if n != "" {
-				names = append(names, n)
-			}
-		}
-		shortMap := buildShortNameMap(names)
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
-			if toolResult.Get("type").String() == "web_search_20250305" {
-				// Replace the tool content entirely with {"type":"web_search"}
-				template, _ = sjson.SetRawBytes(template, "tools.-1", []byte(`{"type":"web_search"}`))
+			if isClaudeWebSearchToolType(toolResult.Get("type").String()) {
+				template, _ = sjson.SetRawBytes(template, "tools.-1", convertClaudeWebSearchToolToCodex(toolResult))
 				continue
 			}
 			tool := []byte(toolResult.Raw)
@@ -273,7 +270,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			// Apply shortened name if needed
 			if v := toolResult.Get("name"); v.Exists() {
 				name := v.String()
-				if short, ok := shortMap[name]; ok {
+				if short, ok := toolNameMap[name]; ok {
 					name = short
 				} else {
 					name = shortenNameIfNeeded(name)
@@ -368,6 +365,98 @@ func isFernetLikeReasoningSignature(signature string) bool {
 
 	ciphertextLen := len(decoded) - fernetVersionLen - fernetTimestamp - fernetIV - fernetHMAC
 	return ciphertextLen > 0 && ciphertextLen%aesBlockSize == 0
+}
+
+// shortenCodexCallIDIfNeeded keeps Claude tool IDs within the OpenAI Responses
+// API call_id limit while preserving a stable, low-collision mapping.
+func shortenCodexCallIDIfNeeded(id string) string {
+	const limit = 64
+	if len(id) <= limit {
+		return id
+	}
+
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	prefixLen := limit - len(suffix)
+	if prefixLen <= 0 {
+		return suffix[len(suffix)-limit:]
+	}
+	return id[:prefixLen] + suffix
+}
+
+func isClaudeWebSearchToolType(toolType string) bool {
+	return toolType == "web_search_20250305" || toolType == "web_search_20260209"
+}
+
+func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
+	names := map[string]struct{}{}
+	if !tools.IsArray() {
+		return names
+	}
+
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		toolType := tool.Get("type").String()
+		if !isClaudeWebSearchToolType(toolType) {
+			return true
+		}
+
+		if name := tool.Get("name").String(); name != "" {
+			names[name] = struct{}{}
+		}
+		return true
+	})
+
+	return names
+}
+
+func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[string]string, webSearchToolNames map[string]struct{}) []byte {
+	if !toolChoice.Exists() || toolChoice.Type == gjson.Null {
+		return []byte(`"auto"`)
+	}
+
+	choiceType := toolChoice.Get("type").String()
+	if choiceType == "" && toolChoice.Type == gjson.String {
+		choiceType = toolChoice.String()
+	}
+
+	switch choiceType {
+	case "auto", "":
+		return []byte(`"auto"`)
+	case "any":
+		return []byte(`"required"`)
+	case "none":
+		return []byte(`"none"`)
+	case "tool":
+		name := toolChoice.Get("name").String()
+		if _, ok := webSearchToolNames[name]; ok {
+			return []byte(`{"type":"web_search"}`)
+		}
+		if short, ok := toolNameMap[name]; ok {
+			name = short
+		} else {
+			name = shortenNameIfNeeded(name)
+		}
+		if name == "" {
+			return []byte(`"auto"`)
+		}
+
+		choice := []byte(`{"type":"function","name":""}`)
+		choice, _ = sjson.SetBytes(choice, "name", name)
+		return choice
+	default:
+		return []byte(`"auto"`)
+	}
+}
+
+func convertClaudeWebSearchToolToCodex(tool gjson.Result) []byte {
+	out := []byte(`{"type":"web_search"}`)
+	if allowedDomains := tool.Get("allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() {
+		out, _ = sjson.SetRawBytes(out, "filters.allowed_domains", []byte(allowedDomains.Raw))
+	}
+	if userLocation := tool.Get("user_location"); userLocation.Exists() && userLocation.IsObject() {
+		out, _ = sjson.SetRawBytes(out, "user_location", []byte(userLocation.Raw))
+	}
+	return out
 }
 
 // shortenNameIfNeeded applies a simple shortening rule for a single name.
