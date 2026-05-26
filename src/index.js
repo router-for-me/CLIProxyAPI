@@ -36,7 +36,19 @@ export default {
     // Get the container instance
     const containerInstance = getContainer(env.PROXY_CONTAINER, sessionId);
 
-    // Pass the request to the container instance on its default port
+    // Cloudflare Containers have a known bug where POST requests with bodies can 
+    // hang indefinitely if the container is asleep (cold start) because the stream stalls.
+    // To fix this, if the request is a POST/PUT, we send a lightweight HEAD request 
+    // first to force the container to wake up and bind its port.
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      try {
+        await containerInstance.fetch(new Request(request.url, { method: "HEAD" }));
+      } catch (e) {
+        // Ignore ping errors, the main request will surface any real errors
+      }
+    }
+
+    // Pass the actual request to the container instance
     return containerInstance.fetch(request);
   },
 };
