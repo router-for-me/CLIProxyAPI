@@ -45,6 +45,14 @@ func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
 }
 
+type refreshTokenReusedTestExecutor struct {
+	schedulerProviderTestExecutor
+}
+
+func (e refreshTokenReusedTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return nil, errors.New("token refresh failed with status 401: {\"error\":{\"code\":\"refresh_token_reused\"}}")
+}
+
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -87,6 +95,51 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_RefreshAuthTokenReusedDoesNotMarkAuthUnavailable(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(refreshTokenReusedTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+	})
+
+	auth := &Auth{
+		ID:       "refresh-token-reused",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email": "x@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	before := time.Now()
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if updated.Unavailable {
+		t.Fatal("refresh_token_reused should not mark auth unavailable")
+	}
+	if updated.LastError == nil {
+		t.Fatal("expected refresh_token_reused failure to be recorded")
+	}
+	if got := updated.LastError.Code; got == "unauthorized" {
+		t.Fatalf("LastError.Code = %q, want non-unauthorized", got)
+	}
+	if got := updated.LastError.StatusCode(); got == http.StatusUnauthorized {
+		t.Fatalf("LastError.StatusCode() = %d, want non-unauthorized", got)
+	}
+	if !updated.NextRefreshAfter.After(before) {
+		t.Fatalf("NextRefreshAfter = %s, want retry backoff after %s", updated.NextRefreshAfter, before)
+	}
+	if manager.shouldRefresh(updated, time.Now()) {
+		t.Fatal("expected refresh_token_reused auth to wait for retry backoff")
 	}
 }
 

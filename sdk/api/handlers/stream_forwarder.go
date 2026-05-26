@@ -6,6 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	log "github.com/sirupsen/logrus"
 )
 
 type StreamForwardOptions struct {
@@ -62,9 +64,36 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	}
 
 	var terminalErr *interfaces.ErrorMessage
+	startedAt := time.Now()
+	lastActivityAt := startedAt
+	chunksForwarded := 0
+	bytesForwarded := 0
+	logEntry := log.WithField("request_id", "--------")
+	if c.Request != nil {
+		if reqID := logging.GetRequestID(c.Request.Context()); reqID != "" {
+			logEntry = log.WithField("request_id", reqID)
+		}
+	}
+	logProgress := func(reason string, warn bool) {
+		msg := "stream forwarder " + reason
+		args := []interface{}{
+			time.Since(startedAt).Truncate(time.Second),
+			time.Since(lastActivityAt).Truncate(time.Second),
+			chunksForwarded,
+			bytesForwarded,
+			c.Writer.Status(),
+			c.Request.Context().Err(),
+		}
+		if warn {
+			logEntry.Warnf(msg+" elapsed=%s idle=%s chunks=%d bytes=%d writer_status=%d request_ctx_err=%v", args...)
+			return
+		}
+		logEntry.Infof(msg+" elapsed=%s idle=%s chunks=%d bytes=%d writer_status=%d request_ctx_err=%v", args...)
+	}
 	for {
 		select {
 		case <-c.Request.Context().Done():
+			logProgress("request context done", true)
 			cancel(c.Request.Context().Err())
 			return
 		case chunk, ok := <-data:
@@ -83,19 +112,37 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					if opts.WriteTerminalError != nil {
 						opts.WriteTerminalError(terminalErr)
 					}
+					logProgress("terminal error before flush", true)
 					flusher.Flush()
+					logProgress("terminal error flushed", true)
 					cancel(terminalErr.Error)
 					return
 				}
 				if opts.WriteDone != nil {
 					opts.WriteDone()
 				}
+				logProgress("data channel closed before final flush", false)
 				flusher.Flush()
+				logProgress("data channel closed flushed", false)
 				cancel(nil)
 				return
 			}
+			lastActivityAt = time.Now()
+			chunksForwarded++
+			bytesForwarded += len(chunk)
 			writeChunk(chunk)
+			beforeFlush := time.Now()
 			flusher.Flush()
+			if flushDuration := time.Since(beforeFlush); flushDuration > time.Second {
+				logEntry.Warnf("stream forwarder slow flush duration=%s elapsed=%s chunks=%d bytes=%d writer_status=%d request_ctx_err=%v",
+					flushDuration.Truncate(time.Millisecond),
+					time.Since(startedAt).Truncate(time.Second),
+					chunksForwarded,
+					bytesForwarded,
+					c.Writer.Status(),
+					c.Request.Context().Err(),
+				)
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				continue
@@ -104,7 +151,9 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				terminalErr = errMsg
 				if opts.WriteTerminalError != nil {
 					opts.WriteTerminalError(errMsg)
+					logProgress("error channel received before flush", true)
 					flusher.Flush()
+					logProgress("error channel received flushed", true)
 				}
 			}
 			var execErr error
@@ -114,8 +163,20 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			cancel(execErr)
 			return
 		case <-keepAliveC:
+			lastActivityAt = time.Now()
 			writeKeepAlive()
+			beforeFlush := time.Now()
 			flusher.Flush()
+			if flushDuration := time.Since(beforeFlush); flushDuration > time.Second {
+				logEntry.Warnf("stream forwarder slow keepalive flush duration=%s elapsed=%s chunks=%d bytes=%d writer_status=%d request_ctx_err=%v",
+					flushDuration.Truncate(time.Millisecond),
+					time.Since(startedAt).Truncate(time.Second),
+					chunksForwarded,
+					bytesForwarded,
+					c.Writer.Status(),
+					c.Request.Context().Err(),
+				)
+			}
 		}
 	}
 }

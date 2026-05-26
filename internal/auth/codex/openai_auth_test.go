@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
@@ -42,6 +44,72 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
+	}
+}
+
+func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
+	var calls int32
+	var wg sync.WaitGroup
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if atomic.AddInt32(&calls, 1) == 1 {
+					close(entered)
+				}
+				<-release
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(`{
+						"access_token":"access-token",
+						"refresh_token":"next-refresh-token",
+						"id_token":"header.payload.signature",
+						"expires_in":3600
+					}`)),
+					Header:  make(http.Header),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+
+	results := make(chan *CodexTokenData, 2)
+	errs := make(chan error, 2)
+	runRefresh := func() {
+		defer wg.Done()
+		td, err := auth.RefreshTokens(context.Background(), "shared-refresh-token")
+		if err != nil {
+			errs <- err
+			return
+		}
+		results <- td
+	}
+
+	wg.Add(1)
+	go runRefresh()
+	<-entered
+	wg.Add(1)
+	go runRefresh()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	if len(errs) > 0 {
+		t.Fatalf("unexpected refresh error: %v", <-errs)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 refresh request, got %d", got)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected both callers to receive token data, got %d", len(results))
+	}
+	for td := range results {
+		if td.RefreshToken != "next-refresh-token" {
+			t.Fatalf("refresh token = %q, want next-refresh-token", td.RefreshToken)
+		}
 	}
 }
 
