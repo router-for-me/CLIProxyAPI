@@ -483,10 +483,10 @@ func appendClaudeAPIResponse(c *gin.Context, data []byte) {
 }
 
 // shouldShortCircuitClaudeSample matches the liveness/auth probe shape that
-// Claude Desktop App and Claude Code send periodically: max_tokens=1, a
-// pre-filled assistant turn (real classifier inputs are user-only), and no
-// tools (tool-gated classifiers won't be probed). Bare max_tokens=1 is a
-// legitimate single-token classification setting and must pass through.
+// Claude Desktop App and Claude Code send periodically: max_tokens=1, the
+// last message pre-filled as assistant (real classifier inputs end on user),
+// and no tools (tool-gated classifiers won't be probed). Bare max_tokens=1
+// is a legitimate single-token classification setting and must pass through.
 func shouldShortCircuitClaudeSample(rawJSON []byte) bool {
 	if v := gjson.GetBytes(rawJSON, "max_tokens"); !v.Exists() || v.Int() != 1 {
 		return false
@@ -494,15 +494,8 @@ func shouldShortCircuitClaudeSample(rawJSON []byte) bool {
 	if gjson.GetBytes(rawJSON, "tools").Exists() || gjson.GetBytes(rawJSON, "tool_choice").Exists() {
 		return false
 	}
-	hasAssistant := false
-	gjson.GetBytes(rawJSON, "messages").ForEach(func(_, msg gjson.Result) bool {
-		if msg.Get("role").String() == "assistant" {
-			hasAssistant = true
-			return false
-		}
-		return true
-	})
-	return hasAssistant
+	lastMsg := gjson.GetBytes(rawJSON, "messages.-1")
+	return lastMsg.Exists() && lastMsg.Get("role").String() == "assistant"
 }
 
 func buildClaudeSampleResponseBody(rawJSON []byte, now time.Time) []byte {
