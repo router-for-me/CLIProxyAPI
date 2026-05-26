@@ -15,7 +15,7 @@ func TestClaudeMessagesShortCircuitNonStreamingSample(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude-sonnet-4-6","max_tokens":1,"messages":[{"role":"user","content":"hello"}]}`))
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude-sonnet-4-6","max_tokens":1,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"x"}]}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 
 	handler := &ClaudeCodeAPIHandler{}
@@ -77,18 +77,33 @@ func TestShouldShortCircuitClaudeSample(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "single message not shorted",
+			name: "single user message not shorted",
 			body: `{"max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`,
 			want: false,
 		},
 		{
-			name: "max tokens one",
+			name: "probe shape shorts",
 			body: `{"max_tokens":1,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"world"}]}`,
 			want: true,
 		},
 		{
-			name: "normal request",
+			name: "normal multi-turn request not shorted",
 			body: `{"max_tokens":64,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"world"}]}`,
+			want: false,
+		},
+		{
+			name: "single-token classifier (user only) not shorted",
+			body: `{"max_tokens":1,"messages":[{"role":"user","content":"Is this spam? Reply yes or no."}]}`,
+			want: false,
+		},
+		{
+			name: "single-token tool-gated classifier not shorted",
+			body: `{"max_tokens":1,"tools":[{"name":"check","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"."},{"role":"assistant","content":"x"}]}`,
+			want: false,
+		},
+		{
+			name: "single-token tool_choice forced not shorted",
+			body: `{"max_tokens":1,"tool_choice":{"type":"any"},"messages":[{"role":"user","content":"."},{"role":"assistant","content":"x"}]}`,
 			want: false,
 		},
 	}
