@@ -7,6 +7,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
@@ -765,9 +766,16 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	patched := injectAuthFilesWarningFilterPatch(data)
 	patched = injectModelPriceDropdownClipPatch(patched)
-	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
+
+	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(patched))
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "no-cache")
+
+	if match := c.GetHeader("If-None-Match"); match != "" && strings.Contains(match, etag) {
+		c.AbortWithStatus(http.StatusNotModified)
+		return
+	}
+
 	c.Data(http.StatusOK, "text/html; charset=utf-8", patched)
 }
 

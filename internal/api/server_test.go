@@ -241,6 +241,48 @@ func TestManagementControlPanelMissingAssetReturnsBootstrapWhileSyncSlow(t *test
 	close(releaseBlock)
 }
 
+func TestServeManagementControlPanel_ETagAndConditionalRequest(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.RemoteManagement.SecretKey = "test"
+
+	staticDir := filepath.Join(filepath.Dir(server.configFilePath), "static")
+	if err := os.MkdirAll(staticDir, 0o755); err != nil {
+		t.Fatalf("failed to create static dir: %v", err)
+	}
+	filePath := filepath.Join(staticDir, "management.html")
+	if err := os.WriteFile(filePath, []byte("<html><body><div>etag-test</div></body></html>"), 0o644); err != nil {
+		t.Fatalf("failed to write management asset: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d; body=%s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	etag := rr.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header in management panel response")
+	}
+	cacheControl := rr.Header().Get("Cache-Control")
+	if strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("expected Cache-Control without no-store when asset exists, got %q", cacheControl)
+	}
+
+	condReq := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	condReq.Header.Set("If-None-Match", etag)
+	condRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(condRR, condReq)
+
+	if condRR.Code != http.StatusNotModified {
+		t.Fatalf("expected status %d for conditional request, got %d; body=%s", http.StatusNotModified, condRR.Code, condRR.Body.String())
+	}
+	if condRR.Body.Len() != 0 {
+		t.Fatalf("expected empty body for 304 response, got %d bytes", condRR.Body.Len())
+	}
+}
+
 func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
@@ -611,8 +653,12 @@ func TestServeManagementControlPanel_DisablesCaching(t *testing.T) {
 		t.Fatalf("expected status %d, got %d; body=%s", http.StatusOK, rr.Code, rr.Body.String())
 	}
 	cacheControl := strings.ToLower(rr.Header().Get("Cache-Control"))
-	if !strings.Contains(cacheControl, "no-store") {
-		t.Fatalf("expected Cache-Control to contain no-store, got %q", rr.Header().Get("Cache-Control"))
+	if !strings.Contains(cacheControl, "no-cache") {
+		t.Fatalf("expected Cache-Control to contain no-cache, got %q", rr.Header().Get("Cache-Control"))
+	}
+	etag := rr.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header in management panel response")
 	}
 	body := rr.Body.String()
 	if !strings.Contains(body, "__cpa_auth_warning_filter_patch__") {
