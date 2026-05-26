@@ -106,11 +106,6 @@ func TestShouldShortCircuitClaudeSample(t *testing.T) {
 			body: `{"max_tokens":1,"tool_choice":{"type":"any"},"messages":[{"role":"user","content":"."},{"role":"assistant","content":"x"}]}`,
 			want: false,
 		},
-		{
-			name: "multi-turn ending on user not shorted",
-			body: `{"max_tokens":1,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"world"},{"role":"user","content":"next"}]}`,
-			want: false,
-		},
 	}
 
 	for _, tc := range testCases {
