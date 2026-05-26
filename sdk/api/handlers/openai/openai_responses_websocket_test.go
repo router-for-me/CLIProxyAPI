@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	requestlogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -593,6 +594,34 @@ func TestSetWebsocketTimelineBody(t *testing.T) {
 	}
 }
 
+func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+
+	timelineLog := newWebsocketTimelineLog(true, nil)
+	timelineLog.BeginRequest()
+	timelineLog.Append("request", []byte(`{"type":"response.create"}`), ts)
+	timelineLog.SetContext(c)
+
+	value, exists := c.Get(wsTimelineBodyKey)
+	if !exists {
+		t.Fatalf("timeline body key not set")
+	}
+	bodyBytes, ok := value.([]byte)
+	if !ok {
+		t.Fatalf("timeline body key type mismatch")
+	}
+	got := string(bodyBytes)
+	if !strings.Contains(got, "Event: websocket.request") {
+		t.Fatalf("timeline event not found: %s", got)
+	}
+	if !strings.Contains(got, `{"type":"response.create"}`) {
+		t.Fatalf("timeline payload not found: %s", got)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -867,14 +896,14 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		completedOutput, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 		)
 		if err != nil {
@@ -945,7 +974,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		if errClose := conn.Close(); errClose != nil {
 			serverErrCh <- errClose
 			return
@@ -957,7 +986,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 		)
 		if err == nil {
@@ -994,17 +1023,35 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
+	logsDir := t.TempDir()
 
 	timelineCh := make(chan string, 1)
 	router := gin.New()
 	router.GET("/v1/responses/ws", func(c *gin.Context) {
+		source, errSource := requestlogging.NewFileBodySourceInDir(logsDir, "websocket-timeline-test")
+		if errSource != nil {
+			timelineCh <- ""
+			return
+		}
+		c.Set(requestlogging.WebsocketTimelineSourceContextKey, source)
 		h.ResponsesWebsocket(c)
 		timeline := ""
 		if value, exists := c.Get(wsTimelineBodyKey); exists {
 			if body, ok := value.([]byte); ok {
 				timeline = string(body)
+			}
+		} else if value, exists := c.Get(requestlogging.WebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				body, _ := source.Bytes()
+				timeline = string(body)
+				_ = source.Cleanup()
+			}
+		}
+		if value, exists := c.Get(requestlogging.APIWebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				_ = source.Cleanup()
 			}
 		}
 		timelineCh <- timeline

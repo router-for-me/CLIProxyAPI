@@ -416,6 +416,13 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 	if len(data) == 0 {
 		return
 	}
+	if source, ok := apiWebsocketTimelineSource(ginCtx); ok {
+		if errAppend := source.AppendPart(data); errAppend == nil {
+			return
+		} else {
+			log.WithError(errAppend).Warn("failed to append api websocket timeline log part")
+		}
+	}
 	if existing, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
 		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
 			combined := make([]byte, 0, len(existingBytes)+len(data)+2)
@@ -430,6 +437,18 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 		}
 	}
 	ginCtx.Set(apiWebsocketTimelineKey, bytes.Clone(data))
+}
+
+func apiWebsocketTimelineSource(ginCtx *gin.Context) (*logging.FileBodySource, bool) {
+	if ginCtx == nil {
+		return nil, false
+	}
+	value, exists := ginCtx.Get(logging.APIWebsocketTimelineSourceContextKey)
+	if !exists {
+		return nil, false
+	}
+	source, ok := value.(*logging.FileBodySource)
+	return source, ok && source != nil
 }
 
 func markAPIResponseTimestamp(ginCtx *gin.Context) {
