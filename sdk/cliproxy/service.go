@@ -1576,12 +1576,13 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		thinking := model.Thinking
 		if thinking == nil && !model.Image {
-			if name := strings.TrimSpace(model.Name); name != "" {
+			name := strings.TrimSpace(model.Name)
+			if name != "" {
 				if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
 					thinking = upstream.Thinking
 				}
 			}
-			if thinking == nil {
+			if thinking == nil && modelID != name {
 				if upstream := registry.LookupStaticModelInfo(modelID); upstream != nil && upstream.Thinking != nil {
 					thinking = upstream.Thinking
 				}
