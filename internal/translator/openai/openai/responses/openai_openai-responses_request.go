@@ -74,6 +74,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		pendingToolCallIDs := make([]string, 0)
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
+		pendingReasoningContent := ""
 
 		flushPendingToolCalls := func() {
 			if len(pendingToolCalls) == 0 {
@@ -81,6 +82,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if pendingReasoningContent != "" {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoningContent)
+				pendingReasoningContent = ""
+			}
 			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
@@ -125,6 +130,24 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 
 			switch itemType {
+			case "reasoning":
+				// Collect reasoning content from summary text or encrypted_content.
+				// Codex preserves encrypted_content but strips summary text, so try both.
+				ecText := item.Get("encrypted_content").String()
+				if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+					for _, part := range summary.Array() {
+						if t := part.Get("text").String(); t != "" {
+							if pendingReasoningContent != "" {
+								pendingReasoningContent += "\n"
+							}
+							pendingReasoningContent += t
+						}
+					}
+				}
+				// Fallback: use encrypted_content if summary was empty (Codex strips summary).
+				if pendingReasoningContent == "" && ecText != "" {
+					pendingReasoningContent = ecText
+				}
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
@@ -170,6 +193,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
+				if role == "assistant" && pendingReasoningContent != "" {
+					message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
+				} else if role != "assistant" && role != "tool" {
+					// Clear reasoning content when moving to a new non-assistant turn.
+					pendingReasoningContent = ""
+				}
 				appendRegularMessage(message)
 
 			case "function_call":
