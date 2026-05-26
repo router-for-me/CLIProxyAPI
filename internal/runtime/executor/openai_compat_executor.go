@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -112,6 +113,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	if e.preserveOpenAIResponsesReasoningContent(auth, from, to, opts.Alt) {
+		convertOpts := responsesconverter.OpenAIResponsesToChatCompletionsOptions{PreserveReasoningContent: true}
+		originalTranslated = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions(baseModel, originalPayload, opts.Stream, convertOpts)
+		translated = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions(baseModel, req.Payload, opts.Stream, convertOpts)
+	}
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -307,6 +313,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	if e.preserveOpenAIResponsesReasoningContent(auth, from, to, opts.Alt) {
+		convertOpts := responsesconverter.OpenAIResponsesToChatCompletionsOptions{PreserveReasoningContent: true}
+		originalTranslated = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions(baseModel, originalPayload, true, convertOpts)
+		translated = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions(baseModel, req.Payload, true, convertOpts)
+	}
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -720,6 +731,20 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 	return body.Bytes(), writer.FormDataContentType(), nil
 }
 
+func (e *OpenAICompatExecutor) preserveOpenAIResponsesReasoningContent(auth *cliproxyauth.Auth, from, to sdktranslator.Format, alt string) bool {
+	if e == nil || e.cfg == nil {
+		return false
+	}
+	if alt != "" {
+		return false
+	}
+	if from.String() != "openai-response" || to.String() != "openai" {
+		return false
+	}
+	compat := e.resolveCompatConfig(auth)
+	return compat != nil && compat.OpenAIResponsesPreserveReasoningContent
+}
+
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {
 	if auth == nil {
 		return "", ""
@@ -732,19 +757,24 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
-	if auth == nil || e.cfg == nil {
+	if e == nil || e.cfg == nil {
 		return nil
 	}
-	candidates := make([]string, 0, 3)
-	if auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["compat_name"]); v != "" {
-			candidates = append(candidates, v)
+	candidates := make([]string, 0, 4)
+	if auth != nil {
+		if auth.Attributes != nil {
+			if v := strings.TrimSpace(auth.Attributes["compat_name"]); v != "" {
+				candidates = append(candidates, v)
+			}
+			if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
+				candidates = append(candidates, v)
+			}
 		}
-		if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
+		if v := strings.TrimSpace(auth.Provider); v != "" {
 			candidates = append(candidates, v)
 		}
 	}
-	if v := strings.TrimSpace(auth.Provider); v != "" {
+	if v := strings.TrimSpace(e.Identifier()); v != "" {
 		candidates = append(candidates, v)
 	}
 	for i := range e.cfg.OpenAICompatibility {

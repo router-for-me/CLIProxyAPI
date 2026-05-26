@@ -122,3 +122,98 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntil
 		t.Fatalf("messages.3.content = %q, want %q", got, "next")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningContentDefaultOmitted(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"think first"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}],"reasoning_content":"hidden thought"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-test", raw, false)
+
+	if gjson.GetBytes(out, "messages.0.reasoning_content").Exists() {
+		t.Fatalf("reasoning_content should be omitted by default: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "answer" {
+		t.Fatalf("messages.0.content.0.text = %q, want %q", got, "answer")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreserveReasoningItem(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"first line"},{"type":"summary_text","text":"second line"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions("gpt-test", raw, false, OpenAIResponsesToChatCompletionsOptions{
+		PreserveReasoningContent: true,
+	})
+
+	if got := len(gjson.GetBytes(out, "messages").Array()); got != 2 {
+		t.Fatalf("messages count = %d, want %d: %s", got, 2, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want assistant", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "" {
+		t.Fatalf("messages.0.content = %q, want empty string", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "first line\n\nsecond line" {
+		t.Fatalf("messages.0.reasoning_content = %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.text").String(); got != "answer" {
+		t.Fatalf("messages.1.content.0.text = %q, want answer", got)
+	}
+	if got := gjson.GetBytes(out, "messages.1.reasoning_content"); !got.Exists() || got.String() != "" {
+		t.Fatalf("messages.1.reasoning_content = %q, exists=%t, want empty string", got.String(), got.Exists())
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreserveMessageReasoningContent(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}],"reasoning_content":"hidden thought"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions("gpt-test", raw, true, OpenAIResponsesToChatCompletionsOptions{
+		PreserveReasoningContent: true,
+	})
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "hidden thought" {
+		t.Fatalf("messages.0.reasoning_content = %q, want hidden thought", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "answer" {
+		t.Fatalf("messages.0.content.0.text = %q, want answer", got)
+	}
+	if got := gjson.GetBytes(out, "stream").Bool(); !got {
+		t.Fatalf("stream = false, want true")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreserveAssistantReasoningContentEmptyString(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},
+			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions("gpt-test", raw, false, OpenAIResponsesToChatCompletionsOptions{
+		PreserveReasoningContent: true,
+	})
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content"); !got.Exists() || got.String() != "" {
+		t.Fatalf("messages.0.reasoning_content = %q, exists=%t, want empty string; body=%s", got.String(), got.Exists(), string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.reasoning_content"); !got.Exists() || got.String() != "" {
+		t.Fatalf("messages.1.reasoning_content = %q, exists=%t, want empty string; body=%s", got.String(), got.Exists(), string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("messages.1.tool_calls.0.id = %q, want call_1; body=%s", got, string(out))
+	}
+}

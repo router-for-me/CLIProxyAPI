@@ -106,6 +106,95 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	}
 }
 
+func TestOpenAICompatExecutorPreservesResponsesReasoningContentWhenConfigured(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:                                    "reasoning-provider",
+				BaseURL:                                 server.URL + "/v1",
+				OpenAIResponsesPreserveReasoningContent: true,
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "reasoning-provider",
+	}}
+	payload := []byte(`{"model":"gpt-test","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"think first"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-test",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want /v1/chat/completions", gotPath)
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.reasoning_content").String(); got != "think first" {
+		t.Fatalf("messages.0.reasoning_content = %q, want think first; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.1.content.0.text").String(); got != "answer" {
+		t.Fatalf("messages.1.content.0.text = %q, want answer; body=%s", got, string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorPreservesResponsesReasoningContentUsingExecutorProviderName(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("deepseek", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:                                    "deepseek",
+				BaseURL:                                 server.URL + "/v1",
+				OpenAIResponsesPreserveReasoningContent: true,
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"gpt-test","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"provider fallback"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-test",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.reasoning_content").String(); got != "provider fallback" {
+		t.Fatalf("messages.0.reasoning_content = %q, want provider fallback; body=%s", got, string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
