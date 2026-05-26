@@ -181,6 +181,8 @@ type Server struct {
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
 	managementRoutesEnabled atomic.Bool
+	// managementAssetSyncing prevents duplicate background sync goroutines for a missing panel asset.
+	managementAssetSyncing atomic.Bool
 
 	// envManagementSecret indicates whether MANAGEMENT_PASSWORD is configured.
 	envManagementSecret bool
@@ -744,12 +746,9 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
+			s.startManagementAssetSync(cfg)
+			s.serveManagementLoadingBootstrap(c)
+			return
 		} else {
 			log.WithError(err).Error("failed to stat management control panel asset")
 			c.AbortWithStatus(http.StatusInternalServerError)
@@ -771,6 +770,41 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	c.Header("Expires", "0")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", patched)
 }
+
+func (s *Server) startManagementAssetSync(cfg *config.Config) {
+	if s == nil || cfg == nil || !s.managementAssetSyncing.CompareAndSwap(false, true) {
+		return
+	}
+	configPath := s.configFilePath
+	proxyURL := cfg.ProxyURL
+	panelRepository := cfg.RemoteManagement.PanelGitHubRepository
+	go func() {
+		defer s.managementAssetSyncing.Store(false)
+		// Control panel bootstrap should not be canceled by client disconnects.
+		managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(configPath), proxyURL, panelRepository)
+	}()
+}
+
+func (s *Server) serveManagementLoadingBootstrap(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(managementLoadingBootstrapHTML))
+}
+
+const managementLoadingBootstrapHTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Management panel is loading</title>
+<style>body{font-family:Arial,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#e2e8f0}.card{max-width:520px;padding:28px;border:1px solid rgba(148,163,184,.35);border-radius:14px;background:rgba(15,23,42,.86);box-shadow:0 24px 80px rgba(0,0,0,.35)}h1{font-size:22px;margin:0 0 12px}p{line-height:1.5;color:#cbd5e1;margin:0 0 10px}</style>
+</head>
+<body>
+<div class="card"><h1>Management panel is loading</h1><p>The management UI is being downloaded in the background. This page will refresh automatically.</p><p>If it does not load soon, refresh this page manually.</p></div>
+<script>setTimeout(function(){ location.reload(); }, 2000);</script>
+</body>
+</html>`
 
 func injectAuthFilesWarningFilterPatch(html []byte) []byte {
 	const marker = "__cpa_auth_warning_filter_patch__"

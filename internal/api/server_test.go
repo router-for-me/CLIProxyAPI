@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,6 +148,97 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
 	}
+}
+
+func TestManagementControlPanelMissingAssetReturnsBootstrapWhileSyncSlow(t *testing.T) {
+	staticDir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", staticDir)
+
+	releaseBlock := make(chan struct{})
+	releaseRequested := make(chan struct{})
+	var closeReleaseRequested sync.Once
+	var connectCount atomic.Int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect && strings.Contains(r.Host, "api.github.com") {
+			connectCount.Add(1)
+			closeReleaseRequested.Do(func() { close(releaseRequested) })
+			<-releaseBlock
+			http.Error(w, "release endpoint unavailable", http.StatusBadGateway)
+			return
+		}
+		http.Error(w, "unexpected proxy request", http.StatusBadGateway)
+	}))
+	t.Cleanup(func() {
+		select {
+		case <-releaseBlock:
+		default:
+			close(releaseBlock)
+		}
+		proxyServer.Close()
+	})
+
+	server := newTestServer(t)
+	server.cfg.ProxyURL = proxyServer.URL
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		server.engine.ServeHTTP(rr, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("/management.html took %s with missing asset and slow release endpoint", elapsed)
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(releaseBlock)
+		<-done
+		t.Fatalf("/management.html blocked while synchronously syncing missing management asset")
+	}
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if cacheControl := rr.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("Cache-Control = %q, want no-store", cacheControl)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Management panel is loading") || !strings.Contains(body, "location.reload") {
+		t.Fatalf("expected loading bootstrap HTML, got %s", body)
+	}
+
+	select {
+	case <-releaseRequested:
+	case <-time.After(time.Second):
+		t.Fatal("background management asset sync was not started")
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	secondRR := httptest.NewRecorder()
+	secondDone := make(chan struct{})
+	go func() {
+		server.engine.ServeHTTP(secondRR, secondReq)
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+	case <-time.After(200 * time.Millisecond):
+		close(releaseBlock)
+		<-secondDone
+		t.Fatal("second /management.html request blocked while sync was already running")
+	}
+	if got := connectCount.Load(); got != 1 {
+		t.Fatalf("release endpoint CONNECT count = %d, want 1", got)
+	}
+	if secondRR.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want %d body=%s", secondRR.Code, http.StatusOK, secondRR.Body.String())
+	}
+
+	close(releaseBlock)
 }
 
 func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
