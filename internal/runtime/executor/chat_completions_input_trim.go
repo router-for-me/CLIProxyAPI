@@ -22,7 +22,7 @@ func chatCompletionsInputTokenCeiling(modelID string) int {
 	if m.InputTokenLimit > 0 {
 		return m.InputTokenLimit
 	}
-	if m.ContextLength > 0 && m.MaxCompletionTokens > 0 {
+	if m.ContextLength > 0 && m.MaxCompletionTokens > 0 && m.ContextLength > m.MaxCompletionTokens {
 		return m.ContextLength - m.MaxCompletionTokens
 	}
 	return 0
