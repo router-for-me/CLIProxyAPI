@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
@@ -75,6 +76,11 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 				Type:    "invalid_request_error",
 			},
 		})
+		return
+	}
+
+	if shouldShortCircuitClaudeSample(rawJSON) {
+		h.writeClaudeSampleResponse(c, rawJSON)
 		return
 	}
 
@@ -474,4 +480,73 @@ func appendClaudeAPIResponse(c *gin.Context, data []byte) {
 		}
 	}
 	c.Set("API_RESPONSE", bytes.Clone(data))
+}
+
+func shouldShortCircuitClaudeSample(rawJSON []byte) bool {
+	maxTokens := gjson.GetBytes(rawJSON, "max_tokens")
+	return maxTokens.Exists() && maxTokens.Int() == 1
+}
+
+func buildClaudeSampleResponseBody(rawJSON []byte, now time.Time) []byte {
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	if strings.TrimSpace(modelName) == "" {
+		modelName = "claude-sonnet-4-6"
+	}
+	responseID := fmt.Sprintf("msg_cli_proxy_sample_%d", now.UnixNano())
+	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":0}}`)
+	out, _ = sjson.SetBytes(out, "id", responseID)
+	out, _ = sjson.SetBytes(out, "model", modelName)
+	return out
+}
+
+func buildClaudeSampleSSE(rawJSON []byte, now time.Time) []byte {
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	if strings.TrimSpace(modelName) == "" {
+		modelName = "claude-sonnet-4-6"
+	}
+	responseID := fmt.Sprintf("msg_cli_proxy_sample_%d", now.UnixNano())
+	messageStart := []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","content":[],"model":"","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":0}}}`)
+	messageStart, _ = sjson.SetBytes(messageStart, "message.id", responseID)
+	messageStart, _ = sjson.SetBytes(messageStart, "message.model", modelName)
+
+	messageDelta := []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":8,"output_tokens":0}}`)
+	messageStop := []byte(`{"type":"message_stop"}`)
+
+	var out []byte
+	out = appendClaudeSSEEvent(out, "message_start", messageStart)
+	out = appendClaudeSSEEvent(out, "message_delta", messageDelta)
+	out = appendClaudeSSEEvent(out, "message_stop", messageStop)
+	return out
+}
+
+func appendClaudeSSEEvent(dst []byte, event string, data []byte) []byte {
+	dst = append(dst, "event: "...)
+	dst = append(dst, event...)
+	dst = append(dst, '\n')
+	dst = append(dst, "data: "...)
+	dst = append(dst, data...)
+	dst = append(dst, '\n', '\n')
+	return dst
+}
+
+func (h *ClaudeCodeAPIHandler) writeClaudeSampleResponse(c *gin.Context, rawJSON []byte) {
+	streamResult := gjson.GetBytes(rawJSON, "stream")
+	now := time.Now()
+	if streamResult.Exists() && streamResult.Type != gjson.False {
+		payload := buildClaudeSampleSSE(rawJSON, now)
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+		appendClaudeAPIResponse(c, payload)
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write(payload)
+		return
+	}
+
+	payload := buildClaudeSampleResponseBody(rawJSON, now)
+	appendClaudeAPIResponse(c, payload)
+	c.Header("Content-Type", "application/json")
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write(payload)
 }
