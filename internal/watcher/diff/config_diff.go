@@ -78,6 +78,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ForceModelPrefix != newCfg.ForceModelPrefix {
 		changes = append(changes, fmt.Sprintf("force-model-prefix: %t -> %t", oldCfg.ForceModelPrefix, newCfg.ForceModelPrefix))
 	}
+	if oldCfg.CodexPreferUpstreamWebsockets != newCfg.CodexPreferUpstreamWebsockets {
+		changes = append(changes, fmt.Sprintf("codex-prefer-upstream-websockets: %t -> %t", oldCfg.CodexPreferUpstreamWebsockets, newCfg.CodexPreferUpstreamWebsockets))
+	}
 	if oldCfg.NonStreamKeepAliveInterval != newCfg.NonStreamKeepAliveInterval {
 		changes = append(changes, fmt.Sprintf("nonstream-keepalive-interval: %d -> %d", oldCfg.NonStreamKeepAliveInterval, newCfg.NonStreamKeepAliveInterval))
 	}

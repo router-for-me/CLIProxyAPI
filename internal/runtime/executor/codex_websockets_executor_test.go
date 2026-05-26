@@ -93,6 +93,62 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
+func TestCodexAutoExecutorPreferUpstreamWebsocketUsesWebsocketTransport(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("request path = %s, want /responses", r.URL.Path)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read upstream websocket message: %v", err)
+		}
+		if msgType != websocket.TextMessage {
+			t.Fatalf("message type = %d, want text", msgType)
+		}
+		capturedPayload <- bytes.Clone(payload)
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "sk-test",
+		"base_url":   server.URL,
+		"websockets": "true",
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+
+	if _, err := exec.Execute(ctx, auth, req, opts); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	select {
+	case payload := <-capturedPayload:
+		if got := gjson.GetBytes(payload, "type").String(); got != "response.create" {
+			t.Fatalf("upstream type = %s, want response.create; payload=%s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +204,20 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for disconnect signal")
+	}
+}
+
+func TestCodexShouldUseWebsocketsRequiresTransportPreference(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"websockets": "true"}}
+
+	if codexShouldUseWebsockets(context.Background(), auth) {
+		t.Fatal("plain context unexpectedly uses websocket transport")
+	}
+	if !codexShouldUseWebsockets(cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background()), auth) {
+		t.Fatal("prefer upstream websocket context did not use websocket transport")
+	}
+	if !codexShouldUseWebsockets(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth) {
+		t.Fatal("downstream websocket context did not use websocket transport")
 	}
 }
 

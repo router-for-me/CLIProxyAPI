@@ -173,28 +173,36 @@ func authWebsocketsEnabled(auth *Auth) bool {
 	return false
 }
 
-func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
-	if len(available) == 0 {
-		return available
+func preferredCodexWebsocketAuths(ctx context.Context, provider string, model string, now time.Time, auths []*Auth) ([]*Auth, bool) {
+	if len(auths) == 0 {
+		return nil, false
 	}
-	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
-		return available
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) && !cliproxyexecutor.PreferUpstreamWebsocket(ctx) {
+		return nil, false
 	}
-	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
-		return available
+	providerKey := strings.TrimSpace(provider)
+	if !strings.EqualFold(providerKey, "codex") && !strings.EqualFold(providerKey, "mixed") {
+		return nil, false
 	}
 
-	wsEnabled := make([]*Auth, 0, len(available))
-	for i := 0; i < len(available); i++ {
-		candidate := available[i]
+	wsCandidates := make([]*Auth, 0, len(auths))
+	for i := 0; i < len(auths); i++ {
+		candidate := auths[i]
+		if candidate == nil || !strings.EqualFold(strings.TrimSpace(candidate.Provider), "codex") {
+			continue
+		}
 		if authWebsocketsEnabled(candidate) {
-			wsEnabled = append(wsEnabled, candidate)
+			wsCandidates = append(wsCandidates, candidate)
 		}
 	}
-	if len(wsEnabled) > 0 {
-		return wsEnabled
+	if len(wsCandidates) == 0 {
+		return nil, false
 	}
-	return available
+	available, err := getAvailableAuths(wsCandidates, provider, model, now)
+	if err != nil || len(available) == 0 {
+		return nil, false
+	}
+	return available, true
 }
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
@@ -261,11 +269,14 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
-	if err != nil {
-		return nil, err
+	available, ok := preferredCodexWebsocketAuths(ctx, provider, model, now, auths)
+	if !ok {
+		var err error
+		available, err = getAvailableAuths(auths, provider, model, now)
+		if err != nil {
+			return nil, err
+		}
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -360,11 +371,14 @@ func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
-	if err != nil {
-		return nil, err
+	available, ok := preferredCodexWebsocketAuths(ctx, provider, model, now, auths)
+	if !ok {
+		var err error
+		available, err = getAvailableAuths(auths, provider, model, now)
+		if err != nil {
+			return nil, err
+		}
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
 }
 

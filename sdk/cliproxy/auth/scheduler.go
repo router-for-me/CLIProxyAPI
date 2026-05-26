@@ -244,7 +244,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+	preferWebsocket := (cliproxyexecutor.DownstreamWebsocket(ctx) || cliproxyexecutor.PreferUpstreamWebsocket(ctx)) && providerKey == "codex" && pinnedAuthID == ""
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -334,15 +334,35 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()
-	for providerIndex, providerKey := range normalized {
-		providerState := s.providers[providerKey]
-		if providerState == nil {
-			continue
+	if cliproxyexecutor.DownstreamWebsocket(ctx) || cliproxyexecutor.PreferUpstreamWebsocket(ctx) {
+		for providerIndex, providerKey := range normalized {
+			if providerKey != "codex" {
+				continue
+			}
+			providerState := s.providers[providerKey]
+			if providerState == nil {
+				continue
+			}
+			shard := providerState.ensureModelLocked(modelKey, now)
+			candidateShards[providerIndex] = shard
+			if picked := shard.pickReadyWebsocketLocked(s.strategy, predicate); picked != nil {
+				return picked, providerKey, nil
+			}
+			break
 		}
-		shard := providerState.ensureModelLocked(modelKey, now)
-		candidateShards[providerIndex] = shard
+	}
+	for providerIndex, providerKey := range normalized {
+		shard := candidateShards[providerIndex]
 		if shard == nil {
-			continue
+			providerState := s.providers[providerKey]
+			if providerState == nil {
+				continue
+			}
+			shard = providerState.ensureModelLocked(modelKey, now)
+			candidateShards[providerIndex] = shard
+			if shard == nil {
+				continue
+			}
 		}
 		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
 		if !okPriority {
@@ -769,6 +789,21 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
 }
 
+func (m *modelScheduler) pickReadyWebsocketLocked(strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+	if m == nil {
+		return nil
+	}
+	m.promoteExpiredLocked(time.Now())
+	for _, priority := range m.priorityOrder {
+		bucket := m.readyByPriority[priority]
+		if bucket == nil || bucket.ws.pickFirst(predicate) == nil {
+			continue
+		}
+		return m.pickReadyAtPriorityLocked(true, priority, strategy, predicate)
+	}
+	return nil
+}
+
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
 // The caller must ensure expired entries are already promoted when needed.
 func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predicate func(*scheduledAuth) bool) (int, bool) {
@@ -776,8 +811,8 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 		return 0, false
 	}
 	if preferWebsocket {
-		// When downstream is websocket and Codex supports websocket transport, prefer websocket-enabled
-		// credentials even if they are in a lower priority tier than HTTP-only credentials.
+		// When Codex websocket transport is preferred, prefer websocket-enabled credentials
+		// even if they are in a lower priority tier than HTTP-only credentials.
 		for _, priority := range m.priorityOrder {
 			bucket := m.readyByPriority[priority]
 			if bucket == nil {
