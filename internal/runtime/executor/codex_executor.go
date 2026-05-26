@@ -38,9 +38,11 @@ const (
 )
 
 var (
-	dataTag                       = []byte("data:")
-	codexHTTPStreamIdleTimeout    = 5 * time.Minute
-	codexHTTPStreamIdleTimeoutMsg = "codex upstream stream idle timeout after %s"
+	dataTag                                = []byte("data:")
+	codexHTTPStreamFirstResponseTimeout    = 2 * time.Minute
+	codexHTTPStreamFirstResponseTimeoutMsg = "codex upstream stream first response timeout after %s"
+	codexHTTPStreamIdleTimeout             = 5 * time.Minute
+	codexHTTPStreamIdleTimeoutMsg          = "codex upstream stream idle timeout after %s"
 )
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
@@ -583,11 +585,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	applyCodexHTTPStreamFirstResponseTimeout(httpClient, codexHTTPStreamFirstResponseTimeout)
 	httpStartedAt := time.Now()
 	helps.LogWithRequestID(ctx).Infof("codex http stream upstream request start url=%s body_bytes=%d auth=%s", url, len(body), authID)
 	httpResp, err := httpClient.Do(httpReq)
 	helps.LogWithRequestID(ctx).Infof("codex http stream upstream request returned elapsed=%s err=%v", time.Since(httpStartedAt).Truncate(time.Millisecond), err)
 	if err != nil {
+		if isCodexHTTPStreamFirstResponseTimeout(err, codexHTTPStreamFirstResponseTimeout) && ctx.Err() == nil {
+			err = statusErr{code: http.StatusGatewayTimeout, msg: fmt.Sprintf(codexHTTPStreamFirstResponseTimeoutMsg, codexHTTPStreamFirstResponseTimeout)}
+		}
+		httpClient.CloseIdleConnections()
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -598,6 +605,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
+		httpClient.CloseIdleConnections()
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
@@ -647,6 +655,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if errClose := httpResp.Body.Close(); errClose != nil && !idleTimedOut.Load() {
 					log.Errorf("codex executor: close response body error: %v", errClose)
 				}
+				httpClient.CloseIdleConnections()
 			})
 		}
 		defer func() {
@@ -809,6 +818,32 @@ func watchCodexHTTPStreamIdle(ctx context.Context, timeout time.Duration, idleTi
 		}
 	}()
 	return stop, markActivity
+}
+
+func applyCodexHTTPStreamFirstResponseTimeout(client *http.Client, timeout time.Duration) {
+	if client == nil || timeout <= 0 {
+		return
+	}
+	if client.Transport == nil {
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
+			transport := defaultTransport.Clone()
+			transport.ResponseHeaderTimeout = timeout
+			client.Transport = transport
+		}
+		return
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok && transport != nil {
+		clone := transport.Clone()
+		clone.ResponseHeaderTimeout = timeout
+		client.Transport = clone
+	}
+}
+
+func isCodexHTTPStreamFirstResponseTimeout(err error, timeout time.Duration) bool {
+	if err == nil || timeout <= 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "timeout awaiting response headers")
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

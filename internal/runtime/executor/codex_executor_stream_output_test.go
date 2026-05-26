@@ -180,6 +180,55 @@ func TestCodexExecutorExecuteStreamTimesOutIdleUpstream(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorExecuteStreamTimesOutWaitingForUpstreamResponse(t *testing.T) {
+	origTimeout := codexHTTPStreamFirstResponseTimeout
+	codexHTTPStreamFirstResponseTimeout = 50 * time.Millisecond
+	defer func() {
+		codexHTTPStreamFirstResponseTimeout = origTimeout
+	}()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	errC := make(chan error, 1)
+	go func() {
+		_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gpt-5.5",
+			Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Stream:       true,
+		})
+		errC <- err
+	}()
+
+	var err error
+	select {
+	case err = <-errC:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream first response timeout error")
+	}
+	if err == nil {
+		t.Fatal("expected first response timeout error, got nil")
+	}
+	if got := statusCodeFromTestError(t, err); got != http.StatusGatewayTimeout {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusGatewayTimeout, err)
+	}
+	if !strings.Contains(err.Error(), "codex upstream stream first response timeout after 50ms") {
+		t.Fatalf("error message missing first response timeout: %v", err)
+	}
+}
+
 func TestCodexTerminalStreamContextLengthErrFromResponseFailed(t *testing.T) {
 	err, ok := codexTerminalStreamContextLengthErr([]byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}}`))
 	if !ok {
