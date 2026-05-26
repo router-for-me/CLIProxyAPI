@@ -1229,6 +1229,32 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
+	if m.isAntigravityCreditsFirst(normalized, req.Model) {
+		_, _, maxWait := m.retrySettings()
+		var lastCreditsErr error
+		for attempt := 0; ; attempt++ {
+			resp, ok, creditsErr := m.tryAntigravityCreditsExecute(ctx, req, opts)
+			if ok {
+				return resp, nil
+			}
+			if creditsErr == nil {
+				break
+			}
+			lastCreditsErr = creditsErr
+			wait, shouldRetry := m.shouldRetryAfterError(creditsErr, attempt, []string{"antigravity"}, req.Model, maxWait)
+			if !shouldRetry {
+				break
+			}
+			if errWait := waitForCooldown(ctx, wait); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
+		}
+		if lastCreditsErr != nil {
+			return cliproxyexecutor.Response{}, lastCreditsErr
+		}
+		return cliproxyexecutor.Response{}, &Error{Code: "credits_exhausted", Message: "all credits candidates exhausted"}
+	}
+
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -1248,7 +1274,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
+			if resp, ok, _ := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
 				return resp, nil
 			}
 		}
@@ -1295,6 +1321,32 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
+	if m.isAntigravityCreditsFirst(normalized, req.Model) {
+		_, _, maxWait := m.retrySettings()
+		var lastCreditsErr error
+		for attempt := 0; ; attempt++ {
+			result, ok, creditsErr := m.tryAntigravityCreditsExecuteStream(ctx, req, opts)
+			if ok {
+				return result, nil
+			}
+			if creditsErr == nil {
+				break
+			}
+			lastCreditsErr = creditsErr
+			wait, shouldRetry := m.shouldRetryAfterError(creditsErr, attempt, []string{"antigravity"}, req.Model, maxWait)
+			if !shouldRetry {
+				break
+			}
+			if errWait := waitForCooldown(ctx, wait); errWait != nil {
+				return nil, errWait
+			}
+		}
+		if lastCreditsErr != nil {
+			return nil, lastCreditsErr
+		}
+		return nil, &Error{Code: "credits_exhausted", Message: "all credits candidates exhausted"}
+	}
+
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -1314,7 +1366,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
+			if result, ok, _ := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
 				return result, nil
 			}
 		}
@@ -3748,12 +3800,13 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	}
 }
 
-func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool) {
+func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool, error) {
 	routeModel := req.Model
 	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
+	var lastErr error
 	for _, c := range candidates {
 		if ctx.Err() != nil {
-			return cliproxyexecutor.Response{}, false
+			return cliproxyexecutor.Response{}, false, ctx.Err()
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
@@ -3779,6 +3832,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
+				lastErr = errExec
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
@@ -3790,18 +3844,19 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				continue
 			}
 			m.MarkResult(creditsCtx, result)
-			return resp, true
+			return resp, true, nil
 		}
 	}
-	return cliproxyexecutor.Response{}, false
+	return cliproxyexecutor.Response{}, false, lastErr
 }
 
-func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool) {
+func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool, error) {
 	routeModel := req.Model
 	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
+	var lastErr error
 	for _, c := range candidates {
 		if ctx.Err() != nil {
-			return nil, false
+			return nil, false, ctx.Err()
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
@@ -3821,11 +3876,29 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, len(models) > 1)
 		if errStream != nil {
+			lastErr = errStream
 			continue
 		}
-		return result, true
+		return result, true, nil
 	}
-	return nil, false
+	return nil, false, lastErr
+}
+
+func (m *Manager) isAntigravityCreditsFirst(providers []string, model string) bool {
+	if m == nil {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits {
+		return false
+	}
+	if cfg.QuotaExceeded.AntigravityCreditsStickSeconds >= 0 {
+		return false
+	}
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(model)), "claude") {
+		return false
+	}
+	return hasAntigravityProvider(providers)
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {

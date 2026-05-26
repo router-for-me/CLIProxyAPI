@@ -219,6 +219,11 @@ type QuotaExceeded struct {
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
 	// an auth that has available Google One AI credits.
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+
+	// AntigravityCreditsStickSeconds controls credits-first behavior for Claude models.
+	// 0 (default): disabled — each request tries free tier first.
+	// -1: always use credits — skip free tier entirely, retry with cooldown on failure.
+	AntigravityCreditsStickSeconds int `yaml:"antigravity-credits-stick-seconds" json:"antigravity-credits-stick-seconds"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
