@@ -115,6 +115,12 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// FastServiceTier enables automatic injection of service_tier=priority for all Codex requests.
+	// When true, "priority" is always set on the service_tier field (overwriting any existing value)
+	// to accelerate API response times. Applies to both OAuth and API key Codex requests.
+	// When false (default), the service_tier field is left unchanged.
+	FastServiceTier bool `yaml:"fast-service-tier,omitempty" json:"fast-service-tier,omitempty"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
