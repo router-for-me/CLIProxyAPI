@@ -137,3 +137,25 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		t.Fatalf("unexpected error message: %q", msg)
 	}
 }
+
+func TestGetRequestDetails_ImageModelAllowedForImageEndpoint(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-request-details-codex-image"
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{{ID: "gpt-image-2"}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, model, errMsg := handler.getRequestDetailsWithOptions("gpt-image-2", true)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetailsWithOptions() error = %v", errMsg.Error)
+	}
+	if !reflect.DeepEqual(providers, []string{"codex"}) {
+		t.Fatalf("providers = %v, want [codex]", providers)
+	}
+	if model != "gpt-image-2" {
+		t.Fatalf("model = %q, want gpt-image-2", model)
+	}
+}

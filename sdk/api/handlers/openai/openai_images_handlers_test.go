@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -15,9 +16,80 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
+
+type recordingImageExecutor struct {
+	lastReq  cliproxyexecutor.Request
+	lastOpts cliproxyexecutor.Options
+}
+
+func (e *recordingImageExecutor) Identifier() string { return "codex" }
+
+func (e *recordingImageExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	_ = ctx
+	_ = auth
+	e.lastReq = req
+	e.lastOpts = opts
+	return cliproxyexecutor.Response{Payload: []byte(`{"created":123,"data":[{"b64_json":"AA=="}]}`)}, nil
+}
+
+func (e *recordingImageExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	_ = ctx
+	_ = auth
+	_ = req
+	_ = opts
+	return nil, nil
+}
+
+func (e *recordingImageExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	_ = ctx
+	return auth, nil
+}
+
+func (e *recordingImageExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	_ = ctx
+	_ = auth
+	_ = req
+	_ = opts
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *recordingImageExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	_ = ctx
+	_ = auth
+	_ = req
+	return nil, nil
+}
+
+func newRecordingImageHandler(t *testing.T) (*OpenAIAPIHandler, *recordingImageExecutor) {
+	t.Helper()
+
+	executor := &recordingImageExecutor{}
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &cliproxyauth.Auth{
+		ID:       "test-codex-image-auth-" + t.Name(),
+		Provider: "codex",
+		Status:   cliproxyauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: defaultImagesToolModel}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	return NewOpenAIAPIHandler(base), executor
+}
 
 func performImagesEndpointRequest(t *testing.T, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
@@ -295,6 +367,95 @@ func TestImagesEditsMultipartRejectsUnsupportedModel(t *testing.T) {
 	resp := performImagesEndpointRequest(t, imagesEditsPath, writer.FormDataContentType(), &body, handler.ImagesEdits)
 
 	assertUnsupportedImagesModelResponse(t, resp, "gpt-5.4-mini")
+}
+
+func TestImagesGenerationsGPTImage2UsesImageExecutionMetadata(t *testing.T) {
+	handler, executor := newRecordingImageHandler(t)
+	body := strings.NewReader(`{"model":"gpt-image-2","prompt":"draw a square"}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastReq.Model != defaultImagesToolModel {
+		t.Fatalf("model = %q, want %q", executor.lastReq.Model, defaultImagesToolModel)
+	}
+	if got := executor.lastOpts.SourceFormat.String(); got != xaiImagesHandlerType {
+		t.Fatalf("source format = %q, want %q", got, xaiImagesHandlerType)
+	}
+	if got := executor.lastOpts.Metadata[cliproxyexecutor.RequestPathMetadataKey]; got != imagesGenerationsPath {
+		t.Fatalf("request path metadata = %#v, want %q", got, imagesGenerationsPath)
+	}
+	if msg := resp.Body.String(); strings.Contains(msg, "only supported on /v1/images/generations and /v1/images/edits") {
+		t.Fatalf("unexpected endpoint restriction error: %s", msg)
+	}
+}
+
+func TestImagesEditsJSONGPTImage2UsesImageExecutionMetadata(t *testing.T) {
+	handler, executor := newRecordingImageHandler(t)
+	body := strings.NewReader(`{"model":"gpt-image-2","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
+
+	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastReq.Model != defaultImagesToolModel {
+		t.Fatalf("model = %q, want %q", executor.lastReq.Model, defaultImagesToolModel)
+	}
+	if got := executor.lastOpts.SourceFormat.String(); got != xaiImagesHandlerType {
+		t.Fatalf("source format = %q, want %q", got, xaiImagesHandlerType)
+	}
+	if got := executor.lastOpts.Metadata[cliproxyexecutor.RequestPathMetadataKey]; got != imagesEditsPath {
+		t.Fatalf("request path metadata = %#v, want %q", got, imagesEditsPath)
+	}
+	if msg := resp.Body.String(); strings.Contains(msg, "only supported on /v1/images/generations and /v1/images/edits") {
+		t.Fatalf("unexpected endpoint restriction error: %s", msg)
+	}
+}
+
+func TestImagesEditsMultipartGPTImage2UsesImageExecutionMetadata(t *testing.T) {
+	handler, executor := newRecordingImageHandler(t)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("model", "gpt-image-2"); err != nil {
+		t.Fatalf("write model field: %v", err)
+	}
+	if err := writer.WriteField("prompt", "edit this"); err != nil {
+		t.Fatalf("write prompt field: %v", err)
+	}
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", multipart.FileContentDisposition("image", "image.png"))
+	header.Set("Content-Type", "image/png")
+	part, errCreate := writer.CreatePart(header)
+	if errCreate != nil {
+		t.Fatalf("create image field: %v", errCreate)
+	}
+	if _, errWrite := part.Write([]byte("png-data")); errWrite != nil {
+		t.Fatalf("write image field: %v", errWrite)
+	}
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("close multipart writer: %v", errClose)
+	}
+
+	resp := performImagesEndpointRequest(t, imagesEditsPath, writer.FormDataContentType(), &body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastReq.Model != defaultImagesToolModel {
+		t.Fatalf("model = %q, want %q", executor.lastReq.Model, defaultImagesToolModel)
+	}
+	if got := executor.lastOpts.SourceFormat.String(); got != xaiImagesHandlerType {
+		t.Fatalf("source format = %q, want %q", got, xaiImagesHandlerType)
+	}
+	if got := executor.lastOpts.Metadata[cliproxyexecutor.RequestPathMetadataKey]; got != imagesEditsPath {
+		t.Fatalf("request path metadata = %#v, want %q", got, imagesEditsPath)
+	}
+	if msg := resp.Body.String(); strings.Contains(msg, "only supported on /v1/images/generations and /v1/images/edits") {
+		t.Fatalf("unexpected endpoint restriction error: %s", msg)
+	}
 }
 
 func TestImagesGenerations_DisableImageGeneration_Returns404(t *testing.T) {
