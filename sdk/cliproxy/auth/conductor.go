@@ -868,7 +868,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel, req.Payload)
 	var lastErr error
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
@@ -1367,7 +1367,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel, req.Payload)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1466,7 +1466,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel, req.Payload)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1728,10 +1728,10 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	return updated, nil
 }
 
-func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
+func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string, payload []byte) context.Context {
 	alias := requestedModelAliasFromOptions(opts, fallback)
 	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
-	if effort := reasoningEffortFromOptions(opts); effort != "" {
+	if effort := reasoningEffortFromOptions(opts, alias, payload); effort != "" {
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
 	}
 	return ctx
@@ -1762,22 +1762,26 @@ func requestedModelAliasFromOptions(opts cliproxyexecutor.Options, fallback stri
 	}
 }
 
-func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
-	if len(opts.Metadata) == 0 {
+func reasoningEffortFromOptions(opts cliproxyexecutor.Options, model string, payload []byte) string {
+	if len(opts.Metadata) > 0 {
+		raw, ok := opts.Metadata[cliproxyexecutor.ReasoningEffortMetadataKey]
+		if ok && raw != nil {
+			switch value := raw.(type) {
+			case string:
+				return strings.TrimSpace(value)
+			case []byte:
+				return strings.TrimSpace(string(value))
+			}
+		}
+	}
+	body := opts.OriginalRequest
+	if len(body) == 0 {
+		body = payload
+	}
+	if len(body) == 0 {
 		return ""
 	}
-	raw, ok := opts.Metadata[cliproxyexecutor.ReasoningEffortMetadataKey]
-	if !ok || raw == nil {
-		return ""
-	}
-	switch value := raw.(type) {
-	case string:
-		return strings.TrimSpace(value)
-	case []byte:
-		return strings.TrimSpace(string(value))
-	default:
-		return ""
-	}
+	return thinking.ExtractReasoningEffort(body, opts.SourceFormat.String(), model)
 }
 
 func pinnedAuthIDFromMetadata(meta map[string]any) string {
@@ -3761,7 +3765,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
-		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
+		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel, req.Payload)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue

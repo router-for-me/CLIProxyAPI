@@ -6,6 +6,7 @@ import (
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
@@ -14,12 +15,33 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 			cliproxyexecutor.RequestedModelMetadataKey:  "client-model",
 			cliproxyexecutor.ReasoningEffortMetadataKey: "medium",
 		},
-	}, "fallback-model")
+	}, "fallback-model", nil)
 
 	if got := coreusage.RequestedModelAliasFromContext(ctx); got != "client-model" {
 		t.Fatalf("requested model alias = %q, want %q", got, "client-model")
 	}
 	if got := coreusage.ReasoningEffortFromContext(ctx); got != "medium" {
 		t.Fatalf("reasoning effort = %q, want %q", got, "medium")
+	}
+}
+
+func TestContextWithRequestedModelAliasInfersReasoningEffortFromOriginalRequest(t *testing.T) {
+	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"reasoning":{"effort":"high"}}`),
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+	}, "gpt-5.5", nil)
+
+	if got := coreusage.ReasoningEffortFromContext(ctx); got != "high" {
+		t.Fatalf("reasoning effort = %q, want %q", got, "high")
+	}
+}
+
+func TestContextWithRequestedModelAliasInfersReasoningEffortFromPayload(t *testing.T) {
+	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}, "gpt-5.5", []byte(`{"reasoning":{"effort":"xhigh"}}`))
+
+	if got := coreusage.ReasoningEffortFromContext(ctx); got != "xhigh" {
+		t.Fatalf("reasoning effort = %q, want %q", got, "xhigh")
 	}
 }
