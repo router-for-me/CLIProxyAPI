@@ -517,7 +517,7 @@ func formatAuthAccount(info UpstreamRequestLog, authType string, authValue strin
 		return label
 	}
 	if authType == "api_key" {
-		return util.HideAPIKey(authValue)
+		return ""
 	}
 	return authValue
 }

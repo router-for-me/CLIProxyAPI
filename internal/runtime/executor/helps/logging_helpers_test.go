@@ -24,7 +24,7 @@ func TestRecordAPIResponseMetadataStoresHeadersWhenRequestLogDisabled(t *testing
 	}
 }
 
-func TestFormatAuthInfoIncludesAccount(t *testing.T) {
+func TestFormatAuthInfoDoesNotUseAPIKeyAsAccount(t *testing.T) {
 	out := formatAuthInfo(UpstreamRequestLog{
 		Provider:  "deepseek",
 		AuthID:    "openai-compatibility:deepseek:123",
@@ -33,8 +33,8 @@ func TestFormatAuthInfoIncludesAccount(t *testing.T) {
 		AuthValue: "sk-1234567890abcdef",
 	})
 
-	if !strings.Contains(out, "account=sk-1...cdef") {
-		t.Fatalf("formatAuthInfo() = %q, want masked account", out)
+	if strings.Contains(out, "account=sk-") || strings.Contains(out, "account=sk-1...cdef") {
+		t.Fatalf("formatAuthInfo() = %q, account must not contain API key", out)
 	}
 }
 
