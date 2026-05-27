@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -1586,7 +1587,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexShouldUseWebsockets(ctx, auth, req.Model) {
 		return e.wsExec.Execute(ctx, auth, req, opts)
 	}
 	return e.httpExec.Execute(ctx, auth, req, opts)
@@ -1596,10 +1597,62 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexShouldUseWebsockets(ctx, auth, req.Model) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
+}
+
+// codexShouldUseWebsockets reports whether the Codex auto executor should route
+// to the WebSocket transport. We force WebSockets for models whose upstream
+// routing rejects HTTP /responses (e.g. gpt-5.5), even when the downstream
+// client speaks plain HTTP.
+func codexShouldUseWebsockets(ctx context.Context, auth *cliproxyauth.Auth, model string) bool {
+	if !codexWebsocketsEnabled(auth) {
+		return false
+	}
+	if cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return true
+	}
+	return codexModelRequiresWebsockets(model)
+}
+
+// codexModelRequiresWebsockets reports whether a model's upstream routing
+// only accepts the Responses-over-WebSocket transport. The set is sourced from
+// the embedded Codex client models catalog (slugs flagged
+// prefer_websockets:true), so newly added Responses-only models start working
+// without a code change.
+func codexModelRequiresWebsockets(model string) bool {
+	base := thinking.ParseSuffix(model).ModelName
+	if base == "" {
+		return false
+	}
+	codexWSPreferredModelsOnce.Do(loadCodexWSPreferredModels)
+	_, ok := codexWSPreferredModels[base]
+	return ok
+}
+
+var (
+	codexWSPreferredModelsOnce sync.Once
+	codexWSPreferredModels     map[string]struct{}
+)
+
+func loadCodexWSPreferredModels() {
+	codexWSPreferredModels = make(map[string]struct{})
+	models := gjson.GetBytes(registry.GetCodexClientModelsJSON(), "models")
+	if !models.IsArray() {
+		return
+	}
+	for _, m := range models.Array() {
+		if !m.Get("prefer_websockets").Bool() {
+			continue
+		}
+		slug := strings.TrimSpace(m.Get("slug").String())
+		if slug == "" {
+			continue
+		}
+		codexWSPreferredModels[slug] = struct{}{}
+	}
 }
 
 func (e *CodexAutoExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
