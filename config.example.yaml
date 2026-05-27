@@ -92,6 +92,11 @@ max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# Maximum wait in seconds for the first upstream response event from Codex.
+# If no data arrives within this period the request fails with 504.
+# 0 = disabled (default). Recommended: 240 for Cloud Run deployments.
+codex-ttft-timeout-seconds: 0
+
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 

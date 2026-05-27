@@ -88,6 +88,9 @@ type Config struct {
 	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+	// CodexTTFTTimeoutSeconds defines the maximum wait in seconds for the first
+	// upstream response event from Codex. 0 = disabled (default).
+	CodexTTFTTimeoutSeconds int `yaml:"codex-ttft-timeout-seconds" json:"codex-ttft-timeout-seconds"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
