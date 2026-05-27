@@ -213,7 +213,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	body = applyCodexFastServiceTier(e.cfg, body)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -239,10 +238,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		defer sess.reqMu.Unlock()
 	}
 
-	// Force service_tier=priority at the absolute latest point, right before we
-	// wrap it as a websocket "response.create" message and send. This is the
-	// most important path for editor agents (Cursor, VS Code, etc.) doing
-	// multi-turn with previous_response_id on long-lived websocket sessions.
+	// Inject service_tier=priority at the absolute latest point, right before
+	// wrapping as websocket "response.create". This is the only sjson work
+	// when fast-service-tier is enabled — covers all processing steps above
+	// (including prompt cache) for multi-turn agent sessions.
 	body = applyCodexFastServiceTier(e.cfg, body)
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	wsReqLog := helps.UpstreamRequestLog{
@@ -421,7 +420,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	body = applyCodexFastServiceTier(e.cfg, body)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -446,10 +444,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	// Force service_tier=priority at the absolute latest point before wrapping
-	// into websocket "response.create". This path handles streaming follow-up
-	// turns on reused websocket sessions (the common case for Cursor/VSCode
-	// agents). Any earlier injection can be lost to prompt cache or other steps.
+	// Inject service_tier=priority at the absolute latest point before
+	// wrapping into websocket "response.create". This is the *only* place
+	// we pay the sjson cost when fast-service-tier is enabled. It covers
+	// prompt cache injection and all prior processing for agent follow-ups.
 	body = applyCodexFastServiceTier(e.cfg, body)
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	wsReqLog := helps.UpstreamRequestLog{

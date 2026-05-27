@@ -285,13 +285,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	body = applyCodexFastServiceTier(e.cfg, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	// Force service_tier=priority at the very last moment before the request is
-	// constructed and sent. This ensures the setting survives user payload rules,
-	// prompt cache key injection, and any other intermediate processing.
-	// Critical for follow-up turns (previous_response_id) in agent conversations.
+	// Inject service_tier=priority at the very last moment before sending.
+	// This is the only place we do the JSON work when fast-service-tier is enabled,
+	// guaranteeing it survives all prior processing (payload rules, thinking,
+	// prompt cache injection, etc.) while avoiding double work on every request.
 	body = applyCodexFastServiceTier(e.cfg, body)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
@@ -447,10 +446,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	body = applyCodexFastServiceTier(e.cfg, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	// Force service_tier=priority at the very last moment before sending (see comment above).
+	// Inject service_tier=priority at the very last moment before sending.
+	// Only one sjson operation per request when fast-service-tier is enabled.
 	body = applyCodexFastServiceTier(e.cfg, body)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
@@ -551,10 +550,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-	body = applyCodexFastServiceTier(e.cfg, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	// Force service_tier=priority at the very last moment before sending (see comment above).
+	// Inject service_tier=priority at the very last moment before sending.
+	// Only one sjson operation per request when fast-service-tier is enabled.
 	body = applyCodexFastServiceTier(e.cfg, body)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
@@ -1144,11 +1143,14 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 // applyCodexFastServiceTier injects service_tier=priority into the payload when the
 // global fast-service-tier config is enabled. It always overwrites the existing value.
 //
-// This is called multiple times (early + right before the final send) in every
-// Codex code path (HTTP and WebSocket) as a defensive measure. This guarantees
-// the setting reaches the upstream even for follow-up turns that use
-// previous_response_id on long-lived websocket sessions (common with Cursor,
-// VS Code, Windsurf, etc.).
+// It is intentionally called only once per request, at the very last moment
+// before the payload is sent over HTTP or WebSocket. This design ensures:
+//   - When disabled: near-zero overhead (simple early return).
+//   - When enabled: sjson.SetBytes is executed exactly once per request,
+//     after all processing (thinking, payload rules, prompt cache, etc.).
+//
+// This single late injection is sufficient for both fresh requests and
+// follow-up turns using previous_response_id on long-lived websocket sessions.
 func applyCodexFastServiceTier(cfg *config.Config, body []byte) []byte {
 	if cfg == nil || !cfg.FastServiceTier || len(body) == 0 {
 		return body
