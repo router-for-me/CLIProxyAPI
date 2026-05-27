@@ -45,3 +45,13 @@ func TestContextWithRequestedModelAliasInfersReasoningEffortFromPayload(t *testi
 		t.Fatalf("reasoning effort = %q, want %q", got, "xhigh")
 	}
 }
+
+func TestContextWithRequestedModelAliasInfersReasoningEffortWithoutSourceFormat(t *testing.T) {
+	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"reasoning":{"effort":"high"}}`),
+	}, "gpt-5.5", nil)
+
+	if got := coreusage.ReasoningEffortFromContext(ctx); got != "high" {
+		t.Fatalf("reasoning effort = %q, want %q", got, "high")
+	}
+}

@@ -1781,7 +1781,17 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options, model string, pay
 	if len(body) == 0 {
 		return ""
 	}
-	return thinking.ExtractReasoningEffort(body, opts.SourceFormat.String(), model)
+	format := opts.SourceFormat.String()
+	effort := thinking.ExtractReasoningEffort(body, format, model)
+	if effort != "" || (format != "" && !strings.EqualFold(format, "unknown")) {
+		return effort
+	}
+	for _, fallbackFormat := range []string{"openai", "openai-response", "claude", "gemini"} {
+		if effort = thinking.ExtractReasoningEffort(body, fallbackFormat, model); effort != "" {
+			return effort
+		}
+	}
+	return ""
 }
 
 func pinnedAuthIDFromMetadata(meta map[string]any) string {
