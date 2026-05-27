@@ -114,6 +114,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 	originalTranslated = helps.PreserveDeepSeekReasoningContent(baseModel, originalTranslated, originalPayload)
 	translated = helps.PreserveDeepSeekReasoningContent(baseModel, translated, req.Payload)
+	originalTranslated = helps.RestoreCachedDeepSeekReasoningContent(baseModel, originalTranslated)
+	translated = helps.RestoreCachedDeepSeekReasoningContent(baseModel, translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -187,6 +189,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if recorder := helps.NewDeepSeekReasoningRecorder(baseModel); recorder != nil {
+		recorder.RecordChatCompletionResponse(body)
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -311,6 +316,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	originalTranslated = helps.PreserveDeepSeekReasoningContent(baseModel, originalTranslated, originalPayload)
 	translated = helps.PreserveDeepSeekReasoningContent(baseModel, translated, req.Payload)
+	originalTranslated = helps.RestoreCachedDeepSeekReasoningContent(baseModel, originalTranslated)
+	translated = helps.RestoreCachedDeepSeekReasoningContent(baseModel, translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -388,9 +395,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		recorder := helps.NewDeepSeekReasoningRecorder(baseModel)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if recorder != nil {
+				recorder.RecordChatCompletionStreamLine(line)
+			}
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -575,6 +586,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 	translated = helps.PreserveDeepSeekReasoningContent(baseModel, translated, req.Payload)
+	translated = helps.RestoreCachedDeepSeekReasoningContent(baseModel, translated)
 
 	modelForCounting := baseModel
 

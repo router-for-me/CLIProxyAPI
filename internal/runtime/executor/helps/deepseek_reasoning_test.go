@@ -132,3 +132,32 @@ func TestPreserveDeepSeekReasoningContent_DoesNotOverwriteExistingReasoning(t *t
 		t.Fatalf("messages.0.reasoning_content = %q, want existing reasoning", got)
 	}
 }
+
+func TestDeepSeekReasoningCache_RestoresStreamingToolCallReasoning(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewDeepSeekReasoningRecorder("deepseek-v4-flash")
+	recorder.RecordChatCompletionStreamLine([]byte(`data: {"choices":[{"delta":{"reasoning_content":"Need a tool."},"finish_reason":null}]}`))
+	recorder.RecordChatCompletionStreamLine([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_cached","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":"tool_calls"}]}`))
+
+	payload := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"assistant","tool_calls":[{"id":"call_cached","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_cached","content":"ok"}]}`)
+	out := RestoreCachedDeepSeekReasoningContent("deepseek-v4-flash", payload)
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "Need a tool." {
+		t.Fatalf("messages.0.reasoning_content = %q, want cached reasoning; payload=%s", got, out)
+	}
+}
+
+func TestDeepSeekReasoningCache_DoesNotOverwriteExistingReasoning(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewDeepSeekReasoningRecorder("deepseek-v4-pro")
+	recorder.RecordChatCompletionResponse([]byte(`{"choices":[{"message":{"role":"assistant","reasoning_content":"cached","tool_calls":[{"id":"call_existing","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}`))
+
+	payload := []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"assistant","reasoning_content":"client reasoning","tool_calls":[{"id":"call_existing","type":"function","function":{"name":"read","arguments":"{}"}}]}]}`)
+	out := RestoreCachedDeepSeekReasoningContent("deepseek-v4-pro", payload)
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "client reasoning" {
+		t.Fatalf("messages.0.reasoning_content = %q, want client reasoning", got)
+	}
+}
