@@ -33,6 +33,11 @@ const (
 	openAICompatMultipartMemory       int64 = 32 << 20
 )
 
+var (
+	openAICompatStreamFirstResponseTimeout    = 2 * time.Minute
+	openAICompatStreamFirstResponseTimeoutMsg = "openai-compatible upstream stream first response timeout after %s"
+)
+
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
@@ -364,8 +369,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	applyOpenAICompatStreamFirstResponseTimeout(httpClient, openAICompatStreamFirstResponseTimeout)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		if isOpenAICompatStreamFirstResponseTimeout(err, openAICompatStreamFirstResponseTimeout) && ctx.Err() == nil {
+			err = statusErr{code: http.StatusGatewayTimeout, msg: fmt.Sprintf(openAICompatStreamFirstResponseTimeoutMsg, openAICompatStreamFirstResponseTimeout)}
+		}
+		httpClient.CloseIdleConnections()
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -377,6 +387,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
+		httpClient.CloseIdleConnections()
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -387,6 +398,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
+			httpClient.CloseIdleConnections()
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
@@ -515,8 +527,13 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	applyOpenAICompatStreamFirstResponseTimeout(httpClient, openAICompatStreamFirstResponseTimeout)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		if isOpenAICompatStreamFirstResponseTimeout(err, openAICompatStreamFirstResponseTimeout) && ctx.Err() == nil {
+			err = statusErr{code: http.StatusGatewayTimeout, msg: fmt.Sprintf(openAICompatStreamFirstResponseTimeoutMsg, openAICompatStreamFirstResponseTimeout)}
+		}
+		httpClient.CloseIdleConnections()
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -527,6 +544,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
+		httpClient.CloseIdleConnections()
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
@@ -543,6 +561,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
+			httpClient.CloseIdleConnections()
 			reporter.EnsurePublished(ctx)
 		}()
 		buffer := make([]byte, 32*1024)
@@ -600,6 +619,32 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	usageJSON := helps.BuildOpenAIUsageJSON(count)
 	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
+}
+
+func applyOpenAICompatStreamFirstResponseTimeout(client *http.Client, timeout time.Duration) {
+	if client == nil || timeout <= 0 {
+		return
+	}
+	if client.Transport == nil {
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
+			transport := defaultTransport.Clone()
+			transport.ResponseHeaderTimeout = timeout
+			client.Transport = transport
+		}
+		return
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok && transport != nil {
+		clone := transport.Clone()
+		clone.ResponseHeaderTimeout = timeout
+		client.Transport = clone
+	}
+}
+
+func isOpenAICompatStreamFirstResponseTimeout(err error, timeout time.Duration) bool {
+	if err == nil || timeout <= 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "timeout awaiting response headers")
 }
 
 // Refresh is a no-op for API-key based compatibility providers.
