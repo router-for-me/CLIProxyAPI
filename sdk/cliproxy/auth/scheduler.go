@@ -34,6 +34,7 @@ const (
 type authScheduler struct {
 	mu            sync.Mutex
 	strategy      schedulerStrategy
+	selector      Selector
 	providers     map[string]*providerScheduler
 	authProviders map[string]string
 	mixedCursors  map[string]int
@@ -167,6 +168,7 @@ func normalizeCursor(cursor, size int) int {
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
 		strategy:      selectorStrategy(selector),
+		selector:      selector,
 		providers:     make(map[string]*providerScheduler),
 		authProviders: make(map[string]string),
 		mixedCursors:  make(map[string]int),
@@ -175,6 +177,9 @@ func newAuthScheduler(selector Selector) *authScheduler {
 
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
 func selectorStrategy(selector Selector) schedulerStrategy {
+	if affinity, ok := selector.(*SessionAffinitySelector); ok {
+		selector = affinity.schedulerFallback()
+	}
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
@@ -193,6 +198,7 @@ func (s *authScheduler) setSelector(selector Selector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
+	s.selector = selector
 	clear(s.mixedCursors)
 }
 
@@ -270,10 +276,70 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
+	if picked := s.pickSessionAffinityLocked(ctx, provider, model, opts, shard, preferWebsocket, predicate); picked != nil {
+		return picked, nil
+	}
 	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
+}
+
+func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, shard *modelScheduler, preferWebsocket bool, predicate func(*scheduledAuth) bool) *Auth {
+	affinity, ok := s.selector.(*SessionAffinitySelector)
+	if !ok {
+		return nil
+	}
+	cache := affinity.sessionCache()
+	if cache == nil {
+		return nil
+	}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return nil
+	}
+	shard.promoteExpiredLocked(time.Now())
+	priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
+	if !okPriority {
+		return nil
+	}
+	cacheKey := provider + "::" + primaryID + "::" + model
+	if cachedAuthID, okCache := cache.GetAndRefresh(cacheKey); okCache {
+		if auth := shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate); auth != nil {
+			selectorLogEntry(ctx).Infof("session-affinity: scheduler cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+			return auth
+		}
+		return s.reselectSessionAffinityLocked(ctx, provider, model, primaryID, cacheKey, shard, preferWebsocket, priorityReady, predicate)
+	}
+	if fallbackID != "" && fallbackID != primaryID {
+		fallbackKey := provider + "::" + fallbackID + "::" + model
+		if cachedAuthID, okCache := cache.Get(fallbackKey); okCache {
+			if auth := shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate); auth != nil {
+				cache.Set(cacheKey, auth.ID)
+				selectorLogEntry(ctx).Infof("session-affinity: scheduler fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+				return auth
+			}
+		}
+	}
+	return s.reselectSessionAffinityLocked(ctx, provider, model, primaryID, cacheKey, shard, preferWebsocket, priorityReady, predicate)
+}
+
+func (s *authScheduler) reselectSessionAffinityLocked(ctx context.Context, provider, model, primaryID, cacheKey string, shard *modelScheduler, preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) *Auth {
+	affinity, ok := s.selector.(*SessionAffinitySelector)
+	if !ok {
+		return nil
+	}
+	cache := affinity.sessionCache()
+	if cache == nil {
+		return nil
+	}
+	auth := shard.pickReadyAtPriorityLocked(preferWebsocket, priority, s.strategy, predicate)
+	if auth == nil {
+		return nil
+	}
+	cache.Set(cacheKey, auth.ID)
+	selectorLogEntry(ctx).Infof("session-affinity: scheduler cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+	return auth
 }
 
 // pickMixed returns the next auth and provider for a mixed-provider request.
@@ -829,6 +895,30 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	return picked.auth
+}
+
+func (m *modelScheduler) readyAuthAtPriorityLocked(preferWebsocket bool, priority int, authID string, predicate func(*scheduledAuth) bool) *Auth {
+	if m == nil || authID == "" {
+		return nil
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return nil
+	}
+	view := &bucket.all
+	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
+		view = &bucket.ws
+	}
+	for _, entry := range view.flat {
+		if entry == nil || entry.auth == nil || entry.auth.ID != authID {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			return nil
+		}
+		return entry.auth
+	}
+	return nil
 }
 
 func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {

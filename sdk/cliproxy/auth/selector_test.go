@@ -700,6 +700,89 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_PriorityOverridesLowerPriorityCache(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_priority-cache-test"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+	lowOnly := []*Auth{
+		{ID: "priority-low", Attributes: map[string]string{"priority": "0"}},
+	}
+
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, lowOnly)
+	if err != nil {
+		t.Fatalf("Pick() low-only error = %v", err)
+	}
+	if first == nil || first.ID != "priority-low" {
+		t.Fatalf("Pick() low-only auth = %v, want priority-low", first)
+	}
+
+	auths := []*Auth{
+		{ID: "priority-low", Attributes: map[string]string{"priority": "0"}},
+		{ID: "priority-high-b", Attributes: map[string]string{"priority": "10"}},
+		{ID: "priority-high-a", Attributes: map[string]string{"priority": "10"}},
+	}
+	got, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() with high-priority auths error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() with high-priority auths = nil")
+	}
+	if got.ID == "priority-low" {
+		t.Fatalf("Pick() used lower-priority cached auth %q", got.ID)
+	}
+	if got.ID != "priority-high-a" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "priority-high-a")
+	}
+}
+
+func TestSessionAffinitySelector_StickyWithinHighestPriorityBucket(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "low", Attributes: map[string]string{"priority": "0"}},
+		{ID: "high-b", Attributes: map[string]string{"priority": "10"}},
+		{ID: "high-a", Attributes: map[string]string{"priority": "10"}},
+	}
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_same-priority-sticky"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("Pick() first auth = nil")
+	}
+	if first.ID != "high-a" {
+		t.Fatalf("Pick() first auth.ID = %q, want %q", first.ID, "high-a")
+	}
+
+	for index := 0; index < 5; index++ {
+		got, errPick := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", index)
+		}
+		if got.ID != first.ID {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", index, got.ID, first.ID)
+		}
+	}
+}
+
 func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *testing.T) {
 	t.Parallel()
 

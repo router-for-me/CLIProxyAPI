@@ -266,7 +266,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	key := provider + ":" + canonicalModelKey(model)
+	key := provider + ":" + canonicalModelKey(model) + priorityCursorSuffix(available)
 	s.mu.Lock()
 	if s.cursors == nil {
 		s.cursors = make(map[string]int)
@@ -317,6 +317,17 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	s.cursors[key] = index + 1
 	s.mu.Unlock()
 	return available[index%len(available)], nil
+}
+
+func priorityCursorSuffix(auths []*Auth) string {
+	if len(auths) == 0 {
+		return ""
+	}
+	priority := authPriority(auths[0])
+	if priority == 0 {
+		return ""
+	}
+	return ":priority:" + strconv.Itoa(priority)
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.
@@ -467,6 +478,20 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	}
 }
 
+func (s *SessionAffinitySelector) schedulerFallback() Selector {
+	if s == nil || s.fallback == nil {
+		return &RoundRobinSelector{}
+	}
+	return s.fallback
+}
+
+func (s *SessionAffinitySelector) sessionCache() *SessionCache {
+	if s == nil {
+		return nil
+	}
+	return s.cache
+}
+
 // Pick selects an auth with session affinity when possible.
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority
@@ -504,8 +529,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
+		auth, err := s.fallback.Pick(ctx, provider, model, opts, available)
 		if err != nil {
 			return nil, err
 		}
@@ -527,7 +551,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
+	auth, err := s.fallback.Pick(ctx, provider, model, opts, available)
 	if err != nil {
 		return nil, err
 	}

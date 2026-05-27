@@ -366,6 +366,165 @@ func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) 
 	}
 }
 
+func TestSchedulerPick_SessionAffinitySticksWithinHighestPriority(t *testing.T) {
+	model := "claude-3"
+	registerSchedulerModels(t, "claude", model, "sticky-low", "sticky-high-a", "sticky-high-b")
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	scheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "sticky-low", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+		&Auth{ID: "sticky-high-b", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "sticky-high-a", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+	)
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_scheduler-sticky"}}`),
+	}
+
+	first, errPick := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() first error = %v", errPick)
+	}
+	if first == nil {
+		t.Fatalf("pickSingle() first auth = nil")
+	}
+	if first.ID != "sticky-high-a" {
+		t.Fatalf("pickSingle() first auth.ID = %q, want %q", first.ID, "sticky-high-a")
+	}
+
+	for index := 0; index < 5; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != first.ID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, first.ID)
+		}
+	}
+}
+
+func TestSchedulerPick_SessionAffinityPriorityOverridesLowerPriorityCache(t *testing.T) {
+	model := "claude-3"
+	registerSchedulerModels(t, "claude", model, "priority-low", "priority-high-a", "priority-high-b")
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	lowScheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "priority-low", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+	)
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_scheduler-priority"}}`),
+	}
+
+	first, errPick := lowScheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() low-only error = %v", errPick)
+	}
+	if first == nil || first.ID != "priority-low" {
+		t.Fatalf("pickSingle() low-only auth = %v, want priority-low", first)
+	}
+
+	scheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "priority-low", Provider: "claude", Attributes: map[string]string{"priority": "0"}},
+		&Auth{ID: "priority-high-b", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "priority-high-a", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+	)
+	got, errPick := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() with high-priority auths error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() with high-priority auths = nil")
+	}
+	if got.ID == "priority-low" {
+		t.Fatalf("pickSingle() used lower-priority cached auth %q", got.ID)
+	}
+	if got.ID != "priority-high-a" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "priority-high-a")
+	}
+}
+
+func TestSchedulerPick_SessionAffinityReselectsUnavailableCachedAuthInPriorityBucket(t *testing.T) {
+	model := "claude-3"
+	registerSchedulerModels(t, "claude", model, "reselect-high-a", "reselect-high-b")
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_scheduler-reselect"}}`),
+	}
+	scheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "reselect-high-a", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "reselect-high-b", Provider: "claude", Attributes: map[string]string{"priority": "10"}},
+	)
+
+	first, errPick := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() first error = %v", errPick)
+	}
+	if first == nil || first.ID != "reselect-high-a" {
+		t.Fatalf("pickSingle() first auth = %v, want reselect-high-a", first)
+	}
+
+	cooling := &Auth{
+		ID:         "reselect-high-a",
+		Provider:   "claude",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				NextRetryAfter: time.Now().Add(time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+		},
+	}
+	scheduler.upsertAuth(cooling)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after cooldown error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() after cooldown auth = nil")
+	}
+	if got.ID != "reselect-high-b" {
+		t.Fatalf("pickSingle() after cooldown auth.ID = %q, want %q", got.ID, "reselect-high-b")
+	}
+}
+
+func TestManager_InitializesSchedulerForSessionAffinitySelector(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &FillFirstSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	if manager.scheduler == nil {
+		t.Fatalf("manager.scheduler = nil")
+	}
+	if manager.scheduler.strategy != schedulerStrategyFillFirst {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyFillFirst)
+	}
+	if !manager.useSchedulerFastPath() {
+		t.Fatalf("manager.useSchedulerFastPath() = false, want true")
+	}
+}
+
 func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
 	t.Parallel()
 
