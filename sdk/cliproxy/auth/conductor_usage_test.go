@@ -15,7 +15,7 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 			cliproxyexecutor.RequestedModelMetadataKey:  "client-model",
 			cliproxyexecutor.ReasoningEffortMetadataKey: "medium",
 		},
-	}, "fallback-model", nil)
+	}, "fallback-model", cliproxyexecutor.Request{})
 
 	if got := coreusage.RequestedModelAliasFromContext(ctx); got != "client-model" {
 		t.Fatalf("requested model alias = %q, want %q", got, "client-model")
@@ -29,7 +29,7 @@ func TestContextWithRequestedModelAliasInfersReasoningEffortFromOriginalRequest(
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
 		OriginalRequest: []byte(`{"reasoning":{"effort":"high"}}`),
 		SourceFormat:    sdktranslator.FormatOpenAIResponse,
-	}, "gpt-5.5", nil)
+	}, "gpt-5.5", cliproxyexecutor.Request{})
 
 	if got := coreusage.ReasoningEffortFromContext(ctx); got != "high" {
 		t.Fatalf("reasoning effort = %q, want %q", got, "high")
@@ -39,7 +39,10 @@ func TestContextWithRequestedModelAliasInfersReasoningEffortFromOriginalRequest(
 func TestContextWithRequestedModelAliasInfersReasoningEffortFromPayload(t *testing.T) {
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
-	}, "gpt-5.5", []byte(`{"reasoning":{"effort":"xhigh"}}`))
+	}, "gpt-5.5", cliproxyexecutor.Request{
+		Payload: []byte(`{"reasoning":{"effort":"xhigh"}}`),
+		Format:  sdktranslator.FormatOpenAIResponse,
+	})
 
 	if got := coreusage.ReasoningEffortFromContext(ctx); got != "xhigh" {
 		t.Fatalf("reasoning effort = %q, want %q", got, "xhigh")
@@ -49,7 +52,20 @@ func TestContextWithRequestedModelAliasInfersReasoningEffortFromPayload(t *testi
 func TestContextWithRequestedModelAliasInfersReasoningEffortWithoutSourceFormat(t *testing.T) {
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
 		OriginalRequest: []byte(`{"reasoning":{"effort":"high"}}`),
-	}, "gpt-5.5", nil)
+	}, "gpt-5.5", cliproxyexecutor.Request{})
+
+	if got := coreusage.ReasoningEffortFromContext(ctx); got != "high" {
+		t.Fatalf("reasoning effort = %q, want %q", got, "high")
+	}
+}
+
+func TestContextWithRequestedModelAliasUsesRequestFormatForPayload(t *testing.T) {
+	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}, "gemini-3-pro", cliproxyexecutor.Request{
+		Payload: []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`),
+		Format:  sdktranslator.FormatGemini,
+	})
 
 	if got := coreusage.ReasoningEffortFromContext(ctx); got != "high" {
 		t.Fatalf("reasoning effort = %q, want %q", got, "high")
