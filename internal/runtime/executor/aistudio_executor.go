@@ -135,6 +135,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	if err != nil {
 		return resp, err
 	}
+	reporter.SetTranslatedReasoningEffort(body.payload, body.toFormat.String())
 
 	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
 	wsReq := &wsrelay.HTTPRequest{
@@ -199,6 +200,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	if err != nil {
 		return nil, err
 	}
+	reporter.SetTranslatedReasoningEffort(body.payload, body.toFormat.String())
 
 	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
 	wsReq := &wsrelay.HTTPRequest{

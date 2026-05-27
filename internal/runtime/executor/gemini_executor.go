@@ -151,6 +151,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -256,6 +257,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

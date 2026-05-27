@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -64,6 +65,13 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 		return
 	}
 	r.publishRecord(ctx, record)
+}
+
+func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+	if r == nil {
+		return
+	}
+	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {

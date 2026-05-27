@@ -20,7 +20,7 @@ type Record struct {
 	AuthIndex string
 	AuthType  string
 	Source    string
-	// ReasoningEffort stores the client-requested thinking level for request event logs.
+	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
 	RequestedAt     time.Time
 	Latency         time.Duration
