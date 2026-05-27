@@ -122,6 +122,16 @@ usage-statistics-enabled: false
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 
+# Persist usage statistics to disk so they survive server restarts.
+usage-persistence:
+  enabled: false
+  # Storage backend: "json" (file-based). "sqlite" is reserved for future use.
+  backend: json
+  # File path for the JSON backend. Supports ~ for home directory.
+  path: ~/.cli-proxy-api/usage.json
+  # How often (in seconds) in-memory stats are flushed to disk.
+  flush-interval-seconds: 300
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
