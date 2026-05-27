@@ -572,6 +572,12 @@ type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional human-readable account label, such as the DeepSeek account email.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
+	// Email is an optional account email used as the label when Label is empty.
+	Email string `yaml:"email,omitempty" json:"email,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 }
