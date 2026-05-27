@@ -245,6 +245,9 @@ nonstream-keepalive-interval: 0
 #   beta-features: "multi_agent"
 
 # Always inject service_tier=priority into Codex requests to accelerate API response times.
+# The injection is applied right before every send (including follow-up turns with previous_response_id).
+# Note: On long conversations, upstream latency on turn 2+ can still vary due to context size and
+# Codex backend scheduling, even when priority is requested on every message.
 # Applies to all Codex requests (OAuth and API key). Default: false.
 # fast-service-tier: false
 

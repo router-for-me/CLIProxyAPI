@@ -239,6 +239,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		defer sess.reqMu.Unlock()
 	}
 
+	// Force service_tier=priority at the absolute latest point, right before we
+	// wrap it as a websocket "response.create" message and send. This is the
+	// most important path for editor agents (Cursor, VS Code, etc.) doing
+	// multi-turn with previous_response_id on long-lived websocket sessions.
+	body = applyCodexFastServiceTier(e.cfg, body)
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
@@ -299,6 +304,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
+				// Re-apply fast service tier for the retry send as well.
+				body = applyCodexFastServiceTier(e.cfg, body)
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -439,6 +446,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
+	// Force service_tier=priority at the absolute latest point before wrapping
+	// into websocket "response.create". This path handles streaming follow-up
+	// turns on reused websocket sessions (the common case for Cursor/VSCode
+	// agents). Any earlier injection can be lost to prompt cache or other steps.
+	body = applyCodexFastServiceTier(e.cfg, body)
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
@@ -501,6 +513,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
+			// Re-apply for retry send on the new connection.
+			body = applyCodexFastServiceTier(e.cfg, body)
 			wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,

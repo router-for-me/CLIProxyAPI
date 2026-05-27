@@ -118,6 +118,9 @@ type Config struct {
 	// FastServiceTier enables automatic injection of service_tier=priority for all Codex requests.
 	// When true, "priority" is always set on the service_tier field (overwriting any existing value)
 	// to accelerate API response times. Applies to both OAuth and API key Codex requests.
+	// The injection is applied defensively at the last possible moment before sending,
+	// including for follow-up turns that carry previous_response_id.
+	// Note: For long conversation chains, upstream behavior may still vary after the first turn.
 	// When false (default), the service_tier field is left unchanged.
 	FastServiceTier bool `yaml:"fast-service-tier,omitempty" json:"fast-service-tier,omitempty"`
 

@@ -288,6 +288,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = applyCodexFastServiceTier(e.cfg, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	// Force service_tier=priority at the very last moment before the request is
+	// constructed and sent. This ensures the setting survives user payload rules,
+	// prompt cache key injection, and any other intermediate processing.
+	// Critical for follow-up turns (previous_response_id) in agent conversations.
+	body = applyCodexFastServiceTier(e.cfg, body)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return resp, err
@@ -445,6 +450,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = applyCodexFastServiceTier(e.cfg, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	// Force service_tier=priority at the very last moment before sending (see comment above).
+	body = applyCodexFastServiceTier(e.cfg, body)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return resp, err
@@ -547,6 +554,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = applyCodexFastServiceTier(e.cfg, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	// Force service_tier=priority at the very last moment before sending (see comment above).
+	body = applyCodexFastServiceTier(e.cfg, body)
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return nil, err
@@ -1134,6 +1143,12 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 
 // applyCodexFastServiceTier injects service_tier=priority into the payload when the
 // global fast-service-tier config is enabled. It always overwrites the existing value.
+//
+// This is called multiple times (early + right before the final send) in every
+// Codex code path (HTTP and WebSocket) as a defensive measure. This guarantees
+// the setting reaches the upstream even for follow-up turns that use
+// previous_response_id on long-lived websocket sessions (common with Cursor,
+// VS Code, Windsurf, etc.).
 func applyCodexFastServiceTier(cfg *config.Config, body []byte) []byte {
 	if cfg == nil || !cfg.FastServiceTier || len(body) == 0 {
 		return body
