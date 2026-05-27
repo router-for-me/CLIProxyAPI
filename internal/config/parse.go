@@ -23,6 +23,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsagePersistence.Enabled = false
+	cfg.UsagePersistence.Backend = "json"
+	cfg.UsagePersistence.Path = "~/.cli-proxy-api/usage.json"
+	cfg.UsagePersistence.FlushIntervalSeconds = 300
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff

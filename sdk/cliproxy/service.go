@@ -18,7 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
@@ -26,7 +26,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -107,8 +107,8 @@ type Service struct {
 //
 // Parameters:
 //   - plugin: The usage plugin to register
-func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
-	usage.RegisterPlugin(plugin)
+func (s *Service) RegisterUsagePlugin(plugin coreusage.Plugin) {
+	coreusage.RegisterPlugin(plugin)
 }
 
 // GetWatcher returns the underlying WatcherWrapper instance.
@@ -783,7 +783,18 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	usage.StartDefault(ctx)
+	coreusage.StartDefault(ctx)
+
+	// Initialize persistence plugin if configured
+	if s.cfg != nil {
+		usage.InitPersistencePlugin(
+			s.cfg.UsagePersistence.Enabled,
+			s.cfg.UsagePersistence.Backend,
+			s.cfg.UsagePersistence.Path,
+			s.cfg.UsagePersistence.FlushIntervalSeconds,
+		)
+	}
+
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
@@ -1045,7 +1056,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		// Stop persistence plugin first to flush data before stopping usage manager
+		usage.StopPersistencePlugin()
+		coreusage.StopDefault()
 	})
 	return shutdownErr
 }

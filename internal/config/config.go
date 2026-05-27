@@ -74,6 +74,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsagePersistence configures optional disk persistence for usage statistics.
+	UsagePersistence UsagePersistenceConfig `yaml:"usage-persistence" json:"usage-persistence"`
+
 	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained
 	// in memory for Management API consumers.
 	// Default: 60. Max: 3600.
@@ -181,6 +184,22 @@ type Config struct {
 	CustomOAuth []CustomOAuthProvider `yaml:"custom-oauth,omitempty" json:"custom-oauth,omitempty"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// UsagePersistenceConfig configures optional disk persistence for usage statistics.
+type UsagePersistenceConfig struct {
+	// Enabled controls whether persistence is active.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Backend specifies the persistence backend: "json" or "sqlite".
+	Backend string `yaml:"backend" json:"backend"`
+
+	// Path is the file path for JSON backend or database path for SQLite.
+	Path string `yaml:"path" json:"path"`
+
+	// FlushIntervalSeconds controls how often data is flushed to disk in seconds.
+	// Default is 300 (5 minutes).
+	FlushIntervalSeconds int `yaml:"flush-interval-seconds" json:"flush-interval-seconds"`
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
@@ -811,6 +830,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.SuccessLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsagePersistence.Enabled = false
+	cfg.UsagePersistence.Backend = "json"
+	cfg.UsagePersistence.Path = "~/.cli-proxy-api/usage.json"
+	cfg.UsagePersistence.FlushIntervalSeconds = 300
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff

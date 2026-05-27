@@ -94,3 +94,55 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestRequestStatisticsRecordIncludesCacheTokens(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:         100,
+			OutputTokens:        50,
+			CacheReadTokens:     30,
+			CacheCreationTokens: 20,
+			TotalTokens:         150,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].Tokens.CacheReadTokens != 30 {
+		t.Fatalf("cache_read_tokens = %d, want 30", details[0].Tokens.CacheReadTokens)
+	}
+	if details[0].Tokens.CacheCreationTokens != 20 {
+		t.Fatalf("cache_creation_tokens = %d, want 20", details[0].Tokens.CacheCreationTokens)
+	}
+}
+
+func TestRequestStatisticsRecordIncludesReasoningEffort(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:          "test-key",
+		Model:           "gpt-5.4",
+		ReasoningEffort: "high",
+		RequestedAt:     time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 20,
+			TotalTokens:  30,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].ReasoningEffort != "high" {
+		t.Fatalf("reasoning_effort = %q, want %q", details[0].ReasoningEffort, "high")
+	}
+}
