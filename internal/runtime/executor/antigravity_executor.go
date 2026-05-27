@@ -661,6 +661,10 @@ attemptLoop:
 					if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 						markAntigravityCreditsPermanentlyDisabled(auth)
 					}
+					if decision.retryAfter != nil && *decision.retryAfter > 0 {
+						markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+						log.Debugf("antigravity executor: full quota exhaustion, recorded cooldown for auth=%s, model=%s, duration=%s, key=%s", auth.ID, baseModel, *decision.retryAfter, antigravityShortCooldownKey(auth, baseModel))
+					}
 					// No credits logic - just fall through to error return below
 				}
 			}
@@ -670,9 +674,15 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if antigravityIsLongQuotaExhaustion(bodyBytes) {
+						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
+						return cliproxyexecutor.Response{}, statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
 					delay := antigravityTransient429RetryDelay(attempt)
@@ -874,16 +884,25 @@ attemptLoop:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
 						}
-						// No credits logic - just fall through to error return below
+						if decision.retryAfter != nil && *decision.retryAfter > 0 {
+							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							log.Debugf("antigravity executor: full quota exhaustion, recorded cooldown for auth=%s, model=%s, duration=%s, key=%s", auth.ID, baseModel, *decision.retryAfter, antigravityShortCooldownKey(auth, baseModel))
+						}
 					}
 				}
 
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if antigravityIsLongQuotaExhaustion(bodyBytes) {
+						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
+						return cliproxyexecutor.Response{}, statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
 					delay := antigravityTransient429RetryDelay(attempt)
@@ -1334,16 +1353,25 @@ attemptLoop:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
 						}
-						// No credits logic - just fall through to error return below
+						if decision.retryAfter != nil && *decision.retryAfter > 0 {
+							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							log.Debugf("antigravity executor: full quota exhaustion, recorded cooldown for auth=%s, model=%s, duration=%s, key=%s", auth.ID, baseModel, *decision.retryAfter, antigravityShortCooldownKey(auth, baseModel))
+						}
 					}
 				}
 
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if antigravityIsLongQuotaExhaustion(bodyBytes) {
+						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
+						return nil, statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
 					delay := antigravityTransient429RetryDelay(attempt)

@@ -92,6 +92,10 @@ func BuildTransport(proxyURL string, tlsSkipVerify bool) (*http.Transport, error
 		return nil, err
 	}
 
+	if transport == nil && !tlsSkipVerify {
+		return nil, nil
+	}
+
 	if transport == nil {
 		transport = cloneDefaultTransport()
 	}

@@ -897,6 +897,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			lastErr = errStream
 			continue
 		}
+		if streamResult == nil {
+			continue
+		}
 
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
@@ -2366,14 +2369,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							state.Quota = QuotaState{Exceeded: true, Reason: "quota"}
 							if !quotaCooldownDisabledForAuth(auth) {
 								cooldown := defaultQuotaCooldown
-								if result.Error != nil {
+								if result.RetryAfter != nil && *result.RetryAfter > 0 {
+									cooldown = *result.RetryAfter
+								} else if result.Error != nil {
 									if parsed, ok := parseQuotaResetDuration(result.Error.Message); ok {
 										cooldown = parsed
-									} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
-										cooldown = *result.RetryAfter
 									}
-								} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
-									cooldown = *result.RetryAfter
 								}
 								next := now.Add(cooldown)
 								state.NextRetryAfter = next
@@ -4277,7 +4278,7 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 	if !needs {
 		return auth
 	}
-	m.lazyRefreshAuth(auth.ID)
+	m.lazyRefreshAuth(ctx, auth.ID)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if fresh, ok := m.auths[auth.ID]; ok && fresh != nil {
@@ -4286,16 +4287,15 @@ func (m *Manager) refreshAuthIfNeeded(ctx context.Context, auth *Auth) *Auth {
 	return auth
 }
 
-func (m *Manager) lazyRefreshAuth(id string) {
-	// Callers MUST block here until the refresh completes (or fails).
-	// We intentionally ignore the caller's context: even if cancelled,
-	// the caller still needs a valid token to proceed. Bailing out early
-	// would just send the caller back with no token, guaranteeing failure.
-	// It's better to wait and let the refreshed auth benefit all in-flight
-	// and future requests. The singleflight coalesces duplicates so only
-	// one refresh runs per ID at a time.
+func (m *Manager) lazyRefreshAuth(ctx context.Context, id string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
 	_, err, _ := m.lazyRefreshGroup.Do(id, func() (any, error) {
-		m.refreshAuth(context.Background(), id)
+		m.refreshAuth(ctx, id)
 		return nil, nil
 	})
 	if err != nil {
