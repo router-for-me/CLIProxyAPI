@@ -1,6 +1,7 @@
 package misc
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,4 +38,18 @@ func CopyConfigTemplate(src, dst string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+// FindExampleConfig locates config.example.yaml in the given directory.
+// Returns the absolute path or an error if the file is missing or is a directory.
+func FindExampleConfig(wd string) (string, error) {
+	path := filepath.Join(wd, "config.example.yaml")
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("config.example.yaml not found in %s; place it alongside the binary or working directory", wd)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("config.example.yaml in %s is a directory, not a file", wd)
+	}
+	return path, nil
 }

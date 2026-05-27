@@ -109,6 +109,7 @@ func main() {
 	var useIncognito bool
 	var localModel bool
 	var loginProxyURL string
+	var initConfig bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -147,6 +148,7 @@ func main() {
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
+	flag.BoolVar(&initConfig, "init", false, "Initialize config.yaml from config.example.yaml and exit")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -208,6 +210,44 @@ func main() {
 	wd, err := os.Getwd()
 	if err != nil {
 		log.Errorf("failed to get working directory: %v", err)
+		return
+	}
+
+	// Handle --init flag: scaffold config.yaml from config.example.yaml and exit.
+	if initConfig {
+		examplePath, errFind := misc.FindExampleConfig(wd)
+		if errFind != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", errFind)
+			return
+		}
+		dstPath := configPath
+		if dstPath == "" {
+			dstPath = filepath.Join(wd, "config.yaml")
+		}
+		if _, statErr := os.Stat(dstPath); statErr == nil {
+			fmt.Printf("Config file already exists: %s\n", dstPath)
+			fmt.Print("Overwrite? [y/N] ")
+			var answer string
+			fmt.Scanln(&answer)
+			answer = strings.TrimSpace(strings.ToLower(answer))
+			if answer != "y" && answer != "yes" {
+				fmt.Println("Aborted.")
+				return
+			}
+		}
+		if errCopy := misc.CopyConfigTemplate(examplePath, dstPath); errCopy != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to create config: %v\n", errCopy)
+			return
+		}
+		fmt.Printf("Config file created: %s\n", dstPath)
+		fmt.Println()
+		fmt.Println("Key settings to review before starting:")
+		fmt.Println("  - port (default: 8317)")
+		fmt.Println("  - api-keys (replace placeholder keys)")
+		fmt.Println("  - auth-dir (default: ~/.cli-proxy-api)")
+		fmt.Println("  - proxy-url (if behind a proxy)")
+		fmt.Println()
+		fmt.Printf("Edit %s then start the server.\n", dstPath)
 		return
 	}
 
@@ -360,7 +400,11 @@ func main() {
 			log.Errorf("failed to initialize postgres token store: %v", err)
 			return
 		}
-		examplePath := filepath.Join(wd, "config.example.yaml")
+		examplePath, errExample := misc.FindExampleConfig(wd)
+		if errExample != nil {
+			log.Errorf("failed to find template config file: %v", errExample)
+			return
+		}
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
@@ -424,7 +468,11 @@ func main() {
 			log.Errorf("failed to initialize object token store: %v", err)
 			return
 		}
-		examplePath := filepath.Join(wd, "config.example.yaml")
+		examplePath, errExample := misc.FindExampleConfig(wd)
+		if errExample != nil {
+			log.Errorf("failed to find template config file: %v", errExample)
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
@@ -462,8 +510,8 @@ func main() {
 			configFilePath = filepath.Join(gitStoreRoot, "config", "config.yaml")
 		}
 		if _, statErr := os.Stat(configFilePath); errors.Is(statErr, fs.ErrNotExist) {
-			examplePath := filepath.Join(wd, "config.example.yaml")
-			if _, errExample := os.Stat(examplePath); errExample != nil {
+			examplePath, errExample := misc.FindExampleConfig(wd)
+			if errExample != nil {
 				log.Errorf("failed to find template config file: %v", errExample)
 				return
 			}
@@ -496,6 +544,18 @@ func main() {
 		}
 		configFilePath = filepath.Join(wd, "config.yaml")
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		// First-run auto-bootstrap: if config file does not exist, scaffold from config.example.yaml.
+		if err != nil && errors.Is(err, fs.ErrNotExist) {
+			if examplePath, errFind := misc.FindExampleConfig(wd); errFind == nil {
+				if errCopy := misc.CopyConfigTemplate(examplePath, configFilePath); errCopy != nil {
+					log.Warnf("failed to auto-create config from template: %v", errCopy)
+				} else {
+					log.Infof("config.yaml created from config.example.yaml: %s", configFilePath)
+					log.Info("Edit config.yaml to configure api-keys and other settings")
+					cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+				}
+			}
+		}
 	}
 	if err != nil {
 		log.Errorf("failed to load config: %v", err)
