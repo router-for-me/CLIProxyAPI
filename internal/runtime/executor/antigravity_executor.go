@@ -677,7 +677,11 @@ attemptLoop:
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if antigravityIsLongQuotaExhaustion(bodyBytes) {
 						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
-						return cliproxyexecutor.Response{}, statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						se := statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+							se.retryAfter = retryAfter
+						}
+						return cliproxyexecutor.Response{}, se
 					}
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
@@ -897,7 +901,11 @@ attemptLoop:
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if antigravityIsLongQuotaExhaustion(bodyBytes) {
 						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
-						return cliproxyexecutor.Response{}, statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						se := statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+							se.retryAfter = retryAfter
+						}
+						return cliproxyexecutor.Response{}, se
 					}
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
@@ -1366,7 +1374,11 @@ attemptLoop:
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if antigravityIsLongQuotaExhaustion(bodyBytes) {
 						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
-						return nil, statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						se := statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+							se.retryAfter = retryAfter
+						}
+						return nil, se
 					}
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
