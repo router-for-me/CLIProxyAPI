@@ -20,13 +20,16 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
-	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
+func TestBuildCodexWebsocketRequestBodyRequiresStoreFalse(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","store":true,"previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got != "response.create" {
 		t.Fatalf("type = %s, want response.create", got)
+	}
+	if got := gjson.GetBytes(wsReqBody, "store").Bool(); got {
+		t.Fatalf("store = %v, want false", got)
 	}
 	if got := gjson.GetBytes(wsReqBody, "previous_response_id").String(); got != "resp-1" {
 		t.Fatalf("previous_response_id = %s, want resp-1", got)

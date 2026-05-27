@@ -306,7 +306,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		allowIncrementalInputWithPreviousResponseID := false
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
-				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+				allowIncrementalInputWithPreviousResponseID = responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth)
 			}
 		} else {
 			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
@@ -461,7 +461,7 @@ func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []by
 	case wsRequestTypeCreate:
 		// log.Infof("responses websocket: response.create request")
 		if len(lastRequest) == 0 {
-			return normalizeResponseCreateRequest(rawJSON)
+			return normalizeResponseCreateRequest(rawJSON, allowIncrementalInputWithPreviousResponseID)
 		}
 		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 	case wsRequestTypeAppend:
@@ -475,10 +475,13 @@ func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []by
 	}
 }
 
-func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
+func normalizeResponseCreateRequest(rawJSON []byte, allowIncrementalInputWithPreviousResponseID bool) ([]byte, []byte, *interfaces.ErrorMessage) {
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
 		normalized = bytes.Clone(rawJSON)
+	}
+	if !allowIncrementalInputWithPreviousResponseID {
+		normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
 	if !gjson.GetBytes(normalized, "input").Exists() {
@@ -726,10 +729,23 @@ func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, met
 	return false
 }
 
+func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	// Codex upstream requires store=false, so response IDs are not durable
+	// enough for follow-up previous_response_id requests. Keep the websocket
+	// transport, but replay CPA's locally merged transcript upstream.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
+}
+
 func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputForModel(modelName string) bool {
 	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
 	for _, auth := range auths {
-		if websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
+		if responsesWebsocketAuthSupportsIncrementalInput(auth) {
 			return true
 		}
 	}

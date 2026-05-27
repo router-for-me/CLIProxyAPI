@@ -680,10 +680,12 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	// `previous_response_id` + incremental `input`, not `response.append`.
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
+		wsReqBody, _ = sjson.SetBytes(wsReqBody, "store", false)
 		return wsReqBody
 	}
 	fallback := bytes.Clone(body)
 	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
+	fallback, _ = sjson.SetBytes(fallback, "store", false)
 	return fallback
 }
 
