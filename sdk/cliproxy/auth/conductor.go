@@ -2469,7 +2469,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) && !isLocalStreamTimeoutResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -2905,6 +2905,16 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 		return false
 	}
 	return isRequestScopedNotFoundMessage(err.Message)
+}
+
+func isLocalStreamTimeoutResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusGatewayTimeout {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Message))
+	return strings.HasPrefix(lower, "codex upstream stream first response timeout after ") ||
+		strings.HasPrefix(lower, "codex upstream stream idle timeout after ") ||
+		strings.HasPrefix(lower, "openai-compatible upstream stream first response timeout after ")
 }
 
 // isRequestInvalidError returns true if the error represents a client request

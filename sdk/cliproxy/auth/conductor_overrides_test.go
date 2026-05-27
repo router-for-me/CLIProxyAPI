@@ -779,6 +779,110 @@ func TestManager_MarkResult_RequestScopedNotFoundDoesNotCooldownAuth(t *testing.
 	}
 }
 
+func TestManager_MarkResult_LocalStreamTimeoutDoesNotCooldownAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-local-timeout",
+		Provider: "openai-compatibility",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "gpt-5.5"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusGatewayTimeout,
+			Message:    "openai-compatible upstream stream first response timeout after 2m0s",
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable {
+		t.Fatalf("expected local stream timeout to keep auth available")
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected local stream timeout to keep auth cooldown unset, got %v", updated.NextRetryAfter)
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("expected local stream timeout to avoid model cooldown state, got %#v", state)
+	}
+	if updated.Failed != 1 {
+		t.Fatalf("failed count = %d, want 1", updated.Failed)
+	}
+}
+
+func TestManager_ExecuteStream_LocalStreamTimeoutDoesNotBlackoutOnlyAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+	executor := &authFallbackExecutor{
+		id: "openai-compatibility",
+		streamFirstErrors: map[string]error{
+			"auth-local-timeout-stream": &retryAfterStatusError{
+				status:  http.StatusGatewayTimeout,
+				message: "codex upstream stream idle timeout after 5m0s",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-local-timeout-stream",
+		Provider: "openai-compatibility",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "gpt-5.5"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	req := cliproxyexecutor.Request{Model: model}
+	streamResult1, errExecute1 := m.ExecuteStream(context.Background(), []string{auth.Provider}, req, cliproxyexecutor.Options{})
+	if errExecute1 != nil {
+		t.Fatalf("first ExecuteStream returned setup error = %v", errExecute1)
+	}
+	var chunkErr error
+	for chunk := range streamResult1.Chunks {
+		if chunk.Err != nil {
+			chunkErr = chunk.Err
+		}
+	}
+	if chunkErr == nil {
+		t.Fatal("expected first stream chunk error")
+	}
+	if statusCodeFromError(chunkErr) != http.StatusGatewayTimeout {
+		t.Fatalf("first stream chunk status = %d, want %d", statusCodeFromError(chunkErr), http.StatusGatewayTimeout)
+	}
+
+	streamResult2, errExecute2 := m.ExecuteStream(context.Background(), []string{auth.Provider}, req, cliproxyexecutor.Options{})
+	if errExecute2 != nil {
+		t.Fatalf("second ExecuteStream error = %v, want same auth to remain selectable", errExecute2)
+	}
+	for range streamResult2.Chunks {
+	}
+
+	calls := executor.StreamCalls()
+	if len(calls) != 2 {
+		t.Fatalf("stream calls = %v, want two calls to same auth", calls)
+	}
+	for i, call := range calls {
+		if call != auth.ID {
+			t.Fatalf("stream call %d auth = %q, want %q", i, call, auth.ID)
+		}
+	}
+}
+
 func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
