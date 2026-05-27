@@ -240,7 +240,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				label = email
 			}
 			if label == "" {
+				label = findAuthFileEmail(ctx.AuthDir, providerName)
+			}
+			if label == "" {
 				label = compat.Name
+			}
+			if email == "" && label != "" && label != compat.Name {
+				email = label
 			}
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
