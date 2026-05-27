@@ -265,6 +265,12 @@ type AmpModelMapping struct {
 	// expression for matching model names. When true, this mapping is evaluated
 	// after exact matches and in the order provided. Defaults to false (exact match).
 	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
+
+	// ReasoningEffortMappings remaps request-body reasoning effort values when this
+	// model mapping is applied. This is useful when Amp's source model exposes a
+	// different effort ladder than the target model (for example, Opus 4.7 smart
+	// mode high/xhigh/max -> GPT-5.5 low/medium/high).
+	ReasoningEffortMappings map[string]string `yaml:"reasoning-effort-mappings,omitempty" json:"reasoning-effort-mappings,omitempty"`
 }
 
 // AmpCode groups Amp CLI integration settings including upstream routing,

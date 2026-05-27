@@ -71,6 +71,32 @@ func TestModelMapper_MapModel_WithProvider(t *testing.T) {
 	}
 }
 
+func TestModelMapper_MapModelWithInfo_ReturnsEffortMappings(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-client-effort-info", "codex", []*registry.ModelInfo{
+		{ID: "gpt-5.5", OwnedBy: "openai", Type: "codex"},
+	})
+	defer reg.UnregisterClient("test-client-effort-info")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{{
+		From: "claude-opus-4-7",
+		To:   "gpt-5.5",
+		ReasoningEffortMappings: map[string]string{
+			"high":  "low",
+			"xhigh": "medium",
+			"max":   "high",
+		},
+	}})
+
+	result := mapper.MapModelWithInfo("claude-opus-4-7")
+	if result.Model != "gpt-5.5" {
+		t.Fatalf("Expected gpt-5.5, got %s", result.Model)
+	}
+	if got := result.Mapping.ReasoningEffortMappings["max"]; got != "high" {
+		t.Fatalf("Expected max effort to map to high, got %q", got)
+	}
+}
+
 func TestModelMapper_MapModel_TargetWithThinkingSuffix(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-client-thinking", "codex", []*registry.ModelInfo{

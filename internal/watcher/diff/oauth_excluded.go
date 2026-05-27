@@ -104,7 +104,17 @@ func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappin
 		if from == "" && to == "" {
 			continue
 		}
-		entries = append(entries, from+"->"+to)
+		efforts := make([]string, 0, len(mapping.ReasoningEffortMappings))
+		for fromEffort, toEffort := range mapping.ReasoningEffortMappings {
+			fromEffort = strings.ToLower(strings.TrimSpace(fromEffort))
+			toEffort = strings.ToLower(strings.TrimSpace(toEffort))
+			if fromEffort == "" && toEffort == "" {
+				continue
+			}
+			efforts = append(efforts, fromEffort+":"+toEffort)
+		}
+		sort.Strings(efforts)
+		entries = append(entries, from+"->"+to+"|effort="+strings.Join(efforts, ","))
 	}
 	if len(entries) == 0 {
 		return AmpModelMappingsSummary{}
