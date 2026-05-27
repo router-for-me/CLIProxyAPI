@@ -18,6 +18,7 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -30,9 +31,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagestats"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -488,6 +491,59 @@ func main() {
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
+	// Initialize persistent usage statistics if configured.
+	var usageStatsStore usagestats.Store
+	if cfg.UsageStatistics.Enabled {
+		usageDSN := strings.TrimSpace(cfg.UsageStatistics.PostgresDSN)
+		if usageDSN == "" {
+			usageDSN = strings.TrimSpace(pgStoreDSN)
+		}
+		usageSchema := strings.TrimSpace(cfg.UsageStatistics.Schema)
+		if usageSchema == "" {
+			usageSchema = strings.TrimSpace(pgStoreSchema)
+		}
+		if usageDSN != "" {
+			initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			pgStore, errInit := usagestats.NewPostgresStore(initCtx, usagestats.PostgresStoreConfig{
+				DSN:    usageDSN,
+				Schema: usageSchema,
+				Table:  cfg.UsageStatistics.Table,
+			})
+			initCancel()
+			if errInit != nil {
+				log.Errorf("failed to initialize usage statistics store: %v", errInit)
+			} else {
+				schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if errSchema := pgStore.EnsureSchema(schemaCtx); errSchema != nil {
+					schemaCancel()
+					log.Errorf("failed to ensure usage statistics schema: %v", errSchema)
+				} else {
+					schemaCancel()
+					usageStatsStore = pgStore
+					log.Info("usage statistics: PostgreSQL store initialized")
+
+					// Build price matcher.
+					var prices []usagestats.ModelPrice
+					for _, p := range cfg.UsageStatistics.Prices {
+						prices = append(prices, usagestats.ModelPrice{
+							Provider:           p.Provider,
+							Model:              p.Model,
+							InputCostPerToken:  p.InputCostPerToken,
+							OutputCostPerToken: p.OutputCostPerToken,
+						})
+					}
+					matcher := usagestats.NewPriceMatcher(prices)
+
+					// Register as usage plugin.
+					plugin := usagestats.NewPlugin(pgStore, matcher)
+					coreusage.RegisterPlugin(plugin)
+				}
+			}
+		} else {
+			log.Warn("usage statistics: enabled but no PostgreSQL DSN configured; persistent stats disabled")
+		}
+	}
+
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
 		return
@@ -648,7 +704,7 @@ func main() {
 			} else if cfg.Home.Enabled {
 				log.Info("Home mode: remote model updates disabled")
 			}
-			cmd.StartService(cfg, configFilePath, password)
+			cmd.StartService(cfg, configFilePath, password, api.WithUsageStatsStore(usageStatsStore))
 		}
 	}
 }

@@ -24,7 +24,8 @@ import (
 //   - cfg: The application configuration
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
-func StartService(cfg *config.Config, configPath string, localPassword string) {
+//   - extraOpts: Optional additional server options
+func StartService(cfg *config.Config, configPath string, localPassword string, extraOpts ...api.ServerOption) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -41,6 +42,10 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 			log.Warn("keep-alive endpoint idle for 10s, shutting down")
 			keepAliveCancel()
 		}))
+	}
+
+	if len(extraOpts) > 0 {
+		builder = builder.WithServerOptions(extraOpts...)
 	}
 
 	service, err := builder.Build()

@@ -74,6 +74,10 @@ type Config struct {
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
+	// UsageStatistics configures persistent PostgreSQL-backed lightweight token/cost statistics.
+	// This is separate from the in-memory usage queue controlled by UsageStatisticsEnabled.
+	UsageStatistics UsageStatisticsConfig `yaml:"usage-statistics" json:"usage-statistics"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -356,6 +360,30 @@ type PayloadModelRule struct {
 	Exist []string `yaml:"exist" json:"exist"`
 	// NotExist requires payload JSON paths to be missing or null.
 	NotExist []string `yaml:"not-exist" json:"not-exist"`
+}
+
+// UsageStatisticsConfig configures persistent PostgreSQL-backed lightweight token/cost statistics.
+// This is separate from the in-memory usage queue controlled by UsageStatisticsEnabled.
+type UsageStatisticsConfig struct {
+	// Enabled toggles persistent usage statistics recording.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// PostgresDSN is the PostgreSQL connection string. When empty, falls back to PGSTORE_DSN env.
+	// JSON tag is \"-\" to prevent leaking the DSN in management API responses.
+	PostgresDSN string `yaml:"postgres-dsn" json:"-"`
+	// Schema is the PostgreSQL schema. When empty, falls back to PGSTORE_SCHEMA env.
+	Schema string `yaml:"postgres-schema" json:"postgres-schema"`
+	// Table is the table name for usage records. Default: usage_records.
+	Table string `yaml:"table" json:"table"`
+	// Prices defines manual per-token pricing for provider+model pairs.
+	Prices []UsageModelPrice `yaml:"prices" json:"prices"`
+}
+
+// UsageModelPrice defines manual per-token pricing for a specific provider+model pair.
+type UsageModelPrice struct {
+	Provider           string  `yaml:"provider" json:"provider"`
+	Model              string  `yaml:"model" json:"model"`
+	InputCostPerToken  float64 `yaml:"input_cost_per_token" json:"input_cost_per_token"`
+	OutputCostPerToken float64 `yaml:"output_cost_per_token" json:"output_cost_per_token"`
 }
 
 // CloakConfig configures request cloaking for non-Claude-Code clients.

@@ -71,6 +71,38 @@ usage-statistics-enabled: false
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 
+# Persistent lightweight token/cost statistics backed by PostgreSQL.
+# This is separate from the in-memory usage queue above.
+# When enabled and a PostgreSQL DSN is available, the server persists sanitized usage events
+# and exposes summary/grouped/recent records via Management API.
+# No sensitive data (prompts, messages, response bodies, raw API keys, tokens, cookies) is stored.
+# Cost calculation is manual-price-only; unmatched models show cost_known=false.
+usage-statistics:
+  # Enable persistent PostgreSQL-backed lightweight token/cost statistics.
+  enabled: false
+
+  # PostgreSQL connection string. When empty, falls back to PGSTORE_DSN environment variable.
+  # If both are empty and enabled=true, the server logs a warning and continues without stats.
+  # postgres-dsn: ""
+
+  # PostgreSQL schema. When empty, falls back to PGSTORE_SCHEMA environment variable.
+  # postgres-schema: ""
+
+  # Table name for usage records. Default: usage_records.
+  # table: "usage_records"
+
+  # Manual model prices. Cost is unknown for provider/model pairs not listed here.
+  # Prices are in USD per token.
+  # prices:
+  #   - provider: "openai"
+  #     model: "gpt-4.1-mini"
+  #     input_cost_per_token: 0.0000004
+  #     output_cost_per_token: 0.0000016
+  #   - provider: "claude"
+  #     model: "claude-sonnet-4"
+  #     input_cost_per_token: 0.000003
+  #     output_cost_per_token: 0.000015
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""

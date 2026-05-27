@@ -73,6 +73,11 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	// Normalize usage-statistics config.
+	if cfg.UsageStatistics.Table == "" {
+		cfg.UsageStatistics.Table = "usage_records"
+	}
+
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeVertexCompatKeys()
