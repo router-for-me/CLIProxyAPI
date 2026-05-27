@@ -24,6 +24,7 @@ type Record struct {
 	ReasoningEffort string
 	RequestedAt     time.Time
 	Latency         time.Duration
+	TTFT            time.Duration
 	Failed          bool
 	Fail            Failure
 	Detail          Detail
