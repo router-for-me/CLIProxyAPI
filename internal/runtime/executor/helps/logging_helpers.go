@@ -482,6 +482,9 @@ func formatAuthInfo(info UpstreamRequestLog) string {
 
 	authType := strings.ToLower(strings.TrimSpace(info.AuthType))
 	authValue := strings.TrimSpace(info.AuthValue)
+	if account := formatAuthAccount(info, authType, authValue); account != "" {
+		parts = append(parts, fmt.Sprintf("account=%s", account))
+	}
 	switch authType {
 	case "api_key":
 		if authValue != "" {
@@ -502,6 +505,21 @@ func formatAuthInfo(info UpstreamRequestLog) string {
 	}
 
 	return strings.Join(parts, ", ")
+}
+
+func formatAuthAccount(info UpstreamRequestLog, authType string, authValue string) string {
+	label := strings.TrimSpace(info.AuthLabel)
+	provider := strings.TrimSpace(info.Provider)
+	if label != "" && !strings.EqualFold(label, provider) && !strings.EqualFold(label, "openai-compatibility") {
+		return label
+	}
+	if authValue == "" {
+		return label
+	}
+	if authType == "api_key" {
+		return util.HideAPIKey(authValue)
+	}
+	return authValue
 }
 
 func SummarizeErrorBody(contentType string, body []byte) string {
