@@ -7,31 +7,22 @@ import (
 	"encoding/json"
 	"strings"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 )
 
-// TruncationInfo contains details about detected truncation in a tool use event.
-type TruncationInfo struct {
-	IsTruncated    bool              // Whether truncation was detected
-	TruncationType string            // Type of truncation detected
-	ToolName       string            // Name of the truncated tool
-	ToolUseID      string            // ID of the truncated tool use
-	RawInput       string            // The raw (possibly truncated) input string
-	ParsedFields   map[string]string // Fields that were successfully parsed before truncation
-	ErrorMessage   string            // Human-readable error message
-}
+// TruncationInfo re-exports the common TruncationInfo for backward compatibility.
+type TruncationInfo = common.TruncationInfo
 
-// TruncationType constants for different truncation scenarios
+// TruncationType constants re-exported for backward compatibility.
 const (
-	TruncationTypeNone             = ""                  // No truncation detected
-	TruncationTypeEmptyInput       = "empty_input"       // No input data received at all
-	TruncationTypeInvalidJSON      = "invalid_json"      // JSON is syntactically invalid (truncated mid-value)
-	TruncationTypeMissingFields    = "missing_fields"    // JSON parsed but critical fields are missing
-	TruncationTypeIncompleteString = "incomplete_string" // String value was cut off mid-content
+	TruncationTypeNone             = common.TruncationTypeNone
+	TruncationTypeEmptyInput       = common.TruncationTypeEmptyInput
+	TruncationTypeInvalidJSON      = common.TruncationTypeInvalidJSON
+	TruncationTypeMissingFields    = common.TruncationTypeMissingFields
+	TruncationTypeIncompleteString = common.TruncationTypeIncompleteString
 )
 
 // KnownWriteTools lists tool names that typically write content and have a "content" field.
-// These tools are checked for content field truncation specifically.
 var KnownWriteTools = map[string]bool{
 	"Write":              true,
 	"write_to_file":      true,
@@ -55,12 +46,6 @@ var KnownCommandTools = map[string]bool{
 
 // RequiredFieldsByTool maps tool names to their required field groups.
 // Each outer element is a required group; each inner slice lists alternative field names (OR logic).
-// A group is satisfied when ANY one of its alternatives exists in the parsed input.
-// All groups must be satisfied for the tool input to be considered valid.
-//
-// Example:
-// {{"cmd", "command"}} means the tool needs EITHER "cmd" OR "command".
-// {{"file_path"}, {"content"}} means the tool needs BOTH "file_path" AND "content".
 var RequiredFieldsByTool = map[string][][]string{
 	"Write":              {{"file_path"}, {"content"}},
 	"write_to_file":      {{"path"}, {"content"}},
@@ -75,304 +60,9 @@ var RequiredFieldsByTool = map[string][][]string{
 }
 
 // DetectTruncation checks if the tool use input appears to be truncated.
-// It returns detailed information about the truncation status and type.
-func DetectTruncation(toolName, toolUseID, rawInput string, parsedInput map[string]interface{}) TruncationInfo {
-	info := TruncationInfo{
-		ToolName:     toolName,
-		ToolUseID:    toolUseID,
-		RawInput:     rawInput,
-		ParsedFields: make(map[string]string),
-	}
-
-	// Scenario 1: Empty input buffer - only flag as truncation if tool has required fields
-	// Many tools (e.g. TaskList, TaskGet) have no required params, so empty input is valid
-	if strings.TrimSpace(rawInput) == "" {
-		if _, hasRequirements := RequiredFieldsByTool[toolName]; hasRequirements {
-			info.IsTruncated = true
-			info.TruncationType = TruncationTypeEmptyInput
-			info.ErrorMessage = "Tool input was completely empty - API response may have been truncated before tool parameters were transmitted"
-			log.Warnf("kiro: truncation detected [%s] for tool %s (ID: %s): empty input buffer",
-				info.TruncationType, toolName, toolUseID)
-			return info
-		}
-		log.Debugf("kiro: empty input for tool %s (ID: %s) - no required fields, treating as valid", toolName, toolUseID)
-		return info
-	}
-
-	// Scenario 2: JSON parse failure - syntactically invalid JSON
-	if parsedInput == nil || len(parsedInput) == 0 {
-		// Check if the raw input looks like truncated JSON
-		if looksLikeTruncatedJSON(rawInput) {
-			info.IsTruncated = true
-			info.TruncationType = TruncationTypeInvalidJSON
-			info.ParsedFields = extractPartialFields(rawInput)
-			info.ErrorMessage = buildTruncationErrorMessage(toolName, info.TruncationType, info.ParsedFields, rawInput)
-			log.Warnf("kiro: truncation detected [%s] for tool %s (ID: %s): JSON parse failed, raw length=%d bytes",
-				info.TruncationType, toolName, toolUseID, len(rawInput))
-			return info
-		}
-	}
-
-	// Scenario 3: JSON parsed but critical fields are missing
-	if parsedInput != nil {
-		requiredGroups, hasRequirements := RequiredFieldsByTool[toolName]
-		if hasRequirements {
-			missingFields := findMissingRequiredFields(parsedInput, requiredGroups)
-			if len(missingFields) > 0 {
-				info.IsTruncated = true
-				info.TruncationType = TruncationTypeMissingFields
-				info.ParsedFields = extractParsedFieldNames(parsedInput)
-				info.ErrorMessage = buildMissingFieldsErrorMessage(toolName, missingFields, info.ParsedFields)
-				log.Warnf("kiro: truncation detected [%s] for tool %s (ID: %s): missing required fields: %v",
-					info.TruncationType, toolName, toolUseID, missingFields)
-				return info
-			}
-		}
-
-		// Scenario 4: Check for incomplete string values (very short content for write tools)
-		if isWriteTool(toolName) {
-			if contentTruncation := detectContentTruncation(parsedInput, rawInput); contentTruncation != "" {
-				info.IsTruncated = true
-				info.TruncationType = TruncationTypeIncompleteString
-				info.ParsedFields = extractParsedFieldNames(parsedInput)
-				info.ErrorMessage = contentTruncation
-				log.Warnf("kiro: truncation detected [%s] for tool %s (ID: %s): %s",
-					info.TruncationType, toolName, toolUseID, contentTruncation)
-				return info
-			}
-		}
-	}
-
-	// No truncation detected
-	info.IsTruncated = false
-	info.TruncationType = TruncationTypeNone
-	return info
-}
-
-// looksLikeTruncatedJSON checks if the raw string appears to be truncated JSON.
-func looksLikeTruncatedJSON(raw string) bool {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return false
-	}
-
-	// Must start with { to be considered JSON
-	if !strings.HasPrefix(trimmed, "{") {
-		return false
-	}
-
-	// Count brackets to detect imbalance
-	openBraces := strings.Count(trimmed, "{")
-	closeBraces := strings.Count(trimmed, "}")
-	openBrackets := strings.Count(trimmed, "[")
-	closeBrackets := strings.Count(trimmed, "]")
-
-	// Bracket imbalance suggests truncation
-	if openBraces > closeBraces || openBrackets > closeBrackets {
-		return true
-	}
-
-	// Check for obvious truncation patterns
-	// - Ends with a quote but no closing brace
-	// - Ends with a colon (mid key-value)
-	// - Ends with a comma (mid object/array)
-	lastChar := trimmed[len(trimmed)-1]
-	if lastChar != '}' && lastChar != ']' {
-		// Check if it's not a complete simple value
-		if lastChar == '"' || lastChar == ':' || lastChar == ',' {
-			return true
-		}
-	}
-
-	// Check for unclosed strings (odd number of unescaped quotes)
-	inString := false
-	escaped := false
-	for i := 0; i < len(trimmed); i++ {
-		c := trimmed[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if c == '\\' {
-			escaped = true
-			continue
-		}
-		if c == '"' {
-			inString = !inString
-		}
-	}
-	if inString {
-		return true // Unclosed string
-	}
-
-	return false
-}
-
-// extractPartialFields attempts to extract any field names from malformed JSON.
-// This helps provide context about what was received before truncation.
-func extractPartialFields(raw string) map[string]string {
-	fields := make(map[string]string)
-
-	// Simple pattern matching for "key": "value" or "key": value patterns
-	// This works even with truncated JSON
-	trimmed := strings.TrimSpace(raw)
-	if !strings.HasPrefix(trimmed, "{") {
-		return fields
-	}
-
-	// Remove opening brace
-	content := strings.TrimPrefix(trimmed, "{")
-
-	// Split by comma (rough parsing)
-	parts := strings.Split(content, ",")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if colonIdx := strings.Index(part, ":"); colonIdx > 0 {
-			key := strings.TrimSpace(part[:colonIdx])
-			key = strings.Trim(key, `"`)
-			value := strings.TrimSpace(part[colonIdx+1:])
-
-			// Truncate long values for display
-			if len(value) > 50 {
-				value = value[:50] + "..."
-			}
-			fields[key] = value
-		}
-	}
-
-	return fields
-}
-
-// extractParsedFieldNames returns the field names from a successfully parsed map.
-func extractParsedFieldNames(parsed map[string]interface{}) map[string]string {
-	fields := make(map[string]string)
-	for key, val := range parsed {
-		switch v := val.(type) {
-		case string:
-			if len(v) > 50 {
-				fields[key] = v[:50] + "..."
-			} else {
-				fields[key] = v
-			}
-		case nil:
-			fields[key] = "<null>"
-		default:
-			// For complex types, just indicate presence
-			fields[key] = "<present>"
-		}
-	}
-	return fields
-}
-
-// findMissingRequiredFields checks which required field groups are unsatisfied.
-// Each group is a slice of alternative field names; the group is satisfied when ANY alternative exists.
-// Returns the list of unsatisfied groups (represented by their alternatives joined with "/").
-func findMissingRequiredFields(parsed map[string]interface{}, requiredGroups [][]string) []string {
-	var missing []string
-	for _, group := range requiredGroups {
-		satisfied := false
-		for _, field := range group {
-			if _, exists := parsed[field]; exists {
-				satisfied = true
-				break
-			}
-		}
-		if !satisfied {
-			missing = append(missing, strings.Join(group, "/"))
-		}
-	}
-	return missing
-}
-
-// isWriteTool checks if the tool is a known write/file operation tool.
-func isWriteTool(toolName string) bool {
-	return KnownWriteTools[toolName]
-}
-
-// detectContentTruncation checks if the content field appears truncated for write tools.
-func detectContentTruncation(parsed map[string]interface{}, rawInput string) string {
-	// Check for content field
-	content, hasContent := parsed["content"]
-	if !hasContent {
-		return ""
-	}
-
-	contentStr, isString := content.(string)
-	if !isString {
-		return ""
-	}
-
-	// Heuristic: if raw input is very large but content is suspiciously short,
-	// it might indicate truncation during JSON repair
-	if len(rawInput) > 1000 && len(contentStr) < 100 {
-		return "content field appears suspiciously short compared to raw input size"
-	}
-
-	// Check for code blocks that appear to be cut off
-	if strings.Contains(contentStr, "```") {
-		openFences := strings.Count(contentStr, "```")
-		if openFences%2 != 0 {
-			return "content contains unclosed code fence (```) suggesting truncation"
-		}
-	}
-
-	return ""
-}
-
-// buildTruncationErrorMessage creates a human-readable error message for truncation.
-func buildTruncationErrorMessage(toolName, truncationType string, parsedFields map[string]string, rawInput string) string {
-	var sb strings.Builder
-	sb.WriteString("Tool input was truncated by the API. ")
-
-	switch truncationType {
-	case TruncationTypeEmptyInput:
-		sb.WriteString("No input data was received.")
-	case TruncationTypeInvalidJSON:
-		sb.WriteString("JSON was cut off mid-transmission. ")
-		if len(parsedFields) > 0 {
-			sb.WriteString("Partial fields received: ")
-			first := true
-			for k := range parsedFields {
-				if !first {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(k)
-				first = false
-			}
-		}
-	case TruncationTypeMissingFields:
-		sb.WriteString("Required fields are missing from the input.")
-	case TruncationTypeIncompleteString:
-		sb.WriteString("Content appears to be shortened or incomplete.")
-	}
-
-	sb.WriteString(" Received ")
-	sb.WriteString(formatInt(len(rawInput)))
-	sb.WriteString(" bytes. Please retry with smaller content chunks.")
-
-	return sb.String()
-}
-
-// buildMissingFieldsErrorMessage creates an error message for missing required fields.
-func buildMissingFieldsErrorMessage(toolName string, missingFields []string, parsedFields map[string]string) string {
-	var sb strings.Builder
-	sb.WriteString("Tool '")
-	sb.WriteString(toolName)
-	sb.WriteString("' is missing required fields: ")
-	sb.WriteString(strings.Join(missingFields, ", "))
-	sb.WriteString(". Fields received: ")
-
-	first := true
-	for k := range parsedFields {
-		if !first {
-			sb.WriteString(", ")
-		}
-		sb.WriteString(k)
-		first = false
-	}
-
-	sb.WriteString(". This usually indicates the API response was truncated.")
-	return sb.String()
+// Delegates to common.DetectTruncation with Kiro-specific required fields and write tool names.
+func DetectTruncation(toolName, toolUseID, rawInput string, parsedInput map[string]interface{}) common.TruncationInfo {
+	return common.DetectTruncation(toolName, toolUseID, rawInput, parsedInput, RequiredFieldsByTool, KnownWriteTools)
 }
 
 // IsTruncated is a convenience function to check if a tool use appears truncated.
@@ -382,22 +72,11 @@ func IsTruncated(toolName, rawInput string, parsedInput map[string]interface{}) 
 }
 
 // GetTruncationSummary returns a short summary string for logging.
-func GetTruncationSummary(info TruncationInfo) string {
-	if !info.IsTruncated {
-		return ""
-	}
-
-	result, _ := json.Marshal(map[string]interface{}{
-		"tool":           info.ToolName,
-		"type":           info.TruncationType,
-		"parsed_fields":  info.ParsedFields,
-		"raw_input_size": len(info.RawInput),
-	})
-	return string(result)
+func GetTruncationSummary(info common.TruncationInfo) string {
+	return common.GetTruncationSummary(info)
 }
 
 // SoftFailureMessage contains the message structure for a truncation soft failure.
-// This is returned to Claude as a tool_result to guide retry behavior.
 type SoftFailureMessage struct {
 	Status      string   // "incomplete" - not an error, just incomplete
 	Reason      string   // Why the tool call was incomplete
@@ -407,21 +86,12 @@ type SoftFailureMessage struct {
 }
 
 // BuildSoftFailureMessage creates a structured message for Claude when truncation is detected.
-// This follows the "soft failure" pattern:
-// - For Claude: Clear explanation of what happened and how to fix
-// - For User: Hidden or minimized (appears as normal processing)
-//
-// Key principle: "Conclusion First"
-// 1. First state what happened (incomplete)
-// 2. Then explain how to fix (chunked approach)
-// 3. Provide specific guidance (line limits)
-func BuildSoftFailureMessage(info TruncationInfo) SoftFailureMessage {
+func BuildSoftFailureMessage(info common.TruncationInfo) SoftFailureMessage {
 	msg := SoftFailureMessage{
 		Status:      "incomplete",
-		MaxLineHint: 300, // Conservative default
+		MaxLineHint: 300,
 	}
 
-	// Build reason based on truncation type
 	switch info.TruncationType {
 	case TruncationTypeEmptyInput:
 		msg.Reason = "Your tool call was too large and the input was completely lost during transmission."
@@ -439,7 +109,6 @@ func BuildSoftFailureMessage(info TruncationInfo) SoftFailureMessage {
 		msg.Reason = "Your tool call was truncated by the API due to output size limits."
 	}
 
-	// Build context from parsed fields
 	if len(info.ParsedFields) > 0 {
 		var parts []string
 		for k, v := range info.ParsedFields {
@@ -451,7 +120,6 @@ func BuildSoftFailureMessage(info TruncationInfo) SoftFailureMessage {
 		msg.Context = "Received partial data: " + strings.Join(parts, ", ")
 	}
 
-	// Build retry guidance - CRITICAL: Conclusion first approach
 	msg.Guidance = []string{
 		"CONCLUSION: Split your output into smaller chunks and retry.",
 		"",
@@ -471,7 +139,7 @@ func BuildSoftFailureMessage(info TruncationInfo) SoftFailureMessage {
 	return msg
 }
 
-// formatInt converts an integer to string (helper to avoid strconv import)
+// formatInt converts an integer to string.
 func formatInt(n int) string {
 	if n == 0 {
 		return "0"
@@ -485,9 +153,7 @@ func formatInt(n int) string {
 }
 
 // BuildSoftFailureToolResult creates a tool_result content for Claude.
-// This is what Claude will see when a tool call is truncated.
-// Returns a string that should be used as the tool_result content.
-func BuildSoftFailureToolResult(info TruncationInfo) string {
+func BuildSoftFailureToolResult(info common.TruncationInfo) string {
 	msg := BuildSoftFailureMessage(info)
 
 	var sb strings.Builder
@@ -517,21 +183,19 @@ func BuildSoftFailureToolResult(info TruncationInfo) string {
 }
 
 // CreateTruncationToolResult creates a KiroToolUse that represents a soft failure.
-// Instead of returning the truncated tool_use, we return a tool with a special
-// error result that guides Claude to retry with smaller chunks.
-//
-// This is the key mechanism for "soft failure":
-// - stop_reason remains "tool_use" so Claude continues
-// - The tool_result content explains the issue and how to fix it
-// - Claude will read this and adjust its approach
-func CreateTruncationToolResult(info TruncationInfo) KiroToolUse {
-	// We create a pseudo tool_use that represents the failed attempt
-	// The executor will convert this to a tool_result with the guidance message
+func CreateTruncationToolResult(info common.TruncationInfo) KiroToolUse {
 	return KiroToolUse{
 		ToolUseID:      info.ToolUseID,
 		Name:           info.ToolName,
-		Input:          nil, // No input since it was truncated
+		Input:          nil,
 		IsTruncated:    true,
 		TruncationInfo: &info,
 	}
+}
+
+// BuildSoftFailureMessageJSON marshals the soft failure message to JSON for API responses.
+func BuildSoftFailureMessageJSON(info common.TruncationInfo) []byte {
+	msg := BuildSoftFailureMessage(info)
+	result, _ := json.Marshal(msg)
+	return result
 }

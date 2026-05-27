@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -513,7 +514,7 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 			continue
 		}
 		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if isResponsesToolCallType(itemType) {
+		if common.IsToolCallType(itemType) {
 			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
 			if callID != "" {
 				if _, ok := seenCallIDs[callID]; ok {

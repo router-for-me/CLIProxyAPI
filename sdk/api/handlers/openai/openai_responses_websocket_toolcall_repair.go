@@ -9,6 +9,8 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 )
 
 const (
@@ -267,14 +269,14 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		}
 		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
 		switch {
-		case isResponsesToolCallOutputType(itemType):
+		case common.IsToolCallOutputType(itemType):
 			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
 			if callID == "" {
 				continue
 			}
 			outputPresent[callID] = struct{}{}
 			outputCache.record(sessionKey, callID, item)
-		case isResponsesToolCallType(itemType):
+		case common.IsToolCallType(itemType):
 			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
 			if callID == "" {
 				continue
@@ -293,7 +295,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 			continue
 		}
 		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if isResponsesToolCallOutputType(itemType) {
+		if common.IsToolCallOutputType(itemType) {
 			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
 			if callID == "" {
 				// Upstream rejects tool outputs without a call_id; drop it.
@@ -325,7 +327,7 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 			// Drop orphaned function_call_output items; upstream rejects transcripts with missing calls.
 			continue
 		}
-		if !isResponsesToolCallType(itemType) {
+		if !common.IsToolCallType(itemType) {
 			filtered = append(filtered, item)
 			continue
 		}
@@ -376,7 +378,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 			return
 		}
 		for _, item := range output.Array() {
-			if !isResponsesToolCallType(item.Get("type").String()) {
+			if !common.IsToolCallType(item.Get("type").String()) {
 				continue
 			}
 			callID := strings.TrimSpace(item.Get("call_id").String())
@@ -390,7 +392,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 		if !item.Exists() || !item.IsObject() {
 			return
 		}
-		if !isResponsesToolCallType(item.Get("type").String()) {
+		if !common.IsToolCallType(item.Get("type").String()) {
 			return
 		}
 		callID := strings.TrimSpace(item.Get("call_id").String())
@@ -401,20 +403,3 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 	}
 }
 
-func isResponsesToolCallType(itemType string) bool {
-	switch strings.TrimSpace(itemType) {
-	case "function_call", "custom_tool_call":
-		return true
-	default:
-		return false
-	}
-}
-
-func isResponsesToolCallOutputType(itemType string) bool {
-	switch strings.TrimSpace(itemType) {
-	case "function_call_output", "custom_tool_call_output":
-		return true
-	default:
-		return false
-	}
-}
