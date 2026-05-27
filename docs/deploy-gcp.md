@@ -12,10 +12,10 @@ Cloudflare DNS (proxy.nomadamas.org)
         -> URL Map (default route)
           -> Backend Service (HTTP, EXTERNAL_MANAGED)
             -> Serverless NEG (asia-northeast3)
-              -> Cloud Run service: cli-proxy-api
+               -> Cloud Run service: cli-proxy-api
                 * gen2 runtime
                 * min=1, max=1, concurrency=200
-                * 1 vCPU, 512Mi memory
+                * 2 vCPU, 1Gi memory
                 * --no-cpu-throttling (background goroutines stay alive)
                 * OBJECTSTORE backend (GCS bucket via S3 HMAC interop)
 
@@ -285,13 +285,13 @@ Recommended value: `240` (4 minutes) for Cloud Run deployments with
 
 | Item | Monthly |
 |------|---------|
-| Cloud Run: 1 vCPU, 512Mi, min=1, always-on CPU | ~$22 |
+| Cloud Run: 2 vCPU, 1Gi, min=1, always-on CPU | ~$50 |
 | Global External Application LB (forwarding rule + first 5 rules free + data) | ~$18 |
 | Cloud Storage (auths bucket, <1 GB, low ops) | <$1 |
 | Artifact Registry storage (~500 MB images) | <$1 |
 | Secret Manager (3 secrets, periodic access) | <$1 |
 | Cloud Build (per-deploy, ~5min/build) | per-use |
 | Cloud Logging/Monitoring (free tier) | $0 |
-| **Total** | **~$45/mo before traffic** |
+| **Total** | **~$73/mo before traffic** |
 
 Add ~$5-10/mo for ~12k req/hour traffic (egress + LB data processing).

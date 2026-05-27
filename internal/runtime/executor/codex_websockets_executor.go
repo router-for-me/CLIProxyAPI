@@ -234,7 +234,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
 	if executionSessionID != "" {
-		sess = e.getOrCreateSession(executionSessionID)
+		sess = e.getOrCreateSessionScoped(authID, executionSessionID)
 		sess.reqMu.Lock()
 		defer sess.reqMu.Unlock()
 	}
@@ -447,7 +447,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
 	if executionSessionID != "" {
-		sess = e.getOrCreateSession(executionSessionID)
+		sess = e.getOrCreateSessionScoped(authID, executionSessionID)
 		if sess != nil {
 			sess.reqMu.Lock()
 		}
@@ -1262,7 +1262,22 @@ func executionSessionIDFromOptions(opts cliproxyexecutor.Options) string {
 	}
 }
 
+// sessionStoreKey returns the composite key used to store a codexWebsocketSession.
+// Scoping by authID prevents different credentials from sharing the same
+// upstream WebSocket connection and reqMu serialization boundary.
+func sessionStoreKey(authID, sessionID string) string {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return sessionID
+	}
+	return authID + "/" + sessionID
+}
+
 func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string) *codexWebsocketSession {
+	return e.getOrCreateSessionScoped("", sessionID)
+}
+
+func (e *CodexWebsocketsExecutor) getOrCreateSessionScoped(authID, sessionID string) *codexWebsocketSession {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil
@@ -1274,23 +1289,41 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string) *codexWeb
 	if store == nil {
 		store = globalCodexWebsocketSessionStore
 	}
+	key := sessionStoreKey(authID, sessionID)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.sessions == nil {
 		store.sessions = make(map[string]*codexWebsocketSession)
 	}
-	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
+	if sess, ok := store.sessions[key]; ok && sess != nil {
 		return sess
 	}
 	sess := &codexWebsocketSession{
 		sessionID:            sessionID,
 		upstreamDisconnectCh: make(chan error, 1),
 	}
-	store.sessions[sessionID] = sess
+	store.sessions[key] = sess
 	return sess
 }
 
 func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
+	sessionID = strings.TrimSpace(sessionID)
+	if e == nil || sessionID == "" {
+		return nil
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	suffix := "/" + sessionID
+	store.mu.Lock()
+	for key, sess := range store.sessions {
+		if (key == sessionID || strings.HasSuffix(key, suffix)) && sess != nil {
+			store.mu.Unlock()
+			return sess.upstreamDisconnectCh
+		}
+	}
+	store.mu.Unlock()
 	sess := e.getOrCreateSession(sessionID)
 	if sess == nil {
 		return nil
@@ -1440,9 +1473,6 @@ func (e *CodexWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 		return
 	}
 	if sessionID == cliproxyauth.CloseAllExecutionSessionsID {
-		// Executor replacement can happen during hot reload (config/credential changes).
-		// Do not force-close upstream websocket sessions here, otherwise in-flight
-		// downstream websocket requests get interrupted.
 		return
 	}
 
@@ -1450,12 +1480,21 @@ func (e *CodexWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 	if store == nil {
 		store = globalCodexWebsocketSessionStore
 	}
+
+	suffix := "/" + sessionID
 	store.mu.Lock()
-	sess := store.sessions[sessionID]
-	delete(store.sessions, sessionID)
+	var matched []*codexWebsocketSession
+	for key, sess := range store.sessions {
+		if key == sessionID || strings.HasSuffix(key, suffix) {
+			matched = append(matched, sess)
+			delete(store.sessions, key)
+		}
+	}
 	store.mu.Unlock()
 
-	e.closeExecutionSession(sess, "session_closed")
+	for _, sess := range matched {
+		e.closeExecutionSession(sess, "session_closed")
+	}
 }
 
 func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {

@@ -326,10 +326,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
 	}
 
-	// Create HTTP server
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: engine,
+		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:           engine,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	return s
