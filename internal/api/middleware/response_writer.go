@@ -21,6 +21,7 @@ const websocketTimelineOverrideContextKey = "WEBSOCKET_TIMELINE_OVERRIDE"
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
 	URL       string              // URL is the request URL.
+	Host      string              // Host is the request domain or host.
 	Method    string              // Method is the HTTP method (e.g., GET, POST).
 	Headers   map[string][]string // Headers contains the request headers.
 	Body      []byte              // Body is the raw request body.
@@ -160,13 +161,28 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 
 	// If streaming, initialize streaming log writer
 	if w.isStreaming && w.logger.IsEnabled() {
-		streamWriter, err := w.logger.LogStreamingRequest(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
-			w.requestInfo.Headers,
-			w.requestInfo.Body,
-			w.requestInfo.RequestID,
-		)
+		var streamWriter logging.StreamingLogWriter
+		var err error
+		if loggerWithOptions, ok := w.logger.(interface {
+			LogStreamingRequestWithHost(string, string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error)
+		}); ok {
+			streamWriter, err = loggerWithOptions.LogStreamingRequestWithHost(
+				w.requestInfo.URL,
+				w.requestInfo.Host,
+				w.requestInfo.Method,
+				w.requestInfo.Headers,
+				w.requestInfo.Body,
+				w.requestInfo.RequestID,
+			)
+		} else {
+			streamWriter, err = w.logger.LogStreamingRequest(
+				w.requestInfo.URL,
+				w.requestInfo.Method,
+				w.requestInfo.Headers,
+				w.requestInfo.Body,
+				w.requestInfo.RequestID,
+			)
+		}
 		if err == nil {
 			w.streamWriter = streamWriter
 			w.chunkChannel = make(chan []byte, 100) // Buffered channel for async writes
@@ -429,6 +445,30 @@ func extractBodyOverride(c *gin.Context, key string) []byte {
 func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body, websocketTimeline, apiRequestBody, apiResponseBody, apiWebsocketTimeline []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
 	if w.requestInfo == nil {
 		return nil
+	}
+
+	if loggerWithOptions, ok := w.logger.(interface {
+		LogRequestWithHostAndOptions(string, string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
+	}); ok {
+		return loggerWithOptions.LogRequestWithHostAndOptions(
+			w.requestInfo.URL,
+			w.requestInfo.Host,
+			w.requestInfo.Method,
+			w.requestInfo.Headers,
+			requestBody,
+			statusCode,
+			headers,
+			body,
+			websocketTimeline,
+			apiRequestBody,
+			apiResponseBody,
+			apiWebsocketTimeline,
+			apiResponseErrors,
+			forceLog,
+			w.requestInfo.RequestID,
+			w.requestInfo.Timestamp,
+			apiResponseTimestamp,
+		)
 	}
 
 	if loggerWithOptions, ok := w.logger.(interface {

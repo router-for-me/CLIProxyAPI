@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -112,11 +113,7 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 // restored so that it can be processed by subsequent handlers.
 func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) {
 	// Capture URL with sensitive query parameters masked
-	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
-	url := c.Request.URL.Path
-	if maskedQuery != "" {
-		url += "?" + maskedQuery
-	}
+	url := requestLogURL(c.Request)
 
 	// Capture method
 	method := c.Request.Method
@@ -143,12 +140,60 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 
 	return &RequestInfo{
 		URL:       url,
+		Host:      requestLogHost(c.Request),
 		Method:    method,
 		Headers:   headers,
 		Body:      body,
 		RequestID: logging.GetGinRequestID(c),
 		Timestamp: time.Now(),
 	}, nil
+}
+
+func requestLogURL(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	maskedQuery := util.MaskSensitiveQuery(req.URL.RawQuery)
+	path := req.URL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if req.URL.IsAbs() {
+		url := req.URL.Scheme + "://" + req.URL.Host + path
+		if maskedQuery != "" {
+			url += "?" + maskedQuery
+		}
+		return url
+	}
+	if req.Host != "" {
+		scheme := "http"
+		if req.TLS != nil {
+			scheme = "https"
+		}
+		url := scheme + "://" + req.Host + path
+		if maskedQuery != "" {
+			url += "?" + maskedQuery
+		}
+		return url
+	}
+	if maskedQuery != "" {
+		path += "?" + maskedQuery
+	}
+	return path
+}
+
+func requestLogHost(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	host := req.Host
+	if host == "" && req.URL != nil {
+		host = req.URL.Host
+	}
+	if hostOnly, _, errSplit := net.SplitHostPort(host); errSplit == nil {
+		return hostOnly
+	}
+	return host
 }
 
 func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {
