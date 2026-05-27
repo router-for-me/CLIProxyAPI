@@ -23,6 +23,14 @@ const (
 )
 
 // GetLogs returns log lines with optional incremental loading.
+//
+// Query parameters:
+//   - after: Unix timestamp; only lines after this time are returned.
+//   - limit: Maximum number of lines to return (default 500, max 5000).
+//   - level: Filter by log level (error, warn, info, debug). Case-insensitive.
+//   - keyword: Filter lines containing this substring (case-insensitive).
+//   - api_key: Filter lines containing this API key substring.
+//   - model: Filter by model name (exact match, case-insensitive).
 func (h *Handler) GetLogs(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -65,7 +73,13 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	}
 
 	cutoff := parseCutoff(c.Query("after"))
-	acc := newLogAccumulator(cutoff, limit)
+	filters := logFilters{
+		level:   c.Query("level"),
+		keyword: c.Query("keyword"),
+		apiKey:  c.Query("api_key"),
+		model:   c.Query("model"),
+	}
+	acc := newLogAccumulatorWithFilters(cutoff, limit, filters)
 	for i := range files {
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
@@ -517,6 +531,93 @@ func (h *Handler) collectLogFiles(dir string) ([]string, error) {
 	return paths, nil
 }
 
+// logLineFields holds structured fields extracted from a single log line.
+type logLineFields struct {
+	level     string
+	requestID string
+	model     string
+	provider  string
+	raw       string
+}
+
+// logFilters holds optional filter criteria for log line matching.
+// All fields are optional; empty values mean "match all".
+type logFilters struct {
+	level   string
+	keyword string
+	apiKey  string
+	model   string
+}
+
+// parseLogLine extracts structured fields from a raw log line.
+// Expected format:
+//
+//	[timestamp] [request_id] [level] [file:line] message key=value ...
+//	[timestamp] [request_id] [level] message key=value ...
+func parseLogLine(raw string) logLineFields {
+	f := logLineFields{raw: raw}
+	if len(raw) < 2 || raw[0] != '[' {
+		return f
+	}
+
+	// Find bracket-delimited fields: [timestamp] [request_id] [level]
+	brackets := make([]string, 0, 3)
+	rest := raw
+	for i := 0; i < 3; i++ {
+		end := strings.Index(rest, "]")
+		if end < 0 {
+			break
+		}
+		brackets = append(brackets, rest[1:end])
+		rest = rest[end+1:]
+		if len(rest) > 0 && rest[0] == ' ' {
+			rest = rest[1:]
+		}
+	}
+
+	if len(brackets) >= 3 {
+		f.requestID = strings.TrimSpace(brackets[1])
+		f.level = strings.TrimSpace(brackets[2])
+	}
+
+	// Extract model and provider from trailing key=value fields
+	idx := strings.LastIndex(raw, " model=")
+	if idx >= 0 {
+		val := raw[idx+len(" model="):]
+		if end := strings.IndexByte(val, ' '); end >= 0 {
+			val = val[:end]
+		}
+		f.model = val
+	}
+	idx = strings.LastIndex(raw, " provider=")
+	if idx >= 0 {
+		val := raw[idx+len(" provider="):]
+		if end := strings.IndexByte(val, ' '); end >= 0 {
+			val = val[:end]
+		}
+		f.provider = val
+	}
+
+	return f
+}
+
+// matches reports whether the parsed log line satisfies all active filters.
+func (f logFilters) matches(line logLineFields) bool {
+	if f.level != "" && !strings.EqualFold(line.level, f.level) {
+		return false
+	}
+	if f.keyword != "" && !strings.Contains(strings.ToLower(line.raw), strings.ToLower(f.keyword)) {
+		return false
+	}
+	if f.apiKey != "" && !strings.Contains(strings.ToLower(line.raw), strings.ToLower(f.apiKey)) {
+		return false
+	}
+	if f.model != "" && !strings.EqualFold(line.model, f.model) {
+		return false
+	}
+	return true
+}
+
 type logAccumulator struct {
 	cutoff  int64
 	limit   int
@@ -524,17 +625,23 @@ type logAccumulator struct {
 	total   int
 	latest  int64
 	include bool
+	filters logFilters
 }
 
 func newLogAccumulator(cutoff int64, limit int) *logAccumulator {
+	return newLogAccumulatorWithFilters(cutoff, limit, logFilters{})
+}
+
+func newLogAccumulatorWithFilters(cutoff int64, limit int, filters logFilters) *logAccumulator {
 	capacity := 256
 	if limit > 0 && limit < capacity {
 		capacity = limit
 	}
 	return &logAccumulator{
-		cutoff: cutoff,
-		limit:  limit,
-		lines:  make([]string, 0, capacity),
+		cutoff:  cutoff,
+		limit:   limit,
+		lines:   make([]string, 0, capacity),
+		filters: filters,
 	}
 }
 
@@ -572,16 +679,19 @@ func (acc *logAccumulator) addLine(raw string) {
 	if ts > 0 {
 		acc.include = acc.cutoff == 0 || ts > acc.cutoff
 		if acc.cutoff == 0 || acc.include {
-			acc.append(line)
+			acc.appendFiltered(line)
 		}
 		return
 	}
 	if acc.cutoff == 0 || acc.include {
-		acc.append(line)
+		acc.appendFiltered(line)
 	}
 }
 
-func (acc *logAccumulator) append(line string) {
+func (acc *logAccumulator) appendFiltered(line string) {
+	if !acc.filters.matches(parseLogLine(line)) {
+		return
+	}
 	acc.lines = append(acc.lines, line)
 	if acc.limit > 0 && len(acc.lines) > acc.limit {
 		acc.lines = acc.lines[len(acc.lines)-acc.limit:]
