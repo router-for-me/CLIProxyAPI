@@ -1774,17 +1774,21 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options, model string, req
 			}
 		}
 	}
-	body := opts.OriginalRequest
-	format := opts.SourceFormat.String()
-	if len(body) == 0 {
-		body = req.Payload
-		if requestFormat := strings.TrimSpace(req.Format.String()); requestFormat != "" {
-			format = requestFormat
-		}
+	if effort := extractReasoningEffortWithFallback(opts.OriginalRequest, opts.SourceFormat.String(), model); effort != "" {
+		return effort
 	}
+	format := req.Format.String()
+	if strings.TrimSpace(format) == "" {
+		format = opts.SourceFormat.String()
+	}
+	return extractReasoningEffortWithFallback(req.Payload, format, model)
+}
+
+func extractReasoningEffortWithFallback(body []byte, format string, model string) string {
 	if len(body) == 0 {
 		return ""
 	}
+	format = strings.TrimSpace(format)
 	effort := thinking.ExtractReasoningEffort(body, format, model)
 	if effort != "" || (format != "" && !strings.EqualFold(format, "unknown")) {
 		return effort
