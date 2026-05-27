@@ -149,6 +149,93 @@ func TestCodexAutoExecutorPreferUpstreamWebsocketUsesWebsocketTransport(t *testi
 	}
 }
 
+func TestCodexAutoExecutorPreferUpstreamWebsocketStreamTranslatesOpenAIResponses(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("request path = %s, want /responses", r.URL.Path)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read upstream websocket message: %v", err)
+		}
+		if msgType != websocket.TextMessage {
+			t.Fatalf("message type = %d, want text", msgType)
+		}
+		capturedPayload <- bytes.Clone(payload)
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "sk-test",
+		"base_url":   server.URL,
+		"websockets": "true",
+	}}
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5-codex",
+		Payload: []byte(`{
+			"model":"gpt-5-codex",
+			"input":[
+				{"type":"message","role":"system","content":[{"type":"input_text","text":"Be concise."}]},
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}
+			],
+			"max_output_tokens":128,
+			"temperature":0.2,
+			"context_management":{"compaction":{"type":"auto"}}
+		}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true}
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var payload []byte
+	select {
+	case payload = <-capturedPayload:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.create" {
+		t.Fatalf("upstream type = %s, want response.create; payload=%s", got, payload)
+	}
+	if got := gjson.GetBytes(payload, "input.0.role").String(); got != "developer" {
+		t.Fatalf("upstream input.0.role = %s, want developer; payload=%s", got, payload)
+	}
+	for _, path := range []string{"max_output_tokens", "temperature", "context_management"} {
+		if gjson.GetBytes(payload, path).Exists() {
+			t.Fatalf("upstream %s should be stripped; payload=%s", path, payload)
+		}
+	}
+	if got := gjson.GetBytes(payload, "model").String(); got != "gpt-5-codex" {
+		t.Fatalf("upstream model = %s, want gpt-5-codex; payload=%s", got, payload)
+	}
+	if !gjson.GetBytes(payload, "stream").Bool() {
+		t.Fatalf("upstream stream should be true; payload=%s", payload)
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
