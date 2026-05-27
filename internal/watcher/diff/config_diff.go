@@ -48,6 +48,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
 		changes = append(changes, fmt.Sprintf("disable-image-generation: %v -> %v", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration))
 	}
+	if strings.TrimSpace(oldCfg.GPTImage2BaseModel) != strings.TrimSpace(newCfg.GPTImage2BaseModel) {
+		changes = append(changes, fmt.Sprintf("gpt-image-2-base-model: %s -> %s", strings.TrimSpace(oldCfg.GPTImage2BaseModel), strings.TrimSpace(newCfg.GPTImage2BaseModel)))
+	}
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}
