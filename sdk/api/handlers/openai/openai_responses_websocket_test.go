@@ -1603,6 +1603,30 @@ func TestNormalizeResponsesWebsocketRequestDropsDuplicateFunctionCallsByCallID(t
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestDropsDuplicateInputItemsByID(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1","role":"user"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"}
+	]`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call","id":"fc-1","call_id":"call-2","name":"tool"},{"type":"function_call_output","id":"tool-out-1","call_id":"call-2"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("merged input len = %d, want 3: %s", len(items), normalized)
+	}
+	if items[0].Get("id").String() != "msg-1" ||
+		items[1].Get("id").String() != "fc-1" ||
+		items[1].Get("call_id").String() != "call-2" ||
+		items[2].Get("id").String() != "tool-out-1" {
+		t.Fatalf("unexpected merged input order: %s", normalized)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestTreatsCustomToolTranscriptReplacementAsReset(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"},{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"apply_patch"},{"type":"custom_tool_call_output","id":"tool-out-1","call_id":"call-1"},{"type":"message","id":"assistant-1","role":"assistant"}]}`)
 	lastResponseOutput := []byte(`[
@@ -1651,6 +1675,22 @@ func TestNormalizeResponsesWebsocketRequestDropsDuplicateCustomToolCallsByCallID
 		items[1].Get("id").String() != "tool-out-1" ||
 		items[2].Get("id").String() != "msg-2" {
 		t.Fatalf("unexpected merged input order: %s", normalized)
+	}
+}
+
+func TestDedupeResponsesWebsocketInputItemsByIDAfterRepair(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"tool"},{"type":"custom_tool_call","id":"ctc-1","call_id":"call-2","name":"tool"},{"type":"custom_tool_call_output","id":"tool-out-1","call_id":"call-2"}]}`)
+
+	deduped := dedupeResponsesWebsocketInputItemsByID(payload)
+
+	items := gjson.GetBytes(deduped, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("deduped input len = %d, want 2: %s", len(items), deduped)
+	}
+	if items[0].Get("id").String() != "ctc-1" ||
+		items[0].Get("call_id").String() != "call-2" ||
+		items[1].Get("id").String() != "tool-out-1" {
+		t.Fatalf("unexpected deduped input: %s", deduped)
 	}
 }
 
