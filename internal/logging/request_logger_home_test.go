@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,57 @@ func (c *stubHomeRequestLogClient) HeartbeatOK() bool { return c.heartbeatOK }
 func (c *stubHomeRequestLogClient) RPushRequestLog(_ context.Context, payload []byte) error {
 	c.pushed = append(c.pushed, bytes.Clone(payload))
 	return nil
+}
+
+func assertFileBodySourceCleaned(t *testing.T, partPaths []string) {
+	t.Helper()
+
+	dirs := make(map[string]struct{}, len(partPaths))
+	for _, path := range partPaths {
+		if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+			t.Fatalf("expected part %s to be removed, stat err=%v", path, errStat)
+		}
+		dirs[filepath.Dir(path)] = struct{}{}
+	}
+	for dir := range dirs {
+		if _, errStat := os.Stat(dir); !os.IsNotExist(errStat) {
+			t.Fatalf("expected part dir %s to be removed, stat err=%v", dir, errStat)
+		}
+	}
+}
+
+func TestFileBodySource_RecreatesPartDirAfterManualCleanup(t *testing.T) {
+	logsDir := t.TempDir()
+	source, errSource := NewFileBodySourceInDir(logsDir, "websocket-timeline-test")
+	if errSource != nil {
+		t.Fatalf("NewFileBodySourceInDir: %v", errSource)
+	}
+	if errAppend := source.AppendPart([]byte("before manual cleanup")); errAppend != nil {
+		t.Fatalf("AppendPart before cleanup: %v", errAppend)
+	}
+	if errRemove := os.RemoveAll(logsDir); errRemove != nil {
+		t.Fatalf("RemoveAll logs dir: %v", errRemove)
+	}
+	if errAppend := source.AppendPart([]byte("after manual cleanup")); errAppend != nil {
+		t.Fatalf("AppendPart after cleanup: %v", errAppend)
+	}
+
+	raw, errBytes := source.Bytes()
+	if errBytes != nil {
+		t.Fatalf("Bytes after cleanup: %v", errBytes)
+	}
+	if bytes.Contains(raw, []byte("before manual cleanup")) {
+		t.Fatalf("expected manually removed part to be skipped, got %q", string(raw))
+	}
+	if !bytes.Contains(raw, []byte("after manual cleanup")) {
+		t.Fatalf("expected recreated part content, got %q", string(raw))
+	}
+
+	partPaths := source.Paths()
+	if errCleanup := source.Cleanup(); errCleanup != nil {
+		t.Fatalf("Cleanup: %v", errCleanup)
+	}
+	assertFileBodySourceCleaned(t, partPaths)
 }
 
 func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.T) {
@@ -143,11 +195,7 @@ func TestFileRequestLogger_LogRequestWithSourcesWritesLocalLogAndCleansParts(t *
 		t.Fatalf("LogRequestWithOptionsAndSources error: %v", errLog)
 	}
 
-	for _, path := range partPaths {
-		if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
-			t.Fatalf("expected part %s to be removed, stat err=%v", path, errStat)
-		}
-	}
+	assertFileBodySourceCleaned(t, partPaths)
 
 	entries, errRead := os.ReadDir(logsDir)
 	if errRead != nil {
@@ -245,11 +293,7 @@ func TestFileRequestLogger_HomeEnabled_ForwardsSourceLogAndCleansParts(t *testin
 	if !strings.Contains(got.RequestLog, "Event: websocket.request") {
 		t.Fatalf("forwarded request_log missing websocket request: %s", got.RequestLog)
 	}
-	for _, path := range partPaths {
-		if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
-			t.Fatalf("expected part %s to be removed, stat err=%v", path, errStat)
-		}
-	}
+	assertFileBodySourceCleaned(t, partPaths)
 }
 
 func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) {
