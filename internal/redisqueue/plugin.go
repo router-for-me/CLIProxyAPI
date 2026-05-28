@@ -78,6 +78,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	detail := requestDetail{
 		Timestamp:       timestamp,
 		LatencyMs:       record.Latency.Milliseconds(),
+		TTFTMs:          record.TTFT.Milliseconds(),
 		Source:          record.Source,
 		AuthIndex:       record.AuthIndex,
 		Tokens:          tokens,
@@ -118,6 +119,7 @@ type queuedUsageDetail struct {
 type requestDetail struct {
 	Timestamp       time.Time   `json:"timestamp"`
 	LatencyMs       int64       `json:"latency_ms"`
+	TTFTMs          int64       `json:"ttft_ms"`
 	Source          string      `json:"source"`
 	AuthIndex       string      `json:"auth_index"`
 	Tokens          tokenStats  `json:"tokens"`
