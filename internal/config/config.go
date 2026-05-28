@@ -81,6 +81,11 @@ type Config struct {
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 
+	// AuthRefreshJitterMinutes adds a per-credential random jitter (0..N minutes) to refresh
+	// scheduling. Spreads simultaneous refreshes when many credentials share similar expiry
+	// times (e.g. after bulk onboarding). When <= 0, no jitter is applied.
+	AuthRefreshJitterMinutes int `yaml:"auth-refresh-jitter-minutes" json:"auth-refresh-jitter-minutes"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
