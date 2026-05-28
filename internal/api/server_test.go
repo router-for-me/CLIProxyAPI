@@ -169,6 +169,7 @@ func TestInjectManagementConfigVersionGuardPatchesAuthIndexStats(t *testing.T) {
 		string(managementPanelAIProviderStatusBlocksNeedle) +
 		string(managementPanelGroupedProviderStatsNeedle) +
 		string(managementPanelOpenAIProviderStatsNeedle) +
+		string(managementPanelVertexProviderStatsNeedle) +
 		`</script></body></html>`)
 
 	out := injectManagementConfigVersionGuard(html)
@@ -182,6 +183,7 @@ func TestInjectManagementConfigVersionGuardPatchesAuthIndexStats(t *testing.T) {
 		string(managementPanelAIProviderStatusBlocksNeedle),
 		string(managementPanelGroupedProviderStatsNeedle),
 		string(managementPanelOpenAIProviderStatsNeedle),
+		string(managementPanelVertexProviderStatsNeedle),
 	} {
 		if strings.Contains(body, oldFragment) {
 			t.Fatalf("expected auth-index stats fragment to be patched, still found %q in %s", oldFragment, body)
@@ -194,6 +196,7 @@ func TestInjectManagementConfigVersionGuardPatchesAuthIndexStats(t *testing.T) {
 		"o.set(e,$p(t.blocks",
 		"wm(n.apiKey,t,n.prefix,n.authIndex??n.auth_index)",
 		"e?.authIndex??e?.auth_index",
+		"wm(e.apiKey,t,e.prefix,e.authIndex??e.auth_index)",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("expected patched auth-index stats fragment %q in %s", expected, body)

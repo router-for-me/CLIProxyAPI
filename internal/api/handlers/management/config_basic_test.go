@@ -138,9 +138,22 @@ func TestGetConfigIncludesAPIKeyAuthIndex(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{
+			APIKey:  "sk-shared",
+			BaseURL: "https://gemini.example.com",
+		}},
+		CodexKey: []config.CodexKey{{
+			APIKey:  "sk-shared",
+			BaseURL: "https://codex.example.com",
+		}},
 		ClaudeKey: []config.ClaudeKey{{
 			APIKey:  "sk-shared",
 			BaseURL: "https://claude.example.com",
+		}},
+		VertexCompatAPIKey: []config.VertexCompatKey{{
+			APIKey:   "sk-shared",
+			BaseURL:  "https://vertex.example.com",
+			ProxyURL: "http://proxy.example.com",
 		}},
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:    "kimi",
@@ -152,9 +165,31 @@ func TestGetConfigIncludesAPIKeyAuthIndex(t *testing.T) {
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
+	geminiID, _ := idGen.Next("gemini:apikey", "sk-shared", "https://gemini.example.com")
+	codexID, _ := idGen.Next("codex:apikey", "sk-shared", "https://codex.example.com")
 	claudeID, _ := idGen.Next("claude:apikey", "sk-shared", "https://claude.example.com")
+	vertexID, _ := idGen.Next("vertex:apikey", "sk-shared", "https://vertex.example.com", "http://proxy.example.com")
 	openAIID, _ := idGen.Next("openai-compatibility:kimi", "sk-shared", "https://api.kimi.com/v1", "")
 	manager := coreauth.NewManager(nil, nil, nil)
+	registerConfigAuth := func(id, provider, baseURL, proxyURL string, attrs map[string]string) {
+		t.Helper()
+		if attrs == nil {
+			attrs = map[string]string{}
+		}
+		attrs["api_key"] = "sk-shared"
+		attrs["base_url"] = baseURL
+		if _, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID:         id,
+			Provider:   provider,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+		}); err != nil {
+			t.Fatalf("register %s auth: %v", provider, err)
+		}
+	}
+	registerConfigAuth(geminiID, "gemini", "https://gemini.example.com", "", nil)
+	registerConfigAuth(codexID, "codex", "https://codex.example.com", "", nil)
+	registerConfigAuth(vertexID, "vertex", "https://vertex.example.com", "http://proxy.example.com", nil)
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
 		ID:       claudeID,
 		Provider: "claude",
@@ -192,6 +227,15 @@ func TestGetConfigIncludesAPIKeyAuthIndex(t *testing.T) {
 		ClaudeAPIKey []struct {
 			AuthIndex string `json:"auth-index"`
 		} `json:"claude-api-key"`
+		GeminiAPIKey []struct {
+			AuthIndex string `json:"auth-index"`
+		} `json:"gemini-api-key"`
+		CodexAPIKey []struct {
+			AuthIndex string `json:"auth-index"`
+		} `json:"codex-api-key"`
+		VertexAPIKey []struct {
+			AuthIndex string `json:"auth-index"`
+		} `json:"vertex-api-key"`
 		OpenAICompatibility []struct {
 			APIKeyEntries []struct {
 				AuthIndex string `json:"auth-index"`
@@ -201,16 +245,34 @@ func TestGetConfigIncludesAPIKeyAuthIndex(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode config response: %v", err)
 	}
+	geminiIndex := body.GeminiAPIKey[0].AuthIndex
+	codexIndex := body.CodexAPIKey[0].AuthIndex
 	claudeIndex := body.ClaudeAPIKey[0].AuthIndex
+	vertexIndex := body.VertexAPIKey[0].AuthIndex
 	openAIIndex := body.OpenAICompatibility[0].APIKeyEntries[0].AuthIndex
+	for name, index := range map[string]string{
+		"gemini":            geminiIndex,
+		"codex":             codexIndex,
+		"claude":            claudeIndex,
+		"vertex":            vertexIndex,
+		"openai-compatible": openAIIndex,
+	} {
+		if index == "" {
+			t.Fatalf("expected %s auth-index in full config response", name)
+		}
+	}
 	if claudeIndex == "" {
 		t.Fatal("expected claude auth-index in full config response")
 	}
 	if openAIIndex == "" {
 		t.Fatal("expected openai-compatible auth-index in full config response")
 	}
-	if claudeIndex == openAIIndex {
-		t.Fatalf("expected same api key across channels to have distinct auth indexes, got %q", claudeIndex)
+	indexes := map[string]struct{}{}
+	for _, index := range []string{geminiIndex, codexIndex, claudeIndex, vertexIndex, openAIIndex} {
+		if _, exists := indexes[index]; exists {
+			t.Fatalf("expected same api key across channels to have distinct auth indexes, duplicate %q", index)
+		}
+		indexes[index] = struct{}{}
 	}
 }
 

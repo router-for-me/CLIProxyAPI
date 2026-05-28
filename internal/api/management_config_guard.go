@@ -42,6 +42,9 @@ var (
 
 	managementPanelOpenAIProviderStatsNeedle      = []byte("Jg=(e,t,n,r)=>{let i=e.apiKeyEntries?.length??0,a=(e.apiKeyEntries??[]).filter(e=>!e.disabled).length,o=(e.apiKeyEntries??[]).filter(e=>e.disabled).length,s=new Set;return Zp({prefix:e.prefix}).forEach(e=>s.add(e)),(e.apiKeyEntries||[]).forEach(e=>{Zp({apiKey:e.apiKey}).forEach(e=>s.add(e))}),{primaryIndex:t,title:e.name||e.prefix||Dm(e.baseUrl)||`OpenAI #${t+1}`,baseUrl:Dm(e.baseUrl),keyCount:i,enabledKeyCount:a,disabledKeyCount:o,modelCount:e.models?.length??0,statusData:em(r,Array.from(s)),success:Tm(e.apiKeyEntries,n,e.prefix).success,failure:Tm(e.apiKeyEntries,n,e.prefix).failure,enabled:i===0||a>0}},Yg=")
 	managementPanelOpenAIProviderStatsReplacement = []byte("Jg=(e,t,n,r)=>{let i=e.apiKeyEntries?.length??0,a=(e.apiKeyEntries??[]).filter(e=>!e.disabled).length,o=(e.apiKeyEntries??[]).filter(e=>e.disabled).length,s=new Set,c=!1;return (e.apiKeyEntries||[]).forEach(e=>{let t=String(e?.authIndex??e?.auth_index??``).trim();t?(s.add(t),c=!0):Zp({apiKey:e.apiKey}).forEach(e=>s.add(e))}),c||Zp({prefix:e.prefix}).forEach(e=>s.add(e)),{primaryIndex:t,title:e.name||e.prefix||Dm(e.baseUrl)||`OpenAI #${t+1}`,baseUrl:Dm(e.baseUrl),keyCount:i,enabledKeyCount:a,disabledKeyCount:o,modelCount:e.models?.length??0,statusData:em(r,Array.from(s)),success:Tm(e.apiKeyEntries,n,e.prefix).success,failure:Tm(e.apiKeyEntries,n,e.prefix).failure,enabled:i===0||a>0}},Yg=")
+
+	managementPanelVertexProviderStatsNeedle      = []byte("let i=wm(e.apiKey,t,e.prefix),a=Ip(e.excludedModels),o=e.excludedModels??[],s=Em(i),c=em(n,Zp({apiKey:e.apiKey,prefix:e.prefix})),")
+	managementPanelVertexProviderStatsReplacement = []byte("let i=wm(e.apiKey,t,e.prefix,e.authIndex??e.auth_index),a=Ip(e.excludedModels),o=e.excludedModels??[],s=Em(i),c=em(n,String(e.authIndex??e.auth_index??``).trim()?[String(e.authIndex??e.auth_index??``).trim()]:Zp({apiKey:e.apiKey,prefix:e.prefix})),")
 )
 
 func managementConfigVersionGuardScript(initialVersion string) []byte {
@@ -333,6 +336,7 @@ func patchManagementPanelAuthIndexStats(data []byte) []byte {
 		{managementPanelAIProviderStatusBlocksNeedle, managementPanelAIProviderStatusBlocksReplacement},
 		{managementPanelGroupedProviderStatsNeedle, managementPanelGroupedProviderStatsReplacement},
 		{managementPanelOpenAIProviderStatsNeedle, managementPanelOpenAIProviderStatsReplacement},
+		{managementPanelVertexProviderStatsNeedle, managementPanelVertexProviderStatsReplacement},
 	}
 	for _, replacement := range replacements {
 		data = bytes.ReplaceAll(data, replacement[0], replacement[1])
