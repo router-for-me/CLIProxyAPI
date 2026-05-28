@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -47,6 +48,32 @@ type codexImageCallResult struct {
 	Size          string
 	Background    string
 	Quality       string
+}
+
+var (
+	codexOpenAIImageHTTP11Transport     *http.Transport
+	codexOpenAIImageHTTP11TransportOnce sync.Once
+)
+
+func initCodexOpenAIImageHTTP11Transport() {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	codexOpenAIImageHTTP11Transport = cloneTransportWithHTTP11(base)
+}
+
+func newCodexOpenAIImageHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	if client.Transport == nil {
+		codexOpenAIImageHTTP11TransportOnce.Do(initCodexOpenAIImageHTTP11Transport)
+		client.Transport = codexOpenAIImageHTTP11Transport
+		return client
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		client.Transport = cloneTransportWithHTTP11(transport)
+	}
+	return client
 }
 
 func isCodexOpenAIImageRequest(opts cliproxyexecutor.Options) bool {
@@ -122,7 +149,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newCodexOpenAIImageHTTPClient(ctx, e.cfg, auth, 0)
 	for attempt := 0; attempt < codexOpenAIImageMaxAttempts; attempt++ {
 		httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)
 		if errCache != nil {
@@ -224,7 +251,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newCodexOpenAIImageHTTPClient(ctx, e.cfg, auth, 0)
 	var httpResp *http.Response
 	for attempt := 0; attempt < codexOpenAIImageMaxAttempts; attempt++ {
 		httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)

@@ -58,6 +58,50 @@ func TestCodexOpenAIImageRetriesIncompleteNonStreamResponse(t *testing.T) {
 	}
 }
 
+func TestCodexOpenAIImageClientForcesHTTP11(t *testing.T) {
+	protoCh := make(chan string, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("path = %q, want /responses", r.URL.Path)
+		}
+		protoCh <- r.Proto
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"created_at\":1,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aGVsbG8=\",\"output_format\":\"png\"}]}}\n\n")
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	executor := NewCodexExecutor(nil)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"draw","response_format":"b64_json"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString(codexOpenAIImageSourceFormat),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: codexImagesGenerationsPath,
+		},
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", server.Client().Transport)
+
+	if _, err := executor.executeOpenAIImage(ctx, auth, req, opts); err != nil {
+		t.Fatalf("executeOpenAIImage() error = %v", err)
+	}
+	select {
+	case proto := <-protoCh:
+		if proto != "HTTP/1.1" {
+			t.Fatalf("protocol = %q, want HTTP/1.1", proto)
+		}
+	default:
+		t.Fatal("server did not record request protocol")
+	}
+}
+
 func TestCodexOpenAIImageStreamStatusErrWrapsHTTP2Reset(t *testing.T) {
 	err := codexOpenAIImageStreamStatusErr(fmt.Errorf("stream ID 13; INTERNAL_ERROR; received from peer"))
 	statusErr, ok := err.(interface{ StatusCode() int })
