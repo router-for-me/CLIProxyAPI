@@ -196,12 +196,6 @@ type Manager struct {
 	// Map key is lowercase provider name; value is a chan struct{} semaphore.
 	providerRefreshSems   map[string]chan struct{}
 	providerRefreshSemsMu sync.RWMutex
-
-	// circuitBreakerThreshold is the consecutive-failure count that opens the circuit.
-	// 0 means use the package default; -1 disables the circuit breaker entirely.
-	circuitBreakerThreshold int
-	// circuitBreakerCooldown is how long an open circuit stays open before half-open retry.
-	circuitBreakerCooldown time.Duration
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -405,7 +399,6 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	m.rebuildProviderRefreshSems(cfg)
-	m.rebuildCircuitBreakerConfig(cfg)
 }
 
 const defaultMaxConcurrentRefreshPerProvider = 3
@@ -455,39 +448,25 @@ const (
 	defaultCircuitBreakerCooldownMinutes = 10
 )
 
-// rebuildCircuitBreakerConfig reads circuit breaker settings from cfg.
-// threshold == -1 disables the circuit breaker; 0 keeps the package default.
-func (m *Manager) rebuildCircuitBreakerConfig(cfg *internalconfig.Config) {
-	if cfg == nil {
-		m.circuitBreakerThreshold = 0
-		m.circuitBreakerCooldown = 0
-		return
-	}
-	m.circuitBreakerThreshold = cfg.AuthCircuitBreakerThreshold
-	if cfg.AuthCircuitBreakerCooldownMinutes > 0 {
-		m.circuitBreakerCooldown = time.Duration(cfg.AuthCircuitBreakerCooldownMinutes) * time.Minute
-	} else {
-		m.circuitBreakerCooldown = 0
-	}
-}
-
 // applyCircuitBreaker checks whether auth has accumulated enough consecutive transient
 // failures to open the circuit. Must be called with m.mu held.
 func (m *Manager) applyCircuitBreaker(auth *Auth, statusCode int, now time.Time) {
 	if auth == nil || m == nil {
 		return
 	}
-	// -1 or a negative threshold other than the sentinel means disabled.
-	threshold := m.circuitBreakerThreshold
-	if threshold < 0 {
-		return
-	}
-	if threshold == 0 {
-		threshold = defaultCircuitBreakerThreshold
-	}
-	cooldown := m.circuitBreakerCooldown
-	if cooldown <= 0 {
-		cooldown = defaultCircuitBreakerCooldownMinutes * time.Minute
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	threshold := defaultCircuitBreakerThreshold
+	cooldown := defaultCircuitBreakerCooldownMinutes * time.Minute
+	if cfg != nil {
+		if cfg.AuthCircuitBreakerThreshold < 0 {
+			return // disabled
+		}
+		if cfg.AuthCircuitBreakerThreshold > 0 {
+			threshold = cfg.AuthCircuitBreakerThreshold
+		}
+		if cfg.AuthCircuitBreakerCooldownMinutes > 0 {
+			cooldown = time.Duration(cfg.AuthCircuitBreakerCooldownMinutes) * time.Minute
+		}
 	}
 
 	switch statusCode {
