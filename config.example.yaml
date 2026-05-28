@@ -270,6 +270,10 @@ nonstream-keepalive-interval: 0
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers
+# Kimi has two common upstream surfaces: OpenAI-compatible /chat/completions
+# and Coding Agent /v1/messages compatibility. Keep keys in the surface they
+# are valid for; if the same Kimi key is duplicated across openai-compatibility
+# and claude-api-key, disable or remove it in both places when it is exhausted.
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     kind: "newapi" # optional built-in profile: kimi, minimax, zhipu, xfyun, maas, langengyun, newapi

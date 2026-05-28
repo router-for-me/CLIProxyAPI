@@ -49,6 +49,13 @@ spread load more evenly, set `provider-strategies.claude: "spread"`. For
 future OpenAI-compatible providers, set
 `provider-strategies.openai-compatibility: "spread"`.
 
+When mixing Kimi OpenAI-compatible keys with Kimi Coding Agent keys, keep the
+two upstream surfaces separated. Some Kimi Coding keys only work through the
+Claude-compatible `/v1/messages` surface, while ordinary OpenAI-compatible keys
+work through `/chat/completions`. If a key is duplicated in both pools, disable
+or remove it in both places when it is exhausted so routing state and management
+tests do not diverge.
+
 ### Usage Statistics Persistence
 
 Control database persistence for usage statistics:

@@ -49,6 +49,12 @@ routing:
 OpenAI 兼容渠道，也可以通过
 `provider-strategies.openai-compatibility: "spread"` 自动继承分散策略。
 
+混用 Kimi OpenAI-compatible key 和 Kimi Coding Agent key 时，要把两类上游
+入口分清楚。有些 Kimi Coding key 只能走 Claude-compatible `/v1/messages`
+入口，普通 OpenAI-compatible key 才走 `/chat/completions`。如果同一个 key
+同时放在两个池子里，额度耗尽或失效时需要在两边同时禁用或移除，避免路由
+状态和管理面板测试结果分叉。
+
 ### 使用量统计持久化
 
 控制使用量统计的数据库持久化：
