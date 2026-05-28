@@ -86,6 +86,11 @@ type Config struct {
 	// times (e.g. after bulk onboarding). When <= 0, no jitter is applied.
 	AuthRefreshJitterMinutes int `yaml:"auth-refresh-jitter-minutes" json:"auth-refresh-jitter-minutes"`
 
+	// AuthMaxConcurrentRefreshPerProvider limits how many token refresh operations can run
+	// simultaneously for the same provider. Prevents bursts of refreshes from overwhelming
+	// provider token endpoints. When <= 0, the default (3) is used.
+	AuthMaxConcurrentRefreshPerProvider int `yaml:"auth-max-concurrent-refresh-per-provider" json:"auth-max-concurrent-refresh-per-provider"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
