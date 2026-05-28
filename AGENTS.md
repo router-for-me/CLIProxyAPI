@@ -22,6 +22,22 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Auth material defaults under `auths/`
 - Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)
 
+### Auth refresh config keys (added in patch series)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auth-refresh-jitter-minutes` | int | `0` (off) | Spreads refresh scheduling by up to N minutes per credential using a stable FNV-64a hash of the auth ID. Prevents all credentials provisioned at the same time from refreshing simultaneously. |
+| `auth-max-concurrent-refresh-per-provider` | int | `3` | Limits simultaneous token refreshes to the same upstream provider. Prevents thundering-herd on provider token endpoints when many credentials expire around the same time. |
+| `auth-circuit-breaker-threshold` | int | `5` | Number of consecutive transient errors (HTTP 408/500/502/503/504) before the circuit opens and `NextRetryAfter` is extended to the cooldown window. Set to `-1` to disable. |
+| `auth-circuit-breaker-cooldown-minutes` | int | `10` | How long an opened circuit keeps the credential on cooldown before it is eligible for retry. |
+
+### Batch credential management endpoints (added in patch series)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v0/management/auth-files/batch-status` | Enable or disable multiple credentials. Accepts `{"names": [...], "disabled": true}` (uniform) or `[{"name": "...", "disabled": false}]` (per-item). Returns `{"updated": N, "failed": [...]}`. |
+| `POST` | `/v0/management/auth-files/batch-clear-errors` | Reset error/unavailable state on multiple credentials. Accepts `{"names": [...], "provider": "claude"}`. Returns `{"cleared": N}`. Useful after provider outages to unblock credentials without waiting for backoff. |
+
 ## Architecture
 - `cmd/server/` — Server entrypoint
 - `internal/api/` — Gin HTTP API (routes, middleware, modules)
