@@ -196,6 +196,12 @@ type Manager struct {
 	// Map key is lowercase provider name; value is a chan struct{} semaphore.
 	providerRefreshSems   map[string]chan struct{}
 	providerRefreshSemsMu sync.RWMutex
+
+	// circuitBreakerThreshold is the consecutive-failure count that opens the circuit.
+	// 0 means use the package default; -1 disables the circuit breaker entirely.
+	circuitBreakerThreshold int
+	// circuitBreakerCooldown is how long an open circuit stays open before half-open retry.
+	circuitBreakerCooldown time.Duration
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -399,6 +405,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	m.rebuildProviderRefreshSems(cfg)
+	m.rebuildCircuitBreakerConfig(cfg)
 }
 
 const defaultMaxConcurrentRefreshPerProvider = 3
@@ -441,6 +448,66 @@ func (m *Manager) providerRefreshSem(provider string) chan struct{} {
 	sem := m.providerRefreshSems[strings.ToLower(provider)]
 	m.providerRefreshSemsMu.RUnlock()
 	return sem
+}
+
+const (
+	defaultCircuitBreakerThreshold       = 5
+	defaultCircuitBreakerCooldownMinutes = 10
+)
+
+// rebuildCircuitBreakerConfig reads circuit breaker settings from cfg.
+// threshold == -1 disables the circuit breaker; 0 keeps the package default.
+func (m *Manager) rebuildCircuitBreakerConfig(cfg *internalconfig.Config) {
+	if cfg == nil {
+		m.circuitBreakerThreshold = 0
+		m.circuitBreakerCooldown = 0
+		return
+	}
+	m.circuitBreakerThreshold = cfg.AuthCircuitBreakerThreshold
+	if cfg.AuthCircuitBreakerCooldownMinutes > 0 {
+		m.circuitBreakerCooldown = time.Duration(cfg.AuthCircuitBreakerCooldownMinutes) * time.Minute
+	} else {
+		m.circuitBreakerCooldown = 0
+	}
+}
+
+// applyCircuitBreaker checks whether auth has accumulated enough consecutive transient
+// failures to open the circuit. Must be called with m.mu held.
+func (m *Manager) applyCircuitBreaker(auth *Auth, statusCode int, now time.Time) {
+	if auth == nil || m == nil {
+		return
+	}
+	// -1 or a negative threshold other than the sentinel means disabled.
+	threshold := m.circuitBreakerThreshold
+	if threshold < 0 {
+		return
+	}
+	if threshold == 0 {
+		threshold = defaultCircuitBreakerThreshold
+	}
+	cooldown := m.circuitBreakerCooldown
+	if cooldown <= 0 {
+		cooldown = defaultCircuitBreakerCooldownMinutes * time.Minute
+	}
+
+	switch statusCode {
+	case 408, 500, 502, 503, 504:
+		// transient — count toward circuit breaker
+	default:
+		// non-transient error: reset counter so isolated 401/429 doesn't accumulate
+		auth.ConsecutiveTransientFailures = 0
+		return
+	}
+
+	auth.ConsecutiveTransientFailures++
+	if auth.ConsecutiveTransientFailures >= threshold {
+		next := now.Add(cooldown)
+		if auth.NextRetryAfter.IsZero() || auth.NextRetryAfter.Before(next) {
+			auth.NextRetryAfter = next
+			log.Warnf("circuit breaker opened: %s/%s after %d consecutive transient failures, retry after %s",
+				auth.Provider, auth.ID, auth.ConsecutiveTransientFailures, next.Format(time.RFC3339))
+		}
+	}
 }
 
 // HomeEnabled reports whether the home control plane integration is enabled in the runtime config.
@@ -2335,11 +2402,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 				}
+				auth.ConsecutiveTransientFailures = 0
 				auth.UpdatedAt = now
 				shouldResumeModel = true
 				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
+				auth.ConsecutiveTransientFailures = 0
 			}
 		} else {
 			if result.Model != "" {
@@ -2432,9 +2501,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
+					m.applyCircuitBreaker(auth, statusCodeFromResult(result.Error), now)
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				m.applyCircuitBreaker(auth, statusCodeFromResult(result.Error), now)
 			}
 		}
 

@@ -91,6 +91,15 @@ type Config struct {
 	// provider token endpoints. When <= 0, the default (3) is used.
 	AuthMaxConcurrentRefreshPerProvider int `yaml:"auth-max-concurrent-refresh-per-provider" json:"auth-max-concurrent-refresh-per-provider"`
 
+	// AuthCircuitBreakerThreshold is the number of consecutive transient errors (5xx/408)
+	// required before a credential's circuit is opened. When <= 0, the default (5) is used.
+	// Set to -1 to disable the circuit breaker entirely.
+	AuthCircuitBreakerThreshold int `yaml:"auth-circuit-breaker-threshold" json:"auth-circuit-breaker-threshold"`
+
+	// AuthCircuitBreakerCooldownMinutes is how long (in minutes) to hold a credential in the
+	// open-circuit state before allowing it to be retried. When <= 0, the default (10) is used.
+	AuthCircuitBreakerCooldownMinutes int `yaml:"auth-circuit-breaker-cooldown-minutes" json:"auth-circuit-breaker-cooldown-minutes"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
