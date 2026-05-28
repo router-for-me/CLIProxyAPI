@@ -31,7 +31,27 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, new(*h.cfg))
+	c.JSON(200, h.configWithAuthIndex())
+}
+
+func (h *Handler) configWithAuthIndex() gin.H {
+	out := gin.H{}
+	if h == nil || h.cfg == nil {
+		return out
+	}
+	data, err := json.Marshal(h.cfg)
+	if err != nil {
+		return out
+	}
+	if err = json.Unmarshal(data, &out); err != nil {
+		return gin.H{}
+	}
+	out["gemini-api-key"] = h.geminiKeysWithAuthIndex()
+	out["codex-api-key"] = h.codexKeysWithAuthIndex()
+	out["claude-api-key"] = h.claudeKeysWithAuthIndex()
+	out["vertex-api-key"] = h.vertexCompatKeysWithAuthIndex()
+	out["openai-compatibility"] = h.openAICompatibilityWithAuthIndex()
+	return out
 }
 
 type releaseInfo struct {

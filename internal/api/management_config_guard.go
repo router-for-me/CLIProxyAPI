@@ -21,6 +21,29 @@ var (
 	managementPanelDisabledKeyGroupingReplacement = []byte(`excludedModels:kg(Lp(t.excludedModels))`)
 )
 
+var (
+	managementPanelAPIKeyAuthIndexNeedle      = []byte("let i={apiKey:r},a=t?.priority??t?.priority;")
+	managementPanelAPIKeyAuthIndexReplacement = []byte("let i={apiKey:r},h=Ud(t?.[`auth-index`]??t?.authIndex??t?.auth_index);h&&(i.authIndex=h);let a=t?.priority??t?.priority;")
+
+	managementPanelOpenAIKeyAuthIndexNeedle      = []byte("return{apiKey:r,proxyUrl:i?String(i):void 0,headers:a,disabled:o??!1}}")
+	managementPanelOpenAIKeyAuthIndexReplacement = []byte("return{apiKey:r,proxyUrl:i?String(i):void 0,headers:a,disabled:o??!1,authIndex:Ud(t?.[`auth-index`]??t?.authIndex??t?.auth_index)}}")
+
+	managementPanelOpenAIProviderAuthIndexNeedle      = []byte("let l={name:String(t),baseUrl:String(n),apiKeyEntries:r},u=Ud(e.prefix??e.prefix);")
+	managementPanelOpenAIProviderAuthIndexReplacement = []byte("let l={name:String(t),baseUrl:String(n),apiKeyEntries:r},d=Ud(e[`auth-index`]??e.authIndex??e.auth_index);d&&(l.authIndex=d);let u=Ud(e.prefix??e.prefix);")
+
+	managementPanelAIProviderStatsNeedle      = []byte("wm=(e,t,n)=>{let r=t.bySource??{},i=Zp({apiKey:e,prefix:n});if(!i.length)return{success:0,failure:0};let a=0,o=0;return i.forEach(e=>{let t=r[e];t&&(a+=t.success,o+=t.failure)}),{success:a,failure:o}},Tm=(e,t,n)=>{let r=t.bySource??{},i=new Set;Zp({prefix:n}).forEach(e=>i.add(e)),(e||[]).forEach(e=>{Zp({apiKey:e?.apiKey}).forEach(e=>i.add(e))});let a=0,o=0;return i.forEach(e=>{let t=r[e];t&&(a+=t.success,o+=t.failure)}),{success:a,failure:o}},Em=")
+	managementPanelAIProviderStatsReplacement = []byte("wm=(e,t,n,r)=>{let i=String(r??``).trim(),a=t.byAuthIndex??{};if(i&&a[i])return a[i];let o=t.bySource??{},s=Zp({apiKey:e,prefix:n});if(!s.length)return{success:0,failure:0};let c=0,l=0;return s.forEach(e=>{let t=o[e];t&&(c+=t.success,l+=t.failure)}),{success:c,failure:l}},Tm=(e,t,n)=>{let r=t.byAuthIndex??{},i=0,a=0,o=!1;(e||[]).forEach(e=>{let t=String(e?.authIndex??e?.auth_index??``).trim(),n=t?r[t]:null;n&&(i+=n.success,a+=n.failure,o=!0)});if(o)return{success:i,failure:a};let s=t.bySource??{},c=new Set;Zp({prefix:n}).forEach(e=>c.add(e)),(e||[]).forEach(e=>{Zp({apiKey:e?.apiKey}).forEach(e=>c.add(e))});let l=0,u=0;return c.forEach(e=>{let t=s[e];t&&(l+=t.success,u+=t.failure)}),{success:l,failure:u}},Em=")
+
+	managementPanelAIProviderStatusBlocksNeedle      = []byte("for(let[e,n]of Object.entries(t))s(e,n);for(let[e,t]of Object.entries(n))a[e]={success:t.success,failure:t.failure};return{keyStats:{bySource:i,byAuthIndex:a},statusBarBySource:o}}")
+	managementPanelAIProviderStatusBlocksReplacement = []byte("for(let[e,n]of Object.entries(t))s(e,n);for(let[e,t]of Object.entries(n))a[e]={success:t.success,failure:t.failure},o.set(e,$p(t.blocks,r.window_start_ms,r.duration_ms));return{keyStats:{bySource:i,byAuthIndex:a},statusBarBySource:o}}")
+
+	managementPanelGroupedProviderStatsNeedle      = []byte("qg=(e,t,n)=>{let r=e.configs.reduce((e,n)=>{let r=wm(n.apiKey,t,n.prefix);return e.success+=r.success,e.failure+=r.failure,e},{success:0,failure:0}),i=e.configs.flatMap(e=>Zp({apiKey:e.apiKey,prefix:e.prefix}));return{primaryIndex:e.primaryIndex,title:e.title,baseUrl:Dm(e.baseUrl),keyCount:e.configs.length,modelCount:e.models.length,statusData:em(n,i),success:r.success,failure:r.failure,enabled:e.enabled}},Jg=")
+	managementPanelGroupedProviderStatsReplacement = []byte("qg=(e,t,n)=>{let r=e.configs.reduce((e,n)=>{let r=wm(n.apiKey,t,n.prefix,n.authIndex??n.auth_index);return e.success+=r.success,e.failure+=r.failure,e},{success:0,failure:0}),i=e.configs.flatMap(e=>{let t=String(e.authIndex??e.auth_index??``).trim();return t?[t]:Zp({apiKey:e.apiKey,prefix:e.prefix})});return{primaryIndex:e.primaryIndex,title:e.title,baseUrl:Dm(e.baseUrl),keyCount:e.configs.length,modelCount:e.models.length,statusData:em(n,i),success:r.success,failure:r.failure,enabled:e.enabled}},Jg=")
+
+	managementPanelOpenAIProviderStatsNeedle      = []byte("Jg=(e,t,n,r)=>{let i=e.apiKeyEntries?.length??0,a=(e.apiKeyEntries??[]).filter(e=>!e.disabled).length,o=(e.apiKeyEntries??[]).filter(e=>e.disabled).length,s=new Set;return Zp({prefix:e.prefix}).forEach(e=>s.add(e)),(e.apiKeyEntries||[]).forEach(e=>{Zp({apiKey:e.apiKey}).forEach(e=>s.add(e))}),{primaryIndex:t,title:e.name||e.prefix||Dm(e.baseUrl)||`OpenAI #${t+1}`,baseUrl:Dm(e.baseUrl),keyCount:i,enabledKeyCount:a,disabledKeyCount:o,modelCount:e.models?.length??0,statusData:em(r,Array.from(s)),success:Tm(e.apiKeyEntries,n,e.prefix).success,failure:Tm(e.apiKeyEntries,n,e.prefix).failure,enabled:i===0||a>0}},Yg=")
+	managementPanelOpenAIProviderStatsReplacement = []byte("Jg=(e,t,n,r)=>{let i=e.apiKeyEntries?.length??0,a=(e.apiKeyEntries??[]).filter(e=>!e.disabled).length,o=(e.apiKeyEntries??[]).filter(e=>e.disabled).length,s=new Set,c=!1;return (e.apiKeyEntries||[]).forEach(e=>{let t=String(e?.authIndex??e?.auth_index??``).trim();t?(s.add(t),c=!0):Zp({apiKey:e.apiKey}).forEach(e=>s.add(e))}),c||Zp({prefix:e.prefix}).forEach(e=>s.add(e)),{primaryIndex:t,title:e.name||e.prefix||Dm(e.baseUrl)||`OpenAI #${t+1}`,baseUrl:Dm(e.baseUrl),keyCount:i,enabledKeyCount:a,disabledKeyCount:o,modelCount:e.models?.length??0,statusData:em(r,Array.from(s)),success:Tm(e.apiKeyEntries,n,e.prefix).success,failure:Tm(e.apiKeyEntries,n,e.prefix).failure,enabled:i===0||a>0}},Yg=")
+)
+
 func managementConfigVersionGuardScript(initialVersion string) []byte {
 	initialVersionJSON, err := json.Marshal(strings.TrimSpace(initialVersion))
 	if err != nil {
@@ -271,6 +294,7 @@ func injectManagementConfigVersionGuard(data []byte, initialVersion ...string) [
 	data = removeManagementConfigVersionGuard(data)
 	data = patchManagementPanelKeyTestBatch(data)
 	data = patchManagementPanelDisabledKeyGrouping(data)
+	data = patchManagementPanelAuthIndexStats(data)
 	lower := bytes.ToLower(data)
 	if idx := bytes.LastIndex(lower, []byte("</body>")); idx >= 0 {
 		out := make([]byte, 0, len(data)+len(guardScript))
@@ -298,6 +322,22 @@ func patchManagementPanelDisabledKeyGrouping(data []byte) []byte {
 		managementPanelDisabledKeyGroupingNeedle,
 		managementPanelDisabledKeyGroupingReplacement,
 	)
+}
+
+func patchManagementPanelAuthIndexStats(data []byte) []byte {
+	replacements := [][2][]byte{
+		{managementPanelAPIKeyAuthIndexNeedle, managementPanelAPIKeyAuthIndexReplacement},
+		{managementPanelOpenAIKeyAuthIndexNeedle, managementPanelOpenAIKeyAuthIndexReplacement},
+		{managementPanelOpenAIProviderAuthIndexNeedle, managementPanelOpenAIProviderAuthIndexReplacement},
+		{managementPanelAIProviderStatsNeedle, managementPanelAIProviderStatsReplacement},
+		{managementPanelAIProviderStatusBlocksNeedle, managementPanelAIProviderStatusBlocksReplacement},
+		{managementPanelGroupedProviderStatsNeedle, managementPanelGroupedProviderStatsReplacement},
+		{managementPanelOpenAIProviderStatsNeedle, managementPanelOpenAIProviderStatsReplacement},
+	}
+	for _, replacement := range replacements {
+		data = bytes.ReplaceAll(data, replacement[0], replacement[1])
+	}
+	return data
 }
 
 func removeManagementConfigVersionGuard(data []byte) []byte {

@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -129,6 +130,87 @@ func TestGetConfigYAMLReturnsVersionHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Get(configETagHeader); got == "" {
 		t.Fatalf("expected %s response header", configETagHeader)
+	}
+}
+
+func TestGetConfigIncludesAPIKeyAuthIndex(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:  "sk-shared",
+			BaseURL: "https://claude.example.com",
+		}},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "kimi",
+			BaseURL: "https://api.kimi.com/v1",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+				APIKey: "sk-shared",
+			}},
+		}},
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	claudeID, _ := idGen.Next("claude:apikey", "sk-shared", "https://claude.example.com")
+	openAIID, _ := idGen.Next("openai-compatibility:kimi", "sk-shared", "https://api.kimi.com/v1", "")
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       claudeID,
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "sk-shared",
+			"base_url": "https://claude.example.com",
+		},
+	}); err != nil {
+		t.Fatalf("register claude auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       openAIID,
+		Provider: "kimi",
+		Attributes: map[string]string{
+			"api_key":      "sk-shared",
+			"base_url":     "https://api.kimi.com/v1",
+			"compat_name":  "kimi",
+			"provider_key": "kimi",
+		},
+	}); err != nil {
+		t.Fatalf("register openai-compatible auth: %v", err)
+	}
+
+	h := NewHandler(cfg, writeTestConfigFile(t), manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/config", nil)
+
+	h.GetConfig(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GetConfig status = %d, want %d with body %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		ClaudeAPIKey []struct {
+			AuthIndex string `json:"auth-index"`
+		} `json:"claude-api-key"`
+		OpenAICompatibility []struct {
+			APIKeyEntries []struct {
+				AuthIndex string `json:"auth-index"`
+			} `json:"api-key-entries"`
+		} `json:"openai-compatibility"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode config response: %v", err)
+	}
+	claudeIndex := body.ClaudeAPIKey[0].AuthIndex
+	openAIIndex := body.OpenAICompatibility[0].APIKeyEntries[0].AuthIndex
+	if claudeIndex == "" {
+		t.Fatal("expected claude auth-index in full config response")
+	}
+	if openAIIndex == "" {
+		t.Fatal("expected openai-compatible auth-index in full config response")
+	}
+	if claudeIndex == openAIIndex {
+		t.Fatalf("expected same api key across channels to have distinct auth indexes, got %q", claudeIndex)
 	}
 }
 

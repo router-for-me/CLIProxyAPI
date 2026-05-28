@@ -160,6 +160,47 @@ const jg=(e,t)=>JSON.stringify({provider:e,baseUrl:Tg(e,t.baseUrl),excludedModel
 	}
 }
 
+func TestInjectManagementConfigVersionGuardPatchesAuthIndexStats(t *testing.T) {
+	html := []byte(`<html><body><script type="module">` +
+		string(managementPanelAPIKeyAuthIndexNeedle) +
+		string(managementPanelOpenAIKeyAuthIndexNeedle) +
+		string(managementPanelOpenAIProviderAuthIndexNeedle) +
+		string(managementPanelAIProviderStatsNeedle) +
+		string(managementPanelAIProviderStatusBlocksNeedle) +
+		string(managementPanelGroupedProviderStatsNeedle) +
+		string(managementPanelOpenAIProviderStatsNeedle) +
+		`</script></body></html>`)
+
+	out := injectManagementConfigVersionGuard(html)
+	body := string(out)
+
+	for _, oldFragment := range []string{
+		string(managementPanelAPIKeyAuthIndexNeedle),
+		string(managementPanelOpenAIKeyAuthIndexNeedle),
+		string(managementPanelOpenAIProviderAuthIndexNeedle),
+		string(managementPanelAIProviderStatsNeedle),
+		string(managementPanelAIProviderStatusBlocksNeedle),
+		string(managementPanelGroupedProviderStatsNeedle),
+		string(managementPanelOpenAIProviderStatsNeedle),
+	} {
+		if strings.Contains(body, oldFragment) {
+			t.Fatalf("expected auth-index stats fragment to be patched, still found %q in %s", oldFragment, body)
+		}
+	}
+	for _, expected := range []string{
+		"i.authIndex=h",
+		"authIndex:Ud",
+		"t.byAuthIndex",
+		"o.set(e,$p(t.blocks",
+		"wm(n.apiKey,t,n.prefix,n.authIndex??n.auth_index)",
+		"e?.authIndex??e?.auth_index",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("expected patched auth-index stats fragment %q in %s", expected, body)
+		}
+	}
+}
+
 func TestUsagePersistenceEnabledHotReload(t *testing.T) {
 	t.Setenv("PGSTORE_DSN", "")
 	t.Setenv("pgstore_dsn", "")
