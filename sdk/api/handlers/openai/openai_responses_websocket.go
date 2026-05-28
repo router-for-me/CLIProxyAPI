@@ -381,6 +381,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+		requestJSON = dedupeResponsesWebsocketInputItemsByID(requestJSON)
 		updatedLastRequest = bytes.Clone(requestJSON)
 		previousLastRequest := bytes.Clone(lastRequest)
 		previousLastResponseOutput := bytes.Clone(lastResponseOutput)
@@ -582,6 +583,10 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	if errDedupeFunctionCalls == nil {
 		mergedInput = dedupedInput
 	}
+	dedupedInput, errDedupeItemIDs := dedupeInputItemsByID(mergedInput)
+	if errDedupeItemIDs == nil {
+		mergedInput = dedupedInput
+	}
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
@@ -685,6 +690,64 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 					continue
 				}
 				seenCallIDs[callID] = struct{}{}
+			}
+		}
+		filtered = append(filtered, item)
+	}
+
+	out, errMarshal := json.Marshal(filtered)
+	if errMarshal != nil {
+		return "", errMarshal
+	}
+	return string(out), nil
+}
+
+func dedupeResponsesWebsocketInputItemsByID(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return payload
+	}
+	dedupedInput, errDedupe := dedupeInputItemsByID(input.Raw)
+	if errDedupe != nil || dedupedInput == input.Raw {
+		return payload
+	}
+	updated, errSet := sjson.SetRawBytes(payload, "input", []byte(dedupedInput))
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+func dedupeInputItemsByID(rawArray string) (string, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]", nil
+	}
+	var items []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
+		return "", errUnmarshal
+	}
+
+	lastIndexByID := make(map[string]int, len(items))
+	for i, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemID := strings.TrimSpace(gjson.GetBytes(item, "id").String())
+		if itemID != "" {
+			lastIndexByID[itemID] = i
+		}
+	}
+
+	filtered := make([]json.RawMessage, 0, len(items))
+	for i, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemID := strings.TrimSpace(gjson.GetBytes(item, "id").String())
+		if itemID != "" {
+			if lastIndexByID[itemID] != i {
+				continue
 			}
 		}
 		filtered = append(filtered, item)
