@@ -3002,6 +3002,196 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
 
+// BatchPatchAuthFileStatus enables or disables multiple credentials in one call.
+//
+// POST /v0/management/auth-files/batch-status
+//
+// Accepts either a uniform object body:
+//
+//	{"names": ["a.json", "b.json"], "disabled": true}
+//
+// or a per-item array body:
+//
+//	[{"name": "a.json", "disabled": true}, {"name": "b.json", "disabled": false}]
+//
+// Returns {"updated": N, "failed": [...]} where failed contains names that were not found.
+func (h *Handler) BatchPatchAuthFileStatus(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	type itemReq struct {
+		Name     string `json:"name"`
+		Disabled *bool  `json:"disabled"`
+	}
+	type uniformReq struct {
+		Names    []string `json:"names"`
+		Disabled *bool    `json:"disabled"`
+	}
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
+		return
+	}
+	body = bytes.TrimSpace(body)
+
+	var items []itemReq
+	if len(body) > 0 && body[0] == '[' {
+		if err := json.Unmarshal(body, &items); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+	} else {
+		var req uniformReq
+		if err := json.Unmarshal(body, &req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		if req.Disabled == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "disabled is required"})
+			return
+		}
+		for _, name := range req.Names {
+			d := *req.Disabled
+			items = append(items, itemReq{Name: name, Disabled: &d})
+		}
+	}
+
+	if len(items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no items provided"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	updated := 0
+	var failed []string
+	now := time.Now()
+
+	for _, item := range items {
+		name := strings.TrimSpace(item.Name)
+		if name == "" || item.Disabled == nil {
+			failed = append(failed, name)
+			continue
+		}
+
+		var target *coreauth.Auth
+		if auth, ok := h.authManager.GetByID(name); ok {
+			target = auth
+		} else {
+			for _, auth := range h.authManager.List() {
+				if auth.FileName == name {
+					target = auth
+					break
+				}
+			}
+		}
+		if target == nil {
+			failed = append(failed, name)
+			continue
+		}
+
+		target.Disabled = *item.Disabled
+		target.UpdatedAt = now
+		if *item.Disabled {
+			target.Status = coreauth.StatusDisabled
+			target.StatusMessage = "disabled via management API"
+		} else {
+			target.Status = coreauth.StatusActive
+			target.StatusMessage = ""
+		}
+		if _, err := h.authManager.Update(ctx, target); err != nil {
+			failed = append(failed, name)
+			continue
+		}
+		updated++
+	}
+
+	c.JSON(http.StatusOK, gin.H{"updated": updated, "failed": failed})
+}
+
+// BatchClearAuthErrors resets the error/unavailable state on multiple credentials.
+// Useful after a provider outage to unblock credentials without waiting for the
+// built-in backoff to expire.
+//
+// POST /v0/management/auth-files/batch-clear-errors
+//
+// Body: {"names": ["a.json"], "provider": "claude"}
+//   - names: specific auth IDs or file names to clear (optional if provider is given)
+//   - provider: if set, clears all credentials for that provider (case-insensitive)
+//
+// Returns {"cleared": N}.
+func (h *Handler) BatchClearAuthErrors(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Names    []string `json:"names"`
+		Provider string   `json:"provider"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if len(req.Names) == 0 && strings.TrimSpace(req.Provider) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "names or provider is required"})
+		return
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	nameSet := make(map[string]struct{}, len(req.Names))
+	for _, n := range req.Names {
+		if n = strings.TrimSpace(n); n != "" {
+			nameSet[n] = struct{}{}
+		}
+	}
+
+	ctx := c.Request.Context()
+	cleared := 0
+	now := time.Now()
+
+	for _, auth := range h.authManager.List() {
+		matched := false
+		if provider != "" && strings.ToLower(auth.Provider) == provider {
+			matched = true
+		}
+		if !matched {
+			if _, ok := nameSet[auth.ID]; ok {
+				matched = true
+			}
+		}
+		if !matched {
+			if _, ok := nameSet[auth.FileName]; ok {
+				matched = true
+			}
+		}
+		if !matched {
+			continue
+		}
+
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		if auth.Status == coreauth.StatusError {
+			auth.Status = coreauth.StatusActive
+		}
+		auth.Quota = coreauth.QuotaState{}
+		auth.UpdatedAt = now
+
+		if _, err := h.authManager.Update(ctx, auth); err != nil {
+			continue
+		}
+		cleared++
+	}
+
+	c.JSON(http.StatusOK, gin.H{"cleared": cleared})
+}
+
 // PopulateAuthContext extracts request info and adds it to the context
 func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 	info := &coreauth.RequestInfo{
