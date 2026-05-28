@@ -130,7 +130,7 @@ func TestCodexAutoExecutorPreferUpstreamWebsocketUsesWebsocketTransport(t *testi
 	}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
-		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}],"stream_options":{"include_usage":true}}`),
 	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
@@ -143,6 +143,9 @@ func TestCodexAutoExecutorPreferUpstreamWebsocketUsesWebsocketTransport(t *testi
 	case payload := <-capturedPayload:
 		if got := gjson.GetBytes(payload, "type").String(); got != "response.create" {
 			t.Fatalf("upstream type = %s, want response.create; payload=%s", got, payload)
+		}
+		if gjson.GetBytes(payload, "stream_options").Exists() {
+			t.Fatalf("upstream stream_options should be stripped; payload=%s", payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
@@ -188,14 +191,15 @@ func TestCodexAutoExecutorPreferUpstreamWebsocketStreamTranslatesOpenAIResponses
 		Model: "gpt-5-codex",
 		Payload: []byte(`{
 			"model":"gpt-5-codex",
-			"input":[
-				{"type":"message","role":"system","content":[{"type":"input_text","text":"Be concise."}]},
-				{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}
-			],
-			"max_output_tokens":128,
-			"temperature":0.2,
-			"context_management":{"compaction":{"type":"auto"}}
-		}`),
+				"input":[
+					{"type":"message","role":"system","content":[{"type":"input_text","text":"Be concise."}]},
+					{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}
+				],
+				"max_output_tokens":128,
+				"temperature":0.2,
+				"context_management":{"compaction":{"type":"auto"}},
+				"stream_options":{"include_usage":true}
+			}`),
 	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true}
 	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
@@ -223,7 +227,7 @@ func TestCodexAutoExecutorPreferUpstreamWebsocketStreamTranslatesOpenAIResponses
 	if got := gjson.GetBytes(payload, "input.0.role").String(); got != "developer" {
 		t.Fatalf("upstream input.0.role = %s, want developer; payload=%s", got, payload)
 	}
-	for _, path := range []string{"max_output_tokens", "temperature", "context_management"} {
+	for _, path := range []string{"max_output_tokens", "temperature", "context_management", "stream_options"} {
 		if gjson.GetBytes(payload, path).Exists() {
 			t.Fatalf("upstream %s should be stripped; payload=%s", path, payload)
 		}
