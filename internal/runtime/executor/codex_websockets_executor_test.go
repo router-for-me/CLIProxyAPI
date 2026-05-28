@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -149,6 +150,55 @@ func TestCodexAutoExecutorPreferUpstreamWebsocketUsesWebsocketTransport(t *testi
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexAutoExecutorPreferUpstreamWebsocketNonStreamUsesOutputItemDone(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("request path = %s, want /responses", r.URL.Path)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Fatalf("read upstream websocket message: %v", errRead)
+		}
+
+		itemDone := []byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":0}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, itemDone); errWrite != nil {
+			t.Fatalf("write output_item.done websocket message: %v", errWrite)
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","object":"response","created_at":1775555723,"status":"completed","model":"gpt-5-codex","output":[],"usage":{"input_tokens":8,"output_tokens":28,"total_tokens":36}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "sk-test",
+		"base_url":   server.URL,
+		"websockets": "true",
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Say ok"}]}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+
+	resp, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "ok" {
+		t.Fatalf("response output text = %q, want %q; payload=%s", got, "ok", resp.Payload)
 	}
 }
 

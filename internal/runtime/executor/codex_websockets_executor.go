@@ -334,6 +334,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -372,7 +374,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
+		if eventType == "response.output_item.done" {
+			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+			continue
+		}
 		if eventType == "response.completed" {
+			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
