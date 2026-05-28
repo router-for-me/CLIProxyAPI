@@ -343,6 +343,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
+	// SSE must not be compressed; the downstream scanner reads line-delimited
+	// text and cannot parse compressed bytes. Override any custom header that
+	// may have re-enabled compression.
+	httpReq.Header.Set("Accept-Encoding", "identity")
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -382,12 +386,25 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
+		decodedBody, decodeErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decodeErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, decodeErr)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
+			reporter.PublishFailure(ctx, decodeErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: decodeErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		defer func() {
+			if errClose := decodedBody.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close decoded response body error: %v", errClose)
+			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
+		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {

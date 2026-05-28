@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"mime"
@@ -439,6 +440,122 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 		got.Write(chunk.Payload)
 	}
 	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
+		t.Fatalf("stream payload = %s", got.String())
+	}
+}
+func TestOpenAICompatExecutorStream_GzipResponse(t *testing.T) {
+	const sseLine = `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}` + "\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(sseLine))
+		_ = gz.Close()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "openrouter-model",
+		Payload: []byte(`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var got strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
+		t.Fatalf("stream payload = %s", got.String())
+	}
+}
+
+func TestOpenAICompatExecutorStream_ForcesIdentityEncoding(t *testing.T) {
+	var gotEncoding string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: [DONE]` + "\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":               server.URL + "/v1",
+		"api_key":                "test",
+		"header:Accept-Encoding": "gzip, deflate",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "openrouter-model",
+		Payload: []byte(`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+	}
+	if gotEncoding != "identity" {
+		t.Fatalf("Accept-Encoding = %q, want identity", gotEncoding)
+	}
+}
+
+func TestOpenAICompatExecutorStream_MagicByteGzipNoHeader(t *testing.T) {
+	const sseLine = `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"world"},"finish_reason":null}]}` + "\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(sseLine))
+		_ = gz.Close()
+		// Misbehaving upstream: compresses but omits Content-Encoding.
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "openrouter-model",
+		Payload: []byte(`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var got strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+	if gjson.Get(got.String(), "choices.0.delta.content").String() != "world" {
 		t.Fatalf("stream payload = %s", got.String())
 	}
 }
