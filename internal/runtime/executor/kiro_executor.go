@@ -263,7 +263,7 @@ func getKiroPooledHTTPClient() *http.Client {
 			ForceAttemptHTTP2:     true,
 		}
 
-		// HTTP/2 PING 探活：空闲 30s 发 PING，15s 没回则废弃连接
+		// HTTP/2 PING liveness: send PING after 30s idle, discard if no response within 15s.
 		if h2, err := http2.ConfigureTransports(transport); err != nil {
 			log.Warnf("kiro: failed to configure HTTP/2 transport: %v", err)
 		} else {
@@ -608,12 +608,12 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Rate limiting: get token key for tracking
 	tokenKey := getAccountKey(auth)
-	// DISABLED: 已移除速率限制
+	// DISABLED: rate limiting removed.
 	// rateLimiter := kiroauth.GetGlobalRateLimiter()
 	// cooldownMgr := kiroauth.GetGlobalCooldownManager()
 
 	// Check if token is in cooldown period
-	// DISABLED: 已移除冷却检查
+	// DISABLED: cooldown checks removed.
 	// if cooldownMgr.IsInCooldown(tokenKey) {
 	// 	remaining := cooldownMgr.GetRemainingCooldown(tokenKey)
 	// 	reason := cooldownMgr.GetCooldownReason(tokenKey)
@@ -623,7 +623,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Wait for rate limiter before proceeding
 	log.Debugf("kiro: waiting for rate limiter for token %s", tokenKey)
-	// DISABLED: 已移除速率限制
+	// DISABLED: rate limiting removed.
 	// rateLimiter.WaitForToken(tokenKey)
 	log.Debugf("kiro: rate limiter cleared for token %s", tokenKey)
 
@@ -631,15 +631,15 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if e.isTokenExpired(accessToken) {
 		log.Infof("kiro: access token expired, attempting recovery")
 
-		// 方案 B: 先尝试从文件重新加载 token（后台刷新器可能已更新文件）
+		// Plan B: reload the token from disk first; the background refresher may have updated it.
 		reloadedAuth, reloadErr := e.reloadAuthFromFile(auth)
 		if reloadErr == nil && reloadedAuth != nil {
-			// 文件中有更新的 token，使用它
+			// Use the newer token from disk.
 			auth = reloadedAuth
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: recovered token from file (background refresh), expires_at: %v", auth.Metadata["expires_at"])
 		} else {
-			// 文件中的 token 也过期了，执行主动刷新
+			// The token on disk is also expired; actively refresh it.
 			log.Debugf("kiro: file reload failed (%v), attempting active refresh", reloadErr)
 			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 			if refreshErr != nil {
@@ -698,7 +698,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from, to sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (cliproxyexecutor.Response, error) {
 	var resp cliproxyexecutor.Response
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
-	// DISABLED: 已移除速率限制
+	// DISABLED: rate limiting removed.
 	// rateLimiter := kiroauth.GetGlobalRateLimiter()
 	// cooldownMgr := kiroauth.GetGlobalCooldownManager()
 	endpointConfigs := getKiroEndpointConfigs(auth)
@@ -812,7 +812,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				// Record failure and set cooldown for 429
-				// DISABLED: 已移除速率限制和冷却机制
+				// DISABLED: rate limiting and cooldown logic removed.
 				// rateLimiter.MarkTokenFailed(tokenKey)
 				// cooldownDuration := kiroauth.CalculateCooldownFor429(attempt)
 				// cooldownMgr.SetCooldown(tokenKey, cooldownDuration, kiroauth.CooldownReason429)
@@ -919,7 +919,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				// Check for SUSPENDED status - return immediately without retry
 				if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
 					// Set long cooldown for suspended accounts
-					// DISABLED: 已移除冷却机制
+					// DISABLED: cooldown logic removed.
 					// rateLimiter.CheckAndMarkSuspended(tokenKey, respBodyStr)
 					// cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)
 					// log.Errorf("kiro: account is suspended, token %s set to cooldown for %v", tokenKey, kiroauth.LongCooldown)
@@ -1027,7 +1027,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			reporter.publish(ctx, usageDetailForInternalStats(usageInfo, estimatedCacheRead, estimatedCacheWrite))
 
 			// Record success for rate limiting
-			// DISABLED: 已移除速率限制
+			// DISABLED: rate limiting removed.
 			// rateLimiter.MarkTokenSuccess(tokenKey)
 			// log.Debugf("kiro: request successful, token %s marked as success", tokenKey)
 			log.Debugf("kiro: request successful (rate limiting disabled)")
@@ -1062,12 +1062,12 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Rate limiting: get token key for tracking
 	tokenKey := getAccountKey(auth)
-	// DISABLED: 已移除速率限制
+	// DISABLED: rate limiting removed.
 	// rateLimiter := kiroauth.GetGlobalRateLimiter()
 	// cooldownMgr := kiroauth.GetGlobalCooldownManager()
 
 	// Check if token is in cooldown period
-	// DISABLED: 已移除冷却检查
+	// DISABLED: cooldown checks removed.
 	// if cooldownMgr.IsInCooldown(tokenKey) {
 	// 	remaining := cooldownMgr.GetRemainingCooldown(tokenKey)
 	// 	reason := cooldownMgr.GetCooldownReason(tokenKey)
@@ -1077,7 +1077,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Wait for rate limiter before proceeding
 	log.Debugf("kiro: stream waiting for rate limiter for token %s", tokenKey)
-	// DISABLED: 已移除速率限制
+	// DISABLED: rate limiting removed.
 	// rateLimiter.WaitForToken(tokenKey)
 	log.Debugf("kiro: stream rate limiter cleared for token %s", tokenKey)
 
@@ -1085,15 +1085,15 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if e.isTokenExpired(accessToken) {
 		log.Infof("kiro: access token expired, attempting recovery before stream request")
 
-		// 方案 B: 先尝试从文件重新加载 token（后台刷新器可能已更新文件）
+		// Plan B: reload the token from disk first; the background refresher may have updated it.
 		reloadedAuth, reloadErr := e.reloadAuthFromFile(auth)
 		if reloadErr == nil && reloadedAuth != nil {
-			// 文件中有更新的 token，使用它
+			// Use the newer token from disk.
 			auth = reloadedAuth
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: recovered token from file (background refresh) for stream, expires_at: %v", auth.Metadata["expires_at"])
 		} else {
-			// 文件中的 token 也过期了，执行主动刷新
+			// The token on disk is also expired; actively refresh it.
 			log.Debugf("kiro: file reload failed (%v), attempting active refresh for stream", reloadErr)
 			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 			if refreshErr != nil {
@@ -1158,7 +1158,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // tokenKey is used for rate limiting and cooldown tracking.
 func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
-	// DISABLED: 已移除速率限制
+	// DISABLED: rate limiting removed.
 	// rateLimiter := kiroauth.GetGlobalRateLimiter()
 	// cooldownMgr := kiroauth.GetGlobalCooldownManager()
 	endpointConfigs := getKiroEndpointConfigs(auth)
@@ -1259,7 +1259,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				// Record failure and set cooldown for 429
-				// DISABLED: 已移除速率限制和冷却机制
+				// DISABLED: rate limiting and cooldown logic removed.
 				// rateLimiter.MarkTokenFailed(tokenKey)
 				// cooldownDuration := kiroauth.CalculateCooldownFor429(attempt)
 				// cooldownMgr.SetCooldown(tokenKey, cooldownDuration, kiroauth.CooldownReason429)
@@ -1381,7 +1381,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				// Check for SUSPENDED status - return immediately without retry
 				if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
 					// Set long cooldown for suspended accounts
-					// DISABLED: 已移除冷却机制
+					// DISABLED: cooldown logic removed.
 					// rateLimiter.CheckAndMarkSuspended(tokenKey, respBodyStr)
 					// cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)
 					// log.Errorf("kiro: stream account is suspended, token %s set to cooldown for %v", tokenKey, kiroauth.LongCooldown)
@@ -1437,7 +1437,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 			// Record success immediately since connection was established successfully
 			// Streaming errors will be handled separately
-			// DISABLED: 已移除速率限制
+			// DISABLED: rate limiting removed.
 			// rateLimiter.MarkTokenSuccess(tokenKey)
 			// log.Debugf("kiro: stream request successful, token %s marked as success", tokenKey)
 			log.Debugf("kiro: stream request successful (rate limiting disabled)")
@@ -1522,7 +1522,7 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 //
 // False positives (discussion text) have characteristics:
 // - In the middle of a sentence
-// - Preceded by discussion words like "标签", "tag", "returns"
+// - Preceded by discussion words like "tag" or "returns"
 // - Inside code blocks or inline code
 //
 // Parameters:
@@ -1601,7 +1601,7 @@ func findRealThinkingEndTag(content string, alreadyInCodeBlock, alreadyInInlineC
 
 		// Discussion patterns - if found, this is likely discussion text
 		discussionPatterns := []string{
-			"标签", "返回", "输出", "包含", "使用", "解析", "转换", "生成", // Chinese
+			"标签", "返回", "输出", "包含", "使用", "解析", "转换", "生成", // Chinese discussion keywords
 			"tag", "return", "output", "contain", "use", "parse", "emit", "convert", "generate", // English
 			"<thinking>",    // discussing both tags together
 			"`</thinking>`", // explicitly in inline code
@@ -1697,6 +1697,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	modelMap := map[string]string{
 		// Amazon Q format (amazonq- prefix) - same API as Kiro
 		"amazonq-auto":                       "auto",
+		"amazonq-claude-opus-4-8":            "claude-opus-4.8",
+		"amazonq-claude-opus-4.8":            "claude-opus-4.8",
 		"amazonq-claude-opus-4-7":            "claude-opus-4.7",
 		"amazonq-claude-opus-4-6":            "claude-opus-4.6",
 		"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
@@ -1707,6 +1709,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
 		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
 		// Kiro format (kiro- prefix) - valid model names that should be preserved
+		"kiro-claude-opus-4-8":            "claude-opus-4.8",
 		"kiro-claude-opus-4-7":            "claude-opus-4.7",
 		"kiro-claude-opus-4-6":            "claude-opus-4.6",
 		"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
@@ -1718,6 +1721,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
 		"kiro-auto":                       "auto",
 		// Native format (no prefix) - used by Kiro IDE directly
+		"claude-opus-4-8":            "claude-opus-4.8",
+		"claude-opus-4.8":            "claude-opus-4.8",
 		"claude-opus-4-7":            "claude-opus-4.7",
 		"claude-opus-4.7":            "claude-opus-4.7",
 		"claude-opus-4-6":            "claude-opus-4.6",
@@ -1735,6 +1740,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"claude-sonnet-4-20250514":   "claude-sonnet-4",
 		"auto":                       "auto",
 		// Agentic variants (same backend model IDs, but with special system prompt)
+		"claude-opus-4.8-agentic":        "claude-opus-4.8",
+		"claude-opus-4-8-agentic":        "claude-opus-4.8",
 		"claude-opus-4.7-agentic":        "claude-opus-4.7",
 		"claude-opus-4.6-agentic":        "claude-opus-4.6",
 		"claude-sonnet-4.6-agentic":      "claude-sonnet-4.6",
@@ -1742,6 +1749,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
 		"claude-sonnet-4-agentic":        "claude-sonnet-4",
 		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
+		"kiro-claude-opus-4-8-agentic":   "claude-opus-4.8",
 		"kiro-claude-opus-4-7-agentic":   "claude-opus-4.7",
 		"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
 		"kiro-claude-sonnet-4-6-agentic": "claude-sonnet-4.6",
@@ -1785,6 +1793,10 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 
 	// Check for Opus variants
 	if strings.Contains(modelLower, "opus") {
+		if strings.Contains(modelLower, "4-8") || strings.Contains(modelLower, "4.8") {
+			log.Debugf("kiro: unknown Opus 4.8 model '%s', mapping to claude-opus-4.8", model)
+			return "claude-opus-4.8"
+		}
 		if strings.Contains(modelLower, "4-7") || strings.Contains(modelLower, "4.7") {
 			log.Debugf("kiro: unknown Opus 4.7 model '%s', mapping to claude-opus-4.7", model)
 			return "claude-opus-4.7"
@@ -1812,14 +1824,14 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 //
 //	sonnet : 0.135  (10 sample rows, range 0.12-0.14)
 //	haiku  : 0.37   (4  sample rows, range 0.30-0.40)
-//	opus   : 0.135  (aligned with sonnet)
+//	opus   : 0.08
 func kiroCreditUSDForModel(model string) float64 {
 	modelLower := strings.ToLower(model)
 	switch {
 	case strings.Contains(modelLower, "haiku"):
 		return 0.37
 	case strings.Contains(modelLower, "opus"):
-		return 0.135
+		return 0.08
 	default:
 		return 0.135
 	}
@@ -1853,7 +1865,7 @@ func kiroTokenPriceForModel(model string) kiroTokenPrice {
 			cacheReadPerMTok:    0.10,
 		}
 	case strings.Contains(modelLower, "opus"):
-		// Opus 4.x pricing (Opus 4.5/4.6/4.7 are all $5/$25/Mtok; the prior
+		// Opus 4.x pricing (Opus 4.5/4.6/4.7/4.8 are all $5/$25/Mtok; the prior
 		// $15/$75 numbers in this file were Opus 3 era).
 		return kiroTokenPrice{
 			inputPerMTok:        5.0,
@@ -4388,15 +4400,15 @@ func (e *KiroExecutor) fetchAndSaveProfileArn(ctx context.Context, auth *cliprox
 	return profileArn
 }
 
-// reloadAuthFromFile 从文件重新加载 auth 数据（方案 B: Fallback 机制）
-// 当内存中的 token 已过期时，尝试从文件读取最新的 token
-// 这解决了后台刷新器已更新文件但内存中 Auth 对象尚未同步的时间差问题
+// reloadAuthFromFile reloads auth data from disk as a fallback.
+// When the in-memory token has expired, it tries to read the latest token from disk.
+// This covers the window where the background refresher updated the file but the in-memory Auth is stale.
 func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if auth == nil {
 		return nil, fmt.Errorf("kiro executor: cannot reload nil auth")
 	}
 
-	// 确定文件路径
+	// Determine the file path.
 	var authPath string
 	if auth.Attributes != nil {
 		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
@@ -4417,34 +4429,34 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		}
 	}
 
-	// 读取文件
+	// Read the file.
 	raw, err := os.ReadFile(authPath)
 	if err != nil {
 		return nil, fmt.Errorf("kiro executor: failed to read auth file %s: %w", authPath, err)
 	}
 
-	// 解析 JSON
+	// Parse JSON.
 	var metadata map[string]any
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		return nil, fmt.Errorf("kiro executor: failed to parse auth file %s: %w", authPath, err)
 	}
 
-	// 检查文件中的 token 是否比内存中的更新
+	// Check whether the token on disk is newer than the in-memory token.
 	fileExpiresAt, _ := metadata["expires_at"].(string)
 	fileAccessToken, _ := metadata["access_token"].(string)
 	memExpiresAt, _ := auth.Metadata["expires_at"].(string)
 	memAccessToken, _ := auth.Metadata["access_token"].(string)
 
-	// 文件中必须有有效的 access_token
+	// The file must contain a valid access_token.
 	if fileAccessToken == "" {
 		return nil, fmt.Errorf("kiro executor: auth file has no access_token field")
 	}
 
-	// 如果有 expires_at，检查是否过期
+	// If expires_at is present, check whether it is expired.
 	if fileExpiresAt != "" {
 		fileExpTime, parseErr := time.Parse(time.RFC3339, fileExpiresAt)
 		if parseErr == nil {
-			// 如果文件中的 token 也已过期，不使用它
+			// Do not use the file token if it is also expired.
 			if time.Now().After(fileExpTime) {
 				log.Debugf("kiro executor: file token also expired at %s, not using", fileExpiresAt)
 				return nil, fmt.Errorf("kiro executor: file token also expired")
@@ -4452,18 +4464,18 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		}
 	}
 
-	// 判断文件中的 token 是否比内存中的更新
-	// 条件1: access_token 不同（说明已刷新）
-	// 条件2: expires_at 更新（说明已刷新）
+	// Determine whether the file token is newer than memory:
+	// 1. access_token differs, which indicates a refresh.
+	// 2. expires_at is later, which also indicates a refresh.
 	isNewer := false
 
-	// 优先检查 access_token 是否变化
+	// Prefer checking whether access_token changed.
 	if fileAccessToken != memAccessToken {
 		isNewer = true
 		log.Debugf("kiro executor: file access_token differs from memory, using file token")
 	}
 
-	// 如果 access_token 相同，检查 expires_at
+	// If access_token is unchanged, check expires_at.
 	if !isNewer && fileExpiresAt != "" && memExpiresAt != "" {
 		fileExpTime, fileParseErr := time.Parse(time.RFC3339, fileExpiresAt)
 		memExpTime, memParseErr := time.Parse(time.RFC3339, memExpiresAt)
@@ -4473,7 +4485,7 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		}
 	}
 
-	// 如果文件中没有 expires_at 但 access_token 相同，无法判断是否更新
+	// If the file has no expires_at and access_token is unchanged, freshness cannot be determined.
 	if !isNewer && fileExpiresAt == "" && fileAccessToken == memAccessToken {
 		return nil, fmt.Errorf("kiro executor: cannot determine if file token is newer (no expires_at, same access_token)")
 	}
@@ -4483,12 +4495,12 @@ func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyaut
 		return nil, fmt.Errorf("kiro executor: file token not newer")
 	}
 
-	// 创建更新后的 auth 对象
+	// Create the updated auth object.
 	updated := auth.Clone()
 	updated.Metadata = metadata
 	updated.UpdatedAt = time.Now()
 
-	// 同步更新 Attributes
+	// Sync Attributes.
 	if updated.Attributes == nil {
 		updated.Attributes = make(map[string]string)
 	}

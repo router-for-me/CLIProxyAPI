@@ -741,6 +741,18 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
+			ID:                  "kiro-claude-opus-4-8",
+			Object:              "model",
+			Created:             1780012800, // 2026-05-29
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Opus 4.8",
+			Description:         "Claude Opus 4.8 via Kiro (2.2x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
 			ID:                  "kiro-claude-opus-4-6",
 			Object:              "model",
 			Created:             1736899200, // 2025-01-15
@@ -812,7 +824,7 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 64000,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
-		// --- 第三方模型 (通过 Kiro 接入) ---
+		// --- Third-party models via Kiro ---
 		{
 			ID:                  "kiro-deepseek-3-2",
 			Object:              "model",
@@ -894,6 +906,18 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 4096,
 		},
 		// --- Agentic Variants (Optimized for coding agents with chunked writes) ---
+		{
+			ID:                  "kiro-claude-opus-4-8-agentic",
+			Object:              "model",
+			Created:             1780012800, // 2026-05-29
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Opus 4.8 (Agentic)",
+			Description:         "Claude Opus 4.8 optimized for coding agents (chunked writes)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
 		{
 			ID:                  "kiro-claude-opus-4-6-agentic",
 			Object:              "model",
@@ -1017,6 +1041,28 @@ func GetAmazonQModels() []*ModelInfo {
 			Type:                "kiro", // Uses Kiro executor - same API
 			DisplayName:         "Amazon Q Auto",
 			Description:         "Automatic model selection by Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-opus-4.8",
+			Object:              "model",
+			Created:             1780012800, // 2026-05-29
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Opus 4.8",
+			Description:         "Claude Opus 4.8 via Amazon Q (2.2x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-opus-4-8",
+			Object:              "model",
+			Created:             1780012800, // 2026-05-29
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Opus 4.8",
+			Description:         "Claude Opus 4.8 via Amazon Q (2.2x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 		},

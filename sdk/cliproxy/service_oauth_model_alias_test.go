@@ -113,3 +113,40 @@ func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T)
 		t.Fatalf("expected aliased model name %q, got %q", "models/claude-opus-4-6", out[1].Name)
 	}
 }
+
+func TestMergeKiroDynamicWithStaticModelsAddsStaticOpus48(t *testing.T) {
+	models := mergeKiroDynamicWithStaticModels([]*ModelInfo{
+		{
+			ID:                  "kiro-claude-sonnet-4-5",
+			Object:              "model",
+			Created:             1,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Dynamic Sonnet",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+	})
+
+	if findCliproxyModelInfo(models, "kiro-claude-opus-4-8") == nil {
+		t.Fatal("expected static Kiro Opus 4.8 to be included when dynamic API list omits it")
+	}
+	if findCliproxyModelInfo(models, "kiro-claude-opus-4-8-agentic") == nil {
+		t.Fatal("expected static Kiro Opus 4.8 agentic variant to be included when dynamic API list omits it")
+	}
+	if findCliproxyModelInfo(models, "kiro-claude-opus-4-6") != nil {
+		t.Fatal("did not expect unrelated static Kiro models to be included when dynamic API list omits them")
+	}
+	if findCliproxyModelInfo(models, "kiro-gpt-4o") != nil {
+		t.Fatal("did not expect unrelated static third-party Kiro models to be included when dynamic API list omits them")
+	}
+}
+
+func findCliproxyModelInfo(models []*ModelInfo, id string) *ModelInfo {
+	for _, model := range models {
+		if model != nil && model.ID == id {
+			return model
+		}
+	}
+	return nil
+}

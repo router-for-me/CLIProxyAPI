@@ -53,6 +53,52 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 	assertGPT55ModelInfo(t, "lookup", model)
 }
 
+func TestKiroStaticModelsIncludeOpus48(t *testing.T) {
+	model := findModelInfo(GetKiroModels(), "kiro-claude-opus-4-8")
+	if model == nil {
+		t.Fatal("expected Kiro models to include kiro-claude-opus-4-8")
+	}
+	assertKiroOpus48ModelInfo(t, model, "Kiro Claude Opus 4.8", "Claude Opus 4.8 via Kiro (2.2x credit)")
+
+	agentic := findModelInfo(GetKiroModels(), "kiro-claude-opus-4-8-agentic")
+	if agentic == nil {
+		t.Fatal("expected Kiro models to include kiro-claude-opus-4-8-agentic")
+	}
+	assertKiroOpus48ModelInfo(t, agentic, "Kiro Claude Opus 4.8 (Agentic)", "Claude Opus 4.8 optimized for coding agents (chunked writes)")
+
+	lookup := LookupStaticModelInfo("kiro-claude-opus-4-8")
+	if lookup == nil {
+		t.Fatal("expected LookupStaticModelInfo to find kiro-claude-opus-4-8")
+	}
+	assertKiroOpus48ModelInfo(t, lookup, "Kiro Claude Opus 4.8", "Claude Opus 4.8 via Kiro (2.2x credit)")
+}
+
+func TestAmazonQStaticModelsIncludeOpus48(t *testing.T) {
+	model := findModelInfo(GetAmazonQModels(), "amazonq-claude-opus-4.8")
+	if model == nil {
+		t.Fatal("expected Amazon Q models to include amazonq-claude-opus-4.8")
+	}
+	assertAmazonQOpus48ModelInfo(t, model, "Amazon Q Claude Opus 4.8", "Claude Opus 4.8 via Amazon Q (2.2x credit)")
+
+	hyphenModel := findModelInfo(GetAmazonQModels(), "amazonq-claude-opus-4-8")
+	if hyphenModel == nil {
+		t.Fatal("expected Amazon Q models to include amazonq-claude-opus-4-8")
+	}
+	assertAmazonQOpus48ModelInfo(t, hyphenModel, "Amazon Q Claude Opus 4.8", "Claude Opus 4.8 via Amazon Q (2.2x credit)")
+
+	lookup := LookupStaticModelInfo("amazonq-claude-opus-4.8")
+	if lookup == nil {
+		t.Fatal("expected LookupStaticModelInfo to find amazonq-claude-opus-4.8")
+	}
+	assertAmazonQOpus48ModelInfo(t, lookup, "Amazon Q Claude Opus 4.8", "Claude Opus 4.8 via Amazon Q (2.2x credit)")
+
+	hyphenLookup := LookupStaticModelInfo("amazonq-claude-opus-4-8")
+	if hyphenLookup == nil {
+		t.Fatal("expected LookupStaticModelInfo to find amazonq-claude-opus-4-8")
+	}
+	assertAmazonQOpus48ModelInfo(t, hyphenLookup, "Amazon Q Claude Opus 4.8", "Claude Opus 4.8 via Amazon Q (2.2x credit)")
+}
+
 func findModelInfo(models []*ModelInfo, id string) *ModelInfo {
 	for _, model := range models {
 		if model != nil && model.ID == id {
@@ -60,6 +106,50 @@ func findModelInfo(models []*ModelInfo, id string) *ModelInfo {
 		}
 	}
 	return nil
+}
+
+func assertKiroOpus48ModelInfo(t *testing.T, model *ModelInfo, displayName, description string) {
+	t.Helper()
+
+	assertAWSOpus48ModelInfo(t, model, displayName, description)
+	if model.Thinking == nil {
+		t.Fatal("missing thinking support")
+	}
+	if model.Thinking.Min != 1024 || model.Thinking.Max != 32000 || !model.Thinking.ZeroAllowed || !model.Thinking.DynamicAllowed {
+		t.Fatalf("thinking support mismatch: %+v", model.Thinking)
+	}
+}
+
+func assertAmazonQOpus48ModelInfo(t *testing.T, model *ModelInfo, displayName, description string) {
+	t.Helper()
+
+	assertAWSOpus48ModelInfo(t, model, displayName, description)
+}
+
+func assertAWSOpus48ModelInfo(t *testing.T, model *ModelInfo, displayName, description string) {
+	t.Helper()
+
+	if model.Created != 1780012800 {
+		t.Fatalf("created timestamp mismatch: got %d", model.Created)
+	}
+	if model.OwnedBy != "aws" {
+		t.Fatalf("owned_by mismatch: got %q", model.OwnedBy)
+	}
+	if model.Type != "kiro" {
+		t.Fatalf("type mismatch: got %q", model.Type)
+	}
+	if model.DisplayName != displayName {
+		t.Fatalf("display name mismatch: got %q, want %q", model.DisplayName, displayName)
+	}
+	if model.Description != description {
+		t.Fatalf("description mismatch: got %q, want %q", model.Description, description)
+	}
+	if model.ContextLength != 200000 {
+		t.Fatalf("context length mismatch: got %d", model.ContextLength)
+	}
+	if model.MaxCompletionTokens != 64000 {
+		t.Fatalf("max completion tokens mismatch: got %d", model.MaxCompletionTokens)
+	}
 }
 
 func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {

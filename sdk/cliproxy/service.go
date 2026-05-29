@@ -1649,9 +1649,29 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 
 	// Generate agentic variants
 	models = generateKiroAgenticVariants(models)
+	models = mergeKiroDynamicWithStaticModels(models)
 
 	log.Infof("kiro: successfully fetched %d models from API (including agentic variants)", len(models))
 	return models
+}
+
+func mergeKiroDynamicWithStaticModels(models []*ModelInfo) []*ModelInfo {
+	return registry.MergeWithStaticMetadata(models, kiroStaticModelDiscoveryAdditions())
+}
+
+func kiroStaticModelDiscoveryAdditions() []*ModelInfo {
+	staticModels := registry.GetKiroModels()
+	out := make([]*ModelInfo, 0, 2)
+	for _, model := range staticModels {
+		if model == nil {
+			continue
+		}
+		switch model.ID {
+		case "kiro-claude-opus-4-8", "kiro-claude-opus-4-8-agentic":
+			out = append(out, model)
+		}
+	}
+	return out
 }
 
 // extractKiroTokenData extracts KiroTokenData from auth attributes and metadata.

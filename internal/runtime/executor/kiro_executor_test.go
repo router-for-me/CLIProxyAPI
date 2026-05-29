@@ -342,12 +342,12 @@ func TestEstimateKiroCacheUsage_BranchA_Sonnet(t *testing.T) {
 }
 
 func TestEstimateKiroCacheUsage_BranchA_Opus(t *testing.T) {
-	// Opus 4.x MSRP: in=5, out=25, cw=6.25, cr=0.50; opus $/credit = 0.135.
+	// Opus 4.x MSRP: in=5, out=25, cw=6.25, cr=0.50; opus $/credit = 0.08.
 	// uncached=100, output=200, total=10300 → cached_total=10000
 	// known_USD = (100×5 + 200×25)/1M = 0.0055
-	// target_USD = 0.20 × 0.135 = 0.027 → remaining = 0.0215 → cache_value = 21500
-	// CW = (21500 - 0.50×10000) / (6.25 - 0.50) = 16500 / 5.75 ≈ 2870
-	// CR = 10000 - 2870 = 7130
+	// target_USD = 0.20 × 0.08 = 0.016 → remaining = 0.0105 → cache_value = 10500
+	// CW = (10500 - 0.50×10000) / (6.25 - 0.50) = 5500 / 5.75 ≈ 957
+	// CR = 10000 - 957 = 9043
 	detail, estCR, estCW := estimateKiroCacheUsage("claude-opus-4.5", usage.Detail{
 		InputTokens:  100,
 		OutputTokens: 200,
@@ -356,11 +356,11 @@ func TestEstimateKiroCacheUsage_BranchA_Opus(t *testing.T) {
 	if !(estCR || estCW) {
 		t.Fatalf("estimated = false, want true")
 	}
-	if detail.CacheCreationInputTokens != 2870 {
-		t.Fatalf("CacheCreationInputTokens = %d, want 2870", detail.CacheCreationInputTokens)
+	if detail.CacheCreationInputTokens != 957 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 957", detail.CacheCreationInputTokens)
 	}
-	if detail.CacheReadInputTokens != 7130 {
-		t.Fatalf("CacheReadInputTokens = %d, want 7130", detail.CacheReadInputTokens)
+	if detail.CacheReadInputTokens != 9043 {
+		t.Fatalf("CacheReadInputTokens = %d, want 9043", detail.CacheReadInputTokens)
 	}
 }
 
@@ -697,8 +697,9 @@ func TestKiroCreditUSDForModel(t *testing.T) {
 		{"claude-sonnet-4.5", 0.135},
 		{"claude-sonnet-4.6", 0.135},
 		{"claude-haiku-4.5", 0.37},
-		{"claude-opus-4.5", 0.135},
-		{"claude-opus-4.6", 0.135},
+		{"claude-opus-4.5", 0.08},
+		{"claude-opus-4.6", 0.08},
+		{"claude-opus-4.8", 0.08},
 		{"unknown-model", 0.135}, // falls through to sonnet default
 	}
 	for _, tc := range cases {
@@ -710,9 +711,33 @@ func TestKiroCreditUSDForModel(t *testing.T) {
 	}
 }
 
+func TestKiroMapModelToKiroSupportsOpus48(t *testing.T) {
+	executor := &KiroExecutor{}
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{"kiro-claude-opus-4-8", "claude-opus-4.8"},
+		{"amazonq-claude-opus-4-8", "claude-opus-4.8"},
+		{"amazonq-claude-opus-4.8", "claude-opus-4.8"},
+		{"claude-opus-4-8", "claude-opus-4.8"},
+		{"claude-opus-4.8", "claude-opus-4.8"},
+		{"kiro-claude-opus-4-8-agentic", "claude-opus-4.8"},
+		{"claude-opus-4-8-agentic", "claude-opus-4.8"},
+		{"custom-claude-opus-4-8-preview", "claude-opus-4.8"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			if got := executor.mapModelToKiro(tc.model); got != tc.want {
+				t.Fatalf("mapModelToKiro(%q) = %q, want %q", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestKiroTokenPriceForModel_Opus4(t *testing.T) {
 	// Opus 4.x is $5/$25/Mtok; cache pricing per the 5-min ratios.
-	got := kiroTokenPriceForModel("claude-opus-4.6")
+	got := kiroTokenPriceForModel("claude-opus-4.8")
 	if got.inputPerMTok != 5.0 {
 		t.Fatalf("inputPerMTok = %v, want 5.0", got.inputPerMTok)
 	}
