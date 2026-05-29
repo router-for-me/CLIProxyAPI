@@ -97,7 +97,7 @@ func (h *ProtocolHandler) Start(ctx context.Context) (int, error) {
 	var listener net.Listener
 	var err error
 	portRange := []int{DefaultHandlerPort, DefaultHandlerPort + 1, DefaultHandlerPort + 2, DefaultHandlerPort + 3, DefaultHandlerPort + 4}
-	
+
 	for _, port := range portRange {
 		listener, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err == nil {
@@ -105,7 +105,7 @@ func (h *ProtocolHandler) Start(ctx context.Context) (int, error) {
 		}
 		log.Debugf("kiro protocol handler: port %d busy, trying next", port)
 	}
-	
+
 	if listener == nil {
 		return 0, fmt.Errorf("failed to start callback server: all ports %d-%d are busy", DefaultHandlerPort, DefaultHandlerPort+4)
 	}
