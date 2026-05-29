@@ -678,7 +678,12 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	shared := geminicli.ResolveSharedCredential(auth.Runtime)
 	if shared != nil {
 		if cachedTS := shared.TokenSource(); cachedTS != nil {
-			return cachedTS, base, nil
+			// Only reuse a cached token source when it is still valid.
+			// StaticTokenSource (used in the Home branch) never refreshes,
+			// so returning it after expiry would keep sending stale tokens.
+			if tok, err := cachedTS.Token(); err == nil && tok.Valid() {
+				return cachedTS, base, nil
+			}
 		}
 	}
 

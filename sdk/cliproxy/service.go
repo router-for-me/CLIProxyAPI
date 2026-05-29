@@ -305,8 +305,13 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		}
 		// Preserve the SharedCredential (with its cached token source) from the existing auth
 		// so that incremental updates don't force a fresh OAuth token refresh.
-		if geminicli.ResolveSharedCredential(existing.Runtime) != nil {
+		if shared := geminicli.ResolveSharedCredential(existing.Runtime); shared != nil {
 			auth.Runtime = existing.Runtime
+			// Merge the newly loaded file metadata into the shared credential so that
+			// rotated tokens, expiry changes, and project updates are picked up.
+			if auth.Metadata != nil {
+				shared.MergeMetadata(auth.Metadata)
+			}
 		}
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
