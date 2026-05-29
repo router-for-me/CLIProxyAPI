@@ -652,6 +652,13 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 
 	base, token := buildToken(metadata)
 
+	shared := geminicli.ResolveSharedCredential(auth.Runtime)
+	if shared != nil {
+		if cachedTS := shared.TokenSource(); cachedTS != nil {
+			return cachedTS, base, nil
+		}
+	}
+
 	conf := &oauth2.Config{
 		ClientID:     geminiOAuthClientID,
 		ClientSecret: geminiOAuthClientSecret,
@@ -684,7 +691,11 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 			return nil, nil, fmt.Errorf("gemini-cli access token missing")
 		}
 		updateGeminiCLITokenMetadata(auth, base, &token)
-		return oauth2.StaticTokenSource(&token), base, nil
+		ts := oauth2.StaticTokenSource(&token)
+		if shared != nil {
+			shared.SetTokenSource(ts)
+		}
+		return ts, base, nil
 	}
 
 	src := conf.TokenSource(ctxToken, &token)
@@ -693,7 +704,11 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 		return nil, nil, err
 	}
 	updateGeminiCLITokenMetadata(auth, base, currentToken)
-	return oauth2.ReuseTokenSource(currentToken, src), base, nil
+	ts := oauth2.ReuseTokenSource(currentToken, src)
+	if shared != nil {
+		shared.SetTokenSource(ts)
+	}
+	return ts, base, nil
 }
 
 func updateGeminiCLITokenMetadata(auth *cliproxyauth.Auth, base map[string]any, tok *oauth2.Token) {

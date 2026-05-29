@@ -1,0 +1,8 @@
+port: 8318
+auth-dir: "~/.cli-proxy-api"
+debug: true
+logging-to-file: true
+proxy-url: "http://localhost:9091"
+request-retry: 1
+remote-management:
+  disable-control-panel: true

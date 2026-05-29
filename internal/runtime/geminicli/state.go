@@ -3,15 +3,18 @@ package geminicli
 import (
 	"strings"
 	"sync"
+
+	"golang.org/x/oauth2"
 )
 
 // SharedCredential keeps canonical OAuth metadata for a multi-project Gemini CLI login.
 type SharedCredential struct {
-	primaryID  string
-	email      string
-	metadata   map[string]any
-	projectIDs []string
-	mu         sync.RWMutex
+	primaryID   string
+	email       string
+	metadata    map[string]any
+	projectIDs  []string
+	mu          sync.RWMutex
+	tokenSource oauth2.TokenSource
 }
 
 // NewSharedCredential builds a shared credential container for the given primary entry.
@@ -79,6 +82,26 @@ func (s *SharedCredential) MergeMetadata(values map[string]any) map[string]any {
 		s.metadata[k] = v
 	}
 	return cloneMap(s.metadata)
+}
+
+// TokenSource returns the cached token source if it exists
+func (s *SharedCredential) TokenSource() oauth2.TokenSource {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tokenSource
+}
+
+// SetTokenSource stores the token source in the shared credential
+func (s *SharedCredential) SetTokenSource(ts oauth2.TokenSource) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokenSource = ts
 }
 
 // SetProjectIDs updates the stored project identifiers.

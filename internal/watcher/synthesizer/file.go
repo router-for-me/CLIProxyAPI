@@ -179,6 +179,11 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			out = append(out, virtuals...)
 			return out
 		}
+
+		// Always create a SharedCredential for caching token source, even if there's only 1 project
+		email, _ := metadata["email"].(string)
+		projects := splitGeminiProjectIDs(metadata)
+		a.Runtime = geminicli.NewSharedCredential(a.ID, email, metadata, projects)
 	}
 	return []*coreauth.Auth{a}
 }

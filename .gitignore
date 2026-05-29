@@ -9,6 +9,7 @@ config.yaml
 # Generated content
 bin/*
 logs/*
+test/smoke/logs/*
 conv/*
 temp/*
 refs/*
