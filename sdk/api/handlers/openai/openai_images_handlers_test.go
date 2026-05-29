@@ -85,6 +85,66 @@ func TestImagesModelValidationAllowsOpenAICompatImageModels(t *testing.T) {
 	}
 }
 
+func TestImagesModelValidationAllowsGeminiImageModels(t *testing.T) {
+	for _, model := range []string{"gemini-3.1-flash-image", "antigravity/gemini-3.1-flash-image", "gemini-2.5-flash-image-preview", "imagen-3"} {
+		if !isSupportedImagesModel(model) {
+			t.Fatalf("expected %s to be supported", model)
+		}
+	}
+	for _, model := range []string{"gemini-2.5-flash", "gemini-2.5-pro"} {
+		if isSupportedImagesModel(model) {
+			t.Fatalf("expected %s to be rejected (no image in name)", model)
+		}
+	}
+}
+
+func TestBuildGeminiChatImagesRequest(t *testing.T) {
+	req := buildGeminiChatImagesRequest("a red apple", "antigravity/gemini-3.1-flash-image")
+
+	if got := gjson.GetBytes(req, "model").String(); got != "antigravity/gemini-3.1-flash-image" {
+		t.Fatalf("model = %q, want antigravity/gemini-3.1-flash-image", got)
+	}
+	if got := gjson.GetBytes(req, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user", got)
+	}
+	if got := gjson.GetBytes(req, "messages.0.content").String(); got != "a red apple" {
+		t.Fatalf("messages.0.content = %q, want a red apple", got)
+	}
+	if got := gjson.GetBytes(req, "modalities.0").String(); got != "image" {
+		t.Fatalf("modalities.0 = %q, want image", got)
+	}
+}
+
+func TestExtractImagesFromChatCompletions(t *testing.T) {
+	resp := []byte(`{"created":1700000000,"choices":[{"message":{"role":"assistant","images":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,/9j/ABC="}}]}}]}`)
+
+	results, createdAt, err := extractImagesFromChatCompletions(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if createdAt != 1700000000 {
+		t.Fatalf("createdAt = %d, want 1700000000", createdAt)
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Result != "/9j/ABC=" {
+		t.Fatalf("result = %q, want /9j/ABC=", results[0].Result)
+	}
+	if results[0].OutputFormat != "jpeg" {
+		t.Fatalf("output_format = %q, want jpeg", results[0].OutputFormat)
+	}
+}
+
+func TestExtractImagesFromChatCompletionsNoImages(t *testing.T) {
+	resp := []byte(`{"created":1700000000,"choices":[{"message":{"role":"assistant","content":"hello"}}]}`)
+
+	_, _, err := extractImagesFromChatCompletions(resp)
+	if err == nil {
+		t.Fatal("expected error for response with no images")
+	}
+}
+
 func TestBuildXAIImagesGenerationsRequest(t *testing.T) {
 	rawJSON := []byte(`{"model":"xai/grok-imagine-image-quality","prompt":"abstract art","aspect_ratio":"landscape","resolution":"2k","n":2,"response_format":"url"}`)
 
