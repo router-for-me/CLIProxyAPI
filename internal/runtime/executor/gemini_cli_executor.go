@@ -131,6 +131,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	basePayload = injectGeminiWebSearchTool(originalPayload, basePayload, "request.tools")
 
 	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -290,6 +291,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	basePayload = injectGeminiWebSearchTool(originalPayload, basePayload, "request.tools")
 
 	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

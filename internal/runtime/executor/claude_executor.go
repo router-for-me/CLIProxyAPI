@@ -185,9 +185,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
 
+	// Inject Claude-native web search tools from original request (dropped by translator)
+	var wsb []string
+	wsb, body = injectClaudeWebSearchTools(originalPayload, body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = append(extraBetas, wsb...)
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -362,9 +367,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
 
+	// Inject Claude-native web search tools from original request (dropped by translator)
+	var wsb []string
+	wsb, body = injectClaudeWebSearchTools(originalPayload, body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = append(extraBetas, wsb...)
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -728,6 +738,52 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+// injectGeminiWebSearchTool adds a googleSearch grounding tool to a translated Gemini payload
+// when the original OpenAI request contains a {type:web_search} tool. toolsPath is the
+// gjson/sjson path where Gemini tools live in the translated payload ("tools" or "request.tools").
+func injectGeminiWebSearchTool(original, translated []byte, toolsPath string) []byte {
+	tools := gjson.GetBytes(original, "tools")
+	if !tools.IsArray() {
+		return translated
+	}
+	for _, t := range tools.Array() {
+		if t.Get("type").String() == "web_search" {
+			if !gjson.GetBytes(translated, toolsPath).IsArray() {
+				translated, _ = sjson.SetRawBytes(translated, toolsPath, []byte("[]"))
+			}
+			translated, _ = sjson.SetRawBytes(translated, toolsPath+".-1", []byte(`{"googleSearch":{}}`))
+			break
+		}
+	}
+	return translated
+}
+
+// injectClaudeWebSearchTools scans the original OpenAI-format request for Claude-native
+// web search tool types and injects them into the translated body. Returns required
+// beta identifiers and the modified body.
+func injectClaudeWebSearchTools(original, translated []byte) ([]string, []byte) {
+	tools := gjson.GetBytes(original, "tools")
+	if !tools.IsArray() {
+		return nil, translated
+	}
+	betaSet := make(map[string]bool)
+	var betas []string
+	for _, t := range tools.Array() {
+		switch t.Get("type").String() {
+		case "web_search_20250305", "web_search_20260209":
+			if !gjson.GetBytes(translated, "tools").IsArray() {
+				translated, _ = sjson.SetRawBytes(translated, "tools", []byte("[]"))
+			}
+			translated, _ = sjson.SetRawBytes(translated, "tools.-1", []byte(t.Raw))
+			if beta := "web-search-2025-03-05"; !betaSet[beta] {
+				betas = append(betas, beta)
+				betaSet[beta] = true
+			}
+		}
+	}
+	return betas, translated
 }
 
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.
