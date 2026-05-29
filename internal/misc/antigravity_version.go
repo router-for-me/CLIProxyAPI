@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -39,9 +41,44 @@ var (
 	antigravityProxyMu       sync.RWMutex
 )
 
+// HasAntigravityAccounts checks if the auth directory contains any antigravity auth files.
+func HasAntigravityAccounts(authDir string) bool {
+	authDir = strings.TrimSpace(authDir)
+	if authDir == "" {
+		return false
+	}
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(authDir, entry.Name()))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			continue
+		}
+		t, _ := metadata["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(t), "antigravity") {
+			return true
+		}
+	}
+	return false
+}
+
 // StartAntigravityVersionUpdater starts a background goroutine that periodically refreshes the cached antigravity version.
 // This is intentionally decoupled from request execution to avoid blocking executors on version lookups.
-func StartAntigravityVersionUpdater(ctx context.Context, proxy string, skipVerify bool) {
+// If hasAccounts is false, the updater is skipped entirely since the version is only needed for antigravity requests.
+func StartAntigravityVersionUpdater(ctx context.Context, proxy string, skipVerify bool, hasAccounts bool) {
+	if !hasAccounts {
+		log.Debug("antigravity version updater skipped: no antigravity accounts configured")
+		return
+	}
 	antigravityProxyMu.Lock()
 	proxyURL = strings.TrimSpace(proxy)
 	tlsSkipVerify = skipVerify

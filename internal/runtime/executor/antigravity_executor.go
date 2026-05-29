@@ -2275,7 +2275,7 @@ func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return base
 	}
-	return antigravityBaseURLProd
+	return antigravityBaseURLDaily
 }
 
 func resolveHost(base string) string {

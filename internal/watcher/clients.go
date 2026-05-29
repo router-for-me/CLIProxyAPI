@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
@@ -223,6 +224,15 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)
+	// Preserve the SharedCredential (with its cached token source) from old auth
+	// entries so that incremental updates don't force a fresh OAuth token refresh.
+	for id, newAuth := range newByID {
+		if oldAuth, ok := oldByID[id]; ok && oldAuth != nil && newAuth != nil {
+			if geminicli.ResolveSharedCredential(oldAuth.Runtime) != nil {
+				newAuth.Runtime = oldAuth.Runtime
+			}
+		}
+	}
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
@@ -293,8 +303,12 @@ func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
 
 func authIDSet(auths map[string]*coreauth.Auth) map[string]*coreauth.Auth {
 	set := make(map[string]*coreauth.Auth, len(auths))
-	for id := range auths {
-		set[id] = nil
+	for id, a := range auths {
+		if a != nil {
+			set[id] = a.Clone()
+		} else {
+			set[id] = nil
+		}
 	}
 	return set
 }

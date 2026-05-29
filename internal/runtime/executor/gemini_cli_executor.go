@@ -249,6 +249,13 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			continue
 		}
 
+		// Clear cached token source on auth errors so the next request refreshes the token.
+		if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+			if shared := geminicli.ResolveSharedCredential(auth.Runtime); shared != nil {
+				shared.SetTokenSource(nil)
+			}
+		}
+
 		err = newGeminiStatusErr(httpResp.StatusCode, data)
 		return resp, err
 	}
@@ -388,6 +395,14 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				continue
 			}
+
+			// Clear cached token source on auth errors so the next request refreshes the token.
+			if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+				if shared := geminicli.ResolveSharedCredential(auth.Runtime); shared != nil {
+					shared.SetTokenSource(nil)
+				}
+			}
+
 			err = newGeminiStatusErr(httpResp.StatusCode, data)
 			return nil, err
 		}
@@ -592,6 +607,14 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 			log.Debugf("gemini cli executor: rate limited, retrying with next model")
 			continue
 		}
+
+		// Clear cached token source on auth errors so the next request refreshes the token.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			if shared := geminicli.ResolveSharedCredential(auth.Runtime); shared != nil {
+				shared.SetTokenSource(nil)
+			}
+		}
+
 		break
 	}
 

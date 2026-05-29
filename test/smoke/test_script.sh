@@ -38,7 +38,7 @@ curl -s --location 'localhost:8318/v1/chat/completions' \
     ]
 }' > /dev/null
 
-sleep 2
+sleep 3
 
 # 4. Make the second request
 echo "Making Request 2..."
