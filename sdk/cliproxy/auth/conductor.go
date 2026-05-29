@@ -227,6 +227,17 @@ func isBuiltInSelector(selector Selector) bool {
 	}
 }
 
+func selectorSupportsCodexWebsocketPreference(selector Selector) bool {
+	switch typed := selector.(type) {
+	case nil, *RoundRobinSelector, *FillFirstSelector:
+		return true
+	case *SessionAffinitySelector:
+		return typed != nil && selectorSupportsCodexWebsocketPreference(typed.fallback)
+	default:
+		return false
+	}
+}
+
 func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
 	if m == nil || m.scheduler == nil {
 		return
@@ -696,6 +707,47 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
 	return available, nil
+}
+
+func (m *Manager) preferredCodexWebsocketAuthsForRouteModel(ctx context.Context, auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, bool) {
+	if len(auths) == 0 {
+		return nil, false
+	}
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) && !cliproxyexecutor.PreferUpstreamWebsocket(ctx) {
+		return nil, false
+	}
+	providerKey := strings.TrimSpace(provider)
+	if !strings.EqualFold(providerKey, "codex") && !strings.EqualFold(providerKey, "mixed") {
+		return nil, false
+	}
+
+	wsCandidates := make([]*Auth, 0, len(auths))
+	for _, candidate := range auths {
+		if candidate == nil || !strings.EqualFold(strings.TrimSpace(candidate.Provider), "codex") {
+			continue
+		}
+		if authWebsocketsEnabled(candidate) {
+			wsCandidates = append(wsCandidates, candidate)
+		}
+	}
+	if len(wsCandidates) == 0 {
+		return nil, false
+	}
+
+	available, errAvailable := m.availableAuthsForRouteModel(wsCandidates, provider, routeModel, now)
+	if errAvailable != nil || len(available) == 0 {
+		return nil, false
+	}
+	return available, true
+}
+
+func (m *Manager) availableAuthsForRouteModelWithPreference(ctx context.Context, auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
+	if selectorSupportsCodexWebsocketPreference(m.selector) {
+		if preferred, ok := m.preferredCodexWebsocketAuthsForRouteModel(ctx, auths, provider, routeModel, now); ok {
+			return preferred, nil
+		}
+	}
+	return m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
@@ -3047,7 +3099,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModelWithPreference(ctx, candidates, provider, model, time.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
@@ -3199,7 +3251,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModelWithPreference(ctx, candidates, "mixed", model, time.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable

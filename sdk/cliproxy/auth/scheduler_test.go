@@ -430,6 +430,90 @@ func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) 
 	}
 }
 
+func TestManagerPickNext_RouteAwarePreferUpstreamWebsocketKeepsLowerPriorityCodexWebsocket(t *testing.T) {
+	t.Parallel()
+
+	const (
+		routeModel    = "team/gpt-5-codex-route-aware-single"
+		upstreamModel = "gpt-5-codex-route-aware-single"
+		httpAuthID    = "codex-http-route-aware-single"
+		wsAuthID      = "codex-ws-route-aware-single"
+	)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(httpAuthID, "codex", []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(wsAuthID, "codex", []*registry.ModelInfo{{ID: upstreamModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(httpAuthID)
+		reg.UnregisterClient(wsAuthID)
+	})
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: httpAuthID, Provider: "codex", Attributes: map[string]string{"priority": "10"}}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", httpAuthID, errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: wsAuthID, Provider: "codex", Prefix: "team", Attributes: map[string]string{"priority": "0", "websockets": "true"}}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", wsAuthID, errRegister)
+	}
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	got, _, errPick := manager.pickNext(ctx, "codex", routeModel, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickNext() auth = nil")
+	}
+	if got.ID != wsAuthID {
+		t.Fatalf("pickNext() auth.ID = %q, want %q", got.ID, wsAuthID)
+	}
+}
+
+func TestManagerPickNextMixed_RouteAwarePreferUpstreamWebsocketKeepsLowerPriorityCodexWebsocket(t *testing.T) {
+	t.Parallel()
+
+	const (
+		routeModel       = "team/gpt-5-codex-route-aware-mixed"
+		upstreamModel    = "gpt-5-codex-route-aware-mixed"
+		compatAuthID     = "openai-compat-route-aware-mixed"
+		codexWSAuthID    = "codex-ws-route-aware-mixed"
+		compatProvider   = "openai-compatible"
+		codexProviderKey = "codex"
+	)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(compatAuthID, compatProvider, []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(codexWSAuthID, codexProviderKey, []*registry.ModelInfo{{ID: upstreamModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(compatAuthID)
+		reg.UnregisterClient(codexWSAuthID)
+	})
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors[compatProvider] = schedulerTestExecutor{}
+	manager.executors[codexProviderKey] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: compatAuthID, Provider: compatProvider, Attributes: map[string]string{"priority": "10"}}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", compatAuthID, errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: codexWSAuthID, Provider: codexProviderKey, Prefix: "team", Attributes: map[string]string{"priority": "0", "websockets": "true"}}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", codexWSAuthID, errRegister)
+	}
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	got, _, provider, errPick := manager.pickNextMixed(ctx, []string{compatProvider, codexProviderKey}, routeModel, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickNextMixed() auth = nil")
+	}
+	if provider != codexProviderKey {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, codexProviderKey)
+	}
+	if got.ID != codexWSAuthID {
+		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, codexWSAuthID)
+	}
+}
+
 func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
 	t.Parallel()
 
