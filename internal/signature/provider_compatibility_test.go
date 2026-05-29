@@ -61,6 +61,42 @@ func TestDetectSignatureProvider_Gemini3EPrefixDoesNotLookClaude(t *testing.T) {
 	}
 }
 
+func TestCompatibleSignatureForProvider_ClaudeUsesProviderNativeEForm(t *testing.T) {
+	nativeSig := testClaudeThinkingSignature()
+	doubleEncoded := base64.StdEncoding.EncodeToString([]byte(nativeSig))
+
+	normalized, ok := CompatibleSignatureForProvider(SignatureProviderClaude, doubleEncoded)
+	if !ok {
+		t.Fatal("double-layer Claude signature should be compatible")
+	}
+	if normalized != nativeSig {
+		t.Fatalf("CompatibleSignatureForProvider(Claude) = %q, want provider-native %q", normalized, nativeSig)
+	}
+}
+
+func TestCompatibleAntigravityClaudeThinkingSignature_UsesDoubleLayerRForm(t *testing.T) {
+	nativeSig := testClaudeThinkingSignature()
+	expected := base64.StdEncoding.EncodeToString([]byte(nativeSig))
+
+	normalized, ok := CompatibleAntigravityClaudeThinkingSignature(nativeSig)
+	if !ok {
+		t.Fatal("Claude signature should be compatible with Antigravity Claude")
+	}
+	if normalized != expected {
+		t.Fatalf("CompatibleAntigravityClaudeThinkingSignature = %q, want %q", normalized, expected)
+	}
+}
+
+func TestCompatibleAntigravityClaudeThinkingSignature_RejectsGeminiEPrefix(t *testing.T) {
+	geminiSig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39, 0xd6, 0xc7, 0x34})
+	if !strings.HasPrefix(geminiSig, "E") {
+		t.Fatalf("test signature should start with E, got %q", geminiSig[:1])
+	}
+	if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(geminiSig); ok || normalized != "" {
+		t.Fatalf("Gemini E-prefix signature normalized=%q ok=%v, want rejected", normalized, ok)
+	}
+}
+
 func TestDetectSignatureProvider_DoesNotClassifyArbitraryBase64AsGemini(t *testing.T) {
 	opaque := testGeminiThoughtSignature([]byte{0x45, 0x12})
 	if got := DetectSignatureProvider(opaque); got != SignatureProviderUnknown {
@@ -172,9 +208,9 @@ func TestSanitizeClaudeMessagesSignaturesForModel_NormalizesSameProviderClaude(t
 	nativeSig := testClaudeThinkingSignature()
 	sig := "claude#" + nativeSig
 	input := []byte(`{"model":"claude-sonnet","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"keep","signature":"` + sig + `"},{"type":"text","text":"answer"}]}]}`)
-	expectedSig, err := NormalizeClaudeThinkingSignature(nativeSig)
+	expectedSig, err := NormalizeClaudeProviderNativeThinkingSignature(nativeSig)
 	if err != nil {
-		t.Fatalf("NormalizeClaudeThinkingSignature failed: %v", err)
+		t.Fatalf("NormalizeClaudeProviderNativeThinkingSignature failed: %v", err)
 	}
 
 	output, report := SanitizeClaudeMessagesSignaturesForModel(input, "claude-sonnet-4-5")
