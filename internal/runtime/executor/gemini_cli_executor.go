@@ -682,6 +682,7 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 			// StaticTokenSource (used in the Home branch) never refreshes,
 			// so returning it after expiry would keep sending stale tokens.
 			if tok, err := cachedTS.Token(); err == nil && tok.Valid() {
+				updateGeminiCLITokenMetadata(auth, base, tok)
 				return cachedTS, base, nil
 			}
 		}
