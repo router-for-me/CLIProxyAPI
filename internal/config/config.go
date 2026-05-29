@@ -98,6 +98,11 @@ type Config struct {
 	// ConcurrencyLimitDefault sets the default per-account maximum in-flight requests
 	// applied to every credential that does not override it. 0 (default) disables it.
 	ConcurrencyLimitDefault int `yaml:"concurrency-limit-default" json:"concurrency-limit-default"`
+	// ClaudeUsageLimitThreshold is the utilization fraction (0..1) of a Claude
+	// rolling usage window (5h/7d) at which an account is parked until that window
+	// resets, to avoid tripping the hard limit. Default 0.85; 0 disables proactive
+	// avoidance (only a hard "rejected" status parks the account).
+	ClaudeUsageLimitThreshold float64 `yaml:"claude-usage-limit-threshold" json:"claude-usage-limit-threshold"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
@@ -654,6 +659,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RPMLimitDefault = 0
 	cfg.TPMLimitDefault = 0
 	cfg.ConcurrencyLimitDefault = 0
+	cfg.ClaudeUsageLimitThreshold = 0.85
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

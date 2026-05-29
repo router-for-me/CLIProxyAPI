@@ -108,6 +108,15 @@ rpm-limit-default: 0
 tpm-limit-default: 0
 concurrency-limit-default: 0
 
+# Claude rolling usage-window avoidance (Max/subscription "unified" limits).
+# Anthropic returns per-response headers exposing the rolling 5-hour and 7-day
+# usage windows. When an account's window utilization reaches this fraction (0..1),
+# the proxy stops routing to that account until the window resets, failing over to
+# other accounts so the hard limit is not tripped. A hard "rejected" status always
+# parks the account regardless of this value. Default 0.85 (= stop at 85%);
+# set 0 to disable proactive avoidance (only react to a hard rejection).
+claude-usage-limit-threshold: 0.85
+
 # disable-image-generation supports: false (default), true, or "chat".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.

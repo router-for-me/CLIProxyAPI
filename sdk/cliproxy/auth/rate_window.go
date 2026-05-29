@@ -24,6 +24,20 @@ type rateBucket struct {
 type rateWindow struct {
 	buckets  [rateWindowSeconds]rateBucket
 	inFlight int64
+	// usageLimitUntil parks the account until this time when a provider usage
+	// window (e.g. Claude's rolling 5h/7d limit) is at or over the avoidance
+	// threshold. Zero means no active usage-limit park.
+	usageLimitUntil time.Time
+}
+
+// parkUntil extends the usage-limit park time, never shortening an existing one.
+func (w *rateWindow) parkUntil(t time.Time) {
+	if w == nil || t.IsZero() {
+		return
+	}
+	if t.After(w.usageLimitUntil) {
+		w.usageLimitUntil = t
+	}
 }
 
 // bucketFor returns the bucket for the given second, resetting it when the ring

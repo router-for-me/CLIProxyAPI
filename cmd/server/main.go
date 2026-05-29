@@ -488,6 +488,7 @@ func main() {
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	coreauth.SetRateLimitDefaults(cfg.RPMLimitDefault, cfg.TPMLimitDefault, cfg.ConcurrencyLimitDefault)
+	coreauth.SetClaudeUsageLimitThreshold(cfg.ClaudeUsageLimitThreshold)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)

@@ -1401,6 +1401,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		auth.SetRateLimitDefaults(cfg.RPMLimitDefault, cfg.TPMLimitDefault, cfg.ConcurrencyLimitDefault)
 	}
 
+	if oldCfg == nil || oldCfg.ClaudeUsageLimitThreshold != cfg.ClaudeUsageLimitThreshold {
+		auth.SetClaudeUsageLimitThreshold(cfg.ClaudeUsageLimitThreshold)
+	}
+
 	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
 		log.Infof("disable-image-generation updated: %v -> %v", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
 	}

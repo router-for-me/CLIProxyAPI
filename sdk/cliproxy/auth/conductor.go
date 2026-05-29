@@ -107,6 +107,28 @@ var (
 	concurrencyLimitDefault atomic.Int64
 )
 
+// claudeUsageThresholdMilli stores the Claude 5h/7d usage-limit avoidance threshold
+// as parts-per-thousand of the utilization fraction (e.g. 850 = 0.85 = 85%). 0
+// disables proactive avoidance (only a hard "rejected" status parks the account).
+var claudeUsageThresholdMilli atomic.Int64
+
+// SetClaudeUsageLimitThreshold sets the utilization fraction (0..1) at which an
+// account is parked until its Claude usage window (rolling 5h/7d) resets. <= 0
+// disables proactive avoidance; the value is clamped to [0,1].
+func SetClaudeUsageLimitThreshold(fraction float64) {
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+	claudeUsageThresholdMilli.Store(int64(fraction * 1000))
+}
+
+func claudeUsageThreshold() float64 {
+	return float64(claudeUsageThresholdMilli.Load()) / 1000
+}
+
 // SetRateLimitDefaults sets the global default requests-per-minute, tokens-per-minute,
 // and max-concurrency limits applied to every credential that does not override them.
 // Pass 0 (or negative) for any dimension to disable that limit globally.
@@ -150,6 +172,11 @@ func (m *Manager) rateLimited(authID string, now time.Time) (time.Time, bool) {
 	a := m.auths[authID]
 	if a == nil {
 		return time.Time{}, false
+	}
+	// Provider usage-window avoidance (e.g. Claude rolling 5h/7d limit): park the
+	// account until the observed reset time, independent of RPM/TPM/concurrency.
+	if until := a.rate.usageLimitUntil; !until.IsZero() && now.Before(until) {
+		return until, true
 	}
 	rpm, tpm, concurrency := effectiveRateLimits(a)
 	if rpm <= 0 && tpm <= 0 && concurrency <= 0 {
@@ -214,19 +241,40 @@ func (m *Manager) RecordTokenUsage(authID string, tokens int64, at time.Time) {
 	m.mu.Unlock()
 }
 
+// noteClaudeUsageLimit inspects Anthropic unified rate-limit headers from a
+// response and, when a usage window is at/over the avoidance threshold (or hard
+// rejected), parks the account until that window resets so it is not routed to.
+func (m *Manager) noteClaudeUsageLimit(authID string, headers http.Header, now time.Time) {
+	if m == nil || authID == "" || headers == nil {
+		return
+	}
+	until := claudeUsageParkUntil(headers, claudeUsageThreshold(), now)
+	if until.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	if a := m.auths[authID]; a != nil {
+		a.rate.parkUntil(until)
+	}
+	m.mu.Unlock()
+}
+
 // rateUsagePlugin feeds published token usage into the manager's per-account TPM
-// windows. It implements coreusage.Plugin.
+// windows and applies Claude usage-window (5h/7d) avoidance. It implements
+// coreusage.Plugin.
 type rateUsagePlugin struct {
 	m *Manager
 }
 
-// HandleUsage records the total tokens of a usage record against its auth.
+// HandleUsage records token usage for TPM and parks accounts approaching their
+// Claude rolling usage limit based on the response's unified rate-limit headers.
 func (p rateUsagePlugin) HandleUsage(_ context.Context, record coreusage.Record) {
 	total := record.Detail.TotalTokens
 	if total <= 0 {
 		total = record.Detail.InputTokens + record.Detail.OutputTokens
 	}
 	p.m.RecordTokenUsage(record.AuthID, total, record.RequestedAt)
+	p.m.noteClaudeUsageLimit(record.AuthID, record.ResponseHeaders, record.RequestedAt)
 }
 
 // Result captures execution outcome used to adjust auth state.
