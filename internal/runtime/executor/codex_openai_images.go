@@ -63,6 +63,20 @@ func codexIsImagesEndpointPath(path string) bool {
 	return strings.HasSuffix(path, codexImagesGenerationsPath) || strings.HasSuffix(path, codexImagesEditsPath)
 }
 
+func (e *CodexExecutor) resolveGPTImage2BaseModel() string {
+	if e == nil || e.cfg == nil {
+		return codexOpenAIImagesMainModel
+	}
+	model := strings.TrimSpace(e.cfg.GPTImage2BaseModel)
+	if model == "" {
+		return codexOpenAIImagesMainModel
+	}
+	if strings.HasPrefix(strings.ToLower(model), "gpt-") {
+		return model
+	}
+	return codexOpenAIImagesMainModel
+}
+
 func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
 	if errPrepare != nil {
@@ -74,13 +88,15 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), codexOpenAIImagesMainModel, auth)
+	mainModel := e.resolveGPTImage2BaseModel()
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), mainModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts)
+	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts, mainModel)
 	if errBuild != nil {
 		return resp, errBuild
 	}
+	reporter.SetTranslatedReasoningEffort(body, "codex")
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)
@@ -91,6 +107,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -161,13 +178,15 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), codexOpenAIImagesMainModel, auth)
+	mainModel := e.resolveGPTImage2BaseModel()
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), mainModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts)
+	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts, mainModel)
 	if errBuild != nil {
 		return nil, errBuild
 	}
+	reporter.SetTranslatedReasoningEffort(body, "codex")
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)
@@ -178,6 +197,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -277,18 +297,22 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
-func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
+func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, mainModel string) ([]byte, error) {
 	out := body
+	mainModel = strings.TrimSpace(mainModel)
+	if mainModel == "" {
+		mainModel = codexOpenAIImagesMainModel
+	}
 	var errThinking error
-	out, errThinking = thinking.ApplyThinking(out, codexOpenAIImagesMainModel, codexOpenAIImageSourceFormat, "codex", e.Identifier())
+	out, errThinking = thinking.ApplyThinking(out, mainModel, codexOpenAIImageSourceFormat, "codex", e.Identifier())
 	if errThinking != nil {
 		return nil, errThinking
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	out = helps.ApplyPayloadConfigWithRequest(e.cfg, codexOpenAIImagesMainModel, "codex", codexOpenAIImageSourceFormat, "", out, body, requestedModel, requestPath, opts.Headers)
-	out, _ = sjson.SetBytes(out, "model", codexOpenAIImagesMainModel)
+	out = helps.ApplyPayloadConfigWithRequest(e.cfg, mainModel, "codex", codexOpenAIImageSourceFormat, "", out, body, requestedModel, requestPath, opts.Headers)
+	out, _ = sjson.SetBytes(out, "model", mainModel)
 	out, _ = sjson.SetBytes(out, "stream", true)
 	out, _ = sjson.DeleteBytes(out, "previous_response_id")
 	out, _ = sjson.DeleteBytes(out, "prompt_cache_retention")

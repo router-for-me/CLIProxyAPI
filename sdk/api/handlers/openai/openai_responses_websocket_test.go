@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	requestlogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -593,6 +594,34 @@ func TestSetWebsocketTimelineBody(t *testing.T) {
 	}
 }
 
+func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+
+	timelineLog := newWebsocketTimelineLog(true, nil)
+	timelineLog.BeginRequest()
+	timelineLog.Append("request", []byte(`{"type":"response.create"}`), ts)
+	timelineLog.SetContext(c)
+
+	value, exists := c.Get(wsTimelineBodyKey)
+	if !exists {
+		t.Fatalf("timeline body key not set")
+	}
+	bodyBytes, ok := value.([]byte)
+	if !ok {
+		t.Fatalf("timeline body key type mismatch")
+	}
+	got := string(bodyBytes)
+	if !strings.Contains(got, "Event: websocket.request") {
+		t.Fatalf("timeline event not found: %s", got)
+	}
+	if !strings.Contains(got, `{"type":"response.create"}`) {
+		t.Fatalf("timeline payload not found: %s", got)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -662,7 +691,7 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForOrphanOutput(t *te
 	}
 }
 
-func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForPreviousResponseOutput(t *testing.T) {
+func TestRepairResponsesWebsocketToolCallsKeepsPreviousResponseOutputIncremental(t *testing.T) {
 	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
 	callCache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -676,17 +705,39 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForPreviousResponseOu
 		t.Fatalf("previous_response_id = %q, want resp-latest", got)
 	}
 	input := gjson.GetBytes(repaired, "input").Array()
-	if len(input) != 3 {
-		t.Fatalf("repaired input len = %d, want 3: %s", len(input), repaired)
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
+	}
+	if input[0].Get("type").String() != "function_call_output" || input[0].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected output item: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsKeepsPreviousResponseCallIncremental(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	outputCache.record(sessionKey, "call-1", []byte(`{"type":"function_call_output","call_id":"call-1","id":"tool-out-1","output":"ok"}`))
+
+	raw := []byte(`{"previous_response_id":"resp-latest","input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
+
+	if got := gjson.GetBytes(repaired, "previous_response_id").String(); got != "resp-latest" {
+		t.Fatalf("previous_response_id = %q, want resp-latest", got)
+	}
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
 	}
 	if input[0].Get("type").String() != "function_call" || input[0].Get("call_id").String() != "call-1" {
-		t.Fatalf("missing inserted call: %s", input[0].Raw)
+		t.Fatalf("unexpected call item: %s", input[0].Raw)
 	}
-	if input[1].Get("type").String() != "function_call_output" || input[1].Get("call_id").String() != "call-1" {
-		t.Fatalf("unexpected output item: %s", input[1].Raw)
-	}
-	if input[2].Get("type").String() != "message" || input[2].Get("id").String() != "msg-1" {
-		t.Fatalf("unexpected trailing item: %s", input[2].Raw)
+	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
 	}
 }
 
@@ -773,6 +824,31 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedCustomToolCallForOrphanOu
 	}
 	if input[2].Get("type").String() != "message" || input[2].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected trailing item: %s", input[2].Raw)
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsKeepsPreviousResponseCustomToolOutputIncremental(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	callCache.record(sessionKey, "call-1", []byte(`{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch"}`))
+
+	raw := []byte(`{"previous_response_id":"resp-latest","input":[{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
+
+	if got := gjson.GetBytes(repaired, "previous_response_id").String(); got != "resp-latest" {
+		t.Fatalf("previous_response_id = %q, want resp-latest", got)
+	}
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
+	}
+	if input[0].Get("type").String() != "custom_tool_call_output" || input[0].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected output item: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
 	}
 }
 
@@ -867,14 +943,14 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		completedOutput, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 		)
 		if err != nil {
@@ -945,7 +1021,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		if errClose := conn.Close(); errClose != nil {
 			serverErrCh <- errClose
 			return
@@ -957,7 +1033,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 		)
 		if err == nil {
@@ -994,17 +1070,35 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
+	logsDir := t.TempDir()
 
 	timelineCh := make(chan string, 1)
 	router := gin.New()
 	router.GET("/v1/responses/ws", func(c *gin.Context) {
+		source, errSource := requestlogging.NewFileBodySourceInDir(logsDir, "websocket-timeline-test")
+		if errSource != nil {
+			timelineCh <- ""
+			return
+		}
+		c.Set(requestlogging.WebsocketTimelineSourceContextKey, source)
 		h.ResponsesWebsocket(c)
 		timeline := ""
 		if value, exists := c.Get(wsTimelineBodyKey); exists {
 			if body, ok := value.([]byte); ok {
 				timeline = string(body)
+			}
+		} else if value, exists := c.Get(requestlogging.WebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				body, _ := source.Bytes()
+				timeline = string(body)
+				_ = source.Cleanup()
+			}
+		}
+		if value, exists := c.Get(requestlogging.APIWebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				_ = source.Cleanup()
 			}
 		}
 		timelineCh <- timeline

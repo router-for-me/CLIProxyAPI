@@ -96,6 +96,29 @@
       }
     },
     {
+      "id": "claude-opus-4-8",
+      "object": "model",
+      "created": 1779984000,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 4.8",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "claude-opus-4-5-20251101",
       "object": "model",
       "created": 1761955200,
@@ -1315,76 +1338,6 @@
   ],
   "codex-free": [
     {
-      "id": "gpt-5.2",
-      "object": "model",
-      "created": 1765440000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.2",
-      "version": "gpt-5.2",
-      "description": "Stable version of GPT 5.2",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "none",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.3-codex",
-      "object": "model",
-      "created": 1770307200,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex",
-      "version": "gpt-5.3",
-      "description": "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "gpt-5.4",
-      "object": "model",
-      "created": 1772668800,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
       "id": "gpt-5.4-mini",
       "object": "model",
       "created": 1773705600,
@@ -2224,6 +2177,27 @@
 
   ],
   "xai": [
+    {
+      "id": "grok-build-0.1",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Build 0.1",
+      "name": "grok-build-0.1",
+      "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
+      "context_length": 256000,
+      "max_completion_tokens": 256000,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
     {
       "id": "grok-4.3",
       "object": "model",

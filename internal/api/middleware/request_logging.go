@@ -58,6 +58,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
+		attachWebsocketLogSources(c, logger, loggerEnabled)
 
 		// Process the request
 		c.Next()
@@ -67,6 +68,26 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			// Log error but don't interrupt the response
 			// In a real implementation, you might want to use a proper logger here
 		}
+	}
+}
+
+type fileBodySourceFactory interface {
+	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
+}
+
+func attachWebsocketLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool) {
+	if c == nil || !loggerEnabled || !isResponsesWebsocketUpgrade(c.Request) {
+		return
+	}
+	factory, ok := logger.(fileBodySourceFactory)
+	if !ok || factory == nil {
+		return
+	}
+	if source, errSource := factory.NewFileBodySource("websocket-timeline"); errSource == nil {
+		c.Set(logging.WebsocketTimelineSourceContextKey, source)
+	}
+	if source, errSource := factory.NewFileBodySource("api-websocket-timeline"); errSource == nil {
+		c.Set(logging.APIWebsocketTimelineSourceContextKey, source)
 	}
 }
 
