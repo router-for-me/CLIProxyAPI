@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
@@ -96,8 +97,9 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
-	homeClient *home.Client
-	homeCancel context.CancelFunc
+	homeClient       *home.Client
+	homeCancel       context.CancelFunc
+	homeLogForwarder *logging.HomeAppLogForwarder
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -717,6 +719,10 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 		s.homeClient.Close()
 		s.homeClient = nil
 	}
+	if s.homeLogForwarder != nil {
+		s.homeLogForwarder.Stop()
+		s.homeLogForwarder = nil
+	}
 
 	homeCtx := ctx
 	if homeCtx == nil {
@@ -739,6 +745,7 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 		return nil
 	})
 	s.startHomeUsageForwarder(homeCtx, client)
+	s.homeLogForwarder = logging.StartHomeAppLogForwarder(0)
 }
 
 // Run starts the service and blocks until the context is cancelled or the server stops.
@@ -970,6 +977,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.homeClient != nil {
 			s.homeClient.Close()
 			s.homeClient = nil
+		}
+		if s.homeLogForwarder != nil {
+			s.homeLogForwarder.Stop()
+			s.homeLogForwarder = nil
 		}
 		home.ClearCurrent()
 

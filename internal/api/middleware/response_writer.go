@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	log "github.com/sirupsen/logrus"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -570,6 +571,8 @@ func cleanupFileBodySources(sources ...*logging.FileBodySource) {
 		if source == nil {
 			continue
 		}
-		_ = source.Cleanup()
+		if errCleanup := source.Cleanup(); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up log part files")
+		}
 	}
 }
