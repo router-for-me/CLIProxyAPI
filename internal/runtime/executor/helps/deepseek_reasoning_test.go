@@ -18,6 +18,8 @@ func TestIsDeepSeekReasoningModel(t *testing.T) {
 		{model: "deepseek-v4-pro", want: true},
 		{model: "deepseek-v4-flash", want: true},
 		{model: "deepseek-v4-pro(8192)", want: true},
+		{model: "deepseek-v4-pro(high)", want: true},
+		{model: "deepseek-v4-pro(max)", want: true},
 		{model: "deepseek-v3.1", want: false},
 		{model: "gpt-5.4", want: false},
 	}

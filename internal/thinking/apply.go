@@ -14,6 +14,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"gemini":      nil,
 	"gemini-cli":  nil,
 	"claude":      nil,
+	"deepseek":    nil,
 	"openai":      nil,
 	"codex":       nil,
 	"antigravity": nil,
@@ -95,12 +96,17 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if fromFormat == "" {
 		fromFormat = providerFormat
 	}
-	// 1. Route check: Get provider applier
-	applier := GetProviderApplier(providerFormat)
+	// 1. Route check: Get provider applier. Prefer providerKey so OpenAI-compatible
+	// providers can specialize their native extra_body fields while keeping OpenAI format.
+	applier := GetProviderApplier(providerKey)
+	if applier == nil {
+		applier = GetProviderApplier(providerFormat)
+	}
 	if applier == nil {
 		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    model,
+			"provider":     providerFormat,
+			"provider_key": providerKey,
+			"model":        model,
 		}).Debug("thinking: unknown provider, passthrough |")
 		return body, nil
 	}
@@ -323,7 +329,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractClaudeConfig(body)
 	case "gemini", "gemini-cli", "antigravity":
 		return extractGeminiConfig(body, provider)
-	case "openai":
+	case "openai", "deepseek":
 		return extractOpenAIConfig(body)
 	case "codex", "xai":
 		return extractCodexConfig(body)
