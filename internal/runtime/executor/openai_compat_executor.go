@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,12 +100,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	endpoint := openAICompatEndpointPath(opts)
-	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses/compact"
-	}
+	to, endpoint := e.resolveProtocol(auth, from, opts)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -121,7 +117,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
-	if opts.Alt == "responses/compact" {
+	if endpoint == "/responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
@@ -303,7 +299,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
+	to, endpoint := e.resolveProtocol(auth, from, opts)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -323,10 +319,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	if to.String() == "openai" {
+		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -795,6 +793,59 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+// responsesCapability reads a capability flag for the openai-compatibility provider.
+// It checks auth attributes first, then falls back to the matching config entry.
+func (e *OpenAICompatExecutor) responsesCapability(auth *cliproxyauth.Auth, key string) bool {
+	if auth != nil && len(auth.Attributes) > 0 {
+		if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+			if parsed, err := strconv.ParseBool(raw); err == nil {
+				return parsed
+			}
+		}
+	}
+	if c := e.resolveCompatConfig(auth); c != nil {
+		switch key {
+		case "responses_passthrough":
+			return c.ResponsesPassthrough
+		case "responses_websocket":
+			return c.ResponsesWebsocket
+		case "responses_compaction":
+			return c.ResponsesCompaction
+		}
+	}
+	return false
+}
+
+// resolveProtocol determines the target format and upstream endpoint for a request.
+// When the source is openai-response and the capability flags permit, it selects
+// identity passthrough to /responses or /responses/compact.
+func (e *OpenAICompatExecutor) resolveProtocol(auth *cliproxyauth.Auth, from sdktranslator.Format, opts cliproxyexecutor.Options) (to sdktranslator.Format, endpoint string) {
+	to = sdktranslator.FromString("openai")
+	endpoint = openAICompatEndpointPath(opts)
+
+	if from.String() != "openai-response" {
+		return
+	}
+
+	passthrough := e.responsesCapability(auth, "responses_passthrough")
+	compaction := e.responsesCapability(auth, "responses_compaction")
+
+	if opts.Alt == "responses/compact" {
+		if compaction {
+			to = sdktranslator.FromString("openai-response")
+			endpoint = "/responses/compact"
+		}
+		return
+	}
+
+	if passthrough {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/responses"
+	}
+
+	return
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

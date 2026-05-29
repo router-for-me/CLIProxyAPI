@@ -2030,3 +2030,58 @@ func TestNormalizeSubsequentRequestAssistantInputTriggersTranscriptReplacement(t
 		t.Fatalf("input[0].id = %q, want %q", input[0].Get("id").String(), "msg-3")
 	}
 }
+
+func TestResponsesWebsocketAuthSupportsCompactionReplay_OpenAICompatibilityAttr(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"responses_compaction": "true",
+		},
+	}
+	if !responsesWebsocketAuthSupportsCompactionReplay(auth) {
+		t.Fatal("expected openai-compatibility with responses_compaction=true to support compaction replay")
+	}
+}
+
+func TestResponsesWebsocketAuthSupportsCompactionReplay_OpenAICompatibilityAttrFalse(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"responses_compaction": "false",
+		},
+	}
+	if responsesWebsocketAuthSupportsCompactionReplay(auth) {
+		t.Fatal("expected openai-compatibility with responses_compaction=false to NOT support compaction replay")
+	}
+}
+
+func TestResponsesWebsocketAuthSupportsCompactionReplay_OpenAICompatibilityNoAttr(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "openai-compatibility",
+		Attributes: map[string]string{},
+	}
+	if responsesWebsocketAuthSupportsCompactionReplay(auth) {
+		t.Fatal("expected openai-compatibility without attr to NOT support compaction replay")
+	}
+}
+
+func TestWebsocketUpstreamSupportsIncrementalInput_ResponsesWebsocketAttr(t *testing.T) {
+	attrs := map[string]string{"responses_websocket": "true"}
+	if !websocketUpstreamSupportsIncrementalInput(attrs, nil) {
+		t.Fatal("expected responses_websocket=true to enable incremental input")
+	}
+}
+
+func TestWebsocketUpstreamSupportsIncrementalInput_ResponsesWebsocketAttrFalse(t *testing.T) {
+	attrs := map[string]string{"responses_websocket": "false"}
+	if websocketUpstreamSupportsIncrementalInput(attrs, nil) {
+		t.Fatal("expected responses_websocket=false to disable incremental input")
+	}
+}
+
+func TestWebsocketUpstreamSupportsIncrementalInput_LegacyWebsocketsFallback(t *testing.T) {
+	attrs := map[string]string{"websockets": "true"}
+	if !websocketUpstreamSupportsIncrementalInput(attrs, nil) {
+		t.Fatal("expected legacy websockets=true to still enable incremental input")
+	}
+}
