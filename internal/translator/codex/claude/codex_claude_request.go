@@ -6,12 +6,15 @@
 package claude
 
 import (
-	"encoding/base64"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -50,7 +53,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		contentIndex := 0
 
 		appendSystemText := func(text string) {
-			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+			if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
 				return
 			}
 
@@ -84,6 +87,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
+			if messageRole == "system" {
+				messageRole = "developer"
+			}
 
 			newMessage := func() []byte {
 				msg := []byte(`{"type":"message","role":"","content":[]}`)
@@ -127,8 +133,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					return
 				}
 
-				signature := part.Get("signature").String()
-				if !isFernetLikeReasoningSignature(signature) {
+				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, part.Get("signature").String())
+				if !ok {
 					return
 				}
 
@@ -172,7 +178,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "tool_use":
 						flushMessage()
 						functionCallMessage := []byte(`{"type":"function_call"}`)
-						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", messageContentResult.Get("id").String())
+						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String()))
 						{
 							name := messageContentResult.Get("name").String()
 							if short, ok := toolNameMap[name]; ok {
@@ -187,7 +193,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "tool_result":
 						flushMessage()
 						functionCallOutputMessage := []byte(`{"type":"function_call_output"}`)
-						functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String())
+						functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("tool_use_id").String()))
 
 						contentResult := messageContentResult.Get("content")
 						if contentResult.IsArray() {
@@ -328,37 +334,21 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	return template
 }
 
-// isFernetLikeReasoningSignature checks only the encrypted_content envelope shape
-// observed in OpenAI reasoning signatures. It does not authenticate source or payload type.
-func isFernetLikeReasoningSignature(signature string) bool {
-	const (
-		fernetVersionLen = 1
-		fernetTimestamp  = 8
-		fernetIV         = 16
-		fernetHMAC       = 32
-		aesBlockSize     = 16
-	)
-
-	signature = strings.TrimSpace(signature)
-	if !strings.HasPrefix(signature, "gAAAA") {
-		return false
+// shortenCodexCallIDIfNeeded keeps Claude tool IDs within the OpenAI Responses
+// API call_id limit while preserving a stable, low-collision mapping.
+func shortenCodexCallIDIfNeeded(id string) string {
+	const limit = 64
+	if len(id) <= limit {
+		return id
 	}
 
-	decoded, err := base64.URLEncoding.DecodeString(signature)
-	if err != nil {
-		decoded, err = base64.RawURLEncoding.DecodeString(signature)
-		if err != nil {
-			return false
-		}
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	prefixLen := limit - len(suffix)
+	if prefixLen <= 0 {
+		return suffix[len(suffix)-limit:]
 	}
-
-	minLen := fernetVersionLen + fernetTimestamp + fernetIV + aesBlockSize + fernetHMAC
-	if len(decoded) < minLen || decoded[0] != 0x80 {
-		return false
-	}
-
-	ciphertextLen := len(decoded) - fernetVersionLen - fernetTimestamp - fernetIV - fernetHMAC
-	return ciphertextLen > 0 && ciphertextLen%aesBlockSize == 0
+	return id[:prefixLen] + suffix
 }
 
 func isClaudeWebSearchToolType(toolType string) bool {

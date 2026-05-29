@@ -252,7 +252,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// Log: Model was mapped to another model
 			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
-			rewriter := NewResponseRewriter(c.Writer, modelName)
+			rewriter := NewResponseRewriterForRequest(c.Writer, modelName, bodyBytes)
 			rewriter.suppressThinking = true
 			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
@@ -267,7 +267,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// Wrap with ResponseRewriter for local providers too, because upstream
 			// proxies (e.g. NewAPI) may return a different model name and lack
 			// Amp-required fields like thinking.signature.
-			rewriter := NewResponseRewriter(c.Writer, modelName)
+			rewriter := NewResponseRewriterForRequest(c.Writer, modelName, bodyBytes)
 			rewriter.suppressThinking = providerName != "claude"
 			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
