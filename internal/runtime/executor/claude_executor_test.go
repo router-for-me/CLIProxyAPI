@@ -1251,6 +1251,63 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 16,
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"drop this","signature":""},
+				{"type":"text","text":"I will run git status."},
+				{"type":"tool_use","id":"Bash-1","name":"Bash","input":{"command":"git status"},"signature":"bad","thoughtSignature":"bad2","model":"claude-opus-4-1"}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"Bash-1","content":"ok"}]}
+		]
+	}`)
+
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	}); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	parts := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("messages.0.content length = %d, want 2; body=%s", len(parts), seenBody)
+	}
+	if parts[0].Get("type").String() != "text" {
+		t.Fatalf("first remaining part = %s, want text", parts[0].Raw)
+	}
+	toolUse := parts[1]
+	if toolUse.Get("type").String() != "tool_use" {
+		t.Fatalf("second remaining part = %s, want tool_use", toolUse.Raw)
+	}
+	for _, path := range []string{"signature", "thoughtSignature", "model"} {
+		if toolUse.Get(path).Exists() {
+			t.Fatalf("tool_use.%s should be removed before upstream: %s", path, seenBody)
+		}
+	}
+}
+
 func hasTTLOrderingViolation(payload []byte) bool {
 	seen5m := false
 	violates := false

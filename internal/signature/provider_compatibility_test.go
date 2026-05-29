@@ -282,3 +282,58 @@ func TestSanitizeClaudeMessagesSignaturesForModel_DropsEmptyAssistantMessage(t *
 		t.Fatalf("remaining role = %q, want user", got)
 	}
 }
+
+func TestSanitizeClaudeMessagesForClaudeUpstream_DropsInvalidThinkingAndCleansToolUse(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"drop me","signature":""},{"type":"text","text":"answer"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git status"},"signature":"bad","thoughtSignature":"bad2","thought_signature":"bad3","model":"claude-sonnet-4-5","extra_content":{"google":{"thought_signature":"bad4"}}}]}]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 1 {
+		t.Fatalf("DroppedBlocks = %d, want 1; report=%+v", report.DroppedBlocks, report)
+	}
+	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("content length = %d, want 2: %s", len(parts), output)
+	}
+	if parts[0].Get("type").String() != "text" {
+		t.Fatalf("first remaining part = %s, want text", parts[0].Raw)
+	}
+	toolUse := parts[1]
+	if toolUse.Get("type").String() != "tool_use" {
+		t.Fatalf("second remaining part = %s, want tool_use", toolUse.Raw)
+	}
+	if got := toolUse.Get("id").String(); got != "toolu_1" {
+		t.Fatalf("tool_use id = %q, want toolu_1", got)
+	}
+	for _, path := range []string{
+		"signature",
+		"thoughtSignature",
+		"thought_signature",
+		"model",
+		"extra_content",
+	} {
+		if toolUse.Get(path).Exists() {
+			t.Fatalf("tool_use.%s should be removed: %s", path, toolUse.Raw)
+		}
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstream_NormalizesValidThinkingAndDropsEmptyMessage(t *testing.T) {
+	nativeSig := testClaudeThinkingSignature()
+	doubleEncoded := base64.StdEncoding.EncodeToString([]byte(nativeSig))
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"keep","signature":"` + doubleEncoded + `"},{"type":"text","text":"answer"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"drop"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.Preserved != 1 || report.DroppedBlocks != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2: %s", len(messages), output)
+	}
+	if got := messages[0].Get("content.0.signature").String(); got != nativeSig {
+		t.Fatalf("signature = %q, want provider-native %q", got, nativeSig)
+	}
+	if got := messages[1].Get("role").String(); got != "user" {
+		t.Fatalf("remaining second role = %q, want user", got)
+	}
+}
