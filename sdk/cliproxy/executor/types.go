@@ -23,6 +23,10 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// CodexFallbackDisplayModelMetadataKey stores the original model name to display in responses
+// when a Codex OAuth model fallback is active (e.g. "gpt-5.5" when the actual request uses "gpt-5.4").
+const CodexFallbackDisplayModelMetadataKey = "codex_fallback_display_model"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

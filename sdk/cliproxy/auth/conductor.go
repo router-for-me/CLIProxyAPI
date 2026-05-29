@@ -1229,32 +1229,21 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
-
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
-		if errExec == nil {
-			return resp, nil
-		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
-		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
+	resp, lastErr := m.runMixedRetry(ctx, normalized, req, opts)
+	if lastErr == nil {
+		return resp, nil
+	}
+	if hasCodexProvider(normalized) {
+		if fbResp, ok := m.tryCodexModelFallbackExecute(ctx, normalized, req, opts); ok {
+			return fbResp, nil
 		}
 	}
-	if lastErr != nil {
-		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
-				return resp, nil
-			}
+	if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+		if agResp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
+			return agResp, nil
 		}
-		return cliproxyexecutor.Response{}, lastErr
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, lastErr
 }
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
@@ -1295,8 +1284,56 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	result, lastErr := m.runStreamMixedRetry(ctx, normalized, req, opts)
+	if lastErr == nil {
+		return result, nil
+	}
+	if hasCodexProvider(normalized) {
+		if fbResult, ok := m.tryCodexModelFallbackExecuteStream(ctx, normalized, req, opts); ok {
+			return fbResult, nil
+		}
+	}
+	if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+		if agResult, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
+			return agResult, nil
+		}
+	}
+	var bootstrapErr *streamBootstrapError
+	if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+		return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+	}
+	return nil, lastErr
+}
 
+// runMixedRetry runs the full retry cycle for a non-streaming execution.
+// It returns the first successful response, or the last error if all attempts fail.
+func (m *Manager) runMixedRetry(ctx context.Context, normalized []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	_, maxRetryCredentials, maxWait := m.retrySettings()
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		if errExec == nil {
+			return resp, nil
+		}
+		lastErr = errExec
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		if !shouldRetry {
+			break
+		}
+		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+			return cliproxyexecutor.Response{}, errWait
+		}
+	}
+	if lastErr != nil {
+		return cliproxyexecutor.Response{}, lastErr
+	}
+	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+// runStreamMixedRetry runs the full retry cycle for a streaming execution.
+// It returns the first successful StreamResult, or the last error if all attempts fail.
+func (m *Manager) runStreamMixedRetry(ctx context.Context, normalized []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	_, maxRetryCredentials, maxWait := m.retrySettings()
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
@@ -1313,20 +1350,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
-		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
-				return result, nil
-			}
-		}
-		var bootstrapErr *streamBootstrapError
-		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
-		}
 		return nil, lastErr
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
-
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}

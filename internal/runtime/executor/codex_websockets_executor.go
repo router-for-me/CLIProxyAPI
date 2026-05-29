@@ -385,6 +385,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			}
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
+			if displayModel := codexFallbackDisplayModel(opts); displayModel != "" {
+				out = rewriteCodexResponseModel(out, displayModel)
+			}
 			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
@@ -553,6 +556,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
+	translateModel := req.Model
+	if displayModel := codexFallbackDisplayModel(opts); displayModel != "" {
+		translateModel = displayModel
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		terminateReason := "completed"
@@ -651,7 +658,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, from, translateModel, body, body, line, &param)
 			for i := range chunks {
 				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
