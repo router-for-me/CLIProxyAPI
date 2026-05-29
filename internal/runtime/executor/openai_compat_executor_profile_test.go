@@ -320,6 +320,75 @@ func TestOpenAICompatExecutorClaudeSourceDowngradesToolSearch(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorMiniMaxClaudeSourceRewritesSystemRole(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"MiniMax-M2.7-highspeed","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("minimax-provider", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name: "minimax-provider",
+			Kind: "minimax",
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL + "/v1",
+		"api_key":     "test",
+		"compat_name": "minimax-provider",
+		"compat_kind": "minimax",
+	}}
+
+	payload := []byte(`{
+		"model":"MiniMax-M2.7-highspeed",
+		"max_tokens":8,
+		"messages":[
+			{"role":"system","content":"You are concise."},
+			{"role":"user","content":"Reply with OK only."}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "MiniMax-M2.7-highspeed",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if gjson.GetBytes(gotBody, `messages.#(role=="system")`).Exists() {
+		t.Fatalf("system role should not reach MiniMax: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user: %s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.content").String(); !strings.Contains(got, "System instructions:\nYou are concise.") {
+		t.Fatalf("messages.0.content = %q, want rewritten system instructions: %s", got, string(gotBody))
+	}
+}
+
+func TestOpenAICompatPayloadGenericKeepsSystemRole(t *testing.T) {
+	payload := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[
+			{"role":"system","content":"You are concise."},
+			{"role":"user","content":"hi"}
+		]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, genericOpenAICompatProfile(), "gpt-5.5", "https://api.openai.com/v1")
+
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "system" {
+		t.Fatalf("messages.0.role = %q, want system: %s", got, string(out))
+	}
+}
+
 func TestInferOpenAICompatKindFromBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string

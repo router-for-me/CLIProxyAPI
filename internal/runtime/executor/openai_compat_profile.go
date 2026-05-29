@@ -30,6 +30,7 @@ type openAICompatProfile struct {
 	SupportsReasoning        bool
 	SupportsMetadata         bool
 	SupportsStore            bool
+	SystemMessagesAsUser     bool
 	DefaultHeaders           map[string]string
 }
 
@@ -62,6 +63,7 @@ var openAICompatProfiles = map[string]openAICompatProfile{
 		SupportsReasoning:        false,
 		SupportsMetadata:         false,
 		SupportsStore:            false,
+		SystemMessagesAsUser:     true,
 	},
 	"xiaomi": {
 		Kind:                     "xiaomi",
@@ -239,6 +241,9 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 
 func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfile, model string, baseURL string) []byte {
 	payload = scrubOpenAICompatPayload(payload, profile)
+	if profile.SystemMessagesAsUser {
+		payload = rewriteOpenAICompatSystemMessagesAsUser(payload)
+	}
 	payload = repairOpenAICompatToolCallHistory(payload)
 	payload = sanitizeOpenAICompatToolSchemas(payload)
 	payload = scrubDeepSeekThinkingBudgetForCompat(payload, model, baseURL, profile.Kind)
@@ -258,6 +263,80 @@ func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfil
 		payload = scrubDeepSeekToolPayload(payload, baseURL)
 	}
 	return payload
+}
+
+func rewriteOpenAICompatSystemMessagesAsUser(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.GetBytes(payload, "messages").IsArray() {
+		return payload
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
+	messages, ok := root["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return payload
+	}
+
+	changed := false
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(compatStringValue(message["role"])), "system") {
+			continue
+		}
+		message["role"] = "user"
+		if text := openAICompatTextContent(message["content"]); text != "" {
+			message["content"] = openAICompatSystemInstructionText(text)
+		}
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+
+	root["messages"] = messages
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return payload
+	}
+	return out
+}
+
+func openAICompatSystemInstructionText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	return "System instructions:\n" + text
+}
+
+func openAICompatTextContent(content any) string {
+	switch typed := content.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, part := range typed {
+			if text := openAICompatTextContent(part); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		if text := strings.TrimSpace(compatStringValue(typed["text"])); text != "" {
+			return text
+		}
+		if nested, ok := typed["content"]; ok {
+			return openAICompatTextContent(nested)
+		}
+		return ""
+	default:
+		return ""
+	}
 }
 
 func scrubDeepSeekThinkingBudgetForCompat(payload []byte, model string, baseURL string, compatKind string) []byte {
