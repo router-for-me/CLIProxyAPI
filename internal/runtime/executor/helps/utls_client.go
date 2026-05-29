@@ -30,7 +30,11 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
+			// Fail closed on malformed proxy URL: see utls_transport.go for
+			// rationale. Silent direct-connection fallback would leak the
+			// host IP for an account intentionally bound to a proxy.
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+			dialer = proxyutil.FailClosedDialer{Err: errBuild}
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}

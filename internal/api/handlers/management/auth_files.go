@@ -129,6 +129,15 @@ func isWebUIRequest(c *gin.Context) bool {
 	}
 }
 
+// parseRequestedProxyURL extracts an optional per-account proxy URL from the
+// "proxy_url" query parameter of the OAuth-start request. Returns an empty
+// string when none is supplied, in which case the global proxy-url (if any)
+// is used. The OAuth-start routes are registered as GET so only the query
+// parameter form is supported.
+func parseRequestedProxyURL(c *gin.Context) string {
+	return strings.TrimSpace(c.Query("proxy_url"))
+}
+
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
@@ -1637,6 +1646,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	fmt.Println("Initializing Claude authentication...")
 
+	// Optional per-account proxy: bind this account to a dedicated proxy/egress IP
+	// before authentication. When provided, the token exchange and all subsequent
+	// API traffic for this account go through this proxy (falls back to global proxy-url).
+	proxyURL := parseRequestedProxyURL(c)
+
 	// Generate PKCE codes
 	pkceCodes, err := claude.GeneratePKCECodes()
 	if err != nil {
@@ -1653,8 +1667,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	// Initialize Claude auth service (proxy-aware so the code-for-token exchange
+	// is performed through the requested proxy when set).
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, proxyURL)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -1750,12 +1765,19 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Create token storage
 		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
+		metadata := map[string]any{"email": tokenStorage.Email}
+		// Persist the per-account proxy into metadata so the synthesizer restores
+		// auth.ProxyURL on reload, keeping the account bound to this proxy/IP.
+		if proxyURL != "" {
+			metadata["proxy_url"] = proxyURL
+		}
 		record := &coreauth.Auth{
 			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Provider: "claude",
 			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
-			Metadata: map[string]any{"email": tokenStorage.Email},
+			ProxyURL: proxyURL,
+			Metadata: metadata,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {

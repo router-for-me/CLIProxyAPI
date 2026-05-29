@@ -46,20 +46,30 @@ func purgeExpiredSessionIDs() {
 	sessionIDCacheMu.Unlock()
 }
 
-func sessionIDCacheKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
-	return hex.EncodeToString(sum[:])
+// sessionIDCacheKey derives a cache key from the downstream apiKey and the
+// per-account proxy URL. Mixing in the proxy URL ensures that an account
+// rebound to a different egress IP gets a fresh session ID, so Anthropic does
+// not see the same Claude Code session ID coming from two different IPs (which
+// can break session affinity or trigger anti-abuse heuristics).
+func sessionIDCacheKey(apiKey, proxyURL string) string {
+	h := sha256.New()
+	h.Write([]byte(apiKey))
+	h.Write([]byte{0}) // domain separator so apiKey + proxyURL cannot collide with another apiKey
+	h.Write([]byte(proxyURL))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-// CachedSessionID returns a stable session UUID per apiKey, refreshing the TTL on each access.
-func CachedSessionID(apiKey string) string {
+// CachedSessionID returns a stable session UUID per (apiKey, proxyURL),
+// refreshing the TTL on each access. Pass the empty string for proxyURL when
+// no per-account proxy is configured.
+func CachedSessionID(apiKey, proxyURL string) string {
 	if apiKey == "" {
 		return uuid.New().String()
 	}
 
 	sessionIDCacheCleanupOnce.Do(startSessionIDCacheCleanup)
 
-	key := sessionIDCacheKey(apiKey)
+	key := sessionIDCacheKey(apiKey, proxyURL)
 	now := time.Now()
 
 	sessionIDCacheMu.RLock()

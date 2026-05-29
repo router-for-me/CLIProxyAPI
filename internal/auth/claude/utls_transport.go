@@ -34,7 +34,12 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	if cfg != nil {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
 		if errBuild != nil {
+			// Fail closed: a proxy was requested but unparseable. Returning a
+			// dialer that always errors prevents the round tripper from silently
+			// leaking traffic over the host network and exposing the account's
+			// real IP.
 			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
+			dialer = proxyutil.FailClosedDialer{Err: errBuild}
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}

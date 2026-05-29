@@ -38,7 +38,9 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	}
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
 	if errBuild != nil {
-		log.Errorf("%v", errBuild)
+		// Include a redacted form of the proxy URL so operators can identify
+		// which auth's proxy is misconfigured without leaking credentials.
+		log.Errorf("build per-auth proxy transport failed for %q: %v", proxyutil.Redact(proxyStr), errBuild)
 		return nil
 	}
 	if transport == nil {

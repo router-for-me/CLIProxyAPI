@@ -264,3 +264,20 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 	}
 	return c.Conn.Read(p)
 }
+
+// FailClosedDialer is a proxy.Dialer that always returns the cached error on
+// Dial. Use it when a proxy URL was configured but could not be parsed: every
+// connection deliberately fails instead of silently falling back to a direct
+// connection, which would leak the host's IP for an account intentionally
+// bound to a proxy.
+type FailClosedDialer struct {
+	Err error
+}
+
+// Dial always returns FailClosedDialer.Err wrapped with proxy context.
+func (d FailClosedDialer) Dial(network, addr string) (net.Conn, error) {
+	if d.Err == nil {
+		return nil, fmt.Errorf("proxy unavailable")
+	}
+	return nil, fmt.Errorf("proxy unavailable: %w", d.Err)
+}

@@ -76,6 +76,15 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			auth.Metadata = make(map[string]any)
 		}
 		auth.Metadata["disabled"] = auth.Disabled
+		// Mirror the top-level ProxyURL into Metadata when Metadata does not
+		// already carry one. The synthesizer restores auth.ProxyURL on reload
+		// from Metadata["proxy_url"], so any caller that sets only ProxyURL
+		// (and forgets to update Metadata) would otherwise lose the per-account
+		// proxy after restart. We do not overwrite an existing Metadata value
+		// because PatchAuthFileFields treats Metadata as canonical.
+		if _, has := auth.Metadata["proxy_url"]; !has && strings.TrimSpace(auth.ProxyURL) != "" {
+			auth.Metadata["proxy_url"] = auth.ProxyURL
+		}
 		if setter, ok := auth.Storage.(metadataSetter); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
@@ -84,6 +93,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		}
 	case auth.Metadata != nil:
 		auth.Metadata["disabled"] = auth.Disabled
+		if _, has := auth.Metadata["proxy_url"]; !has && strings.TrimSpace(auth.ProxyURL) != "" {
+			auth.Metadata["proxy_url"] = auth.ProxyURL
+		}
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
