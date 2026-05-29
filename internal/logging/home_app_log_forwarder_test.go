@@ -72,6 +72,7 @@ func TestHomeAppLogForwarder_ForwardsFormattedLogWhenHomeHealthy(t *testing.T) {
 	entry.Time = time.Date(2026, 5, 29, 8, 0, 0, 0, time.Local)
 	entry.Level = log.DebugLevel
 	entry.Message = "debug details"
+	entry.Data["request_id"] = "req-app-1"
 
 	if errFire := forwarder.Fire(entry); errFire != nil {
 		t.Fatalf("Fire error: %v", errFire)
@@ -92,11 +93,26 @@ func TestHomeAppLogForwarder_ForwardsFormattedLogWhenHomeHealthy(t *testing.T) {
 	if got.Level != "debug" {
 		t.Fatalf("level = %q, want debug", got.Level)
 	}
+	if got.RequestID != "req-app-1" {
+		t.Fatalf("request_id = %q, want req-app-1", got.RequestID)
+	}
 	if !strings.Contains(got.Line, "debug details") {
 		t.Fatalf("line %q missing log message", got.Line)
 	}
+	if !strings.Contains(got.Line, "[req-app-1]") {
+		t.Fatalf("line %q missing matching request id", got.Line)
+	}
 	if strings.TrimSpace(got.Timestamp) == "" {
 		t.Fatal("timestamp empty, want non-empty")
+	}
+}
+
+func TestHomeAppLogForwarder_OmitsPlaceholderRequestID(t *testing.T) {
+	entry := log.NewEntry(log.StandardLogger())
+	entry.Data["request_id"] = "--------"
+
+	if got := appLogRequestID(entry); got != "" {
+		t.Fatalf("request id = %q, want empty for placeholder", got)
 	}
 }
 

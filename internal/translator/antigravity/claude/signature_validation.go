@@ -17,6 +17,10 @@ func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
 	return signature.StripInvalidClaudeThinkingBlocks(payload, signature.ClaudeSignatureValidationOptions{PrefixOnly: true})
 }
 
+func StripInvalidBypassSignatureThinkingBlocks(payload []byte) []byte {
+	return signature.StripInvalidClaudeThinkingBlocks(payload, claudeBypassSignatureValidationOptions())
+}
+
 func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {
 	return signature.ValidateClaudeThinkingSignatures(inputRawJSON, claudeBypassSignatureValidationOptions())
 }
