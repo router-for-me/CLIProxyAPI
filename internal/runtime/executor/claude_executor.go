@@ -181,6 +181,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = scrubDeepSeekThinkingBudgetForCompat(body, baseModel, baseURL, compatKind)
 	body = ensureModelMaxTokens(body, baseModel)
+	body = normalizeClaudeSystemRoleMessages(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -384,6 +385,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = scrubDeepSeekThinkingBudgetForCompat(body, baseModel, baseURL, compatKind)
 	body = ensureModelMaxTokens(body, baseModel)
 	body = applyMiniMaxStreamingThinkingDefaultForCompat(compatKind, body, true)
+	body = normalizeClaudeSystemRoleMessages(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -670,6 +672,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	body = normalizeClaudeSystemRoleMessages(body)
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = downgradeClaudeToolSearchForCompat(baseURL, body)
@@ -860,6 +863,93 @@ func normalizeClaudeTemperatureForThinking(body []byte) []byte {
 		body, _ = sjson.SetBytes(body, "temperature", 1)
 	}
 	return body
+}
+
+func normalizeClaudeSystemRoleMessages(body []byte) []byte {
+	if len(body) == 0 || !gjson.GetBytes(body, "messages").IsArray() {
+		return body
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return body
+	}
+	messages, ok := root["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return body
+	}
+
+	systemBlocks := claudeSystemBlocksFromValue(root["system"])
+	cleanedMessages := make([]any, 0, len(messages))
+	changed := false
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			cleanedMessages = append(cleanedMessages, rawMessage)
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(compatStringValue(message["role"])), "system") {
+			cleanedMessages = append(cleanedMessages, message)
+			continue
+		}
+		systemBlocks = append(systemBlocks, claudeSystemBlocksFromValue(message["content"])...)
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+
+	root["messages"] = cleanedMessages
+	if len(systemBlocks) > 0 {
+		root["system"] = systemBlocks
+	} else {
+		delete(root, "system")
+	}
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return body
+	}
+	return out
+}
+
+func claudeSystemBlocksFromValue(value any) []any {
+	switch typed := value.(type) {
+	case string:
+		return claudeSystemBlockFromText(typed)
+	case []any:
+		blocks := make([]any, 0, len(typed))
+		for _, item := range typed {
+			blocks = append(blocks, claudeSystemBlocksFromValue(item)...)
+		}
+		return blocks
+	case map[string]any:
+		text := strings.TrimSpace(compatStringValue(typed["text"]))
+		if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
+			return nil
+		}
+		block := make(map[string]any, len(typed)+1)
+		for key, val := range typed {
+			block[key] = val
+		}
+		if strings.TrimSpace(compatStringValue(block["type"])) == "" {
+			block["type"] = "text"
+		}
+		block["text"] = text
+		return []any{block}
+	default:
+		return nil
+	}
+}
+
+func claudeSystemBlockFromText(text string) []any {
+	text = strings.TrimSpace(text)
+	if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
+		return nil
+	}
+	return []any{map[string]any{
+		"type": "text",
+		"text": text,
+	}}
 }
 
 type compositeReadCloser struct {
@@ -2359,6 +2449,7 @@ func sanitizeClaudeHTTPRequestToolNames(req *http.Request) (*claudeToolNameSanit
 	body = downgradeClaudeToolSearchForCompatKind(compatKind, requestURLString(req), body)
 	body = scrubDeepSeekThinkingBudgetForCompat(body, gjson.GetBytes(body, "model").String(), requestURLString(req), compatKind)
 	body = applyMiniMaxStreamingThinkingDefaultForCompat(compatKind, body, gjson.GetBytes(body, "stream").Bool())
+	body = normalizeClaudeSystemRoleMessages(body)
 	updated, mapping := sanitizeClaudeToolNamesForUpstream(body)
 	req.Body = io.NopCloser(bytes.NewReader(updated))
 	req.ContentLength = int64(len(updated))

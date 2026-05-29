@@ -1209,6 +1209,85 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutorMovesSystemRoleMessagesToTopLevelSystem(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"MiniMax-M2.7-highspeed","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"model":"MiniMax-M2.7-highspeed",
+		"max_tokens":16,
+		"messages":[
+			{"role":"system","content":"You are concise."},
+			{"role":"user","content":"Reply with OK only."}
+		]
+	}`)
+
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "MiniMax-M2.7-highspeed",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if gjson.GetBytes(gotBody, `messages.#(role=="system")`).Exists() {
+		t.Fatalf("system role should not reach Claude-compatible upstream: %s", string(gotBody))
+	}
+	foundSystem := false
+	for _, block := range gjson.GetBytes(gotBody, "system").Array() {
+		if block.Get("text").String() == "You are concise." {
+			foundSystem = true
+			break
+		}
+	}
+	if !foundSystem {
+		t.Fatalf("moved system text was not found in top-level system: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user: %s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.content").String(); got != "Reply with OK only." {
+		t.Fatalf("messages.0.content = %q, want user content: %s", got, string(gotBody))
+	}
+}
+
+func TestNormalizeClaudeSystemRoleMessagesAppendsExistingSystem(t *testing.T) {
+	payload := []byte(`{
+		"system":[{"type":"text","text":"Existing"}],
+		"messages":[
+			{"role":"system","content":[{"type":"text","text":"Moved","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":"hi"}
+		]
+	}`)
+
+	out := normalizeClaudeSystemRoleMessages(payload)
+
+	if gjson.GetBytes(out, `messages.#(role=="system")`).Exists() {
+		t.Fatalf("system role should be removed from messages: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "Existing" {
+		t.Fatalf("system.0.text = %q, want Existing: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.1.text").String(); got != "Moved" {
+		t.Fatalf("system.1.text = %q, want Moved: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "system.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("moved cache_control.type = %q, want ephemeral: %s", got, string(out))
+	}
+}
+
 func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testing.T) {
 	_, err := executeOpenAIChatCompletionThroughClaude(t, "")
 	if err == nil {
