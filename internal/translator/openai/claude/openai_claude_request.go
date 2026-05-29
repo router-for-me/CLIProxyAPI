@@ -130,7 +130,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	// Process Anthropic messages
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messages.ForEach(func(_, message gjson.Result) bool {
-			role := message.Get("role").String()
+			role := normalizeClaudeRoleForOpenAI(message.Get("role").String())
 			contentResult := message.Get("content")
 
 			// Handle content
@@ -327,6 +327,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+func normalizeClaudeRoleForOpenAI(role string) string {
+	if role == "system" {
+		return "developer"
+	}
+	return role
 }
 
 func convertClaudeContentPart(part gjson.Result) (string, bool) {

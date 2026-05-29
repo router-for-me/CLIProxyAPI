@@ -390,6 +390,44 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_MidConversationSystemBecomesDeveloper(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "first"}]},
+			{"role": "system", "content": [{"type": "text", "text": "mid instruction"}]},
+			{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+			{"role": "system", "content": "second instruction"},
+			{"role": "user", "content": "continue"}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 5 {
+		t.Fatalf("Expected 5 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	for i, message := range messages {
+		if got := message.Get("role").String(); got == "system" {
+			t.Fatalf("Expected no system roles, found at messages[%d]: %s", i, message.Raw)
+		}
+	}
+	if got := messages[1].Get("role").String(); got != "developer" {
+		t.Fatalf("Expected mid-conversation system role to become developer, got %q", got)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "mid instruction" {
+		t.Fatalf("Expected mid instruction text, got %q", got)
+	}
+	if got := messages[3].Get("role").String(); got != "developer" {
+		t.Fatalf("Expected string system role to become developer, got %q", got)
+	}
+	if got := messages[3].Get("content").String(); got != "second instruction" {
+		t.Fatalf("Expected string system content, got %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",
