@@ -47,7 +47,7 @@ var (
 
 const usageMigrationTimeout = 5 * time.Minute
 
-const postgresStoreInitAttempts = 3
+const postgresStoreInitRetryDelay = 2 * time.Second
 
 // init initializes the shared logger setup.
 func init() {
@@ -665,24 +665,22 @@ func main() {
 
 func newPostgresStoreWithRetry(ctx context.Context, cfg store.PostgresStoreConfig) (*store.PostgresStore, error) {
 	var lastErr error
-	for attempt := 1; attempt <= postgresStoreInitAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		pgStoreInst, errStart := store.NewPostgresStore(ctx, cfg)
 		if errStart == nil {
 			return pgStoreInst, nil
 		}
 		lastErr = errStart
-		if attempt == postgresStoreInitAttempts || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 
-		wait := time.Duration(attempt) * time.Second
 		log.WithError(errStart).Warnf(
-			"postgres token store initialization failed; retrying in %s (%d/%d)",
-			wait,
+			"postgres token store initialization failed; retrying in %s (attempt %d)",
+			postgresStoreInitRetryDelay,
 			attempt+1,
-			postgresStoreInitAttempts,
 		)
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(postgresStoreInitRetryDelay)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
