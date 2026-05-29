@@ -22,6 +22,7 @@ type ResponseRewriter struct {
 	originalModel    string
 	isStreaming      bool
 	suppressThinking bool
+	requestToolNames map[string]string
 }
 
 // NewResponseRewriter creates a new response rewriter for model name substitution.
@@ -31,6 +32,12 @@ func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRe
 		body:           &bytes.Buffer{},
 		originalModel:  originalModel,
 	}
+}
+
+func NewResponseRewriterForRequest(w gin.ResponseWriter, originalModel string, requestBody []byte) *ResponseRewriter {
+	rw := NewResponseRewriter(w, originalModel)
+	rw.requestToolNames = collectRequestToolNames(requestBody)
+	return rw
 }
 
 const maxBufferedResponseBytes = 2 * 1024 * 1024 // 2MB safety cap
@@ -134,17 +141,70 @@ var ampCanonicalToolNames = map[string]string{
 	"check": "Check",
 }
 
+func collectRequestToolNames(data []byte) map[string]string {
+	if len(data) == 0 {
+		return nil
+	}
+	parsed := gjson.ParseBytes(data)
+	names := map[string]string{}
+	conflicts := map[string]bool{}
+	record := func(name string) {
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		if conflicts[key] {
+			return
+		}
+		if existing, exists := names[key]; exists {
+			if existing != name {
+				names[key] = ""
+				conflicts[key] = true
+			}
+			return
+		}
+		names[key] = name
+	}
+
+	for _, tool := range parsed.Get("tools").Array() {
+		record(tool.Get("name").String())
+	}
+	if parsed.Get("tool_choice.type").String() == "tool" {
+		record(parsed.Get("tool_choice.name").String())
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+func canonicalAmpToolName(name string, requestToolNames map[string]string) (string, bool) {
+	key := strings.ToLower(name)
+	if canonical, ok := requestToolNames[key]; ok {
+		if canonical == "" {
+			return "", false
+		}
+		return canonical, true
+	}
+	canonical, ok := ampCanonicalToolNames[key]
+	return canonical, ok
+}
+
 // normalizeAmpToolNames fixes tool_use block names to match Amp's canonical casing.
 // Some upstream models return lowercase tool names (e.g. "bash" instead of "Bash")
 // which causes Amp's case-sensitive mode whitelist to reject them.
 func normalizeAmpToolNames(data []byte) []byte {
+	return normalizeAmpToolNamesForRequest(data, nil)
+}
+
+func normalizeAmpToolNamesForRequest(data []byte, requestToolNames map[string]string) []byte {
 	// Non-streaming: content[].name in tool_use blocks
 	for index, block := range gjson.GetBytes(data, "content").Array() {
 		if block.Get("type").String() != "tool_use" {
 			continue
 		}
 		name := block.Get("name").String()
-		if canonical, ok := ampCanonicalToolNames[strings.ToLower(name)]; ok && name != canonical {
+		if canonical, ok := canonicalAmpToolName(name, requestToolNames); ok && name != canonical {
 			path := fmt.Sprintf("content.%d.name", index)
 			var err error
 			data, err = sjson.SetBytes(data, path, canonical)
@@ -157,7 +217,7 @@ func normalizeAmpToolNames(data []byte) []byte {
 	// Streaming: content_block.name in content_block_start events
 	if gjson.GetBytes(data, "content_block.type").String() == "tool_use" {
 		name := gjson.GetBytes(data, "content_block.name").String()
-		if canonical, ok := ampCanonicalToolNames[strings.ToLower(name)]; ok && name != canonical {
+		if canonical, ok := canonicalAmpToolName(name, requestToolNames); ok && name != canonical {
 			var err error
 			data, err = sjson.SetBytes(data, "content_block.name", canonical)
 			if err != nil {
@@ -167,6 +227,10 @@ func normalizeAmpToolNames(data []byte) []byte {
 	}
 
 	return data
+}
+
+func (rw *ResponseRewriter) normalizeToolNames(data []byte) []byte {
+	return normalizeAmpToolNamesForRequest(data, rw.requestToolNames)
 }
 
 // ensureAmpSignature injects empty signature fields into tool_use/thinking blocks
@@ -225,7 +289,7 @@ func (rw *ResponseRewriter) suppressAmpThinking(data []byte) []byte {
 
 func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 	data = ensureAmpSignature(data)
-	data = normalizeAmpToolNames(data)
+	data = rw.normalizeToolNames(data)
 	data = rw.suppressAmpThinking(data)
 	if len(data) == 0 {
 		return data
@@ -326,7 +390,7 @@ func (rw *ResponseRewriter) rewriteStreamEvent(data []byte) []byte {
 	data = ensureAmpSignature(data)
 
 	// Normalize tool names to canonical casing
-	data = normalizeAmpToolNames(data)
+	data = rw.normalizeToolNames(data)
 
 	// Rewrite model name
 	if rw.originalModel != "" {
