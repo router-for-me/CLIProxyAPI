@@ -851,3 +851,239 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
 	}
 }
+
+func TestManager_MarkResult_404PreservesAccessToken(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-404",
+		Provider: "openai",
+		Metadata: map[string]any{
+			"access_token": "keep-me",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-4.1",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusNotFound, Message: "not found"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Metadata["access_token"] != "keep-me" {
+		t.Fatalf("expected 404 to preserve access_token, got %v", updated.Metadata["access_token"])
+	}
+}
+
+func TestManager_MarkResult_NetworkErrorPreservesAccessToken(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-net",
+		Provider: "openai",
+		Metadata: map[string]any{
+			"access_token": "keep-me",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-4.1",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 0, Message: "connection refused"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Metadata["access_token"] != "keep-me" {
+		t.Fatalf("expected network error to preserve access_token, got %v", updated.Metadata["access_token"])
+	}
+}
+
+func TestManager_MarkResult_429LongQuotaPreservesToken(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-long-quota",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"access_token": "keep-me",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	retryAfter := 143*time.Hour + 58*time.Minute + 14*time.Second
+	m.MarkResult(context.Background(), Result{
+		AuthID:     auth.ID,
+		Provider:   auth.Provider,
+		Model:      "gemini-3.5-flash-low",
+		Success:    false,
+		RetryAfter: &retryAfter,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `status 429: {"error":{"code":429,"message":"Individual quota reached. Resets in 143h58m14s.","status":"RESOURCE_EXHAUSTED"}}`,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Metadata["access_token"] != "keep-me" {
+		t.Fatalf("expected long quota exhaustion to preserve access_token, got %v", updated.Metadata["access_token"])
+	}
+}
+
+func TestManager_MarkResult_429TransientEvictsToken(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-transient",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"access_token":  "evict-me",
+			"refresh_token": "some-refresh",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	retryAfter := 10 * time.Second
+	m.MarkResult(context.Background(), Result{
+		AuthID:     auth.ID,
+		Provider:   auth.Provider,
+		Model:      "gemini-3.5-flash-low",
+		Success:    false,
+		RetryAfter: &retryAfter,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `status 429: {"error":{"code":429,"message":"Resource has been exhausted.","status":"RESOURCE_EXHAUSTED"}}`,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if _, hasToken := updated.Metadata["access_token"]; hasToken {
+		t.Fatalf("expected transient rate limit to evict access_token, got %v", updated.Metadata["access_token"])
+	}
+}
+
+func TestManager_MarkResult_429NoDurationEvictsToken(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-no-duration",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"access_token":  "evict-me",
+			"refresh_token": "some-refresh",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gemini-3.5-flash-low",
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `status 429: {"error":{"code":429,"message":"Too many requests.","status":"RESOURCE_EXHAUSTED"}}`,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if _, hasToken := updated.Metadata["access_token"]; hasToken {
+		t.Fatalf("expected no-duration 429 to evict access_token, got %v", updated.Metadata["access_token"])
+	}
+}
+
+func TestIsLongQuotaExhaustion(t *testing.T) {
+	t.Run("nil result", func(t *testing.T) {
+		if isLongQuotaExhaustion(nil) {
+			t.Fatal("isLongQuotaExhaustion(nil) = true, want false")
+		}
+	})
+
+	t.Run("long retryAfter", func(t *testing.T) {
+		d := 2 * time.Hour
+		r := &Result{RetryAfter: &d}
+		if !isLongQuotaExhaustion(r) {
+			t.Fatal("isLongQuotaExhaustion() = false for 2h retryAfter")
+		}
+	})
+
+	t.Run("short retryAfter", func(t *testing.T) {
+		d := 10 * time.Second
+		r := &Result{RetryAfter: &d}
+		if isLongQuotaExhaustion(r) {
+			t.Fatal("isLongQuotaExhaustion() = true for 10s retryAfter")
+		}
+	})
+
+	t.Run("long duration in error message", func(t *testing.T) {
+		r := &Result{Error: &Error{Message: "quota will reset after 143h58m14s"}}
+		if !isLongQuotaExhaustion(r) {
+			t.Fatal("isLongQuotaExhaustion() = false for 143h58m14s in message")
+		}
+	})
+
+	t.Run("short duration in error message", func(t *testing.T) {
+		r := &Result{Error: &Error{Message: "quota will reset after 10s"}}
+		if isLongQuotaExhaustion(r) {
+			t.Fatal("isLongQuotaExhaustion() = true for 10s in message")
+		}
+	})
+}
+
+func TestParseQuotaResetDuration_UpdatedRegex(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    time.Duration
+		wantOK  bool
+	}{
+		{"after 143h58m14s", "after 143h58m14s", 143*time.Hour + 58*time.Minute + 14*time.Second, true},
+		{"Resets in 143h58m14s", "Individual quota reached. Resets in 143h58m14s.", 143*time.Hour + 58*time.Minute + 14*time.Second, true},
+		{" 58m14s", "quota will reset 58m14s", 58*time.Minute + 14*time.Second, true},
+		{" 14s", "quota will reset 14s", 14 * time.Second, true},
+		{" 2h30m", "quota will reset 2h30m", 2*time.Hour + 30*time.Minute, true},
+		{"no duration", "too many requests", 0, false},
+		{"empty", "", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseQuotaResetDuration(tt.message)
+			if ok != tt.wantOK {
+				t.Fatalf("parseQuotaResetDuration() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("parseQuotaResetDuration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

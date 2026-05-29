@@ -1006,7 +1006,7 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 	}
 
 	code := strings.TrimSpace(authErr.Code)
-	if code != "auth_not_found" && code != "auth_unavailable" {
+	if code != "auth_not_found" && code != "auth_unavailable" && code != "model_cooldown" {
 		return err
 	}
 
@@ -1043,12 +1043,32 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 	}
 }
 
+// isProxyRejection reports whether an error represents a proxy-level rejection
+// (e.g., all auths in cooldown, model cooldown) rather than an upstream error.
+func isProxyRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		code := strings.TrimSpace(authErr.Code)
+		return code == "auth_not_found" || code == "auth_unavailable" || code == "model_cooldown"
+	}
+	return false
+}
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
+
+	// Mark proxy-level rejections so the gin logger can distinguish them from upstream errors.
+	if msg != nil && msg.Error != nil && isProxyRejection(msg.Error) {
+		logging.MarkProxyRejected(c, msg.Error.Error())
+	}
+
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
 			if len(values) == 0 {

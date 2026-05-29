@@ -42,10 +42,15 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
+	skipVerify := false
+	if cfg != nil {
+		skipVerify = cfg.TLSSkipVerify
+	}
+
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
-		if transport != nil {
+		transport, errBuild := proxyutil.BuildTransport(proxyURL, skipVerify)
+		if errBuild == nil && transport != nil {
 			httpClient.Transport = transport
 			return httpClient
 		}
@@ -58,19 +63,20 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Transport = rt
 	}
 
+	// Final fallback: if no transport set but skipVerify is requested, use a clean transport with skipVerify
+	if httpClient.Transport == nil && skipVerify {
+		transport, _ := proxyutil.BuildTransport("", true)
+		if transport != nil {
+			httpClient.Transport = transport
+		}
+	}
+
 	return httpClient
 }
 
-// buildProxyTransport creates an HTTP transport configured for the given proxy URL.
-// It supports SOCKS5, HTTP, and HTTPS proxy protocols.
-//
-// Parameters:
-//   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
-//
-// Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
+// buildProxyTransport is deprecated, use proxyutil.BuildTransport instead.
 func buildProxyTransport(proxyURL string) *http.Transport {
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+	transport, errBuild := proxyutil.BuildTransport(proxyURL, false)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil

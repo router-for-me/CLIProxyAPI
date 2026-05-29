@@ -105,6 +105,10 @@ type Config struct {
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
+	// AntigravityUseDefaultProjectID skips fetching project ID via loadCodeAssist
+	// and uses the default base URL directly. Set true when you have no project ID.
+	AntigravityUseDefaultProjectID bool `yaml:"antigravity-use-default-project-id" json:"antigravity-use-default-project-id"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -964,6 +968,139 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		out = append(out, entry)
 	}
 	cfg.GeminiKey = out
+}
+
+func copyStringMap(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func deepCopyGeminiKeys(src []GeminiKey) []GeminiKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]GeminiKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]GeminiModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyCodexKeys(src []CodexKey) []CodexKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]CodexKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]CodexModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyClaudeKeys(src []ClaudeKey) []ClaudeKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]ClaudeKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]ClaudeModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		if k.Cloak != nil {
+			c := *k.Cloak
+			c.SensitiveWords = append([]string(nil), c.SensitiveWords...)
+			if c.CacheUserID != nil {
+				v := *c.CacheUserID
+				c.CacheUserID = &v
+			}
+			k.Cloak = &c
+		}
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyOpenAICompat(src []OpenAICompatibility) []OpenAICompatibility {
+	if src == nil {
+		return nil
+	}
+	out := make([]OpenAICompatibility, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		// Deep copy APIKeyEntries: each entry is a struct, slice needs copy if containing pointers or ref types.
+		// OpenAICompatibilityAPIKey is a struct with string fields, so shallow slice copy is fine if struct is value.
+		k.APIKeyEntries = append([]OpenAICompatibilityAPIKey(nil), k.APIKeyEntries...)
+		if k.Models != nil {
+			models := make([]OpenAICompatibilityModel, len(k.Models))
+			for j, m := range k.Models {
+				if m.Thinking != nil {
+					t := *m.Thinking
+					t.Levels = append([]string(nil), t.Levels...)
+					m.Thinking = &t
+				}
+				models[j] = m
+			}
+			k.Models = models
+		}
+		out[i] = k
+	}
+	return out
+}
+
+func deepCopyVertexCompatKeys(src []VertexCompatKey) []VertexCompatKey {
+	if src == nil {
+		return nil
+	}
+	out := make([]VertexCompatKey, len(src))
+	for i, k := range src {
+		k.Headers = copyStringMap(k.Headers)
+		k.Models = append([]VertexCompatModel(nil), k.Models...)
+		k.ExcludedModels = append([]string(nil), k.ExcludedModels...)
+		out[i] = k
+	}
+	return out
+}
+
+// Snapshot returns a deep copy of the Config with all map and slice
+// fields copied so that the returned value can be safely read without
+// holding the manager lock. This prevents concurrent map iteration
+// panics when the config is JSON-encoded while other goroutines
+// mutate fields like OAuthExcludedModels or OAuthModelAlias.
+func (cfg *Config) Snapshot() *Config {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	if cfg.OAuthExcludedModels != nil {
+		out.OAuthExcludedModels = make(map[string][]string, len(cfg.OAuthExcludedModels))
+		for k, v := range cfg.OAuthExcludedModels {
+			out.OAuthExcludedModels[k] = append([]string(nil), v...)
+		}
+	}
+	if cfg.OAuthModelAlias != nil {
+		out.OAuthModelAlias = make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
+		for k, v := range cfg.OAuthModelAlias {
+			out.OAuthModelAlias[k] = append([]OAuthModelAlias(nil), v...)
+		}
+	}
+	out.GeminiKey = deepCopyGeminiKeys(cfg.GeminiKey)
+	out.CodexKey = deepCopyCodexKeys(cfg.CodexKey)
+	out.ClaudeKey = deepCopyClaudeKeys(cfg.ClaudeKey)
+	out.OpenAICompatibility = deepCopyOpenAICompat(cfg.OpenAICompatibility)
+	out.VertexCompatAPIKey = deepCopyVertexCompatKeys(cfg.VertexCompatAPIKey)
+	return &out
 }
 
 func normalizeModelPrefix(prefix string) string {

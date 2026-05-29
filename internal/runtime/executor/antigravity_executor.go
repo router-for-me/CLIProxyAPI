@@ -56,6 +56,10 @@ const (
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 3 * time.Second
+	// antigravityLongQuotaCooldownThreshold distinguishes account-level quota
+	// exhaustion (long reset) from transient server capacity issues (short retry).
+	// Server capacity exhausted messages typically have 0-30s backoff or no time.
+	antigravityLongQuotaCooldownThreshold = 30 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -185,14 +189,16 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 }
 
 // antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
-// It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
-// (and the goroutines managing it) on every request.
+// antigravitySkipVerifyTransport is a second singleton for requests that skip TLS verification.
+// They are initialized lazily to avoid leaking connection pools on every request.
 var (
-	antigravityTransport     *http.Transport
-	antigravityTransportOnce sync.Once
+	antigravityTransport           *http.Transport
+	antigravityTransportOnce       sync.Once
+	antigravitySkipVerifyTransport *http.Transport
+	antigravitySkipVerifyOnce      sync.Once
 )
 
-func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
+func cloneTransportWithHTTP11(base *http.Transport, skipVerify bool) *http.Transport {
 	if base == nil {
 		return nil
 	}
@@ -208,6 +214,9 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	}
 	// Actively advertise only HTTP/1.1 in the ALPN handshake.
 	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	if skipVerify {
+		clone.TLSClientConfig.InsecureSkipVerify = true
+	}
 	return clone
 }
 
@@ -217,26 +226,60 @@ func initAntigravityTransport() {
 	if !ok {
 		base = &http.Transport{}
 	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
+	antigravityTransport = cloneTransportWithHTTP11(base, false)
+}
+
+// initAntigravitySkipVerifyTransport creates the shared skip-verify HTTP/1.1 transport exactly once.
+func initAntigravitySkipVerifyTransport() {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	antigravitySkipVerifyTransport = cloneTransportWithHTTP11(base, true)
 }
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
 // enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
 // The underlying Transport is a singleton to avoid leaking connection pools.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	antigravityTransportOnce.Do(initAntigravityTransport)
+	skipVerify := cfg != nil && cfg.TLSSkipVerify
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	// If no transport is set, use the shared HTTP/1.1 transport.
+
+	// 1. If no transport is set, use the appropriate shared HTTP/1.1 singleton.
 	if client.Transport == nil {
-		client.Transport = antigravityTransport
+		if skipVerify {
+			antigravitySkipVerifyOnce.Do(initAntigravitySkipVerifyTransport)
+			client.Transport = antigravitySkipVerifyTransport
+		} else {
+			antigravityTransportOnce.Do(initAntigravityTransport)
+			client.Transport = antigravityTransport
+		}
 		return client
 	}
 
-	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = cloneTransportWithHTTP11(transport)
+	// 2. Only proceed with specialized cloning if the transport is an *http.Transport.
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		return client
 	}
+
+	// 3. Apply HTTP/1.1 enforcement and InsecureSkipVerify in a single pass.
+	// We MUST clone if:
+	// - The current transport is NOT one of our shared singletons (e.g. it's a proxy-aware transport)
+	// - OR it's a singleton but we need to change its InsecureSkipVerify state (not possible if we use the right one above, but for safety)
+	if transport != antigravityTransport && transport != antigravitySkipVerifyTransport {
+		client.Transport = cloneTransportWithHTTP11(transport, skipVerify)
+	} else if skipVerify && transport == antigravityTransport {
+		// Fallback for safety: if we somehow have the standard singleton but need skipVerify
+		antigravitySkipVerifyOnce.Do(initAntigravitySkipVerifyTransport)
+		client.Transport = antigravitySkipVerifyTransport
+	} else if !skipVerify && transport == antigravitySkipVerifyTransport {
+		// Fallback for safety: if we somehow have the skip-verify singleton but don't need it
+		antigravityTransportOnce.Do(initAntigravityTransport)
+		client.Transport = antigravityTransport
+	}
+
 	return client
 }
 
@@ -440,6 +483,21 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 
 	decision.kind = antigravity429DecisionSoftRetry
 	return decision
+}
+
+// antigravityIsLongQuotaExhaustion reports whether a 429 response body indicates
+// account-level quota exhaustion with a long cooldown (> 30s). This distinguishes
+// it from transient server capacity issues which typically have 0-30s backoff.
+// Returns false if no duration is parseable (safe default: allow fallback).
+func antigravityIsLongQuotaExhaustion(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	decision := decideAntigravity429(body)
+	if decision.retryAfter != nil && *decision.retryAfter > antigravityLongQuotaCooldownThreshold {
+		return true
+	}
+	return false
 }
 
 func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
@@ -646,6 +704,10 @@ attemptLoop:
 					if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 						markAntigravityCreditsPermanentlyDisabled(auth)
 					}
+					if decision.retryAfter != nil && *decision.retryAfter > 0 {
+						markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+						log.Debugf("antigravity executor: full quota exhaustion, recorded cooldown for auth=%s, model=%s, duration=%s, key=%s", auth.ID, baseModel, *decision.retryAfter, antigravityShortCooldownKey(auth, baseModel))
+					}
 					// No credits logic - just fall through to error return below
 				}
 			}
@@ -655,9 +717,19 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if antigravityIsLongQuotaExhaustion(bodyBytes) {
+						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
+						se := statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+							se.retryAfter = retryAfter
+						}
+						return cliproxyexecutor.Response{}, se
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
 					delay := antigravityTransient429RetryDelay(attempt)
@@ -861,16 +933,29 @@ attemptLoop:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
 						}
-						// No credits logic - just fall through to error return below
+						if decision.retryAfter != nil && *decision.retryAfter > 0 {
+							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							log.Debugf("antigravity executor: full quota exhaustion, recorded cooldown for auth=%s, model=%s, duration=%s, key=%s", auth.ID, baseModel, *decision.retryAfter, antigravityShortCooldownKey(auth, baseModel))
+						}
 					}
 				}
 
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if antigravityIsLongQuotaExhaustion(bodyBytes) {
+						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
+						se := statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+							se.retryAfter = retryAfter
+						}
+						return cliproxyexecutor.Response{}, se
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
 					delay := antigravityTransient429RetryDelay(attempt)
@@ -1323,16 +1408,29 @@ attemptLoop:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 							markAntigravityCreditsPermanentlyDisabled(auth)
 						}
-						// No credits logic - just fall through to error return below
+						if decision.retryAfter != nil && *decision.retryAfter > 0 {
+							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							log.Debugf("antigravity executor: full quota exhaustion, recorded cooldown for auth=%s, model=%s, duration=%s, key=%s", auth.ID, baseModel, *decision.retryAfter, antigravityShortCooldownKey(auth, baseModel))
+						}
 					}
 				}
 
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
-				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-					continue
+				if httpResp.StatusCode == http.StatusTooManyRequests {
+					if antigravityIsLongQuotaExhaustion(bodyBytes) {
+						log.Debugf("antigravity executor: long quota exhaustion for model %s, returning 429 to enforce cooldown", baseModel)
+						se := statusErr{code: http.StatusTooManyRequests, msg: "long quota exhaustion"}
+						if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+							se.retryAfter = retryAfter
+						}
+						return nil, se
+					}
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
 					delay := antigravityTransient429RetryDelay(attempt)
@@ -1463,6 +1561,9 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if e.cfg != nil && e.cfg.AntigravityUseDefaultProjectID {
+		return false
+	}
 	return antigravityProjectIDFromAuth(auth) == ""
 }
 
@@ -1629,7 +1730,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), bodyBytes...)
 		lastErr = nil
-		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) && !antigravityIsLongQuotaExhaustion(bodyBytes) {
 			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
 		}
@@ -1686,7 +1787,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return token, refreshed, nil
 	}
 
-	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone())
+	updated, errRefresh := e.refreshToken(refreshCtx, auth)
 	if errRefresh != nil {
 		return "", nil, errRefresh
 	}
@@ -1822,10 +1923,14 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	auth.Metadata["timestamp"] = now.UnixMilli()
 	auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	auth.Metadata["type"] = antigravityAuthType
-	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
-		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
+	if e.cfg == nil || !e.cfg.AntigravityUseDefaultProjectID {
+		if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
+			log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
+		}
 	}
-	e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
+	if e.cfg != nil && antigravityCreditsRetryEnabled(e.cfg) {
+		e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
+	}
 	return auth, nil
 }
 
@@ -1873,6 +1978,9 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 func (e *AntigravityExecutor) projectIDForRequest(_ context.Context, auth *cliproxyauth.Auth, _ string) (string, error) {
 	if projectID := antigravityProjectIDFromAuth(auth); projectID != "" {
 		return projectID, nil
+	}
+	if e.cfg != nil && e.cfg.AntigravityUseDefaultProjectID {
+		return "", nil
 	}
 	return "", missingAntigravityProjectIDError(nil)
 }
@@ -2214,7 +2322,7 @@ func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return base
 	}
-	return antigravityBaseURLProd
+	return antigravityBaseURLDaily
 }
 
 func resolveHost(base string) string {
@@ -2415,8 +2523,8 @@ var antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
 	}
 	return []string{
 		antigravityBaseURLDaily,
-		antigravityBaseURLProd,
-		// antigravitySandboxBaseURLDaily,
+		// antigravityBaseURLProd,
+		antigravitySandboxBaseURLDaily,
 	}
 }
 

@@ -504,14 +504,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
-		if err != nil {
-			return nil, err
-		}
-		s.cache.Set(cacheKey, auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-		return auth, nil
+		// Cached auth not available (likely suspended), invalidate and reselect
+		s.cache.Invalidate(cacheKey)
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselecting | session=%s cached=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, provider, model)
 	}
 
 	if fallbackID != "" && fallbackID != primaryID {

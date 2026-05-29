@@ -78,7 +78,7 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 	}
 	callbackURL := fmt.Sprintf("http://localhost:%d/oauth2callback", callbackPort)
 
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
+	transport, errBuild := proxyutil.BuildTransport(cfg.ProxyURL, cfg.TLSSkipVerify)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 	} else if transport != nil {

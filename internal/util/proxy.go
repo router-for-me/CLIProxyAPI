@@ -19,9 +19,9 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 		return httpClient
 	}
 
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
+	transport, errBuild := proxyutil.BuildTransport(cfg.ProxyURL, cfg.TLSSkipVerify)
 	if errBuild != nil {
-		log.Errorf("%v", errBuild)
+		log.Errorf("failed to build transport for proxy %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
 	}
 	if transport != nil {
 		httpClient.Transport = transport

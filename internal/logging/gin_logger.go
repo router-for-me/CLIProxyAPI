@@ -29,9 +29,27 @@ var aiAPIPrefixes = []string{
 }
 
 const (
-	skipGinLogKey  = "__gin_skip_request_logging__"
-	creditsUsedKey = "__antigravity_credits_used__"
+	skipGinLogKey          = "__gin_skip_request_logging__"
+	creditsUsedKey         = "__antigravity_credits_used__"
+	proxyRejectedKey       = "__proxy_rejected_request__"
+	proxyRejectedReasonKey = "__proxy_rejected_reason__"
 )
+
+// MarkProxyRejected flags the request as rejected by the proxy (not an upstream error).
+// This causes the gin logger to log at info level instead of warn, and prevents
+// error log files from being generated for these requests.
+func MarkProxyRejected(c *gin.Context, reason string) {
+	c.Set(proxyRejectedKey, true)
+	if reason != "" {
+		c.Set(proxyRejectedReasonKey, reason)
+	}
+}
+
+// IsProxyRejected reports whether the request was rejected by the proxy.
+func IsProxyRejected(c *gin.Context) bool {
+	v, ok := c.Get(proxyRejectedKey)
+	return ok && v == true
+}
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
@@ -92,11 +110,17 @@ func GinLogrusLogger() gin.HandlerFunc {
 
 		entry := log.WithField("request_id", requestID)
 
+		proxyRejected := IsProxyRejected(c)
+
 		switch {
 		case statusCode >= http.StatusInternalServerError:
 			entry.Error(logLine)
 		case statusCode >= http.StatusBadRequest:
-			entry.Warn(logLine)
+			if proxyRejected {
+				entry.Info(logLine + " [proxy-rejected]")
+			} else {
+				entry.Warn(logLine)
+			}
 		default:
 			entry.Info(logLine)
 		}

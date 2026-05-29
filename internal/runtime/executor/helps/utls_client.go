@@ -23,9 +23,10 @@ type utlsRoundTripper struct {
 	connections map[string]*http2.ClientConn
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
+	skipVerify  bool
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string, skipVerify bool) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -39,6 +40,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		connections: make(map[string]*http2.ClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
+		skipVerify:  skipVerify,
 	}
 }
 
@@ -84,7 +86,10 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
+	tlsConfig := &tls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: t.skipVerify,
+	}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	if err := tlsConn.Handshake(); err != nil {
@@ -161,7 +166,12 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	utlsRT := newUtlsRoundTripper(proxyURL)
+	skipVerify := false
+	if cfg != nil {
+		skipVerify = cfg.TLSSkipVerify
+	}
+
+	utlsRT := newUtlsRoundTripper(proxyURL, skipVerify)
 
 	var standardTransport http.RoundTripper = &http.Transport{
 		DialContext: (&net.Dialer{
@@ -169,8 +179,8 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
-	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
+	if proxyURL != "" || skipVerify {
+		if transport, errBuild := proxyutil.BuildTransport(proxyURL, skipVerify); errBuild == nil && transport != nil {
 			standardTransport = transport
 		}
 	}

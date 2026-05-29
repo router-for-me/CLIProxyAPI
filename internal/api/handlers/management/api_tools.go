@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -650,17 +651,28 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	}
 
 	for _, proxyStr := range proxyCandidates {
-		if transport := buildProxyTransport(proxyStr); transport != nil {
+		if transport := h.buildProxyTransport(proxyStr); transport != nil {
 			return transport
 		}
 	}
 
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || transport == nil {
-		return &http.Transport{Proxy: nil}
+		transport = &http.Transport{}
 	}
 	clone := transport.Clone()
 	clone.Proxy = nil
+	if h != nil {
+		h.mu.RLock()
+		skipVerify := h.cfg != nil && h.cfg.TLSSkipVerify
+		h.mu.RUnlock()
+		if skipVerify {
+			if clone.TLSClientConfig == nil {
+				clone.TLSClientConfig = &tls.Config{}
+			}
+			clone.TLSClientConfig.InsecureSkipVerify = true
+		}
+	}
 	return clone
 }
 
@@ -784,8 +796,16 @@ func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, 
 	return ""
 }
 
-func buildProxyTransport(proxyStr string) *http.Transport {
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
+func (h *Handler) buildProxyTransport(proxyStr string) *http.Transport {
+	skipVerify := false
+	if h != nil {
+		h.mu.RLock()
+		if h.cfg != nil {
+			skipVerify = h.cfg.TLSSkipVerify
+		}
+		h.mu.RUnlock()
+	}
+	transport, errBuild := proxyutil.BuildTransport(proxyStr, skipVerify)
 	if errBuild != nil {
 		log.WithError(errBuild).Debug("build proxy transport failed")
 		return nil

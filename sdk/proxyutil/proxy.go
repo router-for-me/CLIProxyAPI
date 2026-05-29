@@ -85,6 +85,31 @@ func NewDirectTransport() *http.Transport {
 	return clone
 }
 
+// BuildTransport constructs an HTTP transport for the provided proxy setting and TLS verification preference.
+func BuildTransport(proxyURL string, tlsSkipVerify bool) (*http.Transport, error) {
+	transport, _, err := BuildHTTPTransport(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if transport == nil && !tlsSkipVerify {
+		return nil, nil
+	}
+
+	if transport == nil {
+		transport = cloneDefaultTransport()
+	}
+
+	if tlsSkipVerify {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+
+	return transport, nil
+}
+
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	setting, errParse := Parse(raw)
