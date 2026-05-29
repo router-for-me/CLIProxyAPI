@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
@@ -133,6 +134,56 @@ func TestInferAPICallAuthSupportsAuthorizationBearerFallback(t *testing.T) {
 	}
 	if got.ID != auth.ID {
 		t.Fatalf("inferred auth ID = %q, want %q", got.ID, auth.ID)
+	}
+}
+
+func TestNormalizeAPICallMiniMaxClaudeMessagesBodyMovesSystemRole(t *testing.T) {
+	t.Parallel()
+
+	parsedURL, errParse := url.Parse("https://api.minimaxi.com/anthropic/v1/messages")
+	if errParse != nil {
+		t.Fatalf("parse URL: %v", errParse)
+	}
+	body := `{
+		"model":"MiniMax-M2.7-highspeed",
+		"system":[{"type":"text","text":"Existing"}],
+		"messages":[
+			{"role":"system","content":[{"type":"text","text":"Moved","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":"hi"}
+		],
+		"stream":true
+	}`
+
+	normalized := normalizeAPICallMiniMaxClaudeMessagesBody(parsedURL, body)
+	root := gjson.Parse(normalized)
+	if root.Get(`messages.#(role=="system")`).Exists() {
+		t.Fatalf("system role should be removed from messages: %s", normalized)
+	}
+	if got := root.Get("system.0.text").String(); got != "Existing" {
+		t.Fatalf("system.0.text = %q, want Existing: %s", got, normalized)
+	}
+	if got := root.Get("system.1.text").String(); got != "Moved" {
+		t.Fatalf("system.1.text = %q, want Moved: %s", got, normalized)
+	}
+	if got := root.Get("system.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("moved cache_control.type = %q, want ephemeral: %s", got, normalized)
+	}
+	if got := root.Get("messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user: %s", got, normalized)
+	}
+}
+
+func TestNormalizeAPICallMiniMaxClaudeMessagesBodySkipsGenericURL(t *testing.T) {
+	t.Parallel()
+
+	parsedURL, errParse := url.Parse("https://example.com/anthropic/v1/messages")
+	if errParse != nil {
+		t.Fatalf("parse URL: %v", errParse)
+	}
+	body := `{"messages":[{"role":"system","content":"keep"}]}`
+
+	if got := normalizeAPICallMiniMaxClaudeMessagesBody(parsedURL, body); got != body {
+		t.Fatalf("generic URL body changed: %s", got)
 	}
 }
 

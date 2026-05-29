@@ -187,6 +187,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	if auth == nil {
 		auth = h.inferAPICallAuth(parsedURL, reqHeaders)
 	}
+	body.Data = normalizeAPICallMiniMaxClaudeMessagesBody(parsedURL, body.Data)
 
 	var requestBody io.Reader
 	if body.Data != "" {
@@ -253,6 +254,112 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func normalizeAPICallMiniMaxClaudeMessagesBody(parsedURL *url.URL, data string) string {
+	if parsedURL == nil || strings.TrimSpace(data) == "" {
+		return data
+	}
+	if config.InferCompatKindFromBaseURL(parsedURL.String()) != "minimax" {
+		return data
+	}
+	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(parsedURL.Path)), "/messages") {
+		return data
+	}
+
+	normalized, ok := normalizeAPICallClaudeSystemRoleMessages([]byte(data))
+	if !ok {
+		return data
+	}
+	return string(normalized)
+}
+
+func normalizeAPICallClaudeSystemRoleMessages(data []byte) ([]byte, bool) {
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return data, false
+	}
+	messages, ok := root["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return data, false
+	}
+
+	systemBlocks := apiCallClaudeSystemBlocks(root["system"])
+	cleanedMessages := make([]any, 0, len(messages))
+	changed := false
+	for _, rawMessage := range messages {
+		message, okMessage := rawMessage.(map[string]any)
+		if !okMessage {
+			cleanedMessages = append(cleanedMessages, rawMessage)
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(apiCallStringValue(message["role"])), "system") {
+			cleanedMessages = append(cleanedMessages, message)
+			continue
+		}
+		systemBlocks = append(systemBlocks, apiCallClaudeSystemBlocks(message["content"])...)
+		changed = true
+	}
+	if !changed {
+		return data, false
+	}
+
+	root["messages"] = cleanedMessages
+	if len(systemBlocks) > 0 {
+		root["system"] = systemBlocks
+	} else {
+		delete(root, "system")
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return data, false
+	}
+	return out, true
+}
+
+func apiCallClaudeSystemBlocks(value any) []any {
+	switch typed := value.(type) {
+	case string:
+		return apiCallClaudeSystemBlockFromText(typed)
+	case []any:
+		blocks := make([]any, 0, len(typed))
+		for _, item := range typed {
+			blocks = append(blocks, apiCallClaudeSystemBlocks(item)...)
+		}
+		return blocks
+	case map[string]any:
+		text := strings.TrimSpace(apiCallStringValue(typed["text"]))
+		if text == "" {
+			return nil
+		}
+		block := make(map[string]any, len(typed)+1)
+		for key, val := range typed {
+			block[key] = val
+		}
+		if strings.TrimSpace(apiCallStringValue(block["type"])) == "" {
+			block["type"] = "text"
+		}
+		block["text"] = text
+		return []any{block}
+	default:
+		return nil
+	}
+}
+
+func apiCallClaudeSystemBlockFromText(text string) []any {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	return []any{map[string]any{
+		"type": "text",
+		"text": text,
+	}}
+}
+
+func apiCallStringValue(value any) string {
+	str, _ := value.(string)
+	return str
 }
 
 func safeAPICallErrorDetail(err error) string {
