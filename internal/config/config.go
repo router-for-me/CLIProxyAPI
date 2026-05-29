@@ -89,6 +89,16 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// RPMLimitDefault sets the default per-account requests-per-minute limit applied
+	// to every credential that does not override it. 0 (default) disables RPM limiting.
+	RPMLimitDefault int `yaml:"rpm-limit-default" json:"rpm-limit-default"`
+	// TPMLimitDefault sets the default per-account tokens-per-minute limit applied
+	// to every credential that does not override it. 0 (default) disables TPM limiting.
+	TPMLimitDefault int `yaml:"tpm-limit-default" json:"tpm-limit-default"`
+	// ConcurrencyLimitDefault sets the default per-account maximum in-flight requests
+	// applied to every credential that does not override it. 0 (default) disables it.
+	ConcurrencyLimitDefault int `yaml:"concurrency-limit-default" json:"concurrency-limit-default"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -641,6 +651,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
+	cfg.RPMLimitDefault = 0
+	cfg.TPMLimitDefault = 0
+	cfg.ConcurrencyLimitDefault = 0
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

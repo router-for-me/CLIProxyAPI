@@ -1395,6 +1395,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	}
 
+	if oldCfg == nil || oldCfg.RPMLimitDefault != cfg.RPMLimitDefault ||
+		oldCfg.TPMLimitDefault != cfg.TPMLimitDefault ||
+		oldCfg.ConcurrencyLimitDefault != cfg.ConcurrencyLimitDefault {
+		auth.SetRateLimitDefaults(cfg.RPMLimitDefault, cfg.TPMLimitDefault, cfg.ConcurrencyLimitDefault)
+	}
+
 	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
 		log.Infof("disable-image-generation updated: %v -> %v", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
 	}

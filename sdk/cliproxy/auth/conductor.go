@@ -99,6 +99,136 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 	return quotaCooldownDisabled.Load()
 }
 
+// Global per-account rate-limit defaults. A value <= 0 means "unlimited" for that
+// dimension. Per-account metadata overrides take precedence (see effectiveRateLimits).
+var (
+	rpmLimitDefault         atomic.Int64
+	tpmLimitDefault         atomic.Int64
+	concurrencyLimitDefault atomic.Int64
+)
+
+// SetRateLimitDefaults sets the global default requests-per-minute, tokens-per-minute,
+// and max-concurrency limits applied to every credential that does not override them.
+// Pass 0 (or negative) for any dimension to disable that limit globally.
+func SetRateLimitDefaults(rpm, tpm, concurrency int) {
+	rpmLimitDefault.Store(int64(rpm))
+	tpmLimitDefault.Store(int64(tpm))
+	concurrencyLimitDefault.Store(int64(concurrency))
+}
+
+// effectiveRateLimits resolves the active RPM/TPM/concurrency limits for an auth,
+// preferring per-account overrides over the global defaults. A returned value
+// <= 0 means that dimension is unlimited.
+func effectiveRateLimits(a *Auth) (rpm, tpm, concurrency int64) {
+	rpm = rpmLimitDefault.Load()
+	tpm = tpmLimitDefault.Load()
+	concurrency = concurrencyLimitDefault.Load()
+	if a != nil {
+		if v, ok := a.RPMLimitOverride(); ok {
+			rpm = int64(v)
+		}
+		if v, ok := a.TPMLimitOverride(); ok {
+			tpm = int64(v)
+		}
+		if v, ok := a.ConcurrencyLimitOverride(); ok {
+			concurrency = int64(v)
+		}
+	}
+	return rpm, tpm, concurrency
+}
+
+// rateLimited reports whether the auth identified by authID is currently over any
+// of its RPM/TPM/concurrency budgets. When limited, it returns a conservative time
+// at which the caller may retry. The read is performed under the manager mutex so
+// it observes the same counters updated by recordDispatch/recordDispatchDone/RecordTokenUsage.
+func (m *Manager) rateLimited(authID string, now time.Time) (time.Time, bool) {
+	if m == nil || authID == "" {
+		return time.Time{}, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	a := m.auths[authID]
+	if a == nil {
+		return time.Time{}, false
+	}
+	rpm, tpm, concurrency := effectiveRateLimits(a)
+	if rpm <= 0 && tpm <= 0 && concurrency <= 0 {
+		return time.Time{}, false
+	}
+	if concurrency > 0 && a.rate.inFlight >= concurrency {
+		// Concurrency frees when an in-flight request completes; the exact time is
+		// unknown, so suggest a short retry hint.
+		return now.Add(time.Second), true
+	}
+	reqs, toks := a.rate.sums(now)
+	if rpm > 0 && reqs >= rpm {
+		return a.rate.earliestFree(now), true
+	}
+	if tpm > 0 && toks >= tpm {
+		return a.rate.earliestFree(now), true
+	}
+	return time.Time{}, false
+}
+
+// recordDispatch records one dispatched request against an auth's RPM window and
+// increments its in-flight counter. Pair every call with recordDispatchDone.
+func (m *Manager) recordDispatch(authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	if a := m.auths[authID]; a != nil {
+		a.rate.addRequest(now)
+		a.rate.acquire()
+	}
+	m.mu.Unlock()
+}
+
+// recordDispatchDone decrements an auth's in-flight counter when a request completes.
+func (m *Manager) recordDispatchDone(authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+	m.mu.Lock()
+	if a := m.auths[authID]; a != nil {
+		a.rate.release()
+	}
+	m.mu.Unlock()
+}
+
+// RecordTokenUsage adds observed token consumption to an auth's TPM window. It is
+// invoked by the usage plugin registered in NewManager when an upstream response's
+// usage is published.
+func (m *Manager) RecordTokenUsage(authID string, tokens int64, at time.Time) {
+	if m == nil || authID == "" || tokens <= 0 {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	m.mu.Lock()
+	if a := m.auths[authID]; a != nil {
+		a.rate.addTokens(at, tokens)
+	}
+	m.mu.Unlock()
+}
+
+// rateUsagePlugin feeds published token usage into the manager's per-account TPM
+// windows. It implements coreusage.Plugin.
+type rateUsagePlugin struct {
+	m *Manager
+}
+
+// HandleUsage records the total tokens of a usage record against its auth.
+func (p rateUsagePlugin) HandleUsage(_ context.Context, record coreusage.Record) {
+	total := record.Detail.TotalTokens
+	if total <= 0 {
+		total = record.Detail.InputTokens + record.Detail.OutputTokens
+	}
+	p.m.RecordTokenUsage(record.AuthID, total, record.RequestedAt)
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.
@@ -215,6 +345,8 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
+	// Feed published token usage into this manager's per-account TPM windows.
+	coreusage.RegisterPlugin(rateUsagePlugin{m: manager})
 	return manager
 }
 
@@ -815,10 +947,14 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, onDone func()) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		if onDone != nil {
+			// Release the in-flight concurrency slot when the stream completes.
+			defer onDone()
+		}
 		var failed bool
 		forward := true
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
@@ -874,8 +1010,21 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		// Count this dispatch toward the auth's RPM and in-flight concurrency.
+		// release is idempotent: it is invoked on every synchronous failure path,
+		// and handed to wrapStreamResult on success so the in-flight slot is held
+		// until the stream finishes.
+		m.recordDispatch(auth.ID)
+		streamReleased := false
+		release := func() {
+			if !streamReleased {
+				streamReleased = true
+				m.recordDispatchDone(auth.ID)
+			}
+		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
+			release()
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
@@ -895,6 +1044,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
+			release()
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
@@ -934,6 +1084,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && len(buffered) == 0 {
+			release()
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
@@ -950,7 +1101,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		// Success: hold the in-flight slot until the stream goroutine completes.
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, release), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1338,6 +1490,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	var rateLimitedSeen bool
+	var rateLimitedReset time.Time
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -1351,6 +1505,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
+			// When the only reason no auth is available is per-account rate limiting,
+			// surface a 429 with a Retry-After hint instead of a generic error.
+			if rateLimitedSeen && lastErr == nil {
+				return cliproxyexecutor.Response{}, newModelCooldownError(routeModel, "", time.Until(rateLimitedReset))
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1362,6 +1521,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
+		// Proactive per-account rate limiting: skip this credential when it is over
+		// its RPM/TPM/concurrency budget and try the next one (failover).
+		if reset, limited := m.rateLimited(auth.ID, time.Now()); limited {
+			rateLimitedSeen = true
+			if rateLimitedReset.IsZero() || reset.Before(rateLimitedReset) {
+				rateLimitedReset = reset
+			}
+			continue
+		}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -1390,7 +1558,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			m.recordDispatch(auth.ID)
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			m.recordDispatchDone(auth.ID)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -1536,6 +1706,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	var rateLimitedSeen bool
+	var rateLimitedReset time.Time
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -1549,6 +1721,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
+			// When the only reason no auth is available is per-account rate limiting,
+			// surface a 429 with a Retry-After hint instead of a generic error.
+			if rateLimitedSeen && lastErr == nil {
+				return nil, newModelCooldownError(routeModel, "", time.Until(rateLimitedReset))
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return nil, lastErr
 			}
@@ -1560,6 +1737,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
+		// Proactive per-account rate limiting: skip this credential when it is over
+		// its RPM/TPM/concurrency budget and try the next one (failover).
+		if reset, limited := m.rateLimited(auth.ID, time.Now()); limited {
+			rateLimitedSeen = true
+			if rateLimitedReset.IsZero() || reset.Before(rateLimitedReset) {
+				rateLimitedReset = reset
+			}
+			continue
+		}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)

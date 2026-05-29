@@ -98,6 +98,11 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+
+	// rate tracks per-account RPM/TPM sliding-window counts and in-flight
+	// concurrency for proactive rate limiting. Access is guarded by the owning
+	// Manager's mutex (same pattern as recentRequests); see rate_window.go.
+	rate rateWindow `json:"-"`
 }
 
 const (
@@ -444,6 +449,41 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// rateLimitOverride reads a non-negative integer override from the auth metadata
+// under the given primary/legacy keys. A value <= 0 is treated as "not set" so
+// the global default still applies.
+func (a *Auth) rateLimitOverride(primaryKey, legacyKey string) (int, bool) {
+	if a == nil || a.Metadata == nil {
+		return 0, false
+	}
+	for _, key := range []string{primaryKey, legacyKey} {
+		if val, ok := a.Metadata[key]; ok {
+			if parsed, okParse := parseIntAny(val); okParse && parsed > 0 {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// RPMLimitOverride returns the auth-scoped requests-per-minute limit when set
+// (metadata key "rpm_limit" or legacy "rpm-limit").
+func (a *Auth) RPMLimitOverride() (int, bool) {
+	return a.rateLimitOverride("rpm_limit", "rpm-limit")
+}
+
+// TPMLimitOverride returns the auth-scoped tokens-per-minute limit when set
+// (metadata key "tpm_limit" or legacy "tpm-limit").
+func (a *Auth) TPMLimitOverride() (int, bool) {
+	return a.rateLimitOverride("tpm_limit", "tpm-limit")
+}
+
+// ConcurrencyLimitOverride returns the auth-scoped max in-flight request limit
+// when set (metadata key "concurrency_limit" or legacy "concurrency-limit").
+func (a *Auth) ConcurrencyLimitOverride() (int, bool) {
+	return a.rateLimitOverride("concurrency_limit", "concurrency-limit")
 }
 
 func parseBoolAny(val any) (bool, bool) {
