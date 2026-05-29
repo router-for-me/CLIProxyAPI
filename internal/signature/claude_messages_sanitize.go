@@ -9,10 +9,11 @@ import (
 )
 
 type ClaudeMessagesSignatureSanitizeOptions struct {
-	TargetProvider     SignatureProvider
-	TargetModel        string
-	DropEmptyMessages  bool
-	DropToolSignatures bool
+	TargetProvider                SignatureProvider
+	TargetModel                   string
+	DropEmptyMessages             bool
+	DropToolSignatures            bool
+	DropEmptyThinkingPlaceholders bool
 }
 
 type SignatureSanitizeReport struct {
@@ -32,6 +33,20 @@ func SanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string
 		TargetProvider:    SignatureProviderFromModelName(targetModel),
 		TargetModel:       targetModel,
 		DropEmptyMessages: true,
+	})
+}
+
+// SanitizeClaudeMessagesForClaudeUpstream prepares a Claude /v1/messages body
+// for native Claude upstreams. Invalid thinking blocks are dropped, valid
+// thinking signatures are normalized to Claude provider-native E-form, and
+// tool_use blocks keep only their tool-call payload.
+func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string) ([]byte, SignatureSanitizeReport) {
+	return SanitizeClaudeMessagesSignaturesForTarget(payload, ClaudeMessagesSignatureSanitizeOptions{
+		TargetProvider:                SignatureProviderClaude,
+		TargetModel:                   targetModel,
+		DropEmptyMessages:             true,
+		DropToolSignatures:            true,
+		DropEmptyThinkingPlaceholders: true,
 	})
 }
 
@@ -103,7 +118,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
-			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) {
+			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
 				keptParts = append(keptParts, part.Raw)
 				continue
 			}
@@ -162,7 +177,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
 	updated := part.Raw
 	changed := false
-	for _, sigPath := range claudeToolUseSignaturePaths() {
+	for _, sigPath := range claudeToolUseProvenancePaths() {
 		if !gjson.Get(updated, sigPath).Exists() {
 			continue
 		}
@@ -231,9 +246,14 @@ func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider SignatureP
 func claudeToolUseSignaturePaths() []string {
 	return []string{
 		"signature",
+		"thoughtSignature",
 		"thought_signature",
 		"extra_content.google.thought_signature",
 	}
+}
+
+func claudeToolUseProvenancePaths() []string {
+	return append(claudeToolUseSignaturePaths(), "model")
 }
 
 func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
