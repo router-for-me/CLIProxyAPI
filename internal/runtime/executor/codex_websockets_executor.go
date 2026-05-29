@@ -255,6 +255,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	var upstreamHeaders http.Header
+	if respHS != nil {
+		upstreamHeaders = respHS.Header.Clone()
+	}
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
@@ -301,6 +305,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
+				if respHSRetry != nil {
+					upstreamHeaders = respHSRetry.Header.Clone()
+				}
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -364,6 +371,15 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		reporter.MarkFirstResponseByte()
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
+		if streamErr, ok := codexTerminalStreamContextLengthErr(payload); ok {
+			err = streamErr
+			if sess != nil {
+				e.invalidateUpstreamConn(sess, conn, "upstream_error", err)
+			}
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", err)
+			return resp, err
+		}
+
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
@@ -378,14 +394,22 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 			continue
 		}
+		if wsErr, ok := codexWebsocketTerminalError(payload); ok {
+			if sess != nil {
+				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+			}
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
+			return resp, wsErr
+		}
 		if eventType == "response.completed" {
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
+			publishCodexImageToolUsage(ctx, reporter, body, payload)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
-			resp = cliproxyexecutor.Response{Payload: out}
+			resp = cliproxyexecutor.Response{Payload: out, Headers: upstreamHeaders}
 			return resp, nil
 		}
 	}
@@ -1096,6 +1120,29 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 		statusErr: statusError,
 		headers:   headers,
 	}, true
+}
+
+func codexWebsocketTerminalError(payload []byte) (error, bool) {
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	var body []byte
+	switch eventType {
+	case "error":
+		body = codexTerminalErrorBody(payload, "error")
+		if len(body) == 0 {
+			body = codexTerminalTopLevelErrorBody(payload)
+		}
+	case "response.failed":
+		body = codexTerminalErrorBody(payload, "response.error")
+		if len(body) == 0 {
+			body = codexTerminalErrorBody(payload, "error")
+		}
+	default:
+		return nil, false
+	}
+	if len(body) == 0 {
+		body = bytes.Clone(payload)
+	}
+	return newCodexStatusErr(http.StatusBadGateway, body), true
 }
 
 func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
