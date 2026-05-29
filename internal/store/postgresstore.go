@@ -24,6 +24,11 @@ const (
 	defaultConfigTable = "config_store"
 	defaultAuthTable   = "auth_store"
 	defaultConfigKey   = "config"
+
+	defaultPostgresStoreMaxOpenConns    = 4
+	defaultPostgresStoreMaxIdleConns    = 2
+	defaultPostgresStoreConnMaxLifetime = 30 * time.Minute
+	defaultPostgresStoreConnMaxIdleTime = 5 * time.Minute
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -92,6 +97,7 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: open database connection: %w", err)
 	}
+	configurePostgresStorePool(db)
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("postgres store: ping database: %w", err)
@@ -105,6 +111,16 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 		authDir:    authDir,
 	}
 	return store, nil
+}
+
+func configurePostgresStorePool(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	db.SetMaxOpenConns(defaultPostgresStoreMaxOpenConns)
+	db.SetMaxIdleConns(defaultPostgresStoreMaxIdleConns)
+	db.SetConnMaxLifetime(defaultPostgresStoreConnMaxLifetime)
+	db.SetConnMaxIdleTime(defaultPostgresStoreConnMaxIdleTime)
 }
 
 // Close releases the underlying database connection.

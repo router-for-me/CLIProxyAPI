@@ -47,6 +47,8 @@ var (
 
 const usageMigrationTimeout = 5 * time.Minute
 
+const postgresStoreInitAttempts = 3
+
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -313,7 +315,7 @@ func main() {
 		}
 		pgStoreLocalPath = filepath.Join(pgStoreLocalPath, "pgstore")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		pgStoreInst, err = store.NewPostgresStore(ctx, store.PostgresStoreConfig{
+		pgStoreInst, err = newPostgresStoreWithRetry(ctx, store.PostgresStoreConfig{
 			DSN:      pgStoreDSN,
 			Schema:   pgStoreSchema,
 			SpoolDir: pgStoreLocalPath,
@@ -659,6 +661,41 @@ func main() {
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
+}
+
+func newPostgresStoreWithRetry(ctx context.Context, cfg store.PostgresStoreConfig) (*store.PostgresStore, error) {
+	var lastErr error
+	for attempt := 1; attempt <= postgresStoreInitAttempts; attempt++ {
+		pgStoreInst, errStart := store.NewPostgresStore(ctx, cfg)
+		if errStart == nil {
+			return pgStoreInst, nil
+		}
+		lastErr = errStart
+		if attempt == postgresStoreInitAttempts || ctx.Err() != nil {
+			break
+		}
+
+		wait := time.Duration(attempt) * time.Second
+		log.WithError(errStart).Warnf(
+			"postgres token store initialization failed; retrying in %s (%d/%d)",
+			wait,
+			attempt+1,
+			postgresStoreInitAttempts,
+		)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, fmt.Errorf("postgres token store initialization canceled: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
 }
 
 func resolveLegacyConfigPath(wd, configPath string) string {

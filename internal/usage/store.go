@@ -356,11 +356,19 @@ type pgUsageStore struct {
 	schema string
 }
 
+const (
+	defaultPostgresUsageMaxOpenConns    = 8
+	defaultPostgresUsageMaxIdleConns    = 4
+	defaultPostgresUsageConnMaxLifetime = 30 * time.Minute
+	defaultPostgresUsageConnMaxIdleTime = 5 * time.Minute
+)
+
 func newPgUsageStore(ctx context.Context, dsn, schema string) (*pgUsageStore, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("usage store: open postgres: %w", err)
 	}
+	configurePostgresUsagePool(db)
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage store: ping postgres: %w", err)
@@ -371,6 +379,16 @@ func newPgUsageStore(ctx context.Context, dsn, schema string) (*pgUsageStore, er
 		return nil, err
 	}
 	return store, nil
+}
+
+func configurePostgresUsagePool(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	db.SetMaxOpenConns(defaultPostgresUsageMaxOpenConns)
+	db.SetMaxIdleConns(defaultPostgresUsageMaxIdleConns)
+	db.SetConnMaxLifetime(defaultPostgresUsageConnMaxLifetime)
+	db.SetConnMaxIdleTime(defaultPostgresUsageConnMaxIdleTime)
 }
 
 func (s *pgUsageStore) fullTableName(name string) string {
