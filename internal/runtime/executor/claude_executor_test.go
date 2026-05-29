@@ -1923,6 +1923,36 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	}
 }
 
+func TestCheckSystemInstructionsWithSigningMode_OAuthPreservesAdditionalSystemBlocks(t *testing.T) {
+	payload := []byte(`{
+		"system":[
+			{"type":"text","text":"Original Amp agent prompt that should be sanitized."},
+			{"type":"text","text":"AGENTS.md guidance should remain."},
+			{"type":"text","text":"Available skills: behavior-driven-development should remain.","cache_control":{"type":"ephemeral"}}
+		],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, "2.1.63", "", "")
+
+	forwarded := gjson.GetBytes(out, "messages.0.content.0.text").String()
+	if !strings.Contains(forwarded, sanitizeForwardedSystemPrompt("Original Amp agent prompt that should be sanitized.")) {
+		t.Fatalf("forwarded system prompt should include sanitized first block, got %q", forwarded)
+	}
+	if strings.Contains(forwarded, "Original Amp agent prompt that should be sanitized.") {
+		t.Fatalf("forwarded system prompt should not include raw first block, got %q", forwarded)
+	}
+	if !strings.Contains(forwarded, "AGENTS.md guidance should remain.") {
+		t.Fatalf("forwarded system prompt should preserve AGENTS guidance, got %q", forwarded)
+	}
+	if !strings.Contains(forwarded, "Available skills: behavior-driven-development should remain.") {
+		t.Fatalf("forwarded system prompt should preserve skill descriptions, got %q", forwarded)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.text").String(); got != "hi" {
+		t.Fatalf("original user content should remain after forwarded system context, got %q", got)
+	}
+}
+
 // Test case 5: Special characters in string system prompt survive forwarding
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
