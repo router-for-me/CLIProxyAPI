@@ -3342,7 +3342,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					clearAuthStateOnSuccess(auth, now)
 				}
 			} else if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) && !isRequestScopedFeatureUnsupportedResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) &&
+					!isRequestScopedFeatureUnsupportedResultError(result.Error) &&
+					!isRequestScopedContentSafetyResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -4448,12 +4450,29 @@ func isRequestScopedFeatureUnsupportedResultError(err *Error) bool {
 	return isRequestScopedFeatureUnsupportedMessage(err.Message)
 }
 
+func isRequestScopedContentSafetyMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "request was rejected") &&
+		(strings.Contains(lower, "high risk") || strings.Contains(lower, "high-risk"))
+}
+
+func isRequestScopedContentSafetyResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusBadRequest {
+		return false
+	}
+	return isRequestScopedContentSafetyMessage(err.Message)
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// "invalid_request_error", request-scoped content safety rejections, request-scoped
+// 404 item misses caused by `store=false`, and all 422 responses as request-shape
+// failures, where switching auths or pooled upstream models will not help.
+// Model-support errors are excluded so routing can fall through to another auth
+// or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -4468,6 +4487,9 @@ func isRequestInvalidError(err error) bool {
 	switch status {
 	case http.StatusBadRequest:
 		msg := err.Error()
+		if isRequestScopedContentSafetyMessage(msg) {
+			return true
+		}
 		return (strings.Contains(msg, "invalid_request_error") && !isRetryableAvailabilityErrorMessage(msg)) ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
 			strings.Contains(msg, "FAILED_PRECONDITION")
@@ -4565,7 +4587,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		clearAuthStateOnSuccess(auth, now)
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) || isRequestScopedFeatureUnsupportedResultError(resultErr) {
+	if isRequestScopedNotFoundResultError(resultErr) ||
+		isRequestScopedFeatureUnsupportedResultError(resultErr) ||
+		isRequestScopedContentSafetyResultError(resultErr) {
 		return
 	}
 	applyHealthFailure(&auth.Health, now, statusCodeFromResult(resultErr))
