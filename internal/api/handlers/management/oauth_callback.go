@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 type oauthCallbackRequest struct {
@@ -97,6 +98,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 			return
 		}
+		log.WithError(errWrite).Error("failed to persist oauth callback")
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to persist oauth callback"})
 		return
 	}
