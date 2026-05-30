@@ -19,6 +19,7 @@ import (
 
 const requestScopedNotFoundMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74' not found. Items are not persisted when `store` is set to false. Try again with `store` set to true, or remove this item from your input."
 const requestScopedContentSafetyMessage = "The request was rejected because it was considered high risk"
+const requestScopedContentBlockedMessage = "The content you provided or machine outputted is blocked."
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
 	m := NewManager(nil, nil, nil)
@@ -1769,50 +1770,90 @@ func TestManager_MarkResult_RequestScopedNotFoundDoesNotCooldownAuth(t *testing.
 }
 
 func TestManager_MarkResult_RequestScopedContentSafetyDoesNotCooldownAuth(t *testing.T) {
-	m := NewManager(nil, nil, nil)
-
-	auth := &Auth{
-		ID:       "auth-1",
-		Provider: "claude",
-	}
-	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
-		t.Fatalf("register auth: %v", errRegister)
-	}
-
-	model := "kimi-k2.6"
-	m.MarkResult(context.Background(), Result{
-		AuthID:   auth.ID,
-		Provider: auth.Provider,
-		Model:    model,
-		Success:  false,
-		Error: &Error{
-			HTTPStatus: http.StatusBadRequest,
-			Message:    requestScopedContentSafetyMessage,
+	tests := []struct {
+		name       string
+		httpStatus int
+		message    string
+	}{
+		{
+			name:       "high risk bad request",
+			httpStatus: http.StatusBadRequest,
+			message:    requestScopedContentSafetyMessage,
 		},
-	})
+		{
+			name:       "blocked legal reasons",
+			httpStatus: http.StatusUnavailableForLegalReasons,
+			message:    requestScopedContentBlockedMessage,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
 
-	updated, ok := m.GetByID(auth.ID)
-	if !ok || updated == nil {
-		t.Fatalf("expected auth to be present")
-	}
-	if updated.Unavailable {
-		t.Fatalf("expected request-scoped content safety error to keep auth available")
-	}
-	if !updated.NextRetryAfter.IsZero() {
-		t.Fatalf("expected request-scoped content safety error to keep auth cooldown unset, got %v", updated.NextRetryAfter)
-	}
-	if state := updated.ModelStates[model]; state != nil {
-		t.Fatalf("expected request-scoped content safety error to avoid model cooldown state, got %#v", state)
+			auth := &Auth{
+				ID:       "auth-1",
+				Provider: "claude",
+			}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			model := "kimi-k2.6"
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: auth.Provider,
+				Model:    model,
+				Success:  false,
+				Error: &Error{
+					HTTPStatus: tt.httpStatus,
+					Message:    tt.message,
+				},
+			})
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatalf("expected auth to be present")
+			}
+			if updated.Unavailable {
+				t.Fatalf("expected request-scoped content safety error to keep auth available")
+			}
+			if !updated.NextRetryAfter.IsZero() {
+				t.Fatalf("expected request-scoped content safety error to keep auth cooldown unset, got %v", updated.NextRetryAfter)
+			}
+			if state := updated.ModelStates[model]; state != nil {
+				t.Fatalf("expected request-scoped content safety error to avoid model cooldown state, got %#v", state)
+			}
+		})
 	}
 }
 
 func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
-	err := &Error{
-		HTTPStatus: http.StatusBadRequest,
-		Message:    requestScopedContentSafetyMessage,
+	tests := []struct {
+		name       string
+		httpStatus int
+		message    string
+	}{
+		{
+			name:       "high risk bad request",
+			httpStatus: http.StatusBadRequest,
+			message:    requestScopedContentSafetyMessage,
+		},
+		{
+			name:       "blocked legal reasons",
+			httpStatus: http.StatusUnavailableForLegalReasons,
+			message:    requestScopedContentBlockedMessage,
+		},
 	}
-	if !isRequestInvalidError(err) {
-		t.Fatalf("expected content safety error to be request invalid")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &Error{
+				HTTPStatus: tt.httpStatus,
+				Message:    tt.message,
+			}
+			if !isRequestInvalidError(err) {
+				t.Fatalf("expected content safety error to be request invalid")
+			}
+		})
 	}
 }
 

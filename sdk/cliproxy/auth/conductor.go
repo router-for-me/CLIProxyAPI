@@ -4456,14 +4456,20 @@ func isRequestScopedContentSafetyMessage(message string) bool {
 		return false
 	}
 	return strings.Contains(lower, "request was rejected") &&
-		(strings.Contains(lower, "high risk") || strings.Contains(lower, "high-risk"))
+		(strings.Contains(lower, "high risk") || strings.Contains(lower, "high-risk")) ||
+		(strings.Contains(lower, "content") && strings.Contains(lower, "blocked"))
 }
 
 func isRequestScopedContentSafetyResultError(err *Error) bool {
-	if err == nil || statusCodeFromResult(err) != http.StatusBadRequest {
+	if err == nil {
 		return false
 	}
-	return isRequestScopedContentSafetyMessage(err.Message)
+	switch statusCodeFromResult(err) {
+	case http.StatusBadRequest, http.StatusUnavailableForLegalReasons:
+		return isRequestScopedContentSafetyMessage(err.Message)
+	default:
+		return false
+	}
 }
 
 // isRequestInvalidError returns true if the error represents a client request
@@ -4493,6 +4499,8 @@ func isRequestInvalidError(err error) bool {
 		return (strings.Contains(msg, "invalid_request_error") && !isRetryableAvailabilityErrorMessage(msg)) ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
 			strings.Contains(msg, "FAILED_PRECONDITION")
+	case http.StatusUnavailableForLegalReasons:
+		return isRequestScopedContentSafetyMessage(err.Error())
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
