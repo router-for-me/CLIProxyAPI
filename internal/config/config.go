@@ -111,6 +111,10 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// CompactDefault controls how credentials with compact mode "auto" are treated for
+	// /responses/compact routing: "allow" (default, backward compatible) or "deny".
+	CompactDefault string `yaml:"compact-default,omitempty" json:"compact-default,omitempty"`
+
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
@@ -465,6 +469,10 @@ type CodexKey struct {
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
+	// Compact controls /responses/compact eligibility for this credential:
+	// "auto" (default, follows compact-default), "force_on", or "force_off".
+	Compact string `yaml:"compact,omitempty" json:"compact,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -558,6 +566,10 @@ type OpenAICompatibility struct {
 
 	// Prefix optionally namespaces model aliases for this provider (e.g., "teamA/kimi-k2").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// Compact controls /responses/compact eligibility for all credentials of this provider:
+	// "auto" (default, follows compact-default), "force_on", or "force_off".
+	Compact string `yaml:"compact,omitempty" json:"compact,omitempty"`
 
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
