@@ -584,8 +584,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
 	applyCodexHTTPStreamFirstResponseTimeout(httpClient, codexHTTPStreamFirstResponseTimeout)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpStartedAt := time.Now()
 	helps.LogWithRequestID(ctx).Infof("codex http stream upstream request start url=%s body_bytes=%d auth=%s", url, len(body), authID)
 	httpResp, err := httpClient.Do(httpReq)

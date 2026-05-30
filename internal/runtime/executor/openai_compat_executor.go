@@ -368,8 +368,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
 	applyOpenAICompatStreamFirstResponseTimeout(httpClient, openAICompatStreamFirstResponseTimeout)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		if isOpenAICompatStreamFirstResponseTimeout(err, openAICompatStreamFirstResponseTimeout) && ctx.Err() == nil {
@@ -526,8 +526,8 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
 	applyOpenAICompatStreamFirstResponseTimeout(httpClient, openAICompatStreamFirstResponseTimeout)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		if isOpenAICompatStreamFirstResponseTimeout(err, openAICompatStreamFirstResponseTimeout) && ctx.Err() == nil {
