@@ -365,9 +365,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
-				if cv := gjson.GetBytes(data, "compact"); cv.Exists() && cv.Type == gjson.String {
-					if trimmed := strings.TrimSpace(cv.String()); trimmed != "" {
-						fileData["compact"] = trimmed
+				if strings.EqualFold(typeValue, "codex") {
+					if cv := gjson.GetBytes(data, "compact"); cv.Exists() && cv.Type == gjson.String {
+						if trimmed := strings.TrimSpace(cv.String()); trimmed != "" {
+							fileData["compact"] = trimmed
+						}
 					}
 				}
 			}
@@ -493,12 +495,14 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
 	}
-	if mode := strings.TrimSpace(authAttribute(auth, "compact_mode")); mode != "" {
-		entry["compact"] = mode
-	} else if auth.Metadata != nil {
-		if rawCompact, ok := auth.Metadata["compact"].(string); ok {
-			if trimmed := strings.TrimSpace(rawCompact); trimmed != "" {
-				entry["compact"] = trimmed
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if mode := strings.TrimSpace(authAttribute(auth, "compact_mode")); mode != "" {
+			entry["compact"] = mode
+		} else if auth.Metadata != nil {
+			if rawCompact, ok := auth.Metadata["compact"].(string); ok {
+				if trimmed := strings.TrimSpace(rawCompact); trimmed != "" {
+					entry["compact"] = trimmed
+				}
 			}
 		}
 	}
@@ -1278,7 +1282,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			return
 		}
 		value = normalizeAuthFileFieldValue(fieldPath, value)
-		if errField := validateAuthFileFieldValue(fieldPath, value); errField != nil {
+		if errField := validateAuthFileFieldValue(targetAuth, fieldPath, value); errField != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errField.Error()})
 			return
 		}
@@ -1338,7 +1342,7 @@ func rootAuthFileField(path string) string {
 }
 
 func normalizeAuthFileFieldValue(path string, value any) any {
-	if strings.TrimSpace(path) != "compact" {
+	if rootAuthFileField(path) != "compact" || strings.TrimSpace(path) != "compact" {
 		return value
 	}
 	raw, ok := value.(string)
@@ -1348,9 +1352,16 @@ func normalizeAuthFileFieldValue(path string, value any) any {
 	return strings.ToLower(strings.TrimSpace(raw))
 }
 
-func validateAuthFileFieldValue(path string, value any) error {
-	if strings.TrimSpace(path) != "compact" {
+func validateAuthFileFieldValue(auth *coreauth.Auth, path string, value any) error {
+	root := rootAuthFileField(path)
+	if root != "compact" {
 		return nil
+	}
+	if strings.TrimSpace(path) != "compact" {
+		return fmt.Errorf("compact must be a top-level field")
+	}
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return fmt.Errorf("compact is only supported for codex auth files")
 	}
 	raw, ok := value.(string)
 	if !ok {
@@ -1581,6 +1592,11 @@ func syncAuthFileCompactAttribute(auth *coreauth.Auth, cfg *config.Config) {
 	}
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		delete(auth.Attributes, "compact_mode")
+		delete(auth.Attributes, "compact_allowed")
+		return
 	}
 	raw, ok := auth.Metadata["compact"].(string)
 	if !ok {

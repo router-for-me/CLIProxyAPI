@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -53,6 +54,46 @@ func TestPickNextViaHomeReusesPinnedWebsocketAuthWithoutHomeDispatch(t *testing.
 	}
 	if provider != "test" {
 		t.Fatalf("pickNextViaHome() provider = %q, want test", provider)
+	}
+}
+
+func TestPickNextViaHomeDoesNotReusePinnedCompactBlockedWebsocketAuth(t *testing.T) {
+	home.ClearCurrent()
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	auth := &Auth{
+		ID:       "home-auth-1",
+		Provider: "codex",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"websockets":      "true",
+			"compact_allowed": "false",
+		},
+	}
+	auth.EnsureIndex()
+	manager.rememberHomeRuntimeAuth("session-1", auth)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	opts := cliproxyexecutor.Options{
+		Alt: cliproxyexecutor.ResponsesCompactAlt,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+			cliproxyexecutor.PinnedAuthMetadataKey:       "home-auth-1",
+		},
+	}
+
+	got, executor, provider, errPick := manager.pickNextViaHome(ctx, "gpt-5.4", opts, nil)
+	if errPick == nil {
+		t.Fatal("pickNextViaHome() error is nil, want home_unavailable")
+	}
+	var authErr *Error
+	if !errors.As(errPick, &authErr) || authErr.Code != "home_unavailable" {
+		t.Fatalf("pickNextViaHome() error = %v, want home_unavailable", errPick)
+	}
+	if got != nil || executor != nil || provider != "" {
+		t.Fatalf("pickNextViaHome() reused compact-blocked auth: auth=%#v executor=%#v provider=%q", got, executor, provider)
 	}
 }
 

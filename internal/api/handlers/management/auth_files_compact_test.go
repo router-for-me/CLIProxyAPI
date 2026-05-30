@@ -17,31 +17,48 @@ import (
 )
 
 func TestSyncAuthFileCompactAttribute(t *testing.T) {
-	on := &coreauth.Auth{ID: "on", Metadata: map[string]any{"compact": "force_on"}}
+	on := &coreauth.Auth{ID: "on", Provider: "codex", Metadata: map[string]any{"compact": "force_on"}}
 	syncAuthFileCompactAttribute(on, &config.Config{})
 	if on.Attributes["compact_mode"] != "force_on" || on.Attributes["compact_allowed"] != "true" {
 		t.Fatalf("force_on attrs = %#v", on.Attributes)
 	}
 
-	off := &coreauth.Auth{ID: "off", Metadata: map[string]any{"compact": "force_off"}}
+	off := &coreauth.Auth{ID: "off", Provider: "codex", Metadata: map[string]any{"compact": "force_off"}}
 	syncAuthFileCompactAttribute(off, &config.Config{})
 	if off.Attributes["compact_mode"] != "force_off" || off.Attributes["compact_allowed"] != "false" {
 		t.Fatalf("force_off attrs = %#v", off.Attributes)
 	}
 
-	autoDenied := &coreauth.Auth{ID: "auto", Metadata: map[string]any{"compact": "auto"}}
+	autoDenied := &coreauth.Auth{ID: "auto", Provider: "codex", Metadata: map[string]any{"compact": "auto"}}
 	syncAuthFileCompactAttribute(autoDenied, &config.Config{CompactDefault: "deny"})
 	if autoDenied.Attributes["compact_mode"] != "auto" || autoDenied.Attributes["compact_allowed"] != "false" {
 		t.Fatalf("auto attrs = %#v", autoDenied.Attributes)
 	}
 
-	cleared := &coreauth.Auth{ID: "c", Attributes: map[string]string{"compact_mode": "force_on", "compact_allowed": "true"}}
+	cleared := &coreauth.Auth{ID: "c", Provider: "codex", Attributes: map[string]string{"compact_mode": "force_on", "compact_allowed": "true"}}
 	syncAuthFileCompactAttribute(cleared, &config.Config{}) // no Metadata["compact"] -> remove mode
 	if _, ok := cleared.Attributes["compact_mode"]; ok {
 		t.Fatalf("compact_mode should be removed, got %#v", cleared.Attributes)
 	}
 	if _, ok := cleared.Attributes["compact_allowed"]; ok {
 		t.Fatalf("compact_allowed should be removed, got %#v", cleared.Attributes)
+	}
+
+	nonCodex := &coreauth.Auth{
+		ID:       "n",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"compact_mode":    "force_on",
+			"compact_allowed": "true",
+		},
+		Metadata: map[string]any{"compact": "force_off"},
+	}
+	syncAuthFileCompactAttribute(nonCodex, &config.Config{})
+	if _, ok := nonCodex.Attributes["compact_mode"]; ok {
+		t.Fatalf("non-codex compact_mode should be removed, got %#v", nonCodex.Attributes)
+	}
+	if _, ok := nonCodex.Attributes["compact_allowed"]; ok {
+		t.Fatalf("non-codex compact_allowed should be removed, got %#v", nonCodex.Attributes)
 	}
 }
 
@@ -51,6 +68,24 @@ func TestBuildAuthFileEntry_ExposesCompact(t *testing.T) {
 	entry := h.buildAuthFileEntry(auth)
 	if entry["compact"] != "force_off" {
 		t.Fatalf("entry[compact] = %v, want force_off", entry["compact"])
+	}
+}
+
+func TestBuildAuthFileEntry_DoesNotExposeCompactForNonCodex(t *testing.T) {
+	h := &Handler{}
+	auth := &coreauth.Auth{
+		ID:       "x",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"runtime_only":    "true",
+			"compact_mode":    "force_off",
+			"compact_allowed": "false",
+		},
+		Metadata: map[string]any{"compact": "force_off"},
+	}
+	entry := h.buildAuthFileEntry(auth)
+	if _, ok := entry["compact"]; ok {
+		t.Fatalf("entry[compact] = %v, want absent", entry["compact"])
 	}
 }
 
@@ -161,5 +196,77 @@ func TestPatchAuthFileFields_InvalidCompactRejected(t *testing.T) {
 	}
 	if _, exists := updated.Metadata["compact"]; exists {
 		t.Fatalf("expected invalid compact not to persist, metadata = %#v", updated.Metadata)
+	}
+}
+
+func TestPatchAuthFileFields_NestedCompactRejected(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": "/tmp/codex.json",
+		},
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"codex.json","compact.mode":"force_on"}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchAuthFileFields_CompactRejectedForNonCodex(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "gemini.json",
+		FileName: "gemini.json",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"path": "/tmp/gemini.json",
+		},
+		Metadata: map[string]any{
+			"type": "gemini",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"gemini.json","compact":"force_on"}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusBadRequest, rec.Code, rec.Body.String())
 	}
 }
