@@ -28,6 +28,7 @@ import (
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -364,6 +365,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
+				if cv := gjson.GetBytes(data, "compact"); cv.Exists() && cv.Type == gjson.String {
+					if trimmed := strings.TrimSpace(cv.String()); trimmed != "" {
+						fileData["compact"] = trimmed
+					}
+				}
 			}
 
 			files = append(files, fileData)
@@ -486,6 +492,15 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
+	}
+	if mode := strings.TrimSpace(authAttribute(auth, "compact_mode")); mode != "" {
+		entry["compact"] = mode
+	} else if auth.Metadata != nil {
+		if rawCompact, ok := auth.Metadata["compact"].(string); ok {
+			if trimmed := strings.TrimSpace(rawCompact); trimmed != "" {
+				entry["compact"] = trimmed
+			}
+		}
 	}
 	return entry
 }
@@ -1262,6 +1277,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
 			return
 		}
+		value = normalizeAuthFileFieldValue(fieldPath, value)
+		if errField := validateAuthFileFieldValue(fieldPath, value); errField != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errField.Error()})
+			return
+		}
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -1278,7 +1298,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		changed = true
 	}
 	if changed {
-		syncAuthFileMetadataFields(targetAuth, touchedRoots)
+		syncAuthFileMetadataFields(targetAuth, touchedRoots, h.cfg)
 	}
 
 	if !changed {
@@ -1315,6 +1335,33 @@ func rootAuthFileField(path string) string {
 		return strings.TrimSpace(path[:idx])
 	}
 	return path
+}
+
+func normalizeAuthFileFieldValue(path string, value any) any {
+	if strings.TrimSpace(path) != "compact" {
+		return value
+	}
+	raw, ok := value.(string)
+	if !ok {
+		return value
+	}
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func validateAuthFileFieldValue(path string, value any) error {
+	if strings.TrimSpace(path) != "compact" {
+		return nil
+	}
+	raw, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("compact must be a string")
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case coreauth.CompactModeAuto, coreauth.CompactModeForceOn, coreauth.CompactModeForceOff:
+		return nil
+	default:
+		return fmt.Errorf("compact must be one of auto, force_on, force_off")
+	}
 }
 
 func setAuthFileMetadataValue(metadata map[string]any, path string, value any) error {
@@ -1403,7 +1450,7 @@ func authFileHeadersStringMap(value any) (map[string]string, bool) {
 	}
 }
 
-func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]struct{}) {
+func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]struct{}, cfg *config.Config) {
 	if auth == nil || len(touchedRoots) == 0 {
 		return
 	}
@@ -1428,6 +1475,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	}
 	if _, ok := touchedRoots["websockets"]; ok {
 		syncAuthFileWebsocketsAttribute(auth)
+	}
+	if _, ok := touchedRoots["compact"]; ok {
+		syncAuthFileCompactAttribute(auth, cfg)
 	}
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
@@ -1523,6 +1573,26 @@ func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["websockets"] = strconv.FormatBool(websockets)
+}
+
+func syncAuthFileCompactAttribute(auth *coreauth.Auth, cfg *config.Config) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	raw, ok := auth.Metadata["compact"].(string)
+	if !ok {
+		delete(auth.Attributes, "compact_mode")
+		delete(auth.Attributes, "compact_allowed")
+		return
+	}
+	defaultAllow := true
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.CompactDefault), "deny") {
+		defaultAllow = false
+	}
+	coreauth.ApplyCompactAttributes(auth, raw, defaultAllow)
 }
 
 func authFileBoolValue(value any) (bool, bool) {
