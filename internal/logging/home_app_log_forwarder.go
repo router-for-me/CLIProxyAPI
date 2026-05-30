@@ -24,6 +24,7 @@ type homeAppLogPayload struct {
 	Line      string `json:"line"`
 	Level     string `json:"level,omitempty"`
 	Timestamp string `json:"timestamp,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 var currentHomeAppLogClient = func() homeAppLogClient {
@@ -92,12 +93,25 @@ func (f *HomeAppLogForwarder) Fire(entry *log.Entry) error {
 		Line:      line,
 		Level:     entry.Level.String(),
 		Timestamp: entry.Time.Format(time.RFC3339Nano),
+		RequestID: appLogRequestID(entry),
 	}
 	select {
 	case f.queue <- payload:
 	default:
 	}
 	return nil
+}
+
+func appLogRequestID(entry *log.Entry) string {
+	if entry == nil {
+		return ""
+	}
+	requestID, _ := entry.Data["request_id"].(string)
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "--------" {
+		return ""
+	}
+	return requestID
 }
 
 func (f *HomeAppLogForwarder) formatEntry(entry *log.Entry) (string, error) {
