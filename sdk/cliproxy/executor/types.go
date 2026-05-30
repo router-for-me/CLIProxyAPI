@@ -46,6 +46,9 @@ type Request struct {
 	Metadata map[string]any
 }
 
+// ResponsesCompactAlt is the Options.Alt value identifying a POST /v1/responses/compact request.
+const ResponsesCompactAlt = "responses/compact"
+
 // Options controls execution behavior for both streaming and non-streaming calls.
 type Options struct {
 	// Stream toggles streaming mode.
