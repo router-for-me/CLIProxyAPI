@@ -400,6 +400,56 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_AzureAttrs(t *testing.T) {
+	includeUsage := false
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:         "AzureGPT4",
+					BaseURL:      "https://example.openai.azure.com",
+					APIType:      "azure-openai",
+					APIVersion:   "2025-04-01-preview",
+					Deployment:   "prod-gpt-4-1",
+					PathMode:     "deployment",
+					AuthType:     "api-key",
+					IncludeUsage: &includeUsage,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "azure-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	attrs := auths[0].Attributes
+	wantAttrs := map[string]string{
+		"base_url":      "https://example.openai.azure.com",
+		"api_type":      "azure-openai",
+		"api_version":   "2025-04-01-preview",
+		"deployment":    "prod-gpt-4-1",
+		"path_mode":     "deployment",
+		"auth_type":     "api-key",
+		"include_usage": "false",
+		"api_key":       "azure-key",
+	}
+	for key, want := range wantAttrs {
+		if got := attrs[key]; got != want {
+			t.Fatalf("attrs[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

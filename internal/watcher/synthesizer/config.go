@@ -227,6 +227,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			providerName = "openai-compatibility"
 		}
 		base := strings.TrimSpace(compat.BaseURL)
+		apiType := strings.TrimSpace(compat.APIType)
+		apiVersion := strings.TrimSpace(compat.APIVersion)
+		deployment := strings.TrimSpace(compat.Deployment)
+		pathMode := strings.TrimSpace(compat.PathMode)
+		authType := strings.TrimSpace(compat.AuthType)
 		disableCooling := compat.DisableCooling
 
 		// Handle new APIKeyEntries format (preferred)
@@ -242,6 +247,24 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
+			}
+			if apiType != "" {
+				attrs["api_type"] = apiType
+			}
+			if apiVersion != "" {
+				attrs["api_version"] = apiVersion
+			}
+			if deployment != "" {
+				attrs["deployment"] = deployment
+			}
+			if pathMode != "" {
+				attrs["path_mode"] = pathMode
+			}
+			if authType != "" {
+				attrs["auth_type"] = authType
+			}
+			if compat.IncludeUsage != nil {
+				attrs["include_usage"] = strconv.FormatBool(*compat.IncludeUsage)
 			}
 			metadata := map[string]any{}
 			if disableCooling {
@@ -284,6 +307,24 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
+			}
+			if apiType != "" {
+				attrs["api_type"] = apiType
+			}
+			if apiVersion != "" {
+				attrs["api_version"] = apiVersion
+			}
+			if deployment != "" {
+				attrs["deployment"] = deployment
+			}
+			if pathMode != "" {
+				attrs["path_mode"] = pathMode
+			}
+			if authType != "" {
+				attrs["auth_type"] = authType
+			}
+			if compat.IncludeUsage != nil {
+				attrs["include_usage"] = strconv.FormatBool(*compat.IncludeUsage)
 			}
 			metadata := map[string]any{}
 			if disableCooling {

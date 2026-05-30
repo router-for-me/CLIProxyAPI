@@ -250,6 +250,8 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     # api-type: "azure-openai" # optional: use Azure OpenAI deployment URL/auth semantics.
+#     # api-version: "2025-04-01-preview" # required when api-type is azure-openai.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -275,6 +277,37 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#
+#   # Azure OpenAI example using deployment path mode. This is disabled by default because
+#   # it is only an example; remove the comment markers and set your own endpoint/key.
+#   - name: "azure-gpt4"
+#     disabled: true
+#     base-url: "https://example.openai.azure.com"
+#     api-type: "azure-openai"
+#     api-version: "2025-04-01-preview"
+#     deployment: "prod-gpt-4-1"
+#     path-mode: "deployment"
+#     auth-type: "api-key"
+#     include-usage: true
+#     api-key-entries:
+#       - api-key: "${AZURE_OPENAI_API_KEY}"
+#     models:
+#       - name: "prod-gpt-4-1"
+#         alias: "azure-gpt-4.1"
+#
+#   # Azure OpenAI v1 path mode example. api-version is optional for GA v1 usage;
+#   # set api-version: "preview" for preview v1 APIs when required by Azure.
+#   - name: "azure-v1"
+#     disabled: true
+#     base-url: "https://example.openai.azure.com"
+#     api-type: "azure-openai"
+#     path-mode: "v1"
+#     auth-type: "api-key"
+#     api-key-entries:
+#       - api-key: "${AZURE_OPENAI_API_KEY}"
+#     models:
+#       - name: "prod-gpt-4-1"
+#         alias: "azure-v1-gpt-4.1"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
