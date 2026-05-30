@@ -14,7 +14,9 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -37,7 +39,14 @@ const (
 )
 
 type CursorComposerExecutor struct {
-	cfg *config.Config
+	cfg           *config.Config
+	identityCache sync.Map
+	tokenCache    sync.Map
+}
+
+type cursorComposerTokenCacheEntry struct {
+	token     string
+	expiresAt time.Time
 }
 
 func NewCursorComposerExecutor(cfg *config.Config) *CursorComposerExecutor {
@@ -194,6 +203,10 @@ func (e *CursorComposerExecutor) prepare(ctx context.Context, auth *cliproxyauth
 	if !json.Valid(translated) {
 		return cursorPreparedRequest{}, nil, statusErr{code: http.StatusBadRequest, msg: "cursor composer requires a JSON chat request"}
 	}
+	messages := gjson.GetBytes(translated, "messages")
+	if !messages.Exists() || !messages.IsArray() || len(messages.Array()) == 0 {
+		return cursorPreparedRequest{}, nil, statusErr{code: http.StatusBadRequest, msg: "cursor composer request has no messages"}
+	}
 	prompt := cursorPromptFromOpenAI(translated)
 	if strings.TrimSpace(prompt) == "" {
 		return cursorPreparedRequest{}, nil, statusErr{code: http.StatusBadRequest, msg: "cursor composer request has no prompt content"}
@@ -252,6 +265,11 @@ func (e *CursorComposerExecutor) createCompletion(ctx context.Context, auth *cli
 }
 
 func (e *CursorComposerExecutor) cursorIdentity(ctx context.Context, auth *cliproxyauth.Auth, apiKey, apiBase string) (string, error) {
+	if val, ok := e.identityCache.Load(apiKey); ok {
+		if identity, ok := val.(string); ok && identity != "" {
+			return identity, nil
+		}
+	}
 	url := strings.TrimRight(apiBase, "/") + "/v1/me"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -270,16 +288,24 @@ func (e *CursorComposerExecutor) cursorIdentity(ctx context.Context, auth *clipr
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", statusErr{code: cursorHTTPStatus(resp.StatusCode), msg: cursorErrorMessage(body, resp.StatusCode)}
 	}
+	identity := ""
 	if id := gjson.GetBytes(body, "userId"); id.Exists() {
-		return "cursor-user:" + id.String(), nil
+		identity = "cursor-user:" + id.String()
+	} else if email := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "userEmail").String())); email != "" {
+		identity = "cursor-email:" + email
+	} else {
+		identity = "cursor-key:" + sha256Hex(apiKey)
 	}
-	if email := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "userEmail").String())); email != "" {
-		return "cursor-email:" + email, nil
-	}
-	return "cursor-key:" + sha256Hex(apiKey), nil
+	e.identityCache.Store(apiKey, identity)
+	return identity, nil
 }
 
 func (e *CursorComposerExecutor) exchangeAPIKey(ctx context.Context, auth *cliproxyauth.Auth, apiKey, backendBase string) (string, error) {
+	if val, ok := e.tokenCache.Load(apiKey); ok {
+		if entry, ok := val.(cursorComposerTokenCacheEntry); ok && entry.token != "" && time.Now().Before(entry.expiresAt) {
+			return entry.token, nil
+		}
+	}
 	url := strings.TrimRight(backendBase, "/") + "/auth/exchange_user_api_key"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
 	if err != nil {
@@ -300,6 +326,10 @@ func (e *CursorComposerExecutor) exchangeAPIKey(ctx context.Context, auth *clipr
 	if token == "" {
 		return "", statusErr{code: http.StatusBadGateway, msg: "Cursor did not return an internal access token"}
 	}
+	e.tokenCache.Store(apiKey, cursorComposerTokenCacheEntry{
+		token:     token,
+		expiresAt: time.Now().Add(5 * time.Minute),
+	})
 	return token, nil
 }
 
@@ -577,8 +607,14 @@ func decodeProtoFields(data []byte) ([]protoDecodedField, error) {
 			out = append(out, protoDecodedField{no: no, wt: wt, bytes: data[offset : offset+int(l)]})
 			offset += int(l)
 		case 1:
+			if offset+8 > len(data) {
+				return nil, io.ErrUnexpectedEOF
+			}
 			offset += 8
 		case 5:
+			if offset+4 > len(data) {
+				return nil, io.ErrUnexpectedEOF
+			}
 			offset += 4
 		default:
 			return nil, fmt.Errorf("unsupported protobuf wire type %d", wt)
@@ -689,7 +725,7 @@ func estimateCursorTokens(s string) int {
 	if s == "" {
 		return 0
 	}
-	return int(math.Ceil(float64(len([]rune(s))) / 4.0))
+	return int(math.Ceil(float64(utf8.RuneCountInString(s)) / 4.0))
 }
 
 func buildOpenAIChatResponse(model, text string, detail usage.Detail) []byte {

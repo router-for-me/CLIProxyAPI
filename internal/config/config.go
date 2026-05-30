@@ -650,6 +650,9 @@ type CursorComposerModel struct {
 func (m CursorComposerModel) GetName() string  { return m.Name }
 func (m CursorComposerModel) GetAlias() string { return m.Alias }
 
+func (k CursorComposerKey) GetAPIKey() string  { return k.APIKey }
+func (k CursorComposerKey) GetBaseURL() string { return k.BaseURL }
+
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,
 // and returns it.
