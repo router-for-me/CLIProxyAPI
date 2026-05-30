@@ -1737,7 +1737,7 @@ func defaultCursorComposerModels() []*ModelInfo {
 			OwnedBy:                   "cursor",
 			Type:                      "cursor-composer",
 			DisplayName:               id,
-			SupportedInputModalities:  []string{"TEXT", "IMAGE"},
+			SupportedInputModalities:  []string{"TEXT"},
 			SupportedOutputModalities: []string{"TEXT"},
 		})
 	}
