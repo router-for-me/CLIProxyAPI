@@ -125,6 +125,9 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	// CursorComposerKey defines Cursor Composer API key configurations.
+	CursorComposerKey []CursorComposerKey `yaml:"cursor-composer-api-key" json:"cursor-composer-api-key"`
+
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
@@ -595,6 +598,57 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
+
+// CursorComposerKey represents a Cursor Composer API key configuration.
+type CursorComposerKey struct {
+	// APIKey is the Cursor API key.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Priority controls selection preference when multiple credentials match.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Disabled prevents this credential from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// Prefix optionally namespaces model aliases for this provider.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the Cursor public API base URL. Defaults to https://api.cursor.com.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// BackendBaseURL is the Cursor internal backend base URL used for Composer requests.
+	BackendBaseURL string `yaml:"backend-base-url" json:"backend-base-url"`
+
+	// ChatEndpoint is the Cursor Composer connect-proto endpoint path.
+	ChatEndpoint string `yaml:"chat-endpoint" json:"chat-endpoint"`
+
+	// ClientVersion is the Cursor IDE client version advertised upstream.
+	ClientVersion string `yaml:"client-version,omitempty" json:"client-version,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this credential if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines model aliases for routing.
+	Models []CursorComposerModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// ExcludedModels excludes models from this credential.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent to Cursor.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// DisableCooling disables auth/model cooldown scheduling for this credential.
+	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+// CursorComposerModel represents a Cursor Composer model alias.
+type CursorComposerModel struct {
+	Name  string `yaml:"name" json:"name"`
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m CursorComposerModel) GetName() string  { return m.Name }
+func (m CursorComposerModel) GetAlias() string { return m.Alias }
 
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,
