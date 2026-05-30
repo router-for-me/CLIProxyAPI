@@ -1224,6 +1224,49 @@ func (m *Manager) Load(ctx context.Context) error {
 
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
+// runWithRetry drives the attempt/cooldown/retry loop shared by Execute,
+// ExecuteCount, and ExecuteStream. The once callback performs a single mixed
+// execution attempt. onExhausted (optional) runs once the loop terminates with a
+// non-nil error so callers can apply provider-specific fallbacks such as the
+// Antigravity credits path or streaming bootstrap recovery; it returns the
+// fallback result and true when it produced a successful response. zero is the
+// typed empty value returned on failure.
+func runWithRetry[T any](
+	m *Manager,
+	ctx context.Context,
+	providers []string,
+	model string,
+	maxWait time.Duration,
+	zero T,
+	once func() (T, error),
+	onExhausted func(lastErr error) (T, bool),
+) (T, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		result, errExec := once()
+		if errExec == nil {
+			return result, nil
+		}
+		lastErr = errExec
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, providers, model, maxWait)
+		if !shouldRetry {
+			break
+		}
+		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+			return zero, errWait
+		}
+	}
+	if lastErr != nil {
+		if onExhausted != nil {
+			if result, ok := onExhausted(lastErr); ok {
+				return result, nil
+			}
+		}
+		return zero, lastErr
+	}
+	return zero, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -1232,30 +1275,19 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
-		if errExec == nil {
-			return resp, nil
-		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
-		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
-		}
-	}
-	if lastErr != nil {
-		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
-				return resp, nil
+	return runWithRetry(m, ctx, normalized, req.Model, maxWait, cliproxyexecutor.Response{},
+		func() (cliproxyexecutor.Response, error) {
+			return m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		},
+		func(lastErr error) (cliproxyexecutor.Response, bool) {
+			if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+				if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
+					return resp, true
+				}
 			}
-		}
-		return cliproxyexecutor.Response{}, lastErr
-	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+			return cliproxyexecutor.Response{}, false
+		},
+	)
 }
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
@@ -1267,25 +1299,12 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
-		if errExec == nil {
-			return resp, nil
-		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
-		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
-		}
-	}
-	if lastErr != nil {
-		return cliproxyexecutor.Response{}, lastErr
-	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return runWithRetry(m, ctx, normalized, req.Model, maxWait, cliproxyexecutor.Response{},
+		func() (cliproxyexecutor.Response, error) {
+			return m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		},
+		nil,
+	)
 }
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
@@ -1298,34 +1317,23 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
-		if errStream == nil {
-			return result, nil
-		}
-		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
-		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return nil, errWait
-		}
-	}
-	if lastErr != nil {
-		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
-				return result, nil
+	return runWithRetry[*cliproxyexecutor.StreamResult](m, ctx, normalized, req.Model, maxWait, nil,
+		func() (*cliproxyexecutor.StreamResult, error) {
+			return m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		},
+		func(lastErr error) (*cliproxyexecutor.StreamResult, bool) {
+			if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+				if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
+					return result, true
+				}
 			}
-		}
-		var bootstrapErr *streamBootstrapError
-		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
-		}
-		return nil, lastErr
-	}
-	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+			var bootstrapErr *streamBootstrapError
+			if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+				return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), true
+			}
+			return nil, false
+		},
+	)
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
@@ -1365,8 +1373,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+			execCtx = cliproxyexecutor.WithRoundTripper(execCtx, rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
@@ -1464,8 +1471,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+			execCtx = cliproxyexecutor.WithRoundTripper(execCtx, rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
@@ -1563,8 +1569,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+			execCtx = cliproxyexecutor.WithRoundTripper(execCtx, rt)
 		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -3794,8 +3799,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
+			creditsCtx = cliproxyexecutor.WithRoundTripper(creditsCtx, rt)
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
@@ -3842,8 +3846,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
+			creditsCtx = cliproxyexecutor.WithRoundTripper(creditsCtx, rt)
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
@@ -4247,9 +4250,6 @@ func (m *Manager) executorFor(provider string) ProviderExecutor {
 	defer m.mu.RUnlock()
 	return m.executors[provider]
 }
-
-// roundTripperContextKey is an unexported context key type to avoid collisions.
-type roundTripperContextKey struct{}
 
 // roundTripperFor retrieves an HTTP RoundTripper for the given auth if a provider is registered.
 func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
