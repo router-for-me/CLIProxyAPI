@@ -178,11 +178,18 @@ nonstream-keepalive-interval: 0
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
 
+# compact-default controls /v1/responses/compact routing for codex/openai-compatible
+# credentials whose per-credential compact mode is "auto" (the default).
+#   allow (default): auto credentials may serve compact requests (backward compatible)
+#   deny: auto credentials are excluded; only credentials with compact: force_on serve compact
+# compact-default: allow
+
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     compact: "auto"   # "auto" (follows compact-default) | "force_on" | "force_off"
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -257,6 +264,7 @@ nonstream-keepalive-interval: 0
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
+#     compact: "auto" # provider-level: "auto" | "force_on" | "force_off"
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
