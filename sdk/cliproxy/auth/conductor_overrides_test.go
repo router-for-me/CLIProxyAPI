@@ -20,6 +20,7 @@ import (
 const requestScopedNotFoundMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74' not found. Items are not persisted when `store` is set to false. Try again with `store` set to true, or remove this item from your input."
 const requestScopedContentSafetyMessage = "The request was rejected because it was considered high risk"
 const requestScopedContentBlockedMessage = "The content you provided or machine outputted is blocked."
+const requestScopedContextLimitMessage = "invalid params, context window exceeds limit (2013)"
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
 	m := NewManager(nil, nil, nil)
@@ -2086,6 +2087,181 @@ func TestManager_Execute_GenericContentSafetyStillStopsRetry(t *testing.T) {
 	}
 	got := executor.ExecuteCalls()
 	want := []string{blockedAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_ClaudeSonnetAliasContextLimitFallsBackWithoutCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 1)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-minimax-auth": &Error{
+				Message: "status_code=400, " + requestScopedContextLimitMessage,
+			},
+			"bb-minimax-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    requestScopedContextLimitMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6"
+	minimaxAuthA := &Auth{ID: "aa-minimax-auth", Provider: "claude"}
+	minimaxAuthB := &Auth{ID: "bb-minimax-auth", Provider: "claude"}
+	stepAuth := &Auth{ID: "cc-step-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(minimaxAuthA.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(minimaxAuthB.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(stepAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(minimaxAuthA.ID)
+		reg.UnregisterClient(minimaxAuthB.ID)
+		reg.UnregisterClient(stepAuth.ID)
+	})
+
+	for _, auth := range []*Auth{minimaxAuthA, minimaxAuthB, stepAuth} {
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != stepAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), stepAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{minimaxAuthA.ID, minimaxAuthB.ID, stepAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, authID := range []string{minimaxAuthA.ID, minimaxAuthB.ID} {
+		updated, ok := m.GetByID(authID)
+		if !ok || updated == nil {
+			t.Fatalf("expected auth %s to remain registered", authID)
+		}
+		if updated.Unavailable {
+			t.Fatalf("expected context-limit fallback to keep auth %s available", authID)
+		}
+		if state := updated.ModelStates[model]; state != nil {
+			t.Fatalf("expected context-limit fallback to avoid model cooldown state for %s, got %#v", authID, state)
+		}
+	}
+}
+
+func TestManager_Execute_GenericContextLimitStillStopsRetry(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-minimax-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    requestScopedContextLimitMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	minimaxAuth := &Auth{ID: "aa-minimax-auth", Provider: "claude"}
+	stepAuth := &Auth{ID: "bb-step-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(minimaxAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(stepAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(minimaxAuth.ID)
+		reg.UnregisterClient(stepAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), minimaxAuth); errRegister != nil {
+		t.Fatalf("register minimax auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), stepAuth); errRegister != nil {
+		t.Fatalf("register step auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected context-limit error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", statusCodeFromError(errExecute), http.StatusBadRequest)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{minimaxAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_ClaudeSonnetAliasMetadataContextLimitFallsBack(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-minimax-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    requestScopedContextLimitMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	routeModel := "minimax-m2.7-highspeed"
+	minimaxAuth := &Auth{ID: "aa-minimax-auth", Provider: "claude"}
+	stepAuth := &Auth{ID: "bb-step-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(minimaxAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(stepAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(minimaxAuth.ID)
+		reg.UnregisterClient(stepAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), minimaxAuth); errRegister != nil {
+		t.Fatalf("register minimax auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), stepAuth); errRegister != nil {
+		t.Fatalf("register step auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "claude-sonnet-4-6",
+		},
+	})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != stepAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), stepAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{minimaxAuth.ID, stepAuth.ID}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
