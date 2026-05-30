@@ -1785,6 +1785,11 @@ func TestManager_MarkResult_RequestScopedContentSafetyDoesNotCooldownAuth(t *tes
 			httpStatus: http.StatusUnavailableForLegalReasons,
 			message:    requestScopedContentBlockedMessage,
 		},
+		{
+			name:       "blocked status in message",
+			httpStatus: 0,
+			message:    "status_code=451, " + requestScopedContentBlockedMessage,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1843,6 +1848,11 @@ func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
 			httpStatus: http.StatusUnavailableForLegalReasons,
 			message:    requestScopedContentBlockedMessage,
 		},
+		{
+			name:       "blocked status in message",
+			httpStatus: 0,
+			message:    "status_code=451, " + requestScopedContentBlockedMessage,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1854,6 +1864,227 @@ func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
 				t.Fatalf("expected content safety error to be request invalid")
 			}
 		})
+	}
+}
+
+func TestManager_Execute_ClaudeSonnetAliasContentSafetyFallsBack(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-blocked-auth": &Error{
+				Message: "status_code=451, " + requestScopedContentBlockedMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6"
+	blockedAuth := &Auth{ID: "aa-blocked-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(blockedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(blockedAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), blockedAuth); errRegister != nil {
+		t.Fatalf("register blocked auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{blockedAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBlocked, ok := m.GetByID(blockedAuth.ID)
+	if !ok || updatedBlocked == nil {
+		t.Fatalf("expected blocked auth to remain registered")
+	}
+	if updatedBlocked.Unavailable {
+		t.Fatalf("expected content safety fallback to keep blocked auth available")
+	}
+	if state := updatedBlocked.ModelStates[model]; state != nil {
+		t.Fatalf("expected content safety fallback to avoid model cooldown state, got %#v", state)
+	}
+}
+
+func TestManager_Execute_GenericContentSafetyStillStopsRetry(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-blocked-auth": &Error{
+				HTTPStatus: http.StatusUnavailableForLegalReasons,
+				Message:    requestScopedContentBlockedMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	blockedAuth := &Auth{ID: "aa-blocked-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(blockedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(blockedAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), blockedAuth); errRegister != nil {
+		t.Fatalf("register blocked auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected content safety error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusUnavailableForLegalReasons {
+		t.Fatalf("status = %d, want %d", statusCodeFromError(errExecute), http.StatusUnavailableForLegalReasons)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{blockedAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_ExecuteCount_ClaudeSonnetAliasContentSafetyFallsBack(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		countErrors: map[string]error{
+			"aa-blocked-auth": &Error{
+				HTTPStatus: http.StatusUnavailableForLegalReasons,
+				Message:    requestScopedContentBlockedMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6"
+	blockedAuth := &Auth{ID: "aa-blocked-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(blockedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(blockedAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), blockedAuth); errRegister != nil {
+		t.Fatalf("register blocked auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute count error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("execute count payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+	got := executor.CountCalls()
+	want := []string{blockedAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("count calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("count call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_ExecuteStream_ClaudeSonnetAliasContentSafetyFallsBack(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		streamFirstErrors: map[string]error{
+			"aa-blocked-auth": &Error{
+				HTTPStatus: http.StatusUnavailableForLegalReasons,
+				Message:    requestScopedContentBlockedMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6"
+	blockedAuth := &Auth{ID: "aa-blocked-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(blockedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(blockedAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), blockedAuth); errRegister != nil {
+		t.Fatalf("register blocked auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want success", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("execute stream chunk error = %v, want success", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != goodAuth.ID {
+		t.Fatalf("execute stream payload = %q, want %q", string(payload), goodAuth.ID)
+	}
+	got := executor.StreamCalls()
+	want := []string{blockedAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

@@ -1565,6 +1565,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errStream
 			}
 			if isRequestInvalidError(errStream) {
+				if shouldFallbackRequestScopedContentSafetyError(routeModel, errStream) {
+					lastErr = errStream
+					continue
+				}
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -1588,6 +1592,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				releaseSlot()
+				if shouldFallbackRequestScopedContentSafetyError(routeModel, bootstrapErr) {
+					lastErr = bootstrapErr
+					continue
+				}
 				return nil, bootstrapErr
 			}
 			if shouldEvictUnauthorizedError(bootstrapErr) {
@@ -2152,6 +2160,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					break
 				}
 				if isRequestInvalidError(errExec) {
+					if shouldFallbackRequestScopedContentSafetyError(routeModel, errExec) {
+						authErr = errExec
+						countAttempt = true
+						continue
+					}
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -2163,7 +2176,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
-				return cliproxyexecutor.Response{}, authErr
+				if !shouldFallbackRequestScopedContentSafetyError(routeModel, authErr) {
+					return cliproxyexecutor.Response{}, authErr
+				}
 			}
 			if countAttempt {
 				attempted[auth.ID] = struct{}{}
@@ -2275,6 +2290,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					break
 				}
 				if isRequestInvalidError(errExec) {
+					if shouldFallbackRequestScopedContentSafetyError(routeModel, errExec) {
+						authErr = errExec
+						countAttempt = true
+						continue
+					}
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -2286,7 +2306,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
-				return cliproxyexecutor.Response{}, authErr
+				if !shouldFallbackRequestScopedContentSafetyError(routeModel, authErr) {
+					return cliproxyexecutor.Response{}, authErr
+				}
 			}
 			if countAttempt {
 				attempted[auth.ID] = struct{}{}
@@ -2376,7 +2398,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				continue
 			}
 			if isRequestInvalidError(errStream) {
-				return nil, errStream
+				if !shouldFallbackRequestScopedContentSafetyError(routeModel, errStream) {
+					return nil, errStream
+				}
 			}
 			attempted[auth.ID] = struct{}{}
 			lastErr = errStream
@@ -4460,25 +4484,66 @@ func isRequestScopedContentSafetyMessage(message string) bool {
 		(strings.Contains(lower, "content") && strings.Contains(lower, "blocked"))
 }
 
+func hasHTTPStatusInMessage(message string, statuses ...int) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	for _, status := range statuses {
+		code := strconv.Itoa(status)
+		if strings.Contains(lower, "status_code="+code) ||
+			strings.Contains(lower, "status_code: "+code) ||
+			strings.Contains(lower, "status code="+code) ||
+			strings.Contains(lower, "status code: "+code) ||
+			strings.Contains(lower, "status="+code) ||
+			strings.Contains(lower, "status: "+code) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRequestScopedContentSafetyStatus(status int, message string) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnavailableForLegalReasons:
+		return true
+	case 0:
+		return hasHTTPStatusInMessage(message, http.StatusBadRequest, http.StatusUnavailableForLegalReasons)
+	default:
+		return false
+	}
+}
+
 func isRequestScopedContentSafetyResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
-	switch statusCodeFromResult(err) {
-	case http.StatusBadRequest, http.StatusUnavailableForLegalReasons:
-		return isRequestScopedContentSafetyMessage(err.Message)
-	default:
+	return isRequestScopedContentSafetyStatus(statusCodeFromResult(err), err.Message) &&
+		isRequestScopedContentSafetyMessage(err.Message)
+}
+
+func isRequestScopedContentSafetyError(err error) bool {
+	if err == nil {
 		return false
 	}
+	message := err.Error()
+	return isRequestScopedContentSafetyStatus(statusCodeFromError(err), message) &&
+		isRequestScopedContentSafetyMessage(message)
+}
+
+func shouldFallbackRequestScopedContentSafetyError(routeModel string, err error) bool {
+	if !strings.EqualFold(strings.TrimSpace(routeModel), "claude-sonnet-4-6") {
+		return false
+	}
+	return isRequestScopedContentSafetyError(err)
 }
 
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped content safety rejections, request-scoped
 // 404 item misses caused by `store=false`, and all 422 responses as request-shape
-// failures, where switching auths or pooled upstream models will not help.
-// Model-support errors are excluded so routing can fall through to another auth
-// or upstream.
+// failures for the generic retry loop. Model-support errors are excluded so
+// routing can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -4489,18 +4554,18 @@ func isRequestInvalidError(err error) bool {
 	if isRequestScopedFeatureUnsupportedMessage(err.Error()) {
 		return false
 	}
+	if isRequestScopedContentSafetyError(err) {
+		return true
+	}
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
 		msg := err.Error()
-		if isRequestScopedContentSafetyMessage(msg) {
-			return true
-		}
 		return (strings.Contains(msg, "invalid_request_error") && !isRetryableAvailabilityErrorMessage(msg)) ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
 			strings.Contains(msg, "FAILED_PRECONDITION")
 	case http.StatusUnavailableForLegalReasons:
-		return isRequestScopedContentSafetyMessage(err.Error())
+		return false
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
