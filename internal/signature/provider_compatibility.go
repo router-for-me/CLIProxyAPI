@@ -229,6 +229,24 @@ func CompatibleSignatureForProviderBlock(targetProvider SignatureProvider, rawSi
 	return decision.NormalizedSignature, true
 }
 
+// CompatibleAntigravityClaudeThinkingSignature returns the double-layer R-form
+// required by Antigravity Claude replay. It only accepts signatures that are
+// strictly identifiable as Claude, so Gemini E-prefixed envelopes cannot slip
+// through the looser Antigravity bypass normalization path.
+func CompatibleAntigravityClaudeThinkingSignature(rawSignature string) (string, bool) {
+	if DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindClaudeThinking) != SignatureProviderClaude {
+		return "", false
+	}
+	normalized, err := NormalizeClaudeThinkingSignature(
+		SignaturePayloadWithoutProviderPrefix(rawSignature),
+		ClaudeSignatureValidationOptions{Strict: true},
+	)
+	if err != nil {
+		return "", false
+	}
+	return normalized, true
+}
+
 func normalizeSignatureTargetProvider(provider SignatureProvider) SignatureProvider {
 	switch provider {
 	case SignatureProviderGeminiBypass:
@@ -255,7 +273,7 @@ func normalizeCompatibleSignatureForProvider(targetProvider SignatureProvider, r
 	payload := SignaturePayloadWithoutProviderPrefix(rawSignature)
 	switch normalizeSignatureTargetProvider(targetProvider) {
 	case SignatureProviderClaude:
-		normalized, err := NormalizeClaudeThinkingSignature(payload)
+		normalized, err := NormalizeClaudeProviderNativeThinkingSignature(payload)
 		if err != nil {
 			return ""
 		}

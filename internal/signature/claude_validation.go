@@ -226,6 +226,40 @@ func NormalizeClaudeThinkingSignature(rawSignature string, opts ...ClaudeSignatu
 	}
 }
 
+// NormalizeClaudeProviderNativeThinkingSignature strips any cache prefix,
+// validates the signature, and returns the single-layer E-form expected by
+// Claude-native providers.
+func NormalizeClaudeProviderNativeThinkingSignature(rawSignature string, opts ...ClaudeSignatureValidationOptions) (string, error) {
+	opt := claudeSignatureValidationOptions(opts)
+	sig := stripClaudeSignaturePrefix(rawSignature)
+	if sig == "" {
+		return "", fmt.Errorf("empty signature")
+	}
+
+	if len(sig) > MaxClaudeThinkingSignatureLen {
+		return "", fmt.Errorf("signature exceeds maximum length (%d bytes)", MaxClaudeThinkingSignatureLen)
+	}
+
+	switch sig[0] {
+	case 'E':
+		if err := validateClaudeSingleLayerSignature(sig, opt); err != nil {
+			return "", err
+		}
+		return sig, nil
+	case 'R':
+		if err := validateClaudeDoubleLayerSignature(sig, opt); err != nil {
+			return "", err
+		}
+		decoded, err := base64.StdEncoding.DecodeString(sig)
+		if err != nil {
+			return "", fmt.Errorf("invalid double-layer signature: base64 decode failed: %w", err)
+		}
+		return string(decoded), nil
+	default:
+		return "", fmt.Errorf("invalid signature: expected 'E' or 'R' prefix, got %q", string(sig[0]))
+	}
+}
+
 func validateClaudeDoubleLayerSignature(sig string, opt ClaudeSignatureValidationOptions) error {
 	decoded, err := base64.StdEncoding.DecodeString(sig)
 	if err != nil {
