@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -31,6 +32,9 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 		FileName: fileName,
 		Provider: "gemini-cli",
 		Status:   coreauth.StatusActive,
+		CreatedAt: time.Date(
+			2026, time.May, 31, 12, 0, 0, 0, time.UTC,
+		),
 		Attributes: map[string]string{
 			"path": filePath,
 		},
@@ -51,6 +55,9 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	if got := entry["project_id"]; got != "project-a" {
 		t.Fatalf("expected project_id %q, got %#v", "project-a", got)
 	}
+	if _, ok := entry["created_at"].(string); !ok {
+		t.Fatalf("expected created_at timestamp string, got %#v", entry["created_at"])
+	}
 }
 
 func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
@@ -68,6 +75,9 @@ func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 	entry := firstAuthFileEntry(t, h)
 	if got := entry["project_id"]; got != "project-a" {
 		t.Fatalf("expected project_id %q, got %#v", "project-a", got)
+	}
+	if _, ok := entry["created_at"].(string); !ok {
+		t.Fatalf("expected created_at timestamp string, got %#v", entry["created_at"])
 	}
 }
 

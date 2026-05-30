@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -209,4 +211,125 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
+}
+
+func TestResolveTokenForAuthRefreshesExpiredManagedOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	expiredAt := time.Now().Add(-time.Minute).UTC()
+	auth := &coreauth.Auth{
+		ID:       "codex-expired",
+		FileName: "codex-expired.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":          "codex",
+			"access_token":  "old-token",
+			"refresh_token": "refresh-token",
+			"expired":       expiredAt.Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshed := auth.Clone()
+	refreshed.Metadata["access_token"] = "new-token"
+	refreshed.Metadata["expired"] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	executor := &apiCallRefreshTestExecutor{provider: "codex", refreshed: refreshed}
+	manager.RegisterExecutor(executor)
+
+	h := &Handler{authManager: manager}
+	token, errToken := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.EnsureIndex()))
+	if errToken != nil {
+		t.Fatalf("resolveTokenForAuth returned error: %v", errToken)
+	}
+	if token != "new-token" {
+		t.Fatalf("token = %q, want new-token", token)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", executor.calls)
+	}
+
+	stored, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("expected refreshed auth to be stored")
+	}
+	if got := tokenValueForAuth(stored); got != "new-token" {
+		t.Fatalf("stored token = %q, want new-token", got)
+	}
+	if stored.LastRefreshedAt.IsZero() {
+		t.Fatal("expected LastRefreshedAt to be updated")
+	}
+}
+
+func TestResolveTokenForAuthSkipsFreshManagedOAuthTokenRefresh(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "claude-fresh",
+		FileName: "claude-fresh.json",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"type":          "claude",
+			"access_token":  "fresh-token",
+			"refresh_token": "refresh-token",
+			"expired":       time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshed := auth.Clone()
+	refreshed.Metadata["access_token"] = "unexpected-token"
+	executor := &apiCallRefreshTestExecutor{provider: "claude", refreshed: refreshed}
+	manager.RegisterExecutor(executor)
+
+	h := &Handler{authManager: manager}
+	token, errToken := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.EnsureIndex()))
+	if errToken != nil {
+		t.Fatalf("resolveTokenForAuth returned error: %v", errToken)
+	}
+	if token != "fresh-token" {
+		t.Fatalf("token = %q, want fresh-token", token)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("refresh calls = %d, want 0", executor.calls)
+	}
+}
+
+type apiCallRefreshTestExecutor struct {
+	provider  string
+	refreshed *coreauth.Auth
+	calls     int
+}
+
+func (e *apiCallRefreshTestExecutor) Identifier() string {
+	return e.provider
+}
+
+func (e *apiCallRefreshTestExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *apiCallRefreshTestExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *apiCallRefreshTestExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	e.calls++
+	if e.refreshed != nil {
+		return e.refreshed.Clone(), nil
+	}
+	return auth, nil
+}
+
+func (e *apiCallRefreshTestExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *apiCallRefreshTestExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
 }

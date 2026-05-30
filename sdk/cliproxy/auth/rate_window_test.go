@@ -48,14 +48,14 @@ func TestRateWindowInFlight(t *testing.T) {
 }
 
 func TestRateLimitedRPMTPMConcurrency(t *testing.T) {
-	defer SetRateLimitDefaults(0, 0, 0)
+	defer SetRateLimitDefaults(0, 0, 0, 0)
 	m := NewManager(nil, nil, nil)
 	a := &Auth{ID: "a1", Provider: "claude"}
 	m.auths["a1"] = a
 	now := time.Unix(1_700_000_000, 0)
 
 	// RPM: limit 2 -> blocked once two requests are recorded in the window.
-	SetRateLimitDefaults(2, 0, 0)
+	SetRateLimitDefaults(2, 0, 0, 0)
 	a.rate.addRequest(now)
 	if _, limited := m.rateLimited("a1", now); limited {
 		t.Fatalf("rpm: should not be limited at 1/2")
@@ -69,7 +69,7 @@ func TestRateLimitedRPMTPMConcurrency(t *testing.T) {
 	}
 
 	// TPM: independent window keyed on tokens.
-	SetRateLimitDefaults(0, 100, 0)
+	SetRateLimitDefaults(0, 100, 0, 0)
 	a2 := &Auth{ID: "a2", Provider: "claude"}
 	m.auths["a2"] = a2
 	a2.rate.addTokens(now, 100)
@@ -78,7 +78,7 @@ func TestRateLimitedRPMTPMConcurrency(t *testing.T) {
 	}
 
 	// Concurrency: limit 1 -> blocked while one request is in flight.
-	SetRateLimitDefaults(0, 0, 1)
+	SetRateLimitDefaults(0, 0, 1, 0)
 	a3 := &Auth{ID: "a3", Provider: "claude"}
 	m.auths["a3"] = a3
 	a3.rate.acquire()
@@ -91,10 +91,33 @@ func TestRateLimitedRPMTPMConcurrency(t *testing.T) {
 	}
 }
 
+func TestRateLimitedRPH(t *testing.T) {
+	defer SetRateLimitDefaults(0, 0, 0, 0)
+	m := NewManager(nil, nil, nil)
+	a := &Auth{ID: "a1", Provider: "claude"}
+	m.auths["a1"] = a
+	now := time.Unix(1_700_000_000, 0)
+
+	SetRateLimitDefaults(0, 0, 0, 2)
+	a.rate.addRequest(now)
+	if _, limited := m.rateLimited("a1", now); limited {
+		t.Fatalf("rph: should not be limited at 1/2")
+	}
+	a.rate.addRequest(now.Add(30 * time.Minute))
+	if retryAt, limited := m.rateLimited("a1", now.Add(30*time.Minute)); !limited {
+		t.Fatalf("rph: should be limited at 2/2")
+	} else if !retryAt.After(now.Add(59 * time.Minute)) {
+		t.Fatalf("rph: retryAt=%s, want after the trailing hour starts expiring", retryAt)
+	}
+	if _, limited := m.rateLimited("a1", now.Add(61*time.Minute)); limited {
+		t.Fatalf("rph: should recover after the hourly window expires")
+	}
+}
+
 func TestRateLimitPerAccountOverride(t *testing.T) {
-	defer SetRateLimitDefaults(0, 0, 0)
+	defer SetRateLimitDefaults(0, 0, 0, 0)
 	// Global RPM disabled; the per-account override must still apply.
-	SetRateLimitDefaults(0, 0, 0)
+	SetRateLimitDefaults(0, 0, 0, 0)
 	m := NewManager(nil, nil, nil)
 	a := &Auth{ID: "a1", Provider: "claude", Metadata: map[string]any{"rpm_limit": 1}}
 	m.auths["a1"] = a
@@ -103,5 +126,19 @@ func TestRateLimitPerAccountOverride(t *testing.T) {
 	a.rate.addRequest(now)
 	if _, limited := m.rateLimited("a1", now); !limited {
 		t.Fatalf("override: should be limited at 1/1 via metadata rpm_limit")
+	}
+}
+
+func TestRateLimitPerAccountRPHOverride(t *testing.T) {
+	defer SetRateLimitDefaults(0, 0, 0, 0)
+	SetRateLimitDefaults(0, 0, 0, 0)
+	m := NewManager(nil, nil, nil)
+	a := &Auth{ID: "a1", Provider: "claude", Metadata: map[string]any{"rph_limit": 1}}
+	m.auths["a1"] = a
+	now := time.Unix(1_700_000_000, 0)
+
+	a.rate.addRequest(now)
+	if _, limited := m.rateLimited("a1", now); !limited {
+		t.Fatalf("override: should be limited at 1/1 via metadata rph_limit")
 	}
 }

@@ -263,12 +263,49 @@ func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
 }
 
+// Max retry credentials
+func (h *Handler) GetMaxRetryCredentials(c *gin.Context) {
+	c.JSON(200, gin.H{"max-retry-credentials": h.cfg.MaxRetryCredentials})
+}
+func (h *Handler) PutMaxRetryCredentials(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.MaxRetryCredentials = v })
+}
+
 // Max retry interval
 func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
 	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
 }
 func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
+}
+
+// Rate limit defaults
+func (h *Handler) GetRPMLimitDefault(c *gin.Context) {
+	c.JSON(200, gin.H{"rpm-limit-default": h.cfg.RPMLimitDefault})
+}
+func (h *Handler) PutRPMLimitDefault(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.RPMLimitDefault = v })
+}
+
+func (h *Handler) GetTPMLimitDefault(c *gin.Context) {
+	c.JSON(200, gin.H{"tpm-limit-default": h.cfg.TPMLimitDefault})
+}
+func (h *Handler) PutTPMLimitDefault(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.TPMLimitDefault = v })
+}
+
+func (h *Handler) GetConcurrencyLimitDefault(c *gin.Context) {
+	c.JSON(200, gin.H{"concurrency-limit-default": h.cfg.ConcurrencyLimitDefault})
+}
+func (h *Handler) PutConcurrencyLimitDefault(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.ConcurrencyLimitDefault = v })
+}
+
+func (h *Handler) GetRPHLimitDefault(c *gin.Context) {
+	c.JSON(200, gin.H{"rph-limit-default": h.cfg.RPHLimitDefault})
+}
+func (h *Handler) PutRPHLimitDefault(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.RPHLimitDefault = v })
 }
 
 // ForceModelPrefix

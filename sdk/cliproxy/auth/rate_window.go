@@ -6,12 +6,28 @@ import "time"
 // accounting. One bucket per second gives a 60s sliding window.
 const rateWindowSeconds = 60
 
+// hourlyRequestWindowMinutes is the trailing window length used for per-account
+// requests-per-hour accounting.
+const hourlyRequestWindowMinutes = 60
+
+// hourlyRequestWindowBuckets keeps one extra minute bucket so any minute that
+// intersects the trailing hour is counted conservatively.
+const hourlyRequestWindowBuckets = hourlyRequestWindowMinutes + 1
+
 // rateBucket accumulates requests and tokens observed during a single wall-clock
 // second. The sec field guards against stale reuse when the ring wraps.
 type rateBucket struct {
 	sec  int64
 	reqs int64
 	toks int64
+}
+
+// hourlyRequestBucket accumulates request counts observed during a single
+// wall-clock minute. The minute field guards against stale reuse when the ring
+// wraps.
+type hourlyRequestBucket struct {
+	minute int64
+	reqs   int64
 }
 
 // rateWindow tracks per-auth requests and tokens over a trailing rateWindowSeconds
@@ -22,8 +38,9 @@ type rateBucket struct {
 // recentRequestRing pattern. This keeps Auth.Clone() (a by-value copy) free of
 // lock-copy hazards.
 type rateWindow struct {
-	buckets  [rateWindowSeconds]rateBucket
-	inFlight int64
+	buckets       [rateWindowSeconds]rateBucket
+	hourlyBuckets [hourlyRequestWindowBuckets]hourlyRequestBucket
+	inFlight      int64
 	// usageLimitUntil parks the account until this time when a provider usage
 	// window (e.g. Claude's rolling 5h/7d limit) is at or over the avoidance
 	// threshold. Zero means no active usage-limit park.
@@ -63,6 +80,7 @@ func (w *rateWindow) addRequest(now time.Time) {
 		return
 	}
 	w.bucketFor(now).reqs++
+	w.hourlyBucketFor(now).reqs++
 }
 
 // addTokens records token consumption observed at now.
@@ -106,6 +124,39 @@ func (w *rateWindow) sums(now time.Time) (reqs int64, toks int64) {
 	return reqs, toks
 }
 
+// hourlyBucketFor returns the bucket for the given minute, resetting it when
+// the ring slot belonged to an older minute.
+func (w *rateWindow) hourlyBucketFor(now time.Time) *hourlyRequestBucket {
+	minute := now.Unix() / 60
+	idx := minute % hourlyRequestWindowBuckets
+	if idx < 0 {
+		idx += hourlyRequestWindowBuckets
+	}
+	b := &w.hourlyBuckets[idx]
+	if b.minute != minute {
+		b.minute = minute
+		b.reqs = 0
+	}
+	return b
+}
+
+// hourlyRequests returns the total requests within the trailing hour ending at now.
+func (w *rateWindow) hourlyRequests(now time.Time) int64 {
+	if w == nil {
+		return 0
+	}
+	currentMinute := now.Unix() / 60
+	minMinute := currentMinute - hourlyRequestWindowMinutes
+	var reqs int64
+	for i := range w.hourlyBuckets {
+		b := w.hourlyBuckets[i]
+		if b.minute >= minMinute && b.minute <= currentMinute {
+			reqs += b.reqs
+		}
+	}
+	return reqs
+}
+
 // earliestFree estimates when the trailing window will drop below the limit,
 // i.e. the oldest counted second plus the window length. It is used as a
 // conservative Retry-After hint. Returns now+1s when nothing is counted.
@@ -135,4 +186,79 @@ func (w *rateWindow) earliestFree(now time.Time) time.Time {
 		return fallback
 	}
 	return free
+}
+
+// hourlyEarliestFree estimates when the hourly request window will drop below
+// the configured limit. It returns the minute boundary after the oldest counted
+// minute leaves the trailing hour.
+func (w *rateWindow) hourlyEarliestFree(now time.Time) time.Time {
+	fallback := now.Add(time.Second)
+	if w == nil {
+		return fallback
+	}
+	currentMinute := now.Unix() / 60
+	minMinute := currentMinute - hourlyRequestWindowMinutes
+	oldest := int64(0)
+	found := false
+	for i := range w.hourlyBuckets {
+		b := w.hourlyBuckets[i]
+		if b.reqs > 0 && b.minute >= minMinute && b.minute <= currentMinute {
+			if !found || b.minute < oldest {
+				oldest = b.minute
+				found = true
+			}
+		}
+	}
+	if !found {
+		return fallback
+	}
+	free := time.Unix((oldest+hourlyRequestWindowBuckets)*60, 0)
+	if !free.After(now) {
+		return fallback
+	}
+	return free
+}
+
+// RateLimitSnapshot captures an auth's effective per-account rate limits (after
+// applying per-account overrides over the global defaults) together with the
+// current usage observed within the trailing window. It is exposed via the
+// management API so operators can see both the configured limits and how close
+// an account currently is to them. A limit of 0 means "unlimited".
+type RateLimitSnapshot struct {
+	RPMLimit         int64 `json:"rpm_limit"`
+	TPMLimit         int64 `json:"tpm_limit"`
+	ConcurrencyLimit int64 `json:"concurrency_limit"`
+	RPHLimit         int64 `json:"rph_limit"`
+	RPMCurrent       int64 `json:"rpm_current"`
+	TPMCurrent       int64 `json:"tpm_current"`
+	RPHCurrent       int64 `json:"rph_current"`
+	InFlight         int64 `json:"in_flight"`
+}
+
+// HasData reports whether the snapshot carries any non-zero limit or usage, used
+// to avoid emitting an all-zero object for idle, unlimited accounts.
+func (s RateLimitSnapshot) HasData() bool {
+	return s.RPMLimit > 0 || s.TPMLimit > 0 || s.ConcurrencyLimit > 0 || s.RPHLimit > 0 ||
+		s.RPMCurrent > 0 || s.TPMCurrent > 0 || s.RPHCurrent > 0 || s.InFlight > 0
+}
+
+// RateLimitSnapshot resolves the effective RPM/TPM/concurrency/RPH limits and the
+// current trailing-window usage for this auth. Read from a cloned Auth (where
+// the rate window is copied by value), it is race-free without extra locking.
+func (a *Auth) RateLimitSnapshot(now time.Time) RateLimitSnapshot {
+	if a == nil {
+		return RateLimitSnapshot{}
+	}
+	rpm, tpm, concurrency, rph := effectiveRateLimits(a)
+	reqs, toks := a.rate.sums(now)
+	return RateLimitSnapshot{
+		RPMLimit:         rpm,
+		TPMLimit:         tpm,
+		ConcurrencyLimit: concurrency,
+		RPHLimit:         rph,
+		RPMCurrent:       reqs,
+		TPMCurrent:       toks,
+		RPHCurrent:       a.rate.hourlyRequests(now),
+		InFlight:         a.rate.inFlight,
+	}
 }

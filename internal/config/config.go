@@ -98,6 +98,9 @@ type Config struct {
 	// ConcurrencyLimitDefault sets the default per-account maximum in-flight requests
 	// applied to every credential that does not override it. 0 (default) disables it.
 	ConcurrencyLimitDefault int `yaml:"concurrency-limit-default" json:"concurrency-limit-default"`
+	// RPHLimitDefault sets the default per-account requests-per-hour limit applied
+	// to every credential that does not override it. 0 (default) disables RPH limiting.
+	RPHLimitDefault int `yaml:"rph-limit-default" json:"rph-limit-default"`
 	// ClaudeUsageLimitThreshold is the utilization fraction (0..1) of a Claude
 	// rolling usage window (5h/7d) at which an account is parked until that window
 	// resets, to avoid tripping the hard limit. Default 0.85; 0 disables proactive
@@ -659,6 +662,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RPMLimitDefault = 0
 	cfg.TPMLimitDefault = 0
 	cfg.ConcurrencyLimitDefault = 0
+	cfg.RPHLimitDefault = 0
 	cfg.ClaudeUsageLimitThreshold = 0.85
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false

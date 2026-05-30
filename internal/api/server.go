@@ -647,9 +647,25 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
 		mgmt.PATCH("/request-retry", s.mgmt.PutRequestRetry)
+		mgmt.GET("/max-retry-credentials", s.mgmt.GetMaxRetryCredentials)
+		mgmt.PUT("/max-retry-credentials", s.mgmt.PutMaxRetryCredentials)
+		mgmt.PATCH("/max-retry-credentials", s.mgmt.PutMaxRetryCredentials)
 		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
 		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
 		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
+
+		mgmt.GET("/rpm-limit-default", s.mgmt.GetRPMLimitDefault)
+		mgmt.PUT("/rpm-limit-default", s.mgmt.PutRPMLimitDefault)
+		mgmt.PATCH("/rpm-limit-default", s.mgmt.PutRPMLimitDefault)
+		mgmt.GET("/tpm-limit-default", s.mgmt.GetTPMLimitDefault)
+		mgmt.PUT("/tpm-limit-default", s.mgmt.PutTPMLimitDefault)
+		mgmt.PATCH("/tpm-limit-default", s.mgmt.PutTPMLimitDefault)
+		mgmt.GET("/concurrency-limit-default", s.mgmt.GetConcurrencyLimitDefault)
+		mgmt.PUT("/concurrency-limit-default", s.mgmt.PutConcurrencyLimitDefault)
+		mgmt.PATCH("/concurrency-limit-default", s.mgmt.PutConcurrencyLimitDefault)
+		mgmt.GET("/rph-limit-default", s.mgmt.GetRPHLimitDefault)
+		mgmt.PUT("/rph-limit-default", s.mgmt.PutRPHLimitDefault)
+		mgmt.PATCH("/rph-limit-default", s.mgmt.PutRPHLimitDefault)
 
 		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)
@@ -1397,8 +1413,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.RPMLimitDefault != cfg.RPMLimitDefault ||
 		oldCfg.TPMLimitDefault != cfg.TPMLimitDefault ||
-		oldCfg.ConcurrencyLimitDefault != cfg.ConcurrencyLimitDefault {
-		auth.SetRateLimitDefaults(cfg.RPMLimitDefault, cfg.TPMLimitDefault, cfg.ConcurrencyLimitDefault)
+		oldCfg.ConcurrencyLimitDefault != cfg.ConcurrencyLimitDefault ||
+		oldCfg.RPHLimitDefault != cfg.RPHLimitDefault {
+		auth.SetRateLimitDefaults(cfg.RPMLimitDefault, cfg.TPMLimitDefault, cfg.ConcurrencyLimitDefault, cfg.RPHLimitDefault)
 	}
 
 	if oldCfg == nil || oldCfg.ClaudeUsageLimitThreshold != cfg.ClaudeUsageLimitThreshold {

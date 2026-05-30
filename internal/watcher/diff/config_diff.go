@@ -69,6 +69,18 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.MaxRetryInterval != newCfg.MaxRetryInterval {
 		changes = append(changes, fmt.Sprintf("max-retry-interval: %d -> %d", oldCfg.MaxRetryInterval, newCfg.MaxRetryInterval))
 	}
+	if oldCfg.RPMLimitDefault != newCfg.RPMLimitDefault {
+		changes = append(changes, fmt.Sprintf("rpm-limit-default: %d -> %d", oldCfg.RPMLimitDefault, newCfg.RPMLimitDefault))
+	}
+	if oldCfg.TPMLimitDefault != newCfg.TPMLimitDefault {
+		changes = append(changes, fmt.Sprintf("tpm-limit-default: %d -> %d", oldCfg.TPMLimitDefault, newCfg.TPMLimitDefault))
+	}
+	if oldCfg.ConcurrencyLimitDefault != newCfg.ConcurrencyLimitDefault {
+		changes = append(changes, fmt.Sprintf("concurrency-limit-default: %d -> %d", oldCfg.ConcurrencyLimitDefault, newCfg.ConcurrencyLimitDefault))
+	}
+	if oldCfg.RPHLimitDefault != newCfg.RPHLimitDefault {
+		changes = append(changes, fmt.Sprintf("rph-limit-default: %d -> %d", oldCfg.RPHLimitDefault, newCfg.RPHLimitDefault))
+	}
 	if oldCfg.ProxyURL != newCfg.ProxyURL {
 		changes = append(changes, fmt.Sprintf("proxy-url: %s -> %s", formatProxyURL(oldCfg.ProxyURL), formatProxyURL(newCfg.ProxyURL)))
 	}

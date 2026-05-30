@@ -99,6 +99,12 @@ type Auth struct {
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
 
+	// warnings retains recent operator-facing warnings (failed requests,
+	// rate-limit/usage-window parks, etc.) so the management API can report what
+	// happened, when, and how often. Access is guarded by the owning Manager's
+	// mutex (same pattern as recentRequests); see warning_ring.go.
+	warnings warningRing `json:"-"`
+
 	// rate tracks per-account RPM/TPM sliding-window counts and in-flight
 	// concurrency for proactive rate limiting. Access is guarded by the owning
 	// Manager's mutex (same pattern as recentRequests); see rate_window.go.
@@ -484,6 +490,12 @@ func (a *Auth) TPMLimitOverride() (int, bool) {
 // when set (metadata key "concurrency_limit" or legacy "concurrency-limit").
 func (a *Auth) ConcurrencyLimitOverride() (int, bool) {
 	return a.rateLimitOverride("concurrency_limit", "concurrency-limit")
+}
+
+// RPHLimitOverride returns the auth-scoped requests-per-hour limit when set
+// (metadata key "rph_limit" or legacy "rph-limit").
+func (a *Auth) RPHLimitOverride() (int, bool) {
+	return a.rateLimitOverride("rph_limit", "rph-limit")
 }
 
 func parseBoolAny(val any) (bool, bool) {

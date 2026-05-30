@@ -334,7 +334,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			continue
 		}
 		if info, errInfo := e.Info(); errInfo == nil {
-			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
+			fileData := gin.H{
+				"name":       name,
+				"size":       info.Size(),
+				"modtime":    info.ModTime(),
+				"created_at": info.ModTime(),
+			}
 
 			// Read file to get type field
 			full := filepath.Join(h.cfg.AuthDir, name)
@@ -442,6 +447,55 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		entry["next_retry_after"] = auth.NextRetryAfter
+	}
+	// Surface the last error so operators can see *what* went wrong, not just
+	// that the auth is in an error state.
+	if auth.LastError != nil {
+		entry["last_error"] = gin.H{
+			"code":        auth.LastError.Code,
+			"message":     auth.LastError.Message,
+			"retryable":   auth.LastError.Retryable,
+			"http_status": auth.LastError.HTTPStatus,
+		}
+	}
+	// Surface quota/rate-limit cooldown state for visibility.
+	if auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() {
+		quota := gin.H{
+			"exceeded":      auth.Quota.Exceeded,
+			"backoff_level": auth.Quota.BackoffLevel,
+		}
+		if auth.Quota.Reason != "" {
+			quota["reason"] = auth.Quota.Reason
+		}
+		if !auth.Quota.NextRecoverAt.IsZero() {
+			quota["next_recover_at"] = auth.Quota.NextRecoverAt
+		}
+		entry["quota"] = quota
+	}
+	// Surface the Claude usage-window (5h/7d) park time when active.
+	if until := auth.UsageLimitUntil(); !until.IsZero() {
+		entry["usage_limit_until"] = until
+	}
+	// Surface effective per-account RPM/TPM/concurrency/RPH limits and current usage.
+	if rl := auth.RateLimitSnapshot(time.Now()); rl.HasData() {
+		entry["rate_limit"] = gin.H{
+			"rpm_limit":         rl.RPMLimit,
+			"tpm_limit":         rl.TPMLimit,
+			"concurrency_limit": rl.ConcurrencyLimit,
+			"rph_limit":         rl.RPHLimit,
+			"rpm_current":       rl.RPMCurrent,
+			"tpm_current":       rl.TPMCurrent,
+			"rph_current":       rl.RPHCurrent,
+			"in_flight":         rl.InFlight,
+		}
+	}
+	// Surface recent warnings (what/when/how-many) so operators can diagnose
+	// flapping credentials without grepping ephemeral logs.
+	if warnings, total := auth.WarningsSnapshot(); total > 0 {
+		entry["warning_count"] = total
+		if len(warnings) > 0 {
+			entry["warnings"] = warnings
+		}
 	}
 	if path != "" {
 		entry["path"] = path

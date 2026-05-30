@@ -98,15 +98,18 @@ disable-cooling: false
 # Proactive per-account rate limiting (anti-abuse / reduces upstream ban risk).
 # These are GLOBAL DEFAULTS applied to every credential; set 0 to disable a dimension.
 # Each account can override any of them via its auth-file metadata keys
-# "rpm_limit" / "tpm_limit" / "concurrency_limit" (editable through the management API/WebUI).
+# "rpm_limit" / "tpm_limit" / "concurrency_limit" / "rph_limit"
+# (editable through the management API/WebUI).
 # When a credential is over budget it is skipped and the request fails over to another
 # credential; if no credential is available the client receives 429 with Retry-After.
 # - rpm-limit-default: max requests per 60s window per account (0 = unlimited).
 # - tpm-limit-default: max tokens per 60s window per account (0 = unlimited).
 # - concurrency-limit-default: max simultaneous in-flight requests per account (0 = unlimited).
+# - rph-limit-default: max requests per trailing 1-hour window per account (0 = unlimited).
 rpm-limit-default: 0
 tpm-limit-default: 0
 concurrency-limit-default: 0
+rph-limit-default: 0
 
 # Claude rolling usage-window avoidance (Max/subscription "unified" limits).
 # Anthropic returns per-response headers exposing the rolling 5-hour and 7-day

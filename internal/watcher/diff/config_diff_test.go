@@ -219,21 +219,25 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	oldCfg := &config.Config{
-		Port:                   1000,
-		AuthDir:                "/old",
-		Debug:                  false,
-		LoggingToFile:          false,
-		UsageStatisticsEnabled: false,
-		DisableCooling:         false,
-		RequestRetry:           1,
-		MaxRetryCredentials:    1,
-		MaxRetryInterval:       1,
-		WebsocketAuth:          false,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
-		ClaudeKey:              []config.ClaudeKey{{APIKey: "c1"}},
-		CodexKey:               []config.CodexKey{{APIKey: "x1"}},
-		AmpCode:                config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
-		RemoteManagement:       config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
+		Port:                    1000,
+		AuthDir:                 "/old",
+		Debug:                   false,
+		LoggingToFile:           false,
+		UsageStatisticsEnabled:  false,
+		DisableCooling:          false,
+		RequestRetry:            1,
+		MaxRetryCredentials:     1,
+		MaxRetryInterval:        1,
+		RPMLimitDefault:         10,
+		TPMLimitDefault:         1000,
+		ConcurrencyLimitDefault: 2,
+		RPHLimitDefault:         100,
+		WebsocketAuth:           false,
+		QuotaExceeded:           config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
+		ClaudeKey:               []config.ClaudeKey{{APIKey: "c1"}},
+		CodexKey:                []config.CodexKey{{APIKey: "x1"}},
+		AmpCode:                 config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
+		RemoteManagement:        config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
@@ -243,17 +247,21 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		},
 	}
 	newCfg := &config.Config{
-		Port:                   2000,
-		AuthDir:                "/new",
-		Debug:                  true,
-		LoggingToFile:          true,
-		UsageStatisticsEnabled: true,
-		DisableCooling:         true,
-		RequestRetry:           2,
-		MaxRetryCredentials:    3,
-		MaxRetryInterval:       3,
-		WebsocketAuth:          true,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
+		Port:                    2000,
+		AuthDir:                 "/new",
+		Debug:                   true,
+		LoggingToFile:           true,
+		UsageStatisticsEnabled:  true,
+		DisableCooling:          true,
+		RequestRetry:            2,
+		MaxRetryCredentials:     3,
+		MaxRetryInterval:        3,
+		RPMLimitDefault:         20,
+		TPMLimitDefault:         2000,
+		ConcurrencyLimitDefault: 3,
+		RPHLimitDefault:         200,
+		WebsocketAuth:           true,
+		QuotaExceeded:           config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -293,6 +301,10 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "request-retry: 1 -> 2")
 	expectContains(t, details, "max-retry-credentials: 1 -> 3")
 	expectContains(t, details, "max-retry-interval: 1 -> 3")
+	expectContains(t, details, "rpm-limit-default: 10 -> 20")
+	expectContains(t, details, "tpm-limit-default: 1000 -> 2000")
+	expectContains(t, details, "concurrency-limit-default: 2 -> 3")
+	expectContains(t, details, "rph-limit-default: 100 -> 200")
 	expectContains(t, details, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, details, "ws-auth: false -> true")
 	expectContains(t, details, "force-model-prefix: false -> true")

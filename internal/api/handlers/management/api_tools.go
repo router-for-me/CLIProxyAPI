@@ -262,8 +262,181 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
+	if shouldRefreshAPICallOAuthToken(auth) {
+		refreshed, errRefresh := h.refreshManagedOAuthAuth(ctx, auth)
+		if errRefresh != nil {
+			return "", errRefresh
+		}
+		if refreshed != nil {
+			auth = refreshed
+		}
+	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+func shouldRefreshAPICallOAuthToken(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "claude", "codex", "kimi", "xai":
+	default:
+		return false
+	}
+	if refreshTokenValueForAuth(auth) == "" {
+		return false
+	}
+	if tokenValueForAuth(auth) == "" {
+		return true
+	}
+	expiry, ok := authTokenExpiry(auth.Metadata)
+	if !ok {
+		return false
+	}
+	const refreshSkew = 2 * time.Minute
+	return !expiry.After(time.Now().Add(refreshSkew))
+}
+
+func (h *Handler) refreshManagedOAuthAuth(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	if h == nil || h.authManager == nil || auth == nil {
+		return auth, nil
+	}
+	exec, ok := h.authManager.Executor(auth.Provider)
+	if !ok || exec == nil {
+		return auth, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, defaultAPICallTimeout)
+	defer cancel()
+
+	cloned := auth.Clone()
+	refreshed, errRefresh := exec.Refresh(refreshCtx, cloned)
+	if errRefresh != nil {
+		return nil, errRefresh
+	}
+	if refreshed == nil {
+		refreshed = cloned
+	}
+	if refreshed == nil {
+		return auth, nil
+	}
+	if strings.TrimSpace(refreshed.ID) == "" {
+		refreshed.ID = auth.ID
+	}
+	if strings.TrimSpace(refreshed.FileName) == "" {
+		refreshed.FileName = auth.FileName
+	}
+	if refreshed.Runtime == nil {
+		refreshed.Runtime = auth.Runtime
+	}
+	now := time.Now()
+	refreshed.LastRefreshedAt = now
+	refreshed.NextRefreshAfter = time.Time{}
+	refreshed.LastError = nil
+	refreshed.UpdatedAt = now
+
+	updated, errUpdate := h.authManager.Update(ctx, refreshed)
+	if errUpdate != nil {
+		return nil, errUpdate
+	}
+	if updated != nil {
+		return updated, nil
+	}
+	return refreshed, nil
+}
+
+func refreshTokenValueForAuth(auth *coreauth.Auth) string {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return ""
+	}
+	if v := stringValue(auth.Metadata, "refresh_token"); v != "" {
+		return v
+	}
+	if tokenRaw, ok := auth.Metadata["token"]; ok && tokenRaw != nil {
+		switch typed := tokenRaw.(type) {
+		case map[string]any:
+			if v, ok := typed["refresh_token"].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		case map[string]string:
+			if v := strings.TrimSpace(typed["refresh_token"]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func authTokenExpiry(metadata map[string]any) (time.Time, bool) {
+	if len(metadata) == 0 {
+		return time.Time{}, false
+	}
+	for _, key := range []string{"expired", "expiry", "expires_at", "expiresAt", "expires", "expiration"} {
+		if ts, ok := parseAPICallTokenExpiry(metadata[key]); ok {
+			return ts, true
+		}
+	}
+	if tokenRaw, ok := metadata["token"]; ok && tokenRaw != nil {
+		switch typed := tokenRaw.(type) {
+		case map[string]any:
+			for _, key := range []string{"expiry", "expired", "expires_at", "expiresAt", "expires", "expiration"} {
+				if ts, ok := parseAPICallTokenExpiry(typed[key]); ok {
+					return ts, true
+				}
+			}
+		case map[string]string:
+			for _, key := range []string{"expiry", "expired", "expires_at", "expiresAt", "expires", "expiration"} {
+				if ts, ok := parseAPICallTokenExpiry(typed[key]); ok {
+					return ts, true
+				}
+			}
+		}
+	}
+	expiresIn := int64Value(metadata["expires_in"])
+	timestampMs := int64Value(metadata["timestamp"])
+	if expiresIn > 0 && timestampMs > 0 {
+		return time.UnixMilli(timestampMs).Add(time.Duration(expiresIn) * time.Second), true
+	}
+	return time.Time{}, false
+}
+
+func parseAPICallTokenExpiry(raw any) (time.Time, bool) {
+	switch typed := raw.(type) {
+	case time.Time:
+		if !typed.IsZero() {
+			return typed, true
+		}
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		if ts, errParse := time.Parse(time.RFC3339, trimmed); errParse == nil {
+			return ts, true
+		}
+		if ts, errParse := time.Parse(time.RFC3339Nano, trimmed); errParse == nil {
+			return ts, true
+		}
+		if seconds, errParse := json.Number(trimmed).Int64(); errParse == nil {
+			return unixTimeFromExpiryNumber(seconds), true
+		}
+	case int, int32, int64, uint, uint32, uint64, float32, float64, json.Number:
+		value := int64Value(typed)
+		if value > 0 {
+			return unixTimeFromExpiryNumber(value), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func unixTimeFromExpiryNumber(value int64) time.Time {
+	if value > 1_000_000_000_000 {
+		return time.UnixMilli(value)
+	}
+	return time.Unix(value, 0)
 }
 
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {

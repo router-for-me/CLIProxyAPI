@@ -105,6 +105,7 @@ var (
 	rpmLimitDefault         atomic.Int64
 	tpmLimitDefault         atomic.Int64
 	concurrencyLimitDefault atomic.Int64
+	rphLimitDefault         atomic.Int64
 )
 
 // claudeUsageThresholdMilli stores the Claude 5h/7d usage-limit avoidance threshold
@@ -129,22 +130,25 @@ func claudeUsageThreshold() float64 {
 	return float64(claudeUsageThresholdMilli.Load()) / 1000
 }
 
-// SetRateLimitDefaults sets the global default requests-per-minute, tokens-per-minute,
-// and max-concurrency limits applied to every credential that does not override them.
+// SetRateLimitDefaults sets the global default requests-per-minute,
+// tokens-per-minute, max-concurrency, and requests-per-hour limits applied to
+// every credential that does not override them.
 // Pass 0 (or negative) for any dimension to disable that limit globally.
-func SetRateLimitDefaults(rpm, tpm, concurrency int) {
+func SetRateLimitDefaults(rpm, tpm, concurrency, rph int) {
 	rpmLimitDefault.Store(int64(rpm))
 	tpmLimitDefault.Store(int64(tpm))
 	concurrencyLimitDefault.Store(int64(concurrency))
+	rphLimitDefault.Store(int64(rph))
 }
 
-// effectiveRateLimits resolves the active RPM/TPM/concurrency limits for an auth,
+// effectiveRateLimits resolves the active RPM/TPM/concurrency/RPH limits for an auth,
 // preferring per-account overrides over the global defaults. A returned value
 // <= 0 means that dimension is unlimited.
-func effectiveRateLimits(a *Auth) (rpm, tpm, concurrency int64) {
+func effectiveRateLimits(a *Auth) (rpm, tpm, concurrency, rph int64) {
 	rpm = rpmLimitDefault.Load()
 	tpm = tpmLimitDefault.Load()
 	concurrency = concurrencyLimitDefault.Load()
+	rph = rphLimitDefault.Load()
 	if a != nil {
 		if v, ok := a.RPMLimitOverride(); ok {
 			rpm = int64(v)
@@ -155,14 +159,18 @@ func effectiveRateLimits(a *Auth) (rpm, tpm, concurrency int64) {
 		if v, ok := a.ConcurrencyLimitOverride(); ok {
 			concurrency = int64(v)
 		}
+		if v, ok := a.RPHLimitOverride(); ok {
+			rph = int64(v)
+		}
 	}
-	return rpm, tpm, concurrency
+	return rpm, tpm, concurrency, rph
 }
 
-// rateLimited reports whether the auth identified by authID is currently over any
-// of its RPM/TPM/concurrency budgets. When limited, it returns a conservative time
-// at which the caller may retry. The read is performed under the manager mutex so
-// it observes the same counters updated by recordDispatch/recordDispatchDone/RecordTokenUsage.
+// rateLimited reports whether the auth identified by authID is currently over
+// any of its RPM/TPM/concurrency/RPH budgets. When limited, it returns a
+// conservative time at which the caller may retry. The read is performed under
+// the manager mutex so it observes the same counters updated by
+// recordDispatch/recordDispatchDone/RecordTokenUsage.
 func (m *Manager) rateLimited(authID string, now time.Time) (time.Time, bool) {
 	if m == nil || authID == "" {
 		return time.Time{}, false
@@ -178,21 +186,38 @@ func (m *Manager) rateLimited(authID string, now time.Time) (time.Time, bool) {
 	if until := a.rate.usageLimitUntil; !until.IsZero() && now.Before(until) {
 		return until, true
 	}
-	rpm, tpm, concurrency := effectiveRateLimits(a)
-	if rpm <= 0 && tpm <= 0 && concurrency <= 0 {
+	rpm, tpm, concurrency, rph := effectiveRateLimits(a)
+	if rpm <= 0 && tpm <= 0 && concurrency <= 0 && rph <= 0 {
 		return time.Time{}, false
+	}
+	retryAt := time.Time{}
+	limited := false
+	setRetryAt := func(ts time.Time) {
+		if ts.IsZero() {
+			return
+		}
+		limited = true
+		if retryAt.IsZero() || ts.After(retryAt) {
+			retryAt = ts
+		}
 	}
 	if concurrency > 0 && a.rate.inFlight >= concurrency {
 		// Concurrency frees when an in-flight request completes; the exact time is
 		// unknown, so suggest a short retry hint.
-		return now.Add(time.Second), true
+		setRetryAt(now.Add(time.Second))
 	}
 	reqs, toks := a.rate.sums(now)
 	if rpm > 0 && reqs >= rpm {
-		return a.rate.earliestFree(now), true
+		setRetryAt(a.rate.earliestFree(now))
 	}
 	if tpm > 0 && toks >= tpm {
-		return a.rate.earliestFree(now), true
+		setRetryAt(a.rate.earliestFree(now))
+	}
+	if rph > 0 && a.rate.hourlyRequests(now) >= rph {
+		setRetryAt(a.rate.hourlyEarliestFree(now))
+	}
+	if limited {
+		return retryAt, true
 	}
 	return time.Time{}, false
 }
@@ -255,6 +280,7 @@ func (m *Manager) noteClaudeUsageLimit(authID string, headers http.Header, now t
 	m.mu.Lock()
 	if a := m.auths[authID]; a != nil {
 		a.rate.parkUntil(until)
+		a.recordWarning(now, "usage_limit", "", "parked until "+until.UTC().Format(time.RFC3339)+" to avoid Claude usage window limit", 0, "")
 	}
 	m.mu.Unlock()
 }
@@ -1570,7 +1596,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		tried[auth.ID] = struct{}{}
 		// Proactive per-account rate limiting: skip this credential when it is over
-		// its RPM/TPM/concurrency budget and try the next one (failover).
+		// its RPM/TPM/concurrency/RPH budget and try the next one (failover).
 		if reset, limited := m.rateLimited(auth.ID, time.Now()); limited {
 			rateLimitedSeen = true
 			if rateLimitedReset.IsZero() || reset.Before(rateLimitedReset) {
@@ -1786,7 +1812,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 
 		tried[auth.ID] = struct{}{}
 		// Proactive per-account rate limiting: skip this credential when it is over
-		// its RPM/TPM/concurrency budget and try the next one (failover).
+		// its RPM/TPM/concurrency/RPH budget and try the next one (failover).
 		if reset, limited := m.rateLimited(auth.ID, time.Now()); limited {
 			rateLimitedSeen = true
 			if rateLimitedReset.IsZero() || reset.Before(rateLimitedReset) {
@@ -2551,6 +2577,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
+			if !isRequestScopedNotFoundResultError(result.Error) {
+				recordResultWarning(auth, result, now)
+			}
 			if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
@@ -2921,6 +2950,45 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+// warningKindForStatus maps an HTTP-like status code to a warning kind label
+// used by the management API to classify operator-facing warnings.
+func warningKindForStatus(code int) string {
+	switch code {
+	case 401:
+		return "unauthorized"
+	case 402, 403:
+		return "payment_required"
+	case 404:
+		return "not_found"
+	case 429:
+		return "rate_limit"
+	case 408, 500, 502, 503, 504:
+		return "server_error"
+	default:
+		return "error"
+	}
+}
+
+// recordResultWarning appends an operator-facing warning derived from a failed
+// execution result. The caller must hold the manager mutex (MarkResult does).
+func recordResultWarning(auth *Auth, result Result, now time.Time) {
+	if auth == nil {
+		return
+	}
+	code := statusCodeFromResult(result.Error)
+	kind := warningKindForStatus(code)
+	if isModelSupportResultError(result.Error) {
+		kind = "model_not_supported"
+	}
+	message := ""
+	errCode := ""
+	if result.Error != nil {
+		message = result.Error.Message
+		errCode = result.Error.Code
+	}
+	auth.recordWarning(now, kind, errCode, message, code, result.Model)
 }
 
 func isModelSupportErrorMessage(message string) bool {

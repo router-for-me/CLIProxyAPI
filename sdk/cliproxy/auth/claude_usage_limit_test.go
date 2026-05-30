@@ -69,8 +69,8 @@ func TestClaudeUsageParkUntil(t *testing.T) {
 }
 
 func TestRateLimitedUsageWindowGate(t *testing.T) {
-	defer SetRateLimitDefaults(0, 0, 0)
-	SetRateLimitDefaults(0, 0, 0) // RPM/TPM/concurrency all off
+	defer SetRateLimitDefaults(0, 0, 0, 0)
+	SetRateLimitDefaults(0, 0, 0, 0) // RPM/TPM/concurrency/RPH all off
 	m := NewManager(nil, nil, nil)
 	a := &Auth{ID: "a1", Provider: "claude"}
 	m.auths["a1"] = a

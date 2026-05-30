@@ -332,7 +332,12 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 	fields = append(fields, configField{"Debug", "debug", "bool", fmt.Sprintf("%v", getBool(cfg, "debug")), nil})
 	fields = append(fields, configField{"Proxy URL", "proxy-url", "string", getString(cfg, "proxy-url"), nil})
 	fields = append(fields, configField{"Request Retry", "request-retry", "int", fmt.Sprintf("%.0f", getFloat(cfg, "request-retry")), nil})
+	fields = append(fields, configField{"Max Retry Credentials", "max-retry-credentials", "int", fmt.Sprintf("%.0f", getFloat(cfg, "max-retry-credentials")), nil})
 	fields = append(fields, configField{"Max Retry Interval (s)", "max-retry-interval", "int", fmt.Sprintf("%.0f", getFloat(cfg, "max-retry-interval")), nil})
+	fields = append(fields, configField{"Default RPM Limit", "rpm-limit-default", "int", fmt.Sprintf("%.0f", getFloat(cfg, "rpm-limit-default")), nil})
+	fields = append(fields, configField{"Default TPM Limit", "tpm-limit-default", "int", fmt.Sprintf("%.0f", getFloat(cfg, "tpm-limit-default")), nil})
+	fields = append(fields, configField{"Default Concurrency Limit", "concurrency-limit-default", "int", fmt.Sprintf("%.0f", getFloat(cfg, "concurrency-limit-default")), nil})
+	fields = append(fields, configField{"Default Hourly Request Limit", "rph-limit-default", "int", fmt.Sprintf("%.0f", getFloat(cfg, "rph-limit-default")), nil})
 	fields = append(fields, configField{"Force Model Prefix", "force-model-prefix", "string", getString(cfg, "force-model-prefix"), nil})
 
 	// Logging
@@ -379,7 +384,7 @@ func fieldSection(apiPath string) string {
 		return T("section_routing")
 	}
 	switch apiPath {
-	case "port", "host", "debug", "proxy-url", "request-retry", "max-retry-interval", "force-model-prefix":
+	case "port", "host", "debug", "proxy-url", "request-retry", "max-retry-credentials", "max-retry-interval", "rpm-limit-default", "tpm-limit-default", "concurrency-limit-default", "rph-limit-default", "force-model-prefix":
 		return T("section_server")
 	case "logging-to-file", "logs-max-total-size-mb", "error-logs-max-files", "usage-statistics-enabled", "request-log":
 		return T("section_logging")
