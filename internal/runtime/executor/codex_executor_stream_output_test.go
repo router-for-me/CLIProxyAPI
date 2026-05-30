@@ -128,58 +128,6 @@ func TestCodexExecutorExecuteStreamSurfacesTerminalStreamError(t *testing.T) {
 	assertCodexErrorCode(t, streamErr.Error(), "invalid_request_error", "context_too_large")
 }
 
-func TestCodexExecutorExecuteStreamTimesOutIdleUpstream(t *testing.T) {
-	origTimeout := codexHTTPStreamIdleTimeout
-	codexHTTPStreamIdleTimeout = 50 * time.Millisecond
-	defer func() {
-		codexHTTPStreamIdleTimeout = origTimeout
-	}()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-
-	executor := NewCodexExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": server.URL,
-		"api_key":  "test",
-	}}
-
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai-response"),
-		Stream:       true,
-	})
-	if err != nil {
-		t.Fatalf("ExecuteStream error: %v", err)
-	}
-
-	select {
-	case chunk, ok := <-result.Chunks:
-		if !ok {
-			t.Fatal("stream closed without idle timeout error")
-		}
-		if chunk.Err == nil {
-			t.Fatalf("stream chunk error = nil, payload=%q", string(chunk.Payload))
-		}
-		if got := statusCodeFromTestError(t, chunk.Err); got != http.StatusGatewayTimeout {
-			t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusGatewayTimeout, chunk.Err)
-		}
-		if !strings.Contains(chunk.Err.Error(), "codex upstream stream idle timeout after 50ms") {
-			t.Fatalf("error message missing idle timeout: %v", chunk.Err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for stream idle timeout error")
-	}
-}
-
 func TestCodexExecutorExecuteStreamTimesOutWaitingForUpstreamResponse(t *testing.T) {
 	origTimeout := codexHTTPStreamFirstResponseTimeout
 	codexHTTPStreamFirstResponseTimeout = 50 * time.Millisecond

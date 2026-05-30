@@ -828,7 +828,7 @@ func TestManager_ExecuteStream_LocalStreamTimeoutDoesNotBlackoutOnlyAuth(t *test
 		streamFirstErrors: map[string]error{
 			"auth-local-timeout-stream": &retryAfterStatusError{
 				status:  http.StatusGatewayTimeout,
-				message: "codex upstream stream idle timeout after 5m0s",
+				message: "codex upstream stream first response timeout after 2m0s",
 			},
 		},
 	}

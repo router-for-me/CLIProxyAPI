@@ -113,6 +113,94 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 }
 
+func TestRefreshTokens_RespectsCallerCancellationWhileSharedRefreshContinues(t *testing.T) {
+	var calls int32
+	var wg sync.WaitGroup
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if atomic.AddInt32(&calls, 1) == 1 {
+					close(entered)
+				}
+				<-release
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(`{
+						"access_token":"access-token",
+						"refresh_token":"next-refresh-token",
+						"id_token":"header.payload.signature",
+						"expires_in":3600
+					}`)),
+					Header:  make(http.Header),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+
+	wg.Add(1)
+	firstErr := make(chan error, 1)
+	go func() {
+		defer wg.Done()
+		_, err := auth.RefreshTokens(context.Background(), "shared-refresh-token-cancel")
+		firstErr <- err
+	}()
+	<-entered
+
+	waitCtx, cancel := context.WithCancel(context.Background())
+	waitErr := make(chan error, 1)
+	go func() {
+		_, err := auth.RefreshTokens(waitCtx, "shared-refresh-token-cancel")
+		waitErr <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-waitErr:
+		if err != context.Canceled {
+			t.Fatalf("RefreshTokens error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for canceled caller")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected shared refresh to keep single upstream request, got %d", got)
+	}
+
+	close(release)
+	wg.Wait()
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first refresh error: %v", err)
+	}
+}
+
+func TestRefreshTokens_SharedRefreshHasBoundedTimeout(t *testing.T) {
+	origTimeout := codexRefreshGroupTimeout
+	codexRefreshGroupTimeout = 50 * time.Millisecond
+	defer func() {
+		codexRefreshGroupTimeout = origTimeout
+	}()
+
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokens(context.Background(), "shared-refresh-token-timeout")
+	if err == nil {
+		t.Fatal("expected refresh timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("expected deadline exceeded error, got %v", err)
+	}
+}
+
 func TestNewCodexAuthWithProxyURL_OverrideDirectDisablesProxy(t *testing.T) {
 	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://proxy.example.com:8080"}}
 	auth := NewCodexAuthWithProxyURL(cfg, "direct")

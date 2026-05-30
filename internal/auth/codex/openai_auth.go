@@ -28,7 +28,10 @@ const (
 	RedirectURI = "http://localhost:1455/auth/callback"
 )
 
-var codexRefreshGroup singleflight.Group
+var (
+	codexRefreshGroup        singleflight.Group
+	codexRefreshGroupTimeout = time.Minute
+)
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
@@ -190,14 +193,35 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
-
-	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
-	})
-	if err != nil {
-		return nil, err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	tokenData, ok := result.(*CodexTokenData)
+	if errCtx := ctx.Err(); errCtx != nil {
+		return nil, errCtx
+	}
+
+	resultC := codexRefreshGroup.DoChan(refreshToken, func() (interface{}, error) {
+		refreshCtx := context.WithoutCancel(ctx)
+		var cancel context.CancelFunc
+		if codexRefreshGroupTimeout > 0 {
+			refreshCtx, cancel = context.WithTimeout(refreshCtx, codexRefreshGroupTimeout)
+		} else {
+			refreshCtx, cancel = context.WithCancel(refreshCtx)
+		}
+		defer cancel()
+		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
+	})
+
+	var result singleflight.Result
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result = <-resultC:
+	}
+	if result.Err != nil {
+		return nil, result.Err
+	}
+	tokenData, ok := result.Val.(*CodexTokenData)
 	if !ok || tokenData == nil {
 		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
 	}

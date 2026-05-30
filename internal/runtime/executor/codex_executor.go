@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,8 +40,6 @@ var (
 	dataTag                                = []byte("data:")
 	codexHTTPStreamFirstResponseTimeout    = 2 * time.Minute
 	codexHTTPStreamFirstResponseTimeoutMsg = "codex upstream stream first response timeout after %s"
-	codexHTTPStreamIdleTimeout             = 5 * time.Minute
-	codexHTTPStreamIdleTimeoutMsg          = "codex upstream stream idle timeout after %s"
 )
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
@@ -648,28 +645,18 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}()
 		defer close(progressDone)
-		var closeBodyOnce sync.Once
-		var idleTimedOut atomic.Bool
-		closeResponseBody := func() {
-			closeBodyOnce.Do(func() {
-				if errClose := httpResp.Body.Close(); errClose != nil && !idleTimedOut.Load() {
-					log.Errorf("codex executor: close response body error: %v", errClose)
-				}
-				httpClient.CloseIdleConnections()
-			})
-		}
 		defer func() {
-			closeResponseBody()
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("codex executor: close response body error: %v", errClose)
+			}
+			httpClient.CloseIdleConnections()
 		}()
-		stopIdleWatch, markStreamActivity := watchCodexHTTPStreamIdle(ctx, codexHTTPStreamIdleTimeout, &idleTimedOut, closeResponseBody)
-		defer stopIdleWatch()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		for scanner.Scan() {
-			markStreamActivity()
 			lineCount.Add(1)
 			lastLineAt.Store(time.Now().UnixNano())
 			line := scanner.Bytes()
@@ -731,22 +718,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			}
 		}
-		if idleTimedOut.Load() {
-			streamErr := statusErr{code: http.StatusGatewayTimeout, msg: fmt.Sprintf(codexHTTPStreamIdleTimeoutMsg, codexHTTPStreamIdleTimeout)}
-			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-			reporter.PublishFailure(ctx, streamErr)
-			helps.LogWithRequestID(ctx).Warnf("codex http stream idle timeout after %s lines=%d data_lines=%d chunks=%d",
-				time.Since(startedAt).Truncate(time.Second),
-				lineCount.Load(),
-				dataLineCount.Load(),
-				translatedChunkCount.Load(),
-			)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-			case <-ctx.Done():
-			}
-			return
-		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
@@ -773,51 +744,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
-}
-
-func watchCodexHTTPStreamIdle(ctx context.Context, timeout time.Duration, idleTimedOut *atomic.Bool, closeResponseBody func()) (func(), func()) {
-	if timeout <= 0 {
-		return func() {}, func() {}
-	}
-	activity := make(chan struct{}, 1)
-	done := make(chan struct{})
-	var stopOnce sync.Once
-	stop := func() {
-		stopOnce.Do(func() {
-			close(done)
-		})
-	}
-	markActivity := func() {
-		select {
-		case activity <- struct{}{}:
-		default:
-		}
-	}
-	go func() {
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-done:
-				return
-			case <-activity:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(timeout)
-			case <-timer.C:
-				idleTimedOut.Store(true)
-				closeResponseBody()
-				return
-			}
-		}
-	}()
-	return stop, markActivity
 }
 
 func applyCodexHTTPStreamFirstResponseTimeout(client *http.Client, timeout time.Duration) {

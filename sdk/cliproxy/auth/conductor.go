@@ -2913,7 +2913,6 @@ func isLocalStreamTimeoutResultError(err *Error) bool {
 	}
 	lower := strings.ToLower(strings.TrimSpace(err.Message))
 	return strings.HasPrefix(lower, "codex upstream stream first response timeout after ") ||
-		strings.HasPrefix(lower, "codex upstream stream idle timeout after ") ||
 		strings.HasPrefix(lower, "openai-compatible upstream stream first response timeout after ")
 }
 
