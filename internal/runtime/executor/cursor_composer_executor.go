@@ -508,7 +508,7 @@ func parseConnectProtoFrames(r io.Reader) func(func([]byte, error) bool) {
 		for {
 			header := make([]byte, 5)
 			if _, err := io.ReadFull(reader, header); err != nil {
-				if err != io.EOF && err != io.ErrUnexpectedEOF {
+				if err != io.EOF {
 					yield(nil, err)
 				}
 				return
@@ -528,6 +528,9 @@ func parseConnectProtoFrames(r io.Reader) func(func([]byte, error) bool) {
 				return
 			}
 			if header[0]&2 == 2 {
+				if err := handleConnectEndStreamFrame(payload); err != nil {
+					yield(nil, err)
+				}
 				continue
 			}
 			if !yield(payload, nil) {
@@ -535,6 +538,25 @@ func parseConnectProtoFrames(r io.Reader) func(func([]byte, error) bool) {
 			}
 		}
 	}
+}
+
+func handleConnectEndStreamFrame(payload []byte) error {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("{}")) {
+		return nil
+	}
+	errorValue := gjson.GetBytes(trimmed, "error")
+	if !errorValue.Exists() {
+		return nil
+	}
+	message := strings.TrimSpace(errorValue.Get("message").String())
+	if message == "" {
+		message = strings.TrimSpace(errorValue.String())
+	}
+	if message == "" {
+		message = "Cursor stream failed"
+	}
+	return statusErr{code: http.StatusBadGateway, msg: message}
 }
 
 func decodeCursorTextFrame(payload []byte) (string, bool) {
