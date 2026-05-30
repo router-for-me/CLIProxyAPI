@@ -106,6 +106,34 @@ var oauthToolRenameMap = map[string]string{
 // then the global reverse map incorrectly rewrote every `Bash` in the
 // response to `bash`, causing Amp to reject the tool_use as unknown).
 
+// mcpSingleUnderscorePrefix / mcpDoubleUnderscorePrefix bracket the MCP tool-name
+// normalization. Some third-party clients (e.g. BoltAI) name MCP tools with a
+// single underscore (`mcp_<tool>`). Anthropic's overage gate fingerprints that
+// single-underscore prefix as a user-installed MCP extension and bills it to
+// extra usage, returning HTTP 400 ("third-party apps now draw from your extra
+// usage") on accounts where extra usage is disabled. Claude Code's own
+// convention is the double-underscore form (`mcp__<server>__<tool>`), which is
+// accepted as first-party, so we normalize `mcp_` -> `mcp__` on OAuth traffic.
+const (
+	mcpSingleUnderscorePrefix = "mcp_"
+	mcpDoubleUnderscorePrefix = "mcp__"
+)
+
+// oauthRenamedToolName returns the Claude Code-compatible upstream name for a
+// client-supplied OAuth tool name and whether a rename is needed. It first
+// applies the static built-in rename map (bash -> Bash, ...), then normalizes a
+// single-underscore `mcp_` MCP prefix to the double-underscore form Anthropic
+// recognizes as first-party. Names that are already `mcp__...` pass through.
+func oauthRenamedToolName(name string) (string, bool) {
+	if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
+		return newName, true
+	}
+	if strings.HasPrefix(name, mcpSingleUnderscorePrefix) && !strings.HasPrefix(name, mcpDoubleUnderscorePrefix) {
+		return mcpDoubleUnderscorePrefix + name[len(mcpSingleUnderscorePrefix):], true
+	}
+	return name, false
+}
+
 // oauthToolsToRemove lists tool names that must be stripped from OAuth requests
 // even after remapping. Currently empty — all tools are mapped instead of removed.
 var oauthToolsToRemove = map[string]bool{}
@@ -1174,7 +1202,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			}
 
 			toolJSON := tool.Raw
-			if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
+			if newName, ok := oauthRenamedToolName(name); ok {
 				updatedTool, err := sjson.Set(toolJSON, "name", newName)
 				if err == nil {
 					toolJSON = updatedTool
@@ -1201,7 +1229,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			// The chosen tool was removed from the tools array, so drop tool_choice to
 			// keep the payload internally consistent and fall back to normal auto tool use.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
+		} else if newName, ok := oauthRenamedToolName(tcName); ok {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
 			recordRename(tcName, newName)
 		}
@@ -1220,14 +1248,14 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
+					if newName, ok := oauthRenamedToolName(name); ok {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						recordRename(name, newName)
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
+					if newName, ok := oauthRenamedToolName(toolName); ok {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						recordRename(toolName, newName)
@@ -1241,7 +1269,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
+								if newName, ok := oauthRenamedToolName(nestedToolName); ok {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, newName)
 									recordRename(nestedToolName, newName)
