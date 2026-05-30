@@ -1565,7 +1565,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errStream
 			}
 			if isRequestInvalidError(errStream) {
-				if shouldFallbackRequestScopedContentSafetyError(routeModel, errStream) {
+				if shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, errStream) {
 					lastErr = errStream
 					continue
 				}
@@ -1592,7 +1592,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				releaseSlot()
-				if shouldFallbackRequestScopedContentSafetyError(routeModel, bootstrapErr) {
+				if shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, bootstrapErr) {
 					lastErr = bootstrapErr
 					continue
 				}
@@ -2076,7 +2076,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials {
+		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
+			!shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2160,7 +2161,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					break
 				}
 				if isRequestInvalidError(errExec) {
-					if shouldFallbackRequestScopedContentSafetyError(routeModel, errExec) {
+					if shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, errExec) {
 						authErr = errExec
 						countAttempt = true
 						continue
@@ -2175,8 +2176,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
+			contentSafetyFallback := shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, authErr)
 			if isRequestInvalidError(authErr) {
-				if !shouldFallbackRequestScopedContentSafetyError(routeModel, authErr) {
+				if !contentSafetyFallback {
 					return cliproxyexecutor.Response{}, authErr
 				}
 			}
@@ -2186,8 +2188,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
-			} else if errWait := m.waitForRetryQueue(ctx); errWait != nil {
-				return cliproxyexecutor.Response{}, errWait
+			} else if !contentSafetyFallback {
+				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
+					return cliproxyexecutor.Response{}, errWait
+				}
 			}
 			continue
 		}
@@ -2206,7 +2210,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials {
+		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
+			!shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2290,7 +2295,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					break
 				}
 				if isRequestInvalidError(errExec) {
-					if shouldFallbackRequestScopedContentSafetyError(routeModel, errExec) {
+					if shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, errExec) {
 						authErr = errExec
 						countAttempt = true
 						continue
@@ -2305,8 +2310,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return resp, nil
 		}
 		if authErr != nil {
+			contentSafetyFallback := shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, authErr)
 			if isRequestInvalidError(authErr) {
-				if !shouldFallbackRequestScopedContentSafetyError(routeModel, authErr) {
+				if !contentSafetyFallback {
 					return cliproxyexecutor.Response{}, authErr
 				}
 			}
@@ -2316,8 +2322,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
-			} else if errWait := m.waitForRetryQueue(ctx); errWait != nil {
-				return cliproxyexecutor.Response{}, errWait
+			} else if !contentSafetyFallback {
+				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
+					return cliproxyexecutor.Response{}, errWait
+				}
 			}
 			continue
 		}
@@ -2336,7 +2344,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials {
+		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
+			!shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, lastErr) {
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -2397,8 +2406,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 				continue
 			}
+			contentSafetyFallback := shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel, opts, errStream)
 			if isRequestInvalidError(errStream) {
-				if !shouldFallbackRequestScopedContentSafetyError(routeModel, errStream) {
+				if !contentSafetyFallback {
 					return nil, errStream
 				}
 			}
@@ -2406,8 +2416,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			lastErr = errStream
 			if homeMode {
 				homeAuthCount++
-			} else if errWait := m.waitForRetryQueue(ctx); errWait != nil {
-				return nil, errWait
+			} else if !contentSafetyFallback {
+				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
+					return nil, errWait
+				}
 			}
 			continue
 		}
@@ -4532,10 +4544,32 @@ func isRequestScopedContentSafetyError(err error) bool {
 }
 
 func shouldFallbackRequestScopedContentSafetyError(routeModel string, err error) bool {
-	if !strings.EqualFold(strings.TrimSpace(routeModel), "claude-sonnet-4-6") {
+	if !isClaudeSonnet46FallbackModel(routeModel) {
 		return false
 	}
 	return isRequestScopedContentSafetyError(err)
+}
+
+func shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel string, opts cliproxyexecutor.Options, err error) bool {
+	if !isRequestScopedContentSafetyError(err) {
+		return false
+	}
+	if isClaudeSonnet46FallbackModel(routeModel) {
+		return true
+	}
+	return isClaudeSonnet46FallbackModel(requestedModelAliasFromOptions(opts, routeModel))
+}
+
+func isClaudeSonnet46FallbackModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	base := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if base == "" {
+		base = model
+	}
+	return strings.EqualFold(base, "claude-sonnet-4-6")
 }
 
 // isRequestInvalidError returns true if the error represents a client request

@@ -1928,6 +1928,123 @@ func TestManager_Execute_ClaudeSonnetAliasContentSafetyFallsBack(t *testing.T) {
 	}
 }
 
+func TestManager_Execute_ClaudeSonnetAliasContentSafetyIgnoresCredentialLimit(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 1)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-blocked-auth": &Error{
+				HTTPStatus: http.StatusUnavailableForLegalReasons,
+				Message:    requestScopedContentBlockedMessage,
+			},
+			"bb-blocked-auth": &Error{
+				HTTPStatus: http.StatusUnavailableForLegalReasons,
+				Message:    requestScopedContentBlockedMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6"
+	blockedAuthA := &Auth{ID: "aa-blocked-auth", Provider: "claude"}
+	blockedAuthB := &Auth{ID: "bb-blocked-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "cc-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(blockedAuthA.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(blockedAuthB.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(blockedAuthA.ID)
+		reg.UnregisterClient(blockedAuthB.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), blockedAuthA); errRegister != nil {
+		t.Fatalf("register first blocked auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), blockedAuthB); errRegister != nil {
+		t.Fatalf("register second blocked auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{blockedAuthA.ID, blockedAuthB.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_ClaudeSonnetAliasMetadataContentSafetyFallsBack(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-blocked-auth": &Error{
+				HTTPStatus: http.StatusUnavailableForLegalReasons,
+				Message:    requestScopedContentBlockedMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	routeModel := "step-3.7-flash"
+	blockedAuth := &Auth{ID: "aa-blocked-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(blockedAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(blockedAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), blockedAuth); errRegister != nil {
+		t.Fatalf("register blocked auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "claude-sonnet-4-6",
+		},
+	})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{blockedAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManager_Execute_GenericContentSafetyStillStopsRetry(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
