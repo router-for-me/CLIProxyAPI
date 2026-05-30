@@ -169,6 +169,10 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	if provider == "codex" {
+		rawCompact, _ := metadata["compact"].(string)
+		ApplyAuthCompactMeta(a, cfg, rawCompact)
+	}
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 			for _, v := range virtuals {

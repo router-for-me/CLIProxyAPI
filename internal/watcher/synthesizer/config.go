@@ -201,6 +201,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+		ApplyAuthCompactMeta(a, cfg, ck.Compact)
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}
@@ -269,6 +270,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+			ApplyAuthCompactMeta(a, cfg, compat.Compact)
 			if len(a.Metadata) == 0 {
 				a.Metadata = nil
 			}
@@ -307,6 +309,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+			ApplyAuthCompactMeta(a, cfg, compat.Compact)
 			if len(a.Metadata) == 0 {
 				a.Metadata = nil
 			}

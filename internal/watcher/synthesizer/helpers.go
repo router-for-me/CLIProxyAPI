@@ -103,6 +103,17 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	}
 }
 
+// ApplyAuthCompactMeta resolves the per-credential compact mode against the global
+// compact-default and records compact_mode + compact_allowed on the auth. Call only for
+// compact-capable providers (codex, openai-compatibility).
+func ApplyAuthCompactMeta(auth *coreauth.Auth, cfg *config.Config, mode string) {
+	if auth == nil || cfg == nil {
+		return
+	}
+	defaultAllow := !strings.EqualFold(strings.TrimSpace(cfg.CompactDefault), "deny")
+	coreauth.ApplyCompactAttributes(auth, mode, defaultAllow)
+}
+
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
