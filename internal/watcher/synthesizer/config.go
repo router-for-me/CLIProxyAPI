@@ -34,6 +34,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
+	// Cursor Composer
+	out = append(out, s.synthesizeCursorComposerKeys(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 
@@ -317,6 +319,77 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			out = append(out, a)
 		}
+	}
+	return out
+}
+
+// synthesizeCursorComposerKeys creates Auth entries for Cursor Composer API keys.
+func (s *ConfigSynthesizer) synthesizeCursorComposerKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.CursorComposerKey))
+	for i := range cfg.CursorComposerKey {
+		entry := cfg.CursorComposerKey[i]
+		if entry.Disabled {
+			continue
+		}
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		base := strings.TrimSpace(entry.BaseURL)
+		backendBase := strings.TrimSpace(entry.BackendBaseURL)
+		chatEndpoint := strings.TrimSpace(entry.ChatEndpoint)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next("cursor-composer:apikey", key, base, backendBase, chatEndpoint, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:cursor-composer[%s]", token),
+			"api_key":      key,
+			"provider_key": "cursor-composer",
+		}
+		metadata := map[string]any{}
+		if entry.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if backendBase != "" {
+			attrs["backend_base_url"] = backendBase
+		}
+		if chatEndpoint != "" {
+			attrs["chat_endpoint"] = chatEndpoint
+		}
+		if v := strings.TrimSpace(entry.ClientVersion); v != "" {
+			attrs["client_version"] = v
+		}
+		if hash := diff.ComputeCursorComposerModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "cursor-composer",
+			Label:      "cursor-composer-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
 	}
 	return out
 }
