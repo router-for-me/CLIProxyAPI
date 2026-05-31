@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/grok"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -301,6 +302,15 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		}
 		if m.OwnedBy != "" {
 			entry["owned_by"] = m.OwnedBy
+		}
+		if m.ContextLength > 0 {
+			entry["context_length"] = m.ContextLength
+		}
+		if m.MaxCompletionTokens > 0 {
+			entry["max_completion_tokens"] = m.MaxCompletionTokens
+		}
+		if len(m.SupportedParameters) > 0 {
+			entry["supported_parameters"] = append([]string(nil), m.SupportedParameters...)
 		}
 		result = append(result, entry)
 	}
@@ -3000,6 +3010,85 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+// RequestGrokToken initiates a Grok (xAI SuperGrok) device-code OAuth flow via
+// the management API. The TUI calls this endpoint; it returns the verification
+// URL immediately and completes authentication in the background.
+func (h *Handler) RequestGrokToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Grok authentication...")
+
+	state := fmt.Sprintf("grk-%d", time.Now().UnixNano())
+	grokAuth := grok.NewGrokAuth(h.cfg)
+
+	deviceResp, err := grokAuth.RequestDeviceCode(ctx)
+	if err != nil {
+		log.Errorf("Failed to start Grok device code flow: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start grok device code flow"})
+		return
+	}
+
+	authURL := deviceResp.VerificationURIComplete
+	if strings.TrimSpace(authURL) == "" {
+		authURL = deviceResp.VerificationURI
+	}
+
+	RegisterOAuthSession(state, "grok")
+
+	go func() {
+		fmt.Println("Waiting for Grok authorization...")
+		tokenResp, errPoll := grokAuth.PollDeviceCodeToken(ctx, deviceResp, grok.DeviceCodePollOptions{})
+		if errPoll != nil {
+			SetOAuthSessionError(state, "Grok authorization failed")
+			log.Errorf("Grok device authorization failed: %v", errPoll)
+			return
+		}
+
+		storage := &grok.GrokTokenStorage{
+			AccessToken:  tokenResp.AccessToken,
+			RefreshToken: tokenResp.RefreshToken,
+			IDToken:      tokenResp.IDToken,
+			LastRefresh:  time.Now().UTC().Format(time.RFC3339),
+		}
+		if tokenResp.ExpiresIn > 0 {
+			storage.Expire = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
+		}
+
+		metadata := map[string]any{
+			"type":          "grok",
+			"access_token":  tokenResp.AccessToken,
+			"refresh_token": tokenResp.RefreshToken,
+			"timestamp":     time.Now().UnixMilli(),
+		}
+		if tokenResp.ExpiresIn > 0 {
+			metadata["expired"] = storage.Expire
+		}
+
+		fileName := fmt.Sprintf("grok-%d.json", time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "grok",
+			FileName: fileName,
+			Label:    "Grok User",
+			Storage:  storage,
+			Metadata: metadata,
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Grok authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Grok authentication successful! Token saved to %s\n", savedPath)
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("grok")
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
 // PopulateAuthContext extracts request info and adds it to the context

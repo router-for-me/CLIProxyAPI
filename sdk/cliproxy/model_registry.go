@@ -28,3 +28,8 @@ func GlobalModelRegistry() ModelRegistry {
 func SetGlobalModelRegistryHook(hook ModelRegistryHook) {
 	registry.GetGlobalRegistry().SetHook(hook)
 }
+
+// GlobalPerAuthModelCache returns the process-wide per-auth model cache singleton.
+func GlobalPerAuthModelCache() *registry.PerAuthModelCache {
+	return registry.GlobalPerAuthModelCache()
+}

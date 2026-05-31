@@ -1940,6 +1940,32 @@
       }
     }
   ],
+  "grok": [
+    {
+      "id": "grok-code-fast-1",
+      "object": "model",
+      "owned_by": "xai",
+      "type": "grok",
+      "display_name": "Grok Code Fast 1",
+      "context_length": 131072,
+      "max_completion_tokens": 16384,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "grok-4-fast",
+      "object": "model",
+      "owned_by": "xai",
+      "type": "grok",
+      "display_name": "Grok 4 Fast",
+      "context_length": 131072,
+      "max_completion_tokens": 16384,
+      "supported_parameters": [
+        "tools"
+      ]
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",

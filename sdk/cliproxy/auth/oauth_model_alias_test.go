@@ -190,3 +190,91 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestResolveOAuthUpstreamModel_CodexImageAlias(t *testing.T) {
+	t.Parallel()
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5", Alias: "codex/gpt-image", Fork: true}},
+	})
+	auth := createAuthForChannel("codex")
+	if got := mgr.resolveOAuthUpstreamModel(auth, "codex/gpt-image"); got != "gpt-5" {
+		t.Fatalf("resolved model = %q, want gpt-5", got)
+	}
+}
+
+func TestResolveOAuthUpstreamModel_CodexImage2Alias(t *testing.T) {
+	t.Parallel()
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.4", Alias: "gpt-image-2", Fork: true}},
+	})
+	auth := createAuthForChannel("codex")
+	if got := mgr.resolveOAuthUpstreamModel(auth, "gpt-image-2"); got != "gpt-5.4" {
+		t.Fatalf("resolved model = %q, want gpt-5.4", got)
+	}
+}
+
+func TestMergeWithDefaultOAuthModelAliases_UserAliasOverridesDefaultResolution(t *testing.T) {
+	t.Parallel()
+
+	merged := MergeWithDefaultOAuthModelAliases(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.2", Alias: "gpt-image-2", Fork: true}},
+	})
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(merged)
+	auth := createAuthForChannel("codex")
+	if got := mgr.resolveOAuthUpstreamModel(auth, "gpt-image-2"); got != "gpt-5.2" {
+		t.Fatalf("resolved model = %q, want gpt-5.2", got)
+	}
+}
+
+func TestDefaultOAuthModelAliases_ReasoningAliasesResolveToSuffixedModels(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(nil)
+
+	tests := []struct {
+		name    string
+		channel string
+		input   string
+		want    string
+	}{
+		{name: "codex low", channel: "codex", input: "gpt-5.5-low", want: "gpt-5.5(low)"},
+		{name: "codex xhigh", channel: "codex", input: "gpt-5.4-mini-xhigh", want: "gpt-5.4-mini(xhigh)"},
+		{name: "claude high", channel: "claude", input: "claude-sonnet-4-6-high", want: "claude-sonnet-4-6(high)"},
+		{name: "claude xhigh", channel: "claude", input: "claude-opus-4-7-xhigh", want: "claude-opus-4-7(xhigh)"},
+		{name: "claude max", channel: "claude", input: "claude-opus-4-6-max", want: "claude-opus-4-6(max)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			auth := createAuthForChannel(tt.channel)
+			if got := mgr.resolveOAuthUpstreamModel(auth, tt.input); got != tt.want {
+				t.Fatalf("resolved model = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergeWithDefaultOAuthModelAliases_UserReasoningAliasOverridesDefault(t *testing.T) {
+	t.Parallel()
+
+	merged := MergeWithDefaultOAuthModelAliases(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.4(low)", Alias: "gpt-5.5-low", Fork: true}},
+	})
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(merged)
+	auth := createAuthForChannel("codex")
+	if got := mgr.resolveOAuthUpstreamModel(auth, "gpt-5.5-low"); got != "gpt-5.4(low)" {
+		t.Fatalf("resolved model = %q, want gpt-5.4(low)", got)
+	}
+}

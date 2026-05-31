@@ -8,6 +8,8 @@ import (
 
 const (
 	codexBuiltinImageModelID      = "gpt-image-2"
+	grokBuiltinCodeFastModelID    = "grok-code-fast-1"
+	grokBuiltinFourFastModelID    = "grok-4-fast"
 	xaiBuiltinImageModelID        = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID        = "grok-imagine-video"
@@ -25,6 +27,7 @@ type staticModelsJSON struct {
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
 	Kimi        []*ModelInfo `json:"kimi"`
+	Grok        []*ModelInfo `json:"grok"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 }
@@ -79,6 +82,11 @@ func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
 }
 
+// GetGrokModels returns the standard Grok (xAI) model definitions.
+func GetGrokModels() []*ModelInfo {
+	return WithGrokBuiltins(cloneModelInfos(getModels().Grok))
+}
+
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
@@ -96,6 +104,12 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImageModelInfo())
 }
 
+// WithGrokBuiltins injects hard-coded Grok model definitions that should not
+// depend on remote models.json updates.
+func WithGrokBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, grokBuiltinCodeFastModelInfo(), grokBuiltinFourFastModelInfo())
+}
+
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
@@ -111,6 +125,32 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func grokBuiltinCodeFastModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  grokBuiltinCodeFastModelID,
+		Object:              "model",
+		OwnedBy:             "xai",
+		Type:                "grok",
+		DisplayName:         "Grok Code Fast 1",
+		ContextLength:       131072,
+		MaxCompletionTokens: 16384,
+		SupportedParameters: []string{"tools"},
+	}
+}
+
+func grokBuiltinFourFastModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  grokBuiltinFourFastModelID,
+		Object:              "model",
+		OwnedBy:             "xai",
+		Type:                "grok",
+		DisplayName:         "Grok 4 Fast",
+		ContextLength:       131072,
+		MaxCompletionTokens: 16384,
+		SupportedParameters: []string{"tools"},
 	}
 }
 
@@ -241,9 +281,11 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCodexProModels()
 	case "kimi":
 		return GetKimiModels()
+	case "grok":
+		return GetGrokModels()
 	case "antigravity":
 		return GetAntigravityModels()
-	case "xai", "x-ai", "grok":
+	case "xai", "x-ai":
 		return GetXAIModels()
 	default:
 		return nil
@@ -266,6 +308,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
+		data.Grok,
 		data.Antigravity,
 		data.XAI,
 	}

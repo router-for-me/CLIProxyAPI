@@ -69,8 +69,14 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
-	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained
-	// in memory for Management API consumers.
+	// LocalModelOnly mirrors the --local-model CLI flag. When true, remote
+	// per-account model discovery (e.g., GET api.x.ai/v1/models for Grok auths)
+	// is suppressed and only the embedded static catalog is exposed. Not
+	// persisted to YAML/JSON — set at process start from the CLI.
+	LocalModelOnly bool `yaml:"-" json:"-"`
+
+	// RedisUsageQueueRetentionSeconds controls how long (in seconds) usage queue items
+	// are retained in memory for the Redis RESP interface (LPOP/RPOP).
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
@@ -125,9 +131,18 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	// AnthropicCompatibility defines Anthropic API compatibility configurations for external providers.
+	// Use this for providers that implement the Anthropic messages API (x-api-key auth, /v1/messages endpoint)
+	// but are hosted at a custom base URL (not api.anthropic.com).
+	AnthropicCompatibility []AnthropicCompatibility `yaml:"anthropic-compatibility" json:"anthropic-compatibility"`
+
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
+	// GrokAuth defines a list of Grok (xAI SuperGrok) OAuth account configurations.
+	// Entries are normally populated by --grok-login and updated automatically on token refresh.
+	GrokAuth []GrokAuth `yaml:"grok-auth,omitempty" json:"grok-auth,omitempty"`
 
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
@@ -476,6 +491,28 @@ type CodexKey struct {
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
 
+// GrokAuth represents a single SuperGrok OAuth account persisted via
+// --grok-login. Mirrors CodexKey/ClaudeKey structurally; mind that the
+// access_token is short-lived (~1h) and rotates on every refresh.
+type GrokAuth struct {
+	// Name is a human-readable label for this account.
+	Name string `yaml:"name" json:"name"`
+	// Email associated with the account (from the id_token claims, when available).
+	Email string `yaml:"email,omitempty" json:"email,omitempty"`
+	// AccountID is the xAI account identifier (from the id_token, when available).
+	AccountID string `yaml:"account-id,omitempty" json:"account-id,omitempty"`
+	// AccessToken is the OAuth2 bearer token. SHORT-LIVED — refreshed automatically.
+	AccessToken string `yaml:"access-token" json:"access-token"`
+	// RefreshToken is the rotating refresh token. Persisted atomically after each refresh.
+	RefreshToken string `yaml:"refresh-token" json:"refresh-token"`
+	// IDToken is the OIDC ID token (optional, used for account-id extraction).
+	IDToken string `yaml:"id-token,omitempty" json:"id-token,omitempty"`
+	// ExpiresAt is the RFC3339 expiry timestamp of AccessToken.
+	ExpiresAt string `yaml:"expires-at,omitempty" json:"expires-at,omitempty"`
+	// Priority controls the round-robin selection priority (higher wins).
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+}
+
 // CodexModel describes a mapping between an alias and the actual upstream model name.
 type CodexModel struct {
 	// Name is the upstream model identifier used when issuing requests.
@@ -595,6 +632,57 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
+
+// AnthropicCompatibility represents the configuration for a provider that implements
+// the Anthropic messages API format at a custom base URL.
+// Requests use x-api-key authentication and are forwarded to /v1/messages.
+type AnthropicCompatibility struct {
+	// Name is the identifier for this Anthropic compatibility configuration.
+	Name string `yaml:"name" json:"name"`
+
+	// Priority controls selection preference when multiple providers or credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces model aliases for this provider.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the base URL for the external Anthropic-compatible API endpoint.
+	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// APIKeyEntries defines API keys with optional per-key proxy configuration.
+	APIKeyEntries []AnthropicCompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+
+	// Models defines the model configurations including aliases for routing.
+	Models []AnthropicCompatibilityModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent to this provider.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+// AnthropicCompatibilityAPIKey represents an API key configuration with optional proxy setting.
+type AnthropicCompatibilityAPIKey struct {
+	// APIKey is the authentication key for accessing the external API services.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+}
+
+// AnthropicCompatibilityModel describes a mapping between an alias and the actual upstream model name.
+type AnthropicCompatibilityModel struct {
+	// Name is the actual model name used by the external provider.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the model name alias that clients will use to reference this model.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m AnthropicCompatibilityModel) GetName() string  { return m.Name }
+func (m AnthropicCompatibilityModel) GetAlias() string { return m.Alias }
 
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,

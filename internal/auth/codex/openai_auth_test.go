@@ -33,7 +33,7 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 		},
 	}
 
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "test-auth-id", "dummy_refresh_token", 3)
 	if err == nil {
 		t.Fatalf("expected error for non-retryable refresh failure")
 	}

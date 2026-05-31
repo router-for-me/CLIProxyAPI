@@ -5,6 +5,7 @@ cli-proxy-api
 # Configuration
 config.yaml
 .env
+.env.local
 
 # Generated content
 bin/*
@@ -12,6 +13,7 @@ logs/*
 conv/*
 temp/*
 refs/*
+.omc/*
 
 # Storage backends
 pgstore/*

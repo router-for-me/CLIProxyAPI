@@ -34,6 +34,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -42,6 +45,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -602,6 +606,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
+		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -705,6 +712,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
+		mgmt.GET("/grok-auth-url", s.mgmt.RequestGrokToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
@@ -836,11 +844,99 @@ func (s *Server) watchKeepAlive() {
 	}
 }
 
+// grokModelFetcher is an interface satisfied by *executor.GrokExecutor, allowing
+// tests to substitute a fake implementation.
+type grokModelFetcher interface {
+	FetchAvailableModels(ctx context.Context, auth *cliproxyauth.Auth) ([]*registry.ModelInfo, error)
+}
+
+// enrichWithPerAuthGrokModels merges per-account model lists discovered from
+// api.x.ai/v1/models into seen (keyed by model ID) for every grok auth
+// registered with authManager. When localModelOnly is true, or when no grok
+// auths are registered, the static fallback inside GlobalPerAuthModelCache is
+// used instead.
+func enrichWithPerAuthGrokModels(ctx context.Context, authManager *cliproxyauth.Manager, fetcher grokModelFetcher, localModelOnly bool, seen map[string]struct{}) []*registry.ModelInfo {
+	var grokAuths []*cliproxyauth.Auth
+	if authManager != nil {
+		for _, a := range authManager.List() {
+			if strings.EqualFold(a.Provider, "grok") {
+				grokAuths = append(grokAuths, a)
+			}
+		}
+	}
+
+	cache := registry.GlobalPerAuthModelCache()
+
+	// No grok auths — return static fallback once (deduped against seen).
+	if len(grokAuths) == 0 {
+		var out []*registry.ModelInfo
+		fallback, _ := cache.GetOrFetch(ctx, "", localModelOnly, nil)
+		for _, m := range fallback {
+			if _, dup := seen[m.ID]; !dup {
+				seen[m.ID] = struct{}{}
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+
+	var out []*registry.ModelInfo
+	for _, a := range grokAuths {
+		auth := a // capture
+		models, err := cache.GetOrFetch(ctx, auth.ID, localModelOnly, func(ctx context.Context) ([]*registry.ModelInfo, error) {
+			return fetcher.FetchAvailableModels(ctx, auth)
+		})
+		if err != nil {
+			log.Warnf("unifiedModels: per-auth grok model fetch failed for auth %s: %v", auth.ID, err)
+		}
+		models = mergeGrokModelsWithStatic(models)
+		if len(models) > 0 {
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, "grok", models)
+		}
+		for _, m := range models {
+			if _, dup := seen[m.ID]; !dup {
+				seen[m.ID] = struct{}{}
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+func mergeGrokModelsWithStatic(models []*registry.ModelInfo) []*registry.ModelInfo {
+	merged := make([]*registry.ModelInfo, 0, len(models)+len(registry.GetGrokModels()))
+	seen := make(map[string]struct{}, len(models))
+	appendModel := func(m *registry.ModelInfo) {
+		if m == nil || strings.TrimSpace(m.ID) == "" {
+			return
+		}
+		key := strings.ToLower(strings.TrimSpace(m.ID))
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, m)
+	}
+	for _, m := range models {
+		appendModel(m)
+	}
+	for _, m := range registry.GetGrokModels() {
+		appendModel(m)
+	}
+	return merged
+}
+
 // unifiedModelsHandler creates a unified handler for the /v1/models endpoint
 // that routes to different handlers based on the User-Agent header.
 // If User-Agent starts with "claude-cli", it routes to Claude handler,
 // otherwise it routes to OpenAI handler.
+//
+// For OpenAI-format responses the handler additionally enriches the model list
+// with per-account Grok models discovered from api.x.ai/v1/models, using
+// GlobalPerAuthModelCache for caching and static-fallback when --local-model
+// is set or no grok accounts are registered.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
+	grokExec := executor.NewGrokExecutor(s.cfg)
 	return func(c *gin.Context) {
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
 			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
@@ -860,12 +956,54 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		// Route to Claude handler if User-Agent starts with "claude-cli"
 		if strings.HasPrefix(userAgent, "claude-cli") {
-			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
 			claudeHandler.ClaudeModels(c)
-		} else {
-			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
-			openaiHandler.OpenAIModels(c)
+			return
 		}
+
+		// OpenAI path — build base model list then enrich with per-auth Grok models.
+		allModels := openaiHandler.Models()
+
+		// Track model IDs already present so grok enrichment does not duplicate them.
+		seen := make(map[string]struct{}, len(allModels))
+		for _, m := range allModels {
+			if id, ok := m["id"].(string); ok && id != "" {
+				seen[id] = struct{}{}
+			}
+		}
+
+		localModelOnly := s.cfg != nil && s.cfg.LocalModelOnly
+		grokModels := enrichWithPerAuthGrokModels(c.Request.Context(), s.handlers.AuthManager, grokExec, localModelOnly, seen)
+
+		// Convert grok ModelInfo entries to the map format used by OpenAIModels.
+		for _, mi := range grokModels {
+			allModels = append(allModels, map[string]any{
+				"id":       mi.ID,
+				"object":   mi.Object,
+				"created":  mi.Created,
+				"owned_by": mi.OwnedBy,
+			})
+		}
+
+		// Filter to only include the 4 required fields (mirrors openaiHandler.OpenAIModels).
+		filteredModels := make([]map[string]any, len(allModels))
+		for i, model := range allModels {
+			filteredModel := map[string]any{
+				"id":     model["id"],
+				"object": model["object"],
+			}
+			if created, exists := model["created"]; exists {
+				filteredModel["created"] = created
+			}
+			if ownedBy, exists := model["owned_by"]; exists {
+				filteredModel["owned_by"] = ownedBy
+			}
+			filteredModels[i] = filteredModel
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   filteredModels,
+		})
 	}
 }
 
@@ -1379,6 +1517,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
 		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	}
 
 	if oldCfg == nil || oldCfg.RedisUsageQueueRetentionSeconds != cfg.RedisUsageQueueRetentionSeconds {
@@ -1494,9 +1633,14 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
+	anthropicCompatCount := 0
+	for i := range cfg.AnthropicCompatibility {
+		entry := cfg.AnthropicCompatibility[i]
+		anthropicCompatCount += len(entry.APIKeyEntries)
+	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount + anthropicCompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat + %d Anthropic-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
@@ -1504,6 +1648,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		codexAPIKeyCount,
 		vertexAICompatCount,
 		openAICompatCount,
+		anthropicCompatCount,
 	)
 }
 
