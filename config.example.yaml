@@ -264,17 +264,13 @@ nonstream-keepalive-interval: 0
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
-#       # You may repeat the same alias to build an internal model pool.
-#       # The client still sees only one alias in the model list.
-#       # Requests to that alias will round-robin across the upstream names below,
-#       # and if the chosen upstream fails before producing output, the request will
-#       # continue with the next upstream model in the same alias pool.
+#       # If multiple models share the same alias, the first-listed model wins
+#       # on selection. Remaining candidates serve as a fallback pool for
+#       # retryable errors (same behavior as other providers).
 #       - name: "deepseek-v3.1"
-#         alias: "claude-opus-4.66"
+#         alias: "shared-alias"
 #       - name: "glm-5"
-#         alias: "claude-opus-4.66"
-#       - name: "kimi-k2.5"
-#         alias: "claude-opus-4.66"
+#         alias: "shared-alias"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:

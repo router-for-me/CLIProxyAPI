@@ -176,9 +176,6 @@ type Manager struct {
 	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
 	apiKeyModelAlias atomic.Value
 
-	// modelPoolOffsets tracks per-auth alias pool rotation state.
-	modelPoolOffsets map[string]int
-
 	// runtimeConfig stores the latest application config for request-time decisions.
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
@@ -209,7 +206,6 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		auths:            make(map[string]*Auth),
 		homeRuntimeAuths: make(map[string]map[string]*Auth),
 		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -456,69 +452,6 @@ func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
 	return strings.TrimSpace(auth.Attributes["compat_name"]) != ""
 }
 
-func openAICompatProviderKey(auth *Auth) string {
-	if auth == nil {
-		return ""
-	}
-	if auth.Attributes != nil {
-		if providerKey := strings.TrimSpace(auth.Attributes["provider_key"]); providerKey != "" {
-			return strings.ToLower(providerKey)
-		}
-		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
-			return strings.ToLower(compatName)
-		}
-	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
-}
-
-func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
-	base := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
-	if base == "" {
-		base = strings.TrimSpace(requestedModel)
-	}
-	return strings.ToLower(strings.TrimSpace(auth.ID)) + "|" + openAICompatProviderKey(auth) + "|" + strings.ToLower(base)
-}
-
-func (m *Manager) nextModelPoolOffset(key string, size int) int {
-	if m == nil || size <= 1 {
-		return 0
-	}
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return 0
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.modelPoolOffsets == nil {
-		m.modelPoolOffsets = make(map[string]int)
-	}
-	offset := m.modelPoolOffsets[key]
-	if offset >= 2_147_483_640 {
-		offset = 0
-	}
-	m.modelPoolOffsets[key] = offset + 1
-	if size <= 0 {
-		return 0
-	}
-	return offset % size
-}
-
-func rotateStrings(values []string, offset int) []string {
-	if len(values) <= 1 {
-		return values
-	}
-	if offset <= 0 {
-		out := make([]string, len(values))
-		copy(out, values)
-		return out
-	}
-	offset = offset % len(values)
-	out := make([]string, 0, len(values))
-	out = append(out, values[offset:]...)
-	out = append(out, values[:offset]...)
-	return out
-}
-
 func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedModel string) []string {
 	if m == nil || !isOpenAICompatAPIKeyAuth(auth) {
 		return nil
@@ -557,11 +490,7 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
-		if len(pool) == 1 {
-			return pool
-		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
-		return rotateStrings(pool, offset)
+		return pool
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
 	if strings.TrimSpace(resolved) == "" {

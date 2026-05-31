@@ -1572,6 +1572,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	}
 	now := time.Now().Unix()
 	models := make([]*ModelInfo, 0, len(compat.Models))
+	seen := make(map[string]struct{}, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
 		modelID := strings.TrimSpace(model.Alias)
@@ -1581,6 +1582,11 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if modelID == "" {
 			continue
 		}
+		key := strings.ToLower(modelID)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		modelType := "openai-compatibility"
 		if model.Image {
 			modelType = registry.OpenAIImageModelType

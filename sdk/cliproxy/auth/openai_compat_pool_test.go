@@ -249,36 +249,6 @@ func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	}
 }
 
-func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
-	alias := "claude-opus-4.66"
-	executor := &openAICompatPoolExecutor{id: "pool"}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "deepseek-v3.1", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
-
-	for i := 0; i < 3; i++ {
-		resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
-		if err != nil {
-			t.Fatalf("execute %d: %v", i, err)
-		}
-		if len(resp.Payload) == 0 {
-			t.Fatalf("execute %d returned empty payload", i)
-		}
-	}
-
-	got := executor.ExecuteModels()
-	want := []string{"deepseek-v3.1", "glm-5", "deepseek-v3.1"}
-	if len(got) != len(want) {
-		t.Fatalf("execute calls = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
 func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_request_error: malformed payload"}
@@ -576,33 +546,6 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLater
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("stream call %d model = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
-func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
-	alias := "claude-opus-4.66"
-	executor := &openAICompatPoolExecutor{id: "pool"}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "deepseek-v3.1", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
-
-	for i := 0; i < 2; i++ {
-		resp, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
-		if err != nil {
-			t.Fatalf("execute count %d: %v", i, err)
-		}
-		if len(resp.Payload) == 0 {
-			t.Fatalf("execute count %d returned empty payload", i)
-		}
-	}
-
-	got := executor.CountModels()
-	want := []string{"deepseek-v3.1", "glm-5"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("count call %d model = %q, want %q", i, got[i], want[i])
 		}
 	}
 }
