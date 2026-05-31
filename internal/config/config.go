@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cursorcomposer"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
@@ -695,6 +696,9 @@ type CursorComposerKey struct {
 	// ClientVersion is the Cursor IDE client version advertised upstream.
 	ClientVersion string `yaml:"client-version,omitempty" json:"client-version,omitempty"`
 
+	// SDKBridgeURL is the local Cursor SDK bridge endpoint (composer-api bridge). When set, requests use the SDK path.
+	SDKBridgeURL string `yaml:"sdk-bridge-url,omitempty" json:"sdk-bridge-url,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this credential if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
@@ -854,6 +858,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
+	// Fill Cursor Composer transport defaults (backend host, chat endpoint, client version).
+	cfg.SanitizeCursorComposerKeys()
+
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
@@ -970,6 +977,28 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+}
+
+// SanitizeCursorComposerKeys applies default Cursor Composer transport settings when unset.
+// Explicit config values take precedence over CURSOR_BACKEND_BASE_URL, CURSOR_CHAT_ENDPOINT,
+// and CURSOR_CLIENT_VERSION environment variables.
+func (cfg *Config) SanitizeCursorComposerKeys() {
+	if cfg == nil || len(cfg.CursorComposerKey) == 0 {
+		return
+	}
+	for i := range cfg.CursorComposerKey {
+		entry := &cfg.CursorComposerKey[i]
+		entry.BackendBaseURL = cursorcomposer.ResolveBackendBase(entry.BackendBaseURL)
+		entry.ChatEndpoint = cursorcomposer.ResolveChatEndpoint(entry.ChatEndpoint)
+		entry.ClientVersion = cursorcomposer.ResolveClientVersion(entry.ClientVersion)
+		entry.SDKBridgeURL = strings.TrimSpace(entry.SDKBridgeURL)
+		if entry.SDKBridgeURL == "" {
+			entry.SDKBridgeURL = "http://127.0.0.1:8792/sdk"
+		}
+		if strings.TrimSpace(entry.BaseURL) == "" {
+			entry.BaseURL = "https://api.cursor.com"
+		}
+	}
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

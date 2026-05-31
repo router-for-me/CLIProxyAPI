@@ -2025,6 +2025,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = mergeCursorComposerDefaultModels(models)
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -2619,6 +2620,40 @@ func defaultCursorComposerModels() []*ModelInfo {
 			SupportedInputModalities:  []string{"TEXT"},
 			SupportedOutputModalities: []string{"TEXT"},
 		})
+	}
+	return out
+}
+
+// mergeCursorComposerDefaultModels ensures canonical Composer model IDs remain
+// registered after config reloads or binary upgrades that previously left stale
+// client model sets in memory.
+func mergeCursorComposerDefaultModels(models []*ModelInfo) []*ModelInfo {
+	defaults := defaultCursorComposerModels()
+	if len(models) == 0 {
+		return defaults
+	}
+	seen := make(map[string]struct{}, len(models)+len(defaults))
+	out := make([]*ModelInfo, 0, len(models)+len(defaults))
+	add := func(model *ModelInfo) {
+		if model == nil {
+			return
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			return
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	for _, model := range models {
+		add(model)
+	}
+	for _, model := range defaults {
+		add(model)
 	}
 	return out
 }
