@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,23 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	if err.RetryAfter() != nil {
 		t.Fatalf("expected nil explicit retryAfter for capacity fallback, got %v", *err.RetryAfter())
 	}
+}
+
+func TestNewCodexStatusErrSanitizesCloudflare524(t *testing.T) {
+	body := []byte(`<!DOCTYPE html><html><head><title>example.cc | 524: A timeout occurred</title></head><body>Cloudflare</body></html>`)
+
+	err := newCodexStatusErr(524, body)
+
+	if got := err.StatusCode(); got != http.StatusGatewayTimeout {
+		t.Fatalf("status code = %d, want %d", got, http.StatusGatewayTimeout)
+	}
+	if got := err.ProviderStatusCode(); got != 524 {
+		t.Fatalf("provider status code = %d, want 524", got)
+	}
+	if strings.Contains(err.Error(), "<!DOCTYPE") || strings.Contains(err.Error(), "<html") {
+		t.Fatalf("error leaked HTML body: %s", err.Error())
+	}
+	assertCodexErrorCode(t, err.Error(), "server_error", "upstream_timeout")
 }
 
 func TestNewCodexStatusErrClassifiesKnownCodexFailures(t *testing.T) {

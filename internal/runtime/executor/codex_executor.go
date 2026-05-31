@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -1009,12 +1010,41 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	if isCodexModelCapacityError(body) {
 		errCode = http.StatusTooManyRequests
 	}
+	if isCodexCloudflareTimeoutError(statusCode, body) {
+		body = codexCloudflareTimeoutErrorBody(statusCode)
+		return statusErr{
+			code:               http.StatusGatewayTimeout,
+			providerStatusCode: statusCode,
+			msg:                string(body),
+			errorCode:          "upstream_timeout",
+		}
+	}
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, providerStatusCode: statusCode, msg: string(body)}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+func isCodexCloudflareTimeoutError(statusCode int, body []byte) bool {
+	if statusCode != 524 {
+		return false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || json.Valid(trimmed) {
+		return false
+	}
+	lower := strings.ToLower(string(trimmed))
+	return strings.Contains(lower, "cloudflare") ||
+		strings.Contains(lower, "524: a timeout occurred") ||
+		strings.Contains(lower, "a timeout occurred")
+}
+
+func codexCloudflareTimeoutErrorBody(providerStatusCode int) []byte {
+	body := []byte(`{"error":{"message":"","type":"server_error","code":"upstream_timeout"}}`)
+	body, _ = sjson.SetBytes(body, "error.message", fmt.Sprintf("upstream Cloudflare timeout from Codex provider (provider status %d)", providerStatusCode))
+	return body
 }
 
 func classifyCodexStatusError(statusCode int, body []byte) []byte {

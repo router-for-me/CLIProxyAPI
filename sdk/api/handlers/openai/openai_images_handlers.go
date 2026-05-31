@@ -182,6 +182,19 @@ func normalizeImagesResponseFormat(responseFormat string) string {
 	return "b64_json"
 }
 
+func shouldStreamImagesRequest(c *gin.Context, requested bool) bool {
+	if !requested || c == nil {
+		return false
+	}
+	for _, part := range strings.Split(c.GetHeader("Accept"), ",") {
+		mediaType := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if strings.EqualFold(mediaType, "text/event-stream") {
+			return true
+		}
+	}
+	return false
+}
+
 func canonicalXAIImagesModel(model string) string {
 	baseModel := imagesModelBase(model)
 	if baseModel == xaiImagesQualityModel {
@@ -551,7 +564,7 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
-	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+	stream := shouldStreamImagesRequest(c, gjson.GetBytes(rawJSON, "stream").Bool())
 	if isMiniMaxImageModelName(imageModel) {
 		miniMaxReq, _, err := buildMiniMaxImageGenerationRequest(rawJSON, imageModel, prompt, nil)
 		if err != nil {
@@ -714,7 +727,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
-	stream := parseBoolField(c.PostForm("stream"), false)
+	stream := shouldStreamImagesRequest(c, parseBoolField(c.PostForm("stream"), false))
 	if isMiniMaxImageModelName(imageModel) {
 		rawForm := buildMiniMaxImageMultipartJSON(c, imageModel, prompt, responseFormat)
 		miniMaxReq, _, errBuild := buildMiniMaxImageGenerationRequest(rawForm, imageModel, prompt, images)
@@ -875,7 +888,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
-	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+	stream := shouldStreamImagesRequest(c, gjson.GetBytes(rawJSON, "stream").Bool())
 	images := collectXAIImagesFromJSON(rawJSON)
 
 	if isDefaultImagesToolModel(imageModel) {

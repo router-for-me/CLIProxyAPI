@@ -238,6 +238,38 @@ func TestBuildOpenAICompatImagesMultipartRequestPreservesStreamAndFileContentTyp
 	}
 }
 
+func TestShouldStreamImagesRequestRequiresSSEAccept(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested bool
+		accept    string
+		want      bool
+	}{
+		{name: "not requested", requested: false, accept: "text/event-stream", want: false},
+		{name: "missing accept", requested: true, accept: "", want: false},
+		{name: "json accept", requested: true, accept: "application/json", want: false},
+		{name: "wildcard accept", requested: true, accept: "*/*", want: false},
+		{name: "sse accept", requested: true, accept: "text/event-stream", want: true},
+		{name: "sse accept list", requested: true, accept: "application/json, text/event-stream; charset=utf-8", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			req := httptest.NewRequest(http.MethodPost, imagesEditsPath, nil)
+			if tt.accept != "" {
+				req.Header.Set("Accept", tt.accept)
+			}
+			c.Request = req
+
+			if got := shouldStreamImagesRequest(c, tt.requested); got != tt.want {
+				t.Fatalf("shouldStreamImagesRequest() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildImagesAPIResponseFromXAI(t *testing.T) {
 	payload := []byte(`{"created":123,"data":[{"b64_json":"AA==","revised_prompt":"refined","mime_type":"image/png"}],"usage":{"total_tokens":0}}`)
 
