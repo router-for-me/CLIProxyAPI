@@ -554,6 +554,25 @@ type OpenAICompatibility struct {
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// APIType selects provider-specific request semantics for compatible configurations.
+	// Empty uses generic OpenAI-compatible behavior; "azure-openai" uses Azure request semantics.
+	APIType string `yaml:"api-type,omitempty" json:"api-type,omitempty"`
+
+	// APIVersion is appended as the api-version query parameter for Azure OpenAI requests.
+	APIVersion string `yaml:"api-version,omitempty" json:"api-version,omitempty"`
+
+	// Deployment is the Azure OpenAI deployment identifier used by deployment path mode.
+	Deployment string `yaml:"deployment,omitempty" json:"deployment,omitempty"`
+
+	// PathMode selects the Azure OpenAI URL shape: "deployment" or "v1".
+	PathMode string `yaml:"path-mode,omitempty" json:"path-mode,omitempty"`
+
+	// AuthType selects Azure OpenAI authentication semantics: "api-key" or "aad".
+	AuthType string `yaml:"auth-type,omitempty" json:"auth-type,omitempty"`
+
+	// IncludeUsage controls whether stream_options.include_usage is requested for streams.
+	IncludeUsage *bool `yaml:"include-usage,omitempty" json:"include-usage,omitempty"`
+
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
@@ -565,6 +584,46 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+// OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
+func (c *OpenAICompatibility) UnmarshalYAML(value *yaml.Node) error {
+	type plain OpenAICompatibility
+	var out plain
+	if err := value.Decode(&out); err != nil {
+		return err
+	}
+	var aliases struct {
+		APIType      string `yaml:"api_type"`
+		APIVersion   string `yaml:"api_version"`
+		Deployment   string `yaml:"deployment_id"`
+		PathMode     string `yaml:"path_mode"`
+		AuthType     string `yaml:"auth_type"`
+		IncludeUsage *bool  `yaml:"include_usage"`
+	}
+	if err := value.Decode(&aliases); err != nil {
+		return err
+	}
+	if out.APIType == "" {
+		out.APIType = aliases.APIType
+	}
+	if out.APIVersion == "" {
+		out.APIVersion = aliases.APIVersion
+	}
+	if out.Deployment == "" {
+		out.Deployment = aliases.Deployment
+	}
+	if out.PathMode == "" {
+		out.PathMode = aliases.PathMode
+	}
+	if out.AuthType == "" {
+		out.AuthType = aliases.AuthType
+	}
+	if out.IncludeUsage == nil {
+		out.IncludeUsage = aliases.IncludeUsage
+	}
+	*c = OpenAICompatibility(out)
+	return nil
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

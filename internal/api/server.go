@@ -37,6 +37,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/azureopenai"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
@@ -373,10 +374,19 @@ func (s *Server) setupRoutes() {
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
+	azureOpenAIHandlers := azureopenai.NewAzureOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
+
+	// Azure OpenAI client-facing API routes
+	azureOpenAI := s.engine.Group("/openai")
+	azureOpenAI.Use(AuthMiddleware(s.accessManager))
+	{
+		azureOpenAI.POST("/deployments/:deployment/chat/completions", azureOpenAIHandlers.DeploymentChatCompletions)
+		azureOpenAI.POST("/v1/chat/completions", azureOpenAIHandlers.ChatCompletions)
+	}
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
