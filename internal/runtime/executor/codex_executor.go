@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -35,7 +36,11 @@ const (
 	codexDefaultImageToolModel = "gpt-image-2"
 )
 
-var dataTag = []byte("data:")
+var (
+	dataTag                                = []byte("data:")
+	codexHTTPStreamFirstResponseTimeout    = 2 * time.Minute
+	codexHTTPStreamFirstResponseTimeoutMsg = "codex upstream stream first response timeout after %s"
+)
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
 // response.completed.response.output empty. Keep the stream path aligned with the
@@ -583,18 +588,28 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	applyCodexHTTPStreamFirstResponseTimeout(httpClient, codexHTTPStreamFirstResponseTimeout)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpStartedAt := time.Now()
+	helps.LogWithRequestID(ctx).Infof("codex http stream upstream request start url=%s body_bytes=%d auth=%s", url, len(body), authID)
 	httpResp, err := httpClient.Do(httpReq)
+	helps.LogWithRequestID(ctx).Infof("codex http stream upstream request returned elapsed=%s err=%v", time.Since(httpStartedAt).Truncate(time.Millisecond), err)
 	if err != nil {
+		if isCodexHTTPStreamFirstResponseTimeout(err, codexHTTPStreamFirstResponseTimeout) && ctx.Err() == nil {
+			err = statusErr{code: http.StatusGatewayTimeout, msg: fmt.Sprintf(codexHTTPStreamFirstResponseTimeoutMsg, codexHTTPStreamFirstResponseTimeout)}
+		}
+		httpClient.CloseIdleConnections()
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.LogWithRequestID(ctx).Infof("codex http stream upstream connected status=%d content_type=%q", httpResp.StatusCode, httpResp.Header.Get("Content-Type"))
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
+		httpClient.CloseIdleConnections()
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
@@ -607,10 +622,41 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		startedAt := time.Now()
+		var lineCount atomic.Int64
+		var dataLineCount atomic.Int64
+		var translatedChunkCount atomic.Int64
+		var lastLineAt atomic.Int64
+		lastLineAt.Store(startedAt.UnixNano())
+		progressDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					last := time.Unix(0, lastLineAt.Load())
+					helps.LogWithRequestID(ctx).Warnf("codex http stream still open elapsed=%s idle=%s upstream_lines=%d upstream_data_lines=%d downstream_chunks=%d ctx_err=%v",
+						time.Since(startedAt).Truncate(time.Second),
+						time.Since(last).Truncate(time.Second),
+						lineCount.Load(),
+						dataLineCount.Load(),
+						translatedChunkCount.Load(),
+						ctx.Err(),
+					)
+				}
+			}
+		}()
+		defer close(progressDone)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
+			httpClient.CloseIdleConnections()
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
@@ -618,15 +664,25 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		for scanner.Scan() {
+			lineCount.Add(1)
+			lastLineAt.Store(time.Now().UnixNano())
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 
 			if bytes.HasPrefix(line, dataTag) {
+				dataLineCount.Add(1)
 				data := bytes.TrimSpace(line[5:])
 				if streamErr, ok := codexTerminalStreamContextLengthErr(data); ok {
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
+					helps.LogWithRequestID(ctx).Warnf("codex http stream terminal upstream context error after %s lines=%d data_lines=%d chunks=%d err=%v",
+						time.Since(startedAt).Truncate(time.Second),
+						lineCount.Load(),
+						dataLineCount.Load(),
+						translatedChunkCount.Load(),
+						streamErr,
+					)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 					case <-ctx.Done():
@@ -643,14 +699,28 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					translatedLine = append([]byte("data: "), data...)
+					helps.LogWithRequestID(ctx).Infof("codex http stream saw response.completed after %s lines=%d data_lines=%d chunks=%d",
+						time.Since(startedAt).Truncate(time.Second),
+						lineCount.Load(),
+						dataLineCount.Load(),
+						translatedChunkCount.Load(),
+					)
 				}
 			}
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
 			for i := range chunks {
+				translatedChunkCount.Add(1)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
+					helps.LogWithRequestID(ctx).Warnf("codex http stream downstream context done while sending chunk after %s lines=%d data_lines=%d chunks=%d ctx_err=%v",
+						time.Since(startedAt).Truncate(time.Second),
+						lineCount.Load(),
+						dataLineCount.Load(),
+						translatedChunkCount.Load(),
+						ctx.Err(),
+					)
 					return
 				}
 			}
@@ -658,13 +728,55 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
+			helps.LogWithRequestID(ctx).Warnf("codex http stream scanner exited with error after %s lines=%d data_lines=%d chunks=%d ctx_err=%v scan_err=%v",
+				time.Since(startedAt).Truncate(time.Second),
+				lineCount.Load(),
+				dataLineCount.Load(),
+				translatedChunkCount.Load(),
+				ctx.Err(),
+				errScan,
+			)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
+			return
 		}
+		helps.LogWithRequestID(ctx).Infof("codex http stream scanner completed after %s lines=%d data_lines=%d chunks=%d ctx_err=%v",
+			time.Since(startedAt).Truncate(time.Second),
+			lineCount.Load(),
+			dataLineCount.Load(),
+			translatedChunkCount.Load(),
+			ctx.Err(),
+		)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func applyCodexHTTPStreamFirstResponseTimeout(client *http.Client, timeout time.Duration) {
+	if client == nil || timeout <= 0 {
+		return
+	}
+	if client.Transport == nil {
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
+			transport := defaultTransport.Clone()
+			transport.ResponseHeaderTimeout = timeout
+			client.Transport = transport
+		}
+		return
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok && transport != nil {
+		clone := transport.Clone()
+		clone.ResponseHeaderTimeout = timeout
+		client.Transport = clone
+	}
+}
+
+func isCodexHTTPStreamFirstResponseTimeout(err error, timeout time.Duration) bool {
+	if err == nil || timeout <= 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "timeout awaiting response headers")
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

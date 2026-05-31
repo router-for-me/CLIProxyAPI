@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // OAuth configuration constants for OpenAI Codex
@@ -25,6 +26,11 @@ const (
 	TokenURL    = "https://auth.openai.com/oauth/token"
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	RedirectURI = "http://localhost:1455/auth/callback"
+)
+
+var (
+	codexRefreshGroup        singleflight.Group
+	codexRefreshGroupTimeout = time.Minute
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -184,6 +190,45 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 // This method is called when an access token has expired. It makes a request to the
 // token endpoint to obtain a new set of tokens.
 func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
+	if refreshToken == "" {
+		return nil, fmt.Errorf("refresh token is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errCtx := ctx.Err(); errCtx != nil {
+		return nil, errCtx
+	}
+
+	resultC := codexRefreshGroup.DoChan(refreshToken, func() (interface{}, error) {
+		refreshCtx := context.WithoutCancel(ctx)
+		var cancel context.CancelFunc
+		if codexRefreshGroupTimeout > 0 {
+			refreshCtx, cancel = context.WithTimeout(refreshCtx, codexRefreshGroupTimeout)
+		} else {
+			refreshCtx, cancel = context.WithCancel(refreshCtx)
+		}
+		defer cancel()
+		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
+	})
+
+	var result singleflight.Result
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result = <-resultC:
+	}
+	if result.Err != nil {
+		return nil, result.Err
+	}
+	tokenData, ok := result.Val.(*CodexTokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
+	}
+	return tokenData, nil
+}
+
+func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}

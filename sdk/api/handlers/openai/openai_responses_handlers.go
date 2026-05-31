@@ -14,12 +14,15 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -485,7 +488,38 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	requestLog := log.WithField("request_id", "--------")
+	if reqID := logging.GetRequestID(cliCtx); reqID != "" {
+		requestLog = log.WithField("request_id", reqID)
+	}
+	streamStartedAt := time.Now()
+	requestLog.Infof("openai responses stream start model=%q body_bytes=%d", modelName, len(rawJSON))
+	executeDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-executeDone:
+				return
+			case <-c.Request.Context().Done():
+				return
+			case <-ticker.C:
+				requestLog.Warnf("openai responses stream waiting ExecuteStreamWithAuthManager elapsed=%s request_ctx_err=%v cli_ctx_err=%v",
+					time.Since(streamStartedAt).Truncate(time.Second),
+					c.Request.Context().Err(),
+					cliCtx.Err(),
+				)
+			}
+		}
+	}()
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	close(executeDone)
+	requestLog.Infof("openai responses stream ExecuteStreamWithAuthManager returned elapsed=%s data_chan_nil=%t err_chan_nil=%t",
+		time.Since(streamStartedAt).Truncate(time.Millisecond),
+		dataChan == nil,
+		errChan == nil,
+	)
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -494,13 +528,18 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 	framer := &responsesSSEFramer{}
+	firstChunkWait := time.NewTicker(30 * time.Second)
+	defer firstChunkWait.Stop()
 
 	// Peek at the first chunk
 	for {
 		select {
 		case <-c.Request.Context().Done():
+			requestLog.Warnf("openai responses stream downstream canceled while waiting first chunk elapsed=%s err=%v", time.Since(streamStartedAt).Truncate(time.Second), c.Request.Context().Err())
 			cliCancel(c.Request.Context().Err())
 			return
+		case <-firstChunkWait.C:
+			requestLog.Warnf("openai responses stream still waiting first chunk elapsed=%s request_ctx_err=%v cli_ctx_err=%v", time.Since(streamStartedAt).Truncate(time.Second), c.Request.Context().Err(), cliCtx.Err())
 		case errMsg, ok := <-errChan:
 			if !ok {
 				// Err channel closed cleanly; wait for data channel.
@@ -508,6 +547,11 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
+			if errMsg != nil {
+				requestLog.Warnf("openai responses stream failed before first chunk elapsed=%s status=%d err=%v", time.Since(streamStartedAt).Truncate(time.Second), errMsg.StatusCode, errMsg.Error)
+			} else {
+				requestLog.Warnf("openai responses stream failed before first chunk elapsed=%s err=<nil>", time.Since(streamStartedAt).Truncate(time.Second))
+			}
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -518,6 +562,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		case chunk, ok := <-dataChan:
 			if !ok {
 				// Stream closed without data? Send headers and done.
+				requestLog.Warnf("openai responses stream data channel closed before first chunk elapsed=%s", time.Since(streamStartedAt).Truncate(time.Second))
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write([]byte("\n"))
@@ -527,6 +572,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			}
 
 			// Success! Set headers.
+			requestLog.Infof("openai responses stream first chunk received elapsed=%s bytes=%d", time.Since(streamStartedAt).Truncate(time.Millisecond), len(chunk))
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 

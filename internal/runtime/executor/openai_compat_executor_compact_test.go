@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -404,6 +405,59 @@ func TestOpenAICompatExecutorStreamRejectsPlainJSONAfterBlankLines(t *testing.T)
 	}
 	if !strings.Contains(gotErr.Error(), "upstream failed") {
 		t.Fatalf("stream error = %v", gotErr)
+	}
+}
+
+func TestOpenAICompatExecutorStreamTimesOutWaitingForUpstreamResponse(t *testing.T) {
+	origTimeout := openAICompatStreamFirstResponseTimeout
+	openAICompatStreamFirstResponseTimeout = 50 * time.Millisecond
+	defer func() {
+		openAICompatStreamFirstResponseTimeout = origTimeout
+	}()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+
+	errC := make(chan error, 1)
+	go func() {
+		_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "openrouter-model",
+			Payload: []byte(`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai"),
+			Stream:       true,
+		})
+		errC <- err
+	}()
+
+	var err error
+	select {
+	case err = <-errC:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream first response timeout error")
+	}
+	if err == nil {
+		t.Fatal("expected first response timeout error, got nil")
+	}
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode(): %v", err, err)
+	}
+	if got := statusErr.StatusCode(); got != http.StatusGatewayTimeout {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusGatewayTimeout, err)
+	}
+	if !strings.Contains(err.Error(), "openai-compatible upstream stream first response timeout after 50ms") {
+		t.Fatalf("error message missing first response timeout: %v", err)
 	}
 }
 

@@ -870,12 +870,31 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	entry := logEntryWithRequestID(ctx)
 	var lastErr error
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		modelStartedAt := time.Now()
+		entry.Infof("auth stream model attempt start provider=%s auth=%s route_model=%s exec_model=%s attempt=%d/%d", provider, safeAuthID(auth), routeModel, execModel, idx+1, len(execModels))
+		stopExecuteWatch := startAuthStreamStageWatch(ctx, "executor.ExecuteStream", map[string]any{
+			"provider":    provider,
+			"auth":        safeAuthID(auth),
+			"route_model": routeModel,
+			"exec_model":  execModel,
+		})
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		stopExecuteWatch()
+		entry.Infof("auth stream executor.ExecuteStream returned provider=%s auth=%s route_model=%s exec_model=%s elapsed=%s err=%v result_nil=%t",
+			provider,
+			safeAuthID(auth),
+			routeModel,
+			execModel,
+			time.Since(modelStartedAt).Truncate(time.Millisecond),
+			errStream,
+			streamResult == nil,
+		)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -894,7 +913,25 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
+		bootstrapStartedAt := time.Now()
+		stopBootstrapWatch := startAuthStreamStageWatch(ctx, "readStreamBootstrap", map[string]any{
+			"provider":    provider,
+			"auth":        safeAuthID(auth),
+			"route_model": routeModel,
+			"exec_model":  execModel,
+		})
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		stopBootstrapWatch()
+		entry.Infof("auth stream readStreamBootstrap returned provider=%s auth=%s route_model=%s exec_model=%s elapsed=%s buffered=%d closed=%t err=%v",
+			provider,
+			safeAuthID(auth),
+			routeModel,
+			execModel,
+			time.Since(bootstrapStartedAt).Truncate(time.Millisecond),
+			len(buffered),
+			closed,
+			bootstrapErr,
+		)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
@@ -1295,13 +1332,25 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	entry := logEntryWithRequestID(ctx)
+	startedAt := time.Now()
+	entry.Infof("auth manager ExecuteStream start providers=%s model=%s payload_bytes=%d", strings.Join(normalized, ","), req.Model, len(req.Payload))
+	stopWatch := startAuthStreamStageWatch(ctx, "Manager.ExecuteStream", map[string]any{
+		"providers": strings.Join(normalized, ","),
+		"model":     req.Model,
+	})
+	defer stopWatch()
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
+		attemptStartedAt := time.Now()
+		entry.Infof("auth manager ExecuteStream attempt start attempt=%d providers=%s model=%s", attempt+1, strings.Join(normalized, ","), req.Model)
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		entry.Infof("auth manager ExecuteStream attempt returned attempt=%d elapsed=%s err=%v result_nil=%t", attempt+1, time.Since(attemptStartedAt).Truncate(time.Millisecond), errStream, result == nil)
 		if errStream == nil {
+			entry.Infof("auth manager ExecuteStream success elapsed=%s attempts=%d", time.Since(startedAt).Truncate(time.Millisecond), attempt+1)
 			return result, nil
 		}
 		lastErr = errStream
@@ -1323,8 +1372,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
 			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
 		}
+		entry.Warnf("auth manager ExecuteStream failed elapsed=%s err=%v", time.Since(startedAt).Truncate(time.Millisecond), lastErr)
 		return nil, lastErr
 	}
+	entry.Warnf("auth manager ExecuteStream failed elapsed=%s err=auth_not_found", time.Since(startedAt).Truncate(time.Millisecond))
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
@@ -1536,6 +1587,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	entry := logEntryWithRequestID(ctx)
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -1548,7 +1600,29 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
+		pickStartedAt := time.Now()
+		entry.Infof("auth stream pickNextMixed start providers=%s route_model=%s tried=%d attempted=%d home_mode=%t home_auth_count=%d",
+			strings.Join(providers, ","),
+			routeModel,
+			len(tried),
+			len(attempted),
+			homeMode,
+			homeAuthCount,
+		)
+		stopPickWatch := startAuthStreamStageWatch(ctx, "pickNextMixed", map[string]any{
+			"providers":   strings.Join(providers, ","),
+			"route_model": routeModel,
+			"tried":       len(tried),
+			"attempted":   len(attempted),
+		})
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		stopPickWatch()
+		entry.Infof("auth stream pickNextMixed returned elapsed=%s provider=%s auth=%s err=%v",
+			time.Since(pickStartedAt).Truncate(time.Millisecond),
+			provider,
+			safeAuthID(auth),
+			errPick,
+		)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return nil, lastErr
@@ -1567,12 +1641,34 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		entry.Infof("auth stream prepared execution models provider=%s auth=%s route_model=%s models=%s pooled=%t",
+			provider,
+			safeAuthID(auth),
+			routeModel,
+			strings.Join(models, ","),
+			pooled,
+		)
 		if len(models) == 0 {
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
 		var errPrepare error
+		prepareStartedAt := time.Now()
+		entry.Infof("auth stream prepareRequestAuth start provider=%s auth=%s route_model=%s", provider, safeAuthID(auth), routeModel)
+		stopPrepareWatch := startAuthStreamStageWatch(execCtx, "prepareRequestAuth", map[string]any{
+			"provider":    provider,
+			"auth":        safeAuthID(auth),
+			"route_model": routeModel,
+		})
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
+		stopPrepareWatch()
+		entry.Infof("auth stream prepareRequestAuth returned provider=%s auth=%s route_model=%s elapsed=%s err=%v",
+			provider,
+			safeAuthID(auth),
+			routeModel,
+			time.Since(prepareStartedAt).Truncate(time.Millisecond),
+			errPrepare,
+		)
 		if errPrepare != nil {
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPrepare); ok && se != nil {
@@ -1583,7 +1679,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
+		executeStartedAt := time.Now()
+		entry.Infof("auth stream executeStreamWithModelPool start provider=%s auth=%s route_model=%s models=%s", provider, safeAuthID(auth), routeModel, strings.Join(models, ","))
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled)
+		entry.Infof("auth stream executeStreamWithModelPool returned provider=%s auth=%s route_model=%s elapsed=%s err=%v result_nil=%t",
+			provider,
+			safeAuthID(auth),
+			routeModel,
+			time.Since(executeStartedAt).Truncate(time.Millisecond),
+			errStream,
+			streamResult == nil,
+		)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1701,16 +1807,35 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 
 	id := strings.TrimSpace(auth.ID)
 	if id == "" {
-		return preparer.PrepareRequestAuth(ctx, auth.Clone())
+		entry := logEntryWithRequestID(ctx)
+		startedAt := time.Now()
+		entry.Infof("auth prepare direct start auth=<empty> provider=%s", auth.Provider)
+		updated, errPrepare := preparer.PrepareRequestAuth(ctx, auth.Clone())
+		entry.Infof("auth prepare direct returned auth=<empty> provider=%s elapsed=%s err=%v", auth.Provider, time.Since(startedAt).Truncate(time.Millisecond), errPrepare)
+		return updated, errPrepare
 	}
 
 	lockValue, _ := m.requestPrepareLocks.LoadOrStore(id, &requestAuthPrepareLock{})
 	lock, ok := lockValue.(*requestAuthPrepareLock)
 	if !ok || lock == nil {
-		return preparer.PrepareRequestAuth(ctx, auth.Clone())
+		entry := logEntryWithRequestID(ctx)
+		startedAt := time.Now()
+		entry.Infof("auth prepare direct start auth=%s provider=%s no_lock=true", safeAuthID(auth), auth.Provider)
+		updated, errPrepare := preparer.PrepareRequestAuth(ctx, auth.Clone())
+		entry.Infof("auth prepare direct returned auth=%s provider=%s no_lock=true elapsed=%s err=%v", safeAuthID(auth), auth.Provider, time.Since(startedAt).Truncate(time.Millisecond), errPrepare)
+		return updated, errPrepare
 	}
 
+	entry := logEntryWithRequestID(ctx)
+	lockStartedAt := time.Now()
+	entry.Infof("auth prepare lock wait start auth=%s provider=%s", safeAuthID(auth), auth.Provider)
+	stopLockWatch := startAuthStreamStageWatch(ctx, "prepareRequestAuth.lock", map[string]any{
+		"auth":     safeAuthID(auth),
+		"provider": auth.Provider,
+	})
 	lock.mu.Lock()
+	stopLockWatch()
+	entry.Infof("auth prepare lock acquired auth=%s provider=%s elapsed=%s", safeAuthID(auth), auth.Provider, time.Since(lockStartedAt).Truncate(time.Millisecond))
 	defer lock.mu.Unlock()
 
 	target := auth.Clone()
@@ -1721,10 +1846,19 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	m.mu.RUnlock()
 
 	if !preparer.ShouldPrepareRequestAuth(target) {
+		entry.Infof("auth prepare skipped after lock auth=%s provider=%s", safeAuthID(target), target.Provider)
 		return target, nil
 	}
 
+	prepareStartedAt := time.Now()
+	entry.Infof("auth prepare provider call start auth=%s provider=%s", safeAuthID(target), target.Provider)
+	stopPrepareWatch := startAuthStreamStageWatch(ctx, "PrepareRequestAuth.provider", map[string]any{
+		"auth":     safeAuthID(target),
+		"provider": target.Provider,
+	})
 	updated, errPrepare := preparer.PrepareRequestAuth(ctx, target)
+	stopPrepareWatch()
+	entry.Infof("auth prepare provider call returned auth=%s provider=%s elapsed=%s err=%v", safeAuthID(target), target.Provider, time.Since(prepareStartedAt).Truncate(time.Millisecond), errPrepare)
 	if errPrepare != nil {
 		return auth, errPrepare
 	}
@@ -1732,7 +1866,10 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 		return target, nil
 	}
 
+	updateStartedAt := time.Now()
+	entry.Infof("auth prepare manager update start auth=%s provider=%s", safeAuthID(updated), updated.Provider)
 	saved, errUpdate := m.Update(ctx, updated)
+	entry.Infof("auth prepare manager update returned auth=%s provider=%s elapsed=%s err=%v", safeAuthID(updated), updated.Provider, time.Since(updateStartedAt).Truncate(time.Millisecond), errUpdate)
 	if errUpdate != nil {
 		return updated, errUpdate
 	}
@@ -2332,7 +2469,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) && !isLocalStreamTimeoutResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -2647,10 +2784,13 @@ func isUnauthorizedError(err error) bool {
 	if err == nil {
 		return false
 	}
+	raw := strings.ToLower(err.Error())
+	if strings.Contains(raw, "refresh_token_reused") {
+		return false
+	}
 	if statusCodeFromError(err) == http.StatusUnauthorized {
 		return true
 	}
-	raw := strings.ToLower(err.Error())
 	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
 }
 
@@ -2765,6 +2905,15 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 		return false
 	}
 	return isRequestScopedNotFoundMessage(err.Message)
+}
+
+func isLocalStreamTimeoutResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusGatewayTimeout {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Message))
+	return strings.HasPrefix(lower, "codex upstream stream first response timeout after ") ||
+		strings.HasPrefix(lower, "openai-compatible upstream stream first response timeout after ")
 }
 
 // isRequestInvalidError returns true if the error represents a client request
@@ -4452,4 +4601,57 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
+}
+
+func safeAuthID(auth *Auth) string {
+	if auth == nil {
+		return "<nil>"
+	}
+	id := strings.TrimSpace(auth.ID)
+	if id != "" {
+		return id
+	}
+	file := strings.TrimSpace(auth.FileName)
+	if file != "" {
+		return filepath.Base(file)
+	}
+	label := strings.TrimSpace(auth.Label)
+	if label != "" {
+		return label
+	}
+	return "<empty>"
+}
+
+func startAuthStreamStageWatch(ctx context.Context, stage string, fields map[string]any) func() {
+	stage = strings.TrimSpace(stage)
+	if stage == "" {
+		stage = "unknown"
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	startedAt := time.Now()
+	stop := func() {
+		once.Do(func() {
+			close(done)
+		})
+	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		entry := logEntryWithRequestID(ctx)
+		for k, v := range fields {
+			entry = entry.WithField(k, v)
+		}
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				entry.Warnf("auth stream stage still running stage=%s elapsed=%s ctx_err=%v", stage, time.Since(startedAt).Truncate(time.Second), ctx.Err())
+			}
+		}
+	}()
+	return stop
 }
