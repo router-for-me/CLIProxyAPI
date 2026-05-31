@@ -669,6 +669,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
 
+		mgmt.GET("/cursor-composer-api-key", s.mgmt.GetCursorComposerKeys)
+		mgmt.PUT("/cursor-composer-api-key", s.mgmt.PutCursorComposerKeys)
+		mgmt.PATCH("/cursor-composer-api-key", s.mgmt.PatchCursorComposerKey)
+		mgmt.DELETE("/cursor-composer-api-key", s.mgmt.DeleteCursorComposerKey)
+
+		mgmt.GET("/cursor-api-key", s.mgmt.GetCursorKeys)
+		mgmt.PUT("/cursor-api-key", s.mgmt.PutCursorKeys)
+		mgmt.PATCH("/cursor-api-key", s.mgmt.PatchCursorKey)
+		mgmt.DELETE("/cursor-api-key", s.mgmt.DeleteCursorKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)

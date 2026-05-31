@@ -364,6 +364,10 @@ func (s *ConfigSynthesizer) synthesizeCursorComposerKeys(ctx *SynthesisContext) 
 		if v := strings.TrimSpace(entry.ClientVersion); v != "" {
 			attrs["client_version"] = v
 		}
+		attrs["sdk_bridge_url"] = strings.TrimSpace(entry.SDKBridgeURL)
+		if attrs["sdk_bridge_url"] == "" {
+			attrs["sdk_bridge_url"] = "http://127.0.0.1:8792/sdk"
+		}
 		if hash := diff.ComputeCursorComposerModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}

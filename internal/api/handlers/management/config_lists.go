@@ -1081,6 +1081,235 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// cursor-composer-api-key: []CursorComposerKey
+func (h *Handler) GetCursorComposerKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"cursor-composer-api-key": h.cursorComposerKeysWithAuthIndex()})
+}
+
+// GetCursorKeys is an alias for management panels that expect "cursor-api-key".
+func (h *Handler) GetCursorKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"cursor-api-key": h.cursorComposerKeysWithAuthIndex()})
+}
+
+func (h *Handler) PutCursorComposerKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.CursorComposerKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.CursorComposerKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	for i := range arr {
+		normalizeCursorComposerKey(&arr[i])
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.CursorComposerKey = append([]config.CursorComposerKey(nil), arr...)
+	h.cfg.SanitizeCursorComposerKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) PutCursorKeys(c *gin.Context) { h.PutCursorComposerKeys(c) }
+
+func (h *Handler) PatchCursorComposerKey(c *gin.Context) {
+	type cursorComposerKeyPatch struct {
+		APIKey         *string                       `json:"api-key"`
+		Priority       *int                          `json:"priority"`
+		Disabled       *bool                         `json:"disabled"`
+		Prefix         *string                       `json:"prefix"`
+		BaseURL        *string                       `json:"base-url"`
+		BackendBaseURL *string                       `json:"backend-base-url"`
+		ChatEndpoint   *string                       `json:"chat-endpoint"`
+		ClientVersion  *string                       `json:"client-version"`
+		SDKBridgeURL   *string                       `json:"sdk-bridge-url"`
+		ProxyURL       *string                       `json:"proxy-url"`
+		Models         *[]config.CursorComposerModel `json:"models"`
+		Headers        *map[string]string            `json:"headers"`
+		ExcludedModels *[]string                     `json:"excluded-models"`
+		DisableCooling *bool                         `json:"disable-cooling"`
+	}
+	var body struct {
+		Index *int                    `json:"index"`
+		Match *string                 `json:"match"`
+		Value *cursorComposerKeyPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CursorComposerKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.CursorComposerKey {
+			if h.cfg.CursorComposerKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.CursorComposerKey[targetIndex]
+	if body.Value.APIKey != nil {
+		trimmed := strings.TrimSpace(*body.Value.APIKey)
+		if trimmed == "" {
+			h.cfg.CursorComposerKey = append(h.cfg.CursorComposerKey[:targetIndex], h.cfg.CursorComposerKey[targetIndex+1:]...)
+			h.cfg.SanitizeCursorComposerKeys()
+			h.persistLocked(c)
+			return
+		}
+		entry.APIKey = trimmed
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.Disabled != nil {
+		entry.Disabled = *body.Value.Disabled
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+	}
+	if body.Value.BackendBaseURL != nil {
+		entry.BackendBaseURL = strings.TrimSpace(*body.Value.BackendBaseURL)
+	}
+	if body.Value.ChatEndpoint != nil {
+		entry.ChatEndpoint = strings.TrimSpace(*body.Value.ChatEndpoint)
+	}
+	if body.Value.ClientVersion != nil {
+		entry.ClientVersion = strings.TrimSpace(*body.Value.ClientVersion)
+	}
+	if body.Value.SDKBridgeURL != nil {
+		entry.SDKBridgeURL = strings.TrimSpace(*body.Value.SDKBridgeURL)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.CursorComposerModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.DisableCooling != nil {
+		entry.DisableCooling = *body.Value.DisableCooling
+	}
+	normalizeCursorComposerKey(&entry)
+	h.cfg.CursorComposerKey[targetIndex] = entry
+	h.cfg.SanitizeCursorComposerKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) PatchCursorKey(c *gin.Context) { h.PatchCursorComposerKey(c) }
+
+func (h *Handler) DeleteCursorComposerKey(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
+			base := strings.TrimSpace(baseRaw)
+			out := make([]config.CursorComposerKey, 0, len(h.cfg.CursorComposerKey))
+			for _, v := range h.cfg.CursorComposerKey {
+				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+					continue
+				}
+				out = append(out, v)
+			}
+			h.cfg.CursorComposerKey = out
+			h.cfg.SanitizeCursorComposerKeys()
+			h.persistLocked(c)
+			return
+		}
+
+		matchIndex := -1
+		matchCount := 0
+		for i := range h.cfg.CursorComposerKey {
+			if strings.TrimSpace(h.cfg.CursorComposerKey[i].APIKey) == val {
+				matchCount++
+				if matchIndex == -1 {
+					matchIndex = i
+				}
+			}
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+			return
+		}
+		if matchIndex != -1 {
+			h.cfg.CursorComposerKey = append(h.cfg.CursorComposerKey[:matchIndex], h.cfg.CursorComposerKey[matchIndex+1:]...)
+		}
+		h.cfg.SanitizeCursorComposerKeys()
+		h.persistLocked(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.CursorComposerKey) {
+			h.cfg.CursorComposerKey = append(h.cfg.CursorComposerKey[:idx], h.cfg.CursorComposerKey[idx+1:]...)
+			h.cfg.SanitizeCursorComposerKeys()
+			h.persistLocked(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
+func (h *Handler) DeleteCursorKey(c *gin.Context) { h.DeleteCursorComposerKey(c) }
+
+func normalizeCursorComposerKey(entry *config.CursorComposerKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.BackendBaseURL = strings.TrimSpace(entry.BackendBaseURL)
+	entry.ChatEndpoint = strings.TrimSpace(entry.ChatEndpoint)
+	entry.ClientVersion = strings.TrimSpace(entry.ClientVersion)
+	entry.SDKBridgeURL = strings.TrimSpace(entry.SDKBridgeURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.CursorComposerModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
 func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	if entry == nil {
 		return

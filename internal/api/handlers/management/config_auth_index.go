@@ -28,6 +28,11 @@ type vertexCompatKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type cursorComposerKeyWithAuthIndex struct {
+	config.CursorComposerKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type openAICompatibilityAPIKeyWithAuthIndex struct {
 	config.OpenAICompatibilityAPIKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -159,6 +164,39 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  entry,
 			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) cursorComposerKeysWithAuthIndex() []cursorComposerKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]cursorComposerKeyWithAuthIndex, len(h.cfg.CursorComposerKey))
+	for i := range h.cfg.CursorComposerKey {
+		entry := h.cfg.CursorComposerKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			base := strings.TrimSpace(entry.BaseURL)
+			backendBase := strings.TrimSpace(entry.BackendBaseURL)
+			chatEndpoint := strings.TrimSpace(entry.ChatEndpoint)
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			id, _ := idGen.Next("cursor-composer:apikey", key, base, backendBase, chatEndpoint, proxyURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = cursorComposerKeyWithAuthIndex{
+			CursorComposerKey: entry,
+			AuthIndex:         authIndex,
 		}
 	}
 	return out

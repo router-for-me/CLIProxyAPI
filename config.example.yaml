@@ -236,6 +236,22 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
+# Cursor Composer API keys (Dashboard → Integrations). No separate proxy on :8787 is required;
+# CLIProxy talks to Cursor's connect-proto endpoint directly when backend/chat settings are unset.
+# Optional env overrides: CURSOR_BACKEND_BASE_URL, CURSOR_CHAT_ENDPOINT, CURSOR_CLIENT_VERSION
+# On macOS, values from "API for Cursor" app settings are used when env/config omit them.
+# cursor-composer-api-key:
+#   - api-key: "crsr_..."
+#     # backend-base-url: "https://api2.cursor.sh" # default
+#     # chat-endpoint: "aiserver.v1.ChatService/StreamUnifiedChatWithTools" # default (no leading slash required)
+#     # client-version: "2.6.22" # default
+#     # base-url: "https://api.cursor.com" # used for /v1/me identity lookup
+#     models:
+#       - name: "composer-2.5"
+#         alias: "composer-2.5"
+# OpenCode provider icon (optional): point "icon" at the bundled asset, e.g.
+# file:///absolute/path/to/CLIProxyAPI/assets/cursor.webp
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;

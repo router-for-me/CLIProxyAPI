@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cursorcomposer"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -35,7 +36,6 @@ const (
 	cursorComposerProvider       = "cursor-composer"
 	cursorComposerDefaultAPIBase = "https://api.cursor.com"
 	cursorComposerDefaultModel   = "composer-2.5"
-	cursorComposerDefaultVersion = "2.6.22"
 )
 
 type CursorComposerExecutor struct {
@@ -64,16 +64,25 @@ func (e *CursorComposerExecutor) Execute(ctx context.Context, auth *cliproxyauth
 	if err != nil {
 		return resp, err
 	}
-	cursorResp, err := e.createCompletion(ctx, auth, prepared)
-	if err != nil {
-		return resp, err
-	}
-	defer func() {
-		if errClose := cursorResp.Body.Close(); errClose != nil {
-			log.Errorf("cursor composer executor: close response body error: %v", errClose)
+	var text string
+	if bridgeURL := cursorComposerSDKBridgeURL(auth); bridgeURL != "" {
+		text, err = e.executeViaSDKBridge(ctx, auth, prepared, false)
+	} else {
+		var cursorResp *http.Response
+		cursorResp, err = e.createCompletion(ctx, auth, prepared)
+		if err != nil {
+			return resp, err
 		}
-	}()
-	text, err := readCursorComposerText(cursorResp)
+		defer func() {
+			if errClose := cursorResp.Body.Close(); errClose != nil {
+				log.Errorf("cursor composer executor: close response body error: %v", errClose)
+			}
+		}()
+		text, err = readCursorComposerText(cursorResp)
+		if err != nil {
+			return resp, err
+		}
+	}
 	if err != nil {
 		return resp, err
 	}
@@ -82,7 +91,7 @@ func (e *CursorComposerExecutor) Execute(ctx context.Context, auth *cliproxyauth
 	body := buildOpenAIChatResponse(prepared.model, text, usageDetail)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FromString("openai"), opts.SourceFormat, req.Model, opts.OriginalRequest, translated, body, &param)
-	return cliproxyexecutor.Response{Payload: out, Headers: cursorResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out}, nil
 }
 
 func (e *CursorComposerExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -94,36 +103,26 @@ func (e *CursorComposerExecutor) ExecuteStream(ctx context.Context, auth *clipro
 	if err != nil {
 		return nil, err
 	}
-	cursorResp, err := e.createCompletion(ctx, auth, prepared)
-	if err != nil {
-		return nil, err
+	bridgeURL := cursorComposerSDKBridgeURL(auth)
+	var cursorResp *http.Response
+	if bridgeURL == "" {
+		cursorResp, err = e.createCompletion(ctx, auth, prepared)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := cursorResp.Body.Close(); errClose != nil {
-				log.Errorf("cursor composer executor: close response body error: %v", errClose)
-			}
-			reporter.EnsurePublished(ctx)
-		}()
+		defer reporter.EnsurePublished(ctx)
 		var param any
 		var fullText strings.Builder
 		chunkID := "chatcmpl-" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		created := time.Now().Unix()
-		for delta, readErr := range streamCursorComposerText(cursorResp) {
-			if readErr != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, readErr)
-				reporter.PublishFailure(ctx, readErr)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: readErr}:
-				case <-ctx.Done():
-				}
-				return
-			}
+		emitDelta := func(delta string) bool {
 			if delta == "" {
-				continue
+				return true
 			}
 			fullText.WriteString(delta)
 			line := buildOpenAIChatStreamLine(chunkID, prepared.model, delta, created, false, nil)
@@ -131,6 +130,42 @@ func (e *CursorComposerExecutor) ExecuteStream(ctx context.Context, auth *clipro
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():
+					return false
+				}
+			}
+			return true
+		}
+		if bridgeURL != "" {
+			text, bridgeErr := e.executeViaSDKBridge(ctx, auth, prepared, true)
+			if bridgeErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, bridgeErr)
+				reporter.PublishFailure(ctx, bridgeErr)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: bridgeErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if !emitDelta(text) {
+				return
+			}
+		} else {
+			defer func() {
+				if errClose := cursorResp.Body.Close(); errClose != nil {
+					log.Errorf("cursor composer executor: close response body error: %v", errClose)
+				}
+			}()
+			for delta, readErr := range streamCursorComposerText(cursorResp) {
+				if readErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+					reporter.PublishFailure(ctx, readErr)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: readErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if !emitDelta(delta) {
 					return
 				}
 			}
@@ -150,7 +185,11 @@ func (e *CursorComposerExecutor) ExecuteStream(ctx context.Context, auth *clipro
 			}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: cursorResp.Header.Clone(), Chunks: out}, nil
+	var headers http.Header
+	if cursorResp != nil {
+		headers = cursorResp.Header.Clone()
+	}
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
 }
 
 func (e *CursorComposerExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -335,18 +374,19 @@ func (e *CursorComposerExecutor) exchangeAPIKey(ctx context.Context, auth *clipr
 
 func cursorComposerCredentials(auth *cliproxyauth.Auth) (apiKey, apiBase, backendBase, endpoint, clientVersion string) {
 	apiBase = cursorComposerDefaultAPIBase
-	clientVersion = cursorComposerDefaultVersion
+	var attrBackend, attrEndpoint, attrVersion string
 	if auth != nil && auth.Attributes != nil {
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 		if v := strings.TrimSpace(auth.Attributes["base_url"]); v != "" {
 			apiBase = v
 		}
-		backendBase = strings.TrimSpace(auth.Attributes["backend_base_url"])
-		endpoint = strings.TrimSpace(auth.Attributes["chat_endpoint"])
-		if v := strings.TrimSpace(auth.Attributes["client_version"]); v != "" {
-			clientVersion = v
-		}
+		attrBackend = strings.TrimSpace(auth.Attributes["backend_base_url"])
+		attrEndpoint = strings.TrimSpace(auth.Attributes["chat_endpoint"])
+		attrVersion = strings.TrimSpace(auth.Attributes["client_version"])
 	}
+	backendBase = cursorcomposer.ResolveBackendBase(attrBackend)
+	endpoint = cursorcomposer.ResolveChatEndpoint(attrEndpoint)
+	clientVersion = cursorcomposer.ResolveClientVersion(attrVersion)
 	return
 }
 
@@ -700,7 +740,7 @@ func cursorInternalHeaders(token, identity, requestID, clientVersion string) map
 		"x-ghost-mode":                "false",
 		"x-new-onboarding-completed":  "false",
 		"x-request-id":                requestID,
-		"x-session-id":                stableUUID("", token),
+		"x-session-id":                cursorSessionID(token),
 	}
 }
 
@@ -718,6 +758,15 @@ func cursorChecksum(identity string) string {
 
 func stableUUID(namespace, value string) string {
 	hash := sha256Hex(namespace + ":" + value)
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hash[:8], hash[8:12], hash[12:16], hash[16:20], hash[20:32])
+}
+
+func cursorSessionID(accessToken string) string {
+	hash := sha256Hex(accessToken)
+	if len(hash) < 32 {
+		return hash
+	}
+	hash = hash[:32]
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hash[:8], hash[8:12], hash[12:16], hash[16:20], hash[20:32])
 }
 
