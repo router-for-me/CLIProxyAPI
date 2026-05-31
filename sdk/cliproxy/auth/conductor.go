@@ -86,6 +86,8 @@ const (
 	quotaImmediateCooldownRetryAfter = 15 * time.Minute
 	accountQuotaCooldown             = 24 * time.Hour
 	halfOpenProbeStateLimit          = 4096
+	transientNetworkRetryAttempts    = 3
+	transientNetworkRetryMaxDelay    = 5 * time.Second
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2079,7 +2081,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
-			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) {
+			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
+			!isTransientNetworkError(lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2180,6 +2183,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		if authErr != nil {
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, authErr)
+			transientNetworkFallback := isTransientNetworkError(authErr)
 			if isRequestInvalidError(authErr) {
 				if !routeFallback {
 					return cliproxyexecutor.Response{}, authErr
@@ -2191,7 +2195,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
-			} else if !routeFallback {
+			} else if !routeFallback && !transientNetworkFallback {
 				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
 					return cliproxyexecutor.Response{}, errWait
 				}
@@ -2214,7 +2218,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
-			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) {
+			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
+			!isTransientNetworkError(lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2315,6 +2320,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		if authErr != nil {
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, authErr)
+			transientNetworkFallback := isTransientNetworkError(authErr)
 			if isRequestInvalidError(authErr) {
 				if !routeFallback {
 					return cliproxyexecutor.Response{}, authErr
@@ -2326,7 +2332,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastErr = authErr
 			if homeMode {
 				homeAuthCount++
-			} else if !routeFallback {
+			} else if !routeFallback && !transientNetworkFallback {
 				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
 					return cliproxyexecutor.Response{}, errWait
 				}
@@ -2349,7 +2355,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
-			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) {
+			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
+			!isTransientNetworkError(lastErr) {
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -2411,6 +2418,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				continue
 			}
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, errStream)
+			transientNetworkFallback := isTransientNetworkError(errStream)
 			if isRequestInvalidError(errStream) {
 				if !routeFallback {
 					return nil, errStream
@@ -2420,7 +2428,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			lastErr = errStream
 			if homeMode {
 				homeAuthCount++
-			} else if !routeFallback {
+			} else if !routeFallback && !transientNetworkFallback {
 				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
 					return nil, errWait
 				}
@@ -3220,14 +3228,17 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if err == nil {
 		return 0, false
 	}
-	if maxWait <= 0 {
-		return 0, false
-	}
 	status := statusCodeFromError(err)
 	if status == http.StatusOK {
 		return 0, false
 	}
 	if isRequestInvalidError(err) {
+		return 0, false
+	}
+	if isTransientNetworkError(err) {
+		return transientNetworkRetryDelay(attempt, maxWait)
+	}
+	if maxWait <= 0 {
 		return 0, false
 	}
 	if status == 0 && isRetryableAuthError(err) {
@@ -3254,6 +3265,20 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		return 0, false
 	}
 	return *retryAfter, true
+}
+
+func transientNetworkRetryDelay(attempt int, maxWait time.Duration) (time.Duration, bool) {
+	if attempt < 0 || attempt >= transientNetworkRetryAttempts {
+		return 0, false
+	}
+	wait := time.Duration(attempt+1) * time.Second
+	if wait > transientNetworkRetryMaxDelay {
+		wait = transientNetworkRetryMaxDelay
+	}
+	if maxWait > 0 && wait > maxWait {
+		return 0, false
+	}
+	return wait, true
 }
 
 func isRetryableAuthError(err error) bool {
@@ -3385,7 +3410,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if !isRequestScopedNotFoundResultError(result.Error) &&
 					!isRequestScopedFeatureUnsupportedResultError(result.Error) &&
 					!isRequestScopedContentSafetyResultError(result.Error) &&
-					!isRequestScopedContextLimitResultError(result.Error) {
+					!isRequestScopedContextLimitResultError(result.Error) &&
+					!isTransientNetworkResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -3655,6 +3681,9 @@ func shouldCountChannelBreakerFailure(result Result) bool {
 		return false
 	}
 	if isRequestScopedNotFoundResultError(result.Error) || isRequestScopedFeatureUnsupportedResultError(result.Error) {
+		return false
+	}
+	if isTransientNetworkResultError(result.Error) {
 		return false
 	}
 	if isModelSupportResultError(result.Error) || isBalanceExhaustedResultError(result.Error) {
@@ -4588,6 +4617,60 @@ func isRequestScopedContextLimitError(err error) bool {
 	message := err.Error()
 	return isRequestScopedContextLimitStatus(statusCodeFromError(err), message) &&
 		isRequestScopedContextLimitMessage(message)
+}
+
+func isTransientNetworkMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := []string{
+		"connection reset by peer",
+		"broken pipe",
+		"unexpected eof",
+		"read: eof",
+		"write: eof",
+		"server closed idle connection",
+		"use of closed network connection",
+		"i/o timeout",
+		"io timeout",
+		"tls handshake timeout",
+		"timeout awaiting response headers",
+		"client timeout exceeded",
+		"context deadline exceeded",
+		"connection refused",
+		"connection aborted",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return lower == "eof" || strings.HasSuffix(lower, ": eof")
+}
+
+func isTransientNetworkStatus(status int, message string) bool {
+	if status == 0 {
+		return !hasHTTPStatusInMessage(message, http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity) ||
+			hasHTTPStatusInMessage(message, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout)
+	}
+	return status == http.StatusRequestTimeout || isTransientUpstreamStatus(status)
+}
+
+func isTransientNetworkResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.TrimSpace(err.Code + " " + err.Message)
+	return isTransientNetworkMessage(message) && isTransientNetworkStatus(statusCodeFromResult(err), message)
+}
+
+func isTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return isTransientNetworkMessage(message) && isTransientNetworkStatus(statusCodeFromError(err), message)
 }
 
 func isRequestScopedRouteFallbackError(err error) bool {

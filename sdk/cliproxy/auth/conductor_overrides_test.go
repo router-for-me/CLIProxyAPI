@@ -115,6 +115,44 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 }
 
+func TestManager_ShouldRetryAfterError_TransientNetworkUsesBoundedShortBackoff(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	err := &Error{
+		HTTPStatus: http.StatusInternalServerError,
+		Message:    "read tcp 10.0.0.1:52886->10.0.0.2:443: read: connection reset by peer",
+	}
+
+	for attempt, want := range []time.Duration{time.Second, 2 * time.Second, 3 * time.Second} {
+		wait, shouldRetry := m.shouldRetryAfterError(err, attempt, []string{"claude"}, "claude-sonnet-4-6", 10*time.Second)
+		if !shouldRetry {
+			t.Fatalf("attempt %d should retry", attempt)
+		}
+		if wait != want {
+			t.Fatalf("attempt %d wait = %v, want %v", attempt, wait, want)
+		}
+	}
+	if wait, shouldRetry := m.shouldRetryAfterError(err, transientNetworkRetryAttempts, []string{"claude"}, "claude-sonnet-4-6", 10*time.Second); shouldRetry {
+		t.Fatalf("attempt %d should stop retrying, got wait %v", transientNetworkRetryAttempts, wait)
+	}
+}
+
+func TestTransientNetworkErrorPatterns(t *testing.T) {
+	tests := []string{
+		"status_code=500, read tcp 10.0.0.1:52886->10.0.0.2:443: read: connection reset by peer",
+		"status_code=500, write tcp 10.0.0.1:52886->10.0.0.2:443: write: broken pipe",
+		"unexpected EOF",
+		"i/o timeout",
+		"context deadline exceeded",
+	}
+	for _, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			if !isTransientNetworkError(&Error{HTTPStatus: http.StatusInternalServerError, Message: message}) {
+				t.Fatalf("expected transient network error for %q", message)
+			}
+		})
+	}
+}
+
 func TestManager_AuthSupportsRouteModel_EmptyRegistryForAPIKeyAuthDoesNotMatch(t *testing.T) {
 	t.Parallel()
 
@@ -607,6 +645,76 @@ func TestManager_Execute_OpenAICompatChannelBreakerBypassesHigherPriorityChannel
 		blocked, reason, next := isAuthBlockedForModel(updated, model, time.Now())
 		if !blocked || reason != blockReasonCooldown || next.IsZero() {
 			t.Fatalf("auth %s blocked=%v reason=%v next=%v, want channel cooldown", authID, blocked, reason, next)
+		}
+	}
+}
+
+func TestManager_Execute_TransientNetworkTriesAllCredentialsWithoutCooldown(t *testing.T) {
+	model := "transient-network-model"
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 1)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-reset-auth": &Error{
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    "read tcp 10.0.0.1:52886->10.0.0.2:443: read: connection reset by peer",
+			},
+			"bb-eof-auth": &Error{
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    "unexpected EOF",
+			},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auths := []*Auth{
+		{ID: "aa-reset-auth", Provider: "claude"},
+		{ID: "bb-eof-auth", Provider: "claude"},
+		{ID: "cc-good-auth", Provider: "claude"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	resp, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success after transient network fallback", errExecute)
+	}
+	if string(resp.Payload) != "cc-good-auth" {
+		t.Fatalf("payload = %q, want cc-good-auth", string(resp.Payload))
+	}
+	got := executor.ExecuteCalls()
+	want := []string{"aa-reset-auth", "bb-eof-auth", "cc-good-auth"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, authID := range []string{"aa-reset-auth", "bb-eof-auth"} {
+		updated, ok := manager.GetByID(authID)
+		if !ok || updated == nil {
+			t.Fatalf("auth %s not found", authID)
+		}
+		if updated.Unavailable {
+			t.Fatalf("auth %s should remain available after transient network fallback", authID)
+		}
+		if state := updated.ModelStates[model]; state != nil {
+			t.Fatalf("auth %s should not have model cooldown after transient network fallback: %#v", authID, state)
 		}
 	}
 }
