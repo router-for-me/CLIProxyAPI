@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,13 +29,16 @@ import (
 )
 
 const (
-	wsRequestTypeCreate  = "response.create"
-	wsRequestTypeAppend  = "response.append"
-	wsEventTypeError     = "error"
-	wsEventTypeCompleted = "response.completed"
-	wsDoneMarker         = "[DONE]"
-	wsTurnStateHeader    = "x-codex-turn-state"
-	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsRequestTypeCreate        = "response.create"
+	wsRequestTypeAppend        = "response.append"
+	wsEventTypeError           = "error"
+	wsEventTypeCompleted       = "response.completed"
+	wsDoneMarker               = "[DONE]"
+	wsTurnStateHeader          = "x-codex-turn-state"
+	wsTimelineBodyKey          = "WEBSOCKET_TIMELINE_OVERRIDE"
+	wsCloseControlWriteTimeout = 5 * time.Second
+	wsHeartbeatInterval        = 30 * time.Second
+	wsHeartbeatPongTimeout     = 75 * time.Second
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -224,11 +228,21 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 	wsDone := make(chan struct{})
 	defer close(wsDone)
+	setDownstreamWaiting := startResponsesWebsocketHeartbeat(conn, wsDone, passthroughSessionID)
 
+	var upstreamGeneration func() uint64
 	if h != nil && h.AuthManager != nil {
 		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
 			type upstreamDisconnectSubscriber interface {
 				UpstreamDisconnectChan(sessionID string) <-chan error
+			}
+			type upstreamGenerationProvider interface {
+				UpstreamGeneration(sessionID string) uint64
+			}
+			if provider, ok := exec.(upstreamGenerationProvider); ok && provider != nil {
+				upstreamGeneration = func() uint64 {
+					return provider.UpstreamGeneration(passthroughSessionID)
+				}
 			}
 			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
 				disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
@@ -238,7 +252,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 						case <-wsDone:
 							return
 						case <-disconnectCh:
-							_ = conn.Close()
+							closeResponsesWebsocketWithFrame(conn, websocket.CloseInternalServerErr, "upstream websocket disconnected")
 						}
 					}()
 				}
@@ -268,6 +282,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	seenUpstreamGeneration := uint64(0)
+	if upstreamGeneration != nil {
+		seenUpstreamGeneration = upstreamGeneration()
+	}
 	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
 		if h == nil || h.AuthManager == nil {
 			return nil, false
@@ -280,7 +298,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	forceTranscriptReplayNextRequest := false
 
 	for {
+		setDownstreamWaiting(true)
 		msgType, payload, errReadMessage := conn.ReadMessage()
+		setDownstreamWaiting(false)
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
 			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
@@ -303,6 +323,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		wsTimelineLog.BeginRequest()
 		wsTimelineLog.Append("request", payload, time.Now())
 
+		replayCurrentRequest := false
+retryCurrentRequest:
+		currentUpstreamGeneration := seenUpstreamGeneration
+		upstreamGenerationChanged := false
+		if upstreamGeneration != nil {
+			currentUpstreamGeneration = upstreamGeneration()
+			upstreamGenerationChanged = currentUpstreamGeneration != seenUpstreamGeneration
+		}
+
 		allowIncrementalInputWithPreviousResponseID := false
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
@@ -315,7 +344,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 		}
-		if forceTranscriptReplayNextRequest {
+		if forceTranscriptReplayNextRequest || upstreamGenerationChanged || replayCurrentRequest {
 			allowIncrementalInputWithPreviousResponseID = false
 		}
 
@@ -385,7 +414,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		updatedLastRequest = bytes.Clone(requestJSON)
 		previousLastRequest := bytes.Clone(lastRequest)
 		previousLastResponseOutput := bytes.Clone(lastResponseOutput)
-		forcedTranscriptReplay := forceTranscriptReplayNextRequest
+		forcedTranscriptReplay := forceTranscriptReplayNextRequest || upstreamGenerationChanged || replayCurrentRequest
 		lastRequest = updatedLastRequest
 		if forcedTranscriptReplay {
 			forceTranscriptReplayNextRequest = false
@@ -414,11 +443,19 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID)
+		suppressPreviousResponseNotFound := !forcedTranscriptReplay && strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != ""
+		completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID, suppressPreviousResponseNotFound)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
+		}
+		if suppressPreviousResponseNotFound && shouldRetryResponsesWebsocketTranscriptReplay(forwardErrMsg) {
+			replayCurrentRequest = true
+			forceTranscriptReplayNextRequest = false
+			lastRequest = previousLastRequest
+			lastResponseOutput = previousLastResponseOutput
+			goto retryCurrentRequest
 		}
 		if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
 			pinnedAuthID = ""
@@ -428,6 +465,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 		lastResponseOutput = completedOutput
+		if upstreamGeneration != nil {
+			seenUpstreamGeneration = upstreamGeneration()
+		} else {
+			seenUpstreamGeneration = currentUpstreamGeneration
+		}
 	}
 }
 
@@ -1138,8 +1180,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog websocketTimelineAppender,
 	sessionID string,
+	suppressPreviousResponseNotFound bool,
 ) ([]byte, *interfaces.ErrorMessage, error) {
 	completed := false
+	forwardedPayload := false
 	completedOutput := []byte("[]")
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
@@ -1157,6 +1201,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
+				if suppressPreviousResponseNotFound && !forwardedPayload && shouldRetryResponsesWebsocketTranscriptReplay(errMsg) {
+					cancel(errMsg.Error)
+					return completedOutput, errMsg, nil
+				}
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
@@ -1244,6 +1292,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					cancel(errWrite)
 					return completedOutput, nil, errWrite
 				}
+				forwardedPayload = true
 			}
 		}
 	}
@@ -1265,6 +1314,24 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	default:
 		return false
 	}
+}
+
+func shouldRetryResponsesWebsocketTranscriptReplay(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil || errMsg.Error == nil {
+		return false
+	}
+	status := errMsg.StatusCode
+	if status <= 0 {
+		if se, ok := errMsg.Error.(interface{ StatusCode() int }); ok && se != nil {
+			status = se.StatusCode()
+		}
+	}
+	if status > 0 && status != http.StatusBadRequest {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(errMsg.Error.Error()))
+	return strings.Contains(lower, "previous_response_not_found") ||
+		(strings.Contains(lower, "previous_response") || strings.Contains(lower, "previous response")) && strings.Contains(lower, "not found")
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
@@ -1437,6 +1504,63 @@ func writeResponsesWebsocketPayload(conn *websocket.Conn, wsTimelineLog websocke
 		wsTimelineLog.Append("response", payload, timestamp)
 	}
 	return conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func startResponsesWebsocketHeartbeat(conn *websocket.Conn, done <-chan struct{}, sessionID string) func(bool) {
+	return startResponsesWebsocketHeartbeatWithInterval(conn, done, sessionID, wsHeartbeatInterval, wsHeartbeatPongTimeout)
+}
+
+func startResponsesWebsocketHeartbeatWithInterval(conn *websocket.Conn, done <-chan struct{}, sessionID string, interval time.Duration, pongTimeout time.Duration) func(bool) {
+	if conn == nil || interval <= 0 {
+		return func(bool) {}
+	}
+	var waiting atomic.Bool
+	var lastPongUnixNano atomic.Int64
+	lastPongUnixNano.Store(time.Now().UnixNano())
+	conn.SetPongHandler(func(string) error {
+		lastPongUnixNano.Store(time.Now().UnixNano())
+		return nil
+	})
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				deadline := time.Now().Add(wsCloseControlWriteTimeout)
+				if errWrite := conn.WriteControl(websocket.PingMessage, []byte("ping"), deadline); errWrite != nil {
+					log.Debugf("responses websocket: heartbeat ping failed id=%s error=%v", strings.TrimSpace(sessionID), errWrite)
+					_ = conn.Close()
+					return
+				}
+				if pongTimeout > 0 && waiting.Load() && time.Since(time.Unix(0, lastPongUnixNano.Load())) > pongTimeout {
+					log.Debugf("responses websocket: heartbeat pong timeout id=%s", strings.TrimSpace(sessionID))
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
+	return func(isWaiting bool) {
+		if isWaiting {
+			lastPongUnixNano.Store(time.Now().UnixNano())
+		}
+		waiting.Store(isWaiting)
+	}
+}
+
+func closeResponsesWebsocketWithFrame(conn *websocket.Conn, code int, text string) {
+	if conn == nil {
+		return
+	}
+	deadline := time.Now().Add(wsCloseControlWriteTimeout)
+	payload := websocket.FormatCloseMessage(code, text)
+	if errWrite := conn.WriteControl(websocket.CloseMessage, payload, deadline); errWrite != nil {
+		log.Debugf("responses websocket: write close frame failed: %v", errWrite)
+	}
+	_ = conn.Close()
 }
 
 func appendWebsocketTimelineDisconnect(timeline websocketTimelineAppender, err error, timestamp time.Time) {

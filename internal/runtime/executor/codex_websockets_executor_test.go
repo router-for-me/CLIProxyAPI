@@ -93,6 +93,61 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
+func TestCodexWebsocketsExecutePreviousResponseNotFoundDropsQuietly(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("request path = %s, want /responses", r.URL.Path)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Fatalf("read upstream websocket message: %v", errRead)
+		}
+		errPayload := []byte(`{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"previous response with id 'resp-1' not found"}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, errPayload); errWrite != nil {
+			t.Fatalf("write websocket error: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	sessionID := "sess-previous-response-missing"
+	defer exec.CloseExecutionSession(sessionID)
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	if disconnectCh == nil {
+		t.Fatal("expected disconnect channel")
+	}
+
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+		},
+	}
+
+	if _, err := exec.Execute(context.Background(), auth, req, opts); err == nil || !strings.Contains(err.Error(), "previous_response_not_found") {
+		t.Fatalf("Execute() error = %v, want previous_response_not_found", err)
+	}
+	if got := exec.UpstreamGeneration(sessionID); got != 1 {
+		t.Fatalf("upstream generation = %d, want 1", got)
+	}
+	select {
+	case errRead, ok := <-disconnectCh:
+		t.Fatalf("unexpected disconnect signal ok=%t err=%v", ok, errRead)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +178,9 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	if disconnectCh == nil {
 		t.Fatal("expected disconnect channel")
 	}
+	if got := exec.UpstreamGeneration(sessionID); got != 0 {
+		t.Fatalf("initial upstream generation = %d, want 0", got)
+	}
 
 	sess := exec.getOrCreateSession(sessionID)
 	if sess == nil {
@@ -148,6 +206,141 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for disconnect signal")
+	}
+}
+
+func TestCodexWebsocketsDropUpstreamConnQuietlyDoesNotSignalDisconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "sess-quiet"
+	defer exec.CloseExecutionSession(sessionID)
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	if disconnectCh == nil {
+		t.Fatal("expected disconnect channel")
+	}
+
+	sess := exec.getOrCreateSession(sessionID)
+	if sess == nil {
+		t.Fatal("expected session")
+	}
+	sess.connMu.Lock()
+	sess.conn = conn
+	sess.authID = "auth-1"
+	sess.wsURL = "ws://example.test/responses"
+	sess.readerConn = conn
+	sess.connMu.Unlock()
+
+	exec.dropUpstreamConn(sess, conn, "upstream_disconnected", errors.New("idle timeout"), false)
+
+	select {
+	case errRead, ok := <-disconnectCh:
+		t.Fatalf("unexpected disconnect signal ok=%t err=%v", ok, errRead)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	sess.connMu.Lock()
+	current := sess.conn
+	readerConn := sess.readerConn
+	sess.connMu.Unlock()
+	if current != nil || readerConn != nil {
+		t.Fatalf("expected upstream connection to be cleared")
+	}
+	if got := exec.UpstreamGeneration(sessionID); got != 1 {
+		t.Fatalf("upstream generation after quiet drop = %d, want 1", got)
+	}
+}
+
+func TestCodexWebsocketsReadLoopIgnoresStaleConnErrors(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	staleConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial stale websocket: %v", err)
+	}
+	currentConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial current websocket: %v", err)
+	}
+	defer func() { _ = currentConn.Close() }()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "sess-stale-reader"
+	defer exec.CloseExecutionSession(sessionID)
+	sess := exec.getOrCreateSession(sessionID)
+	if sess == nil {
+		t.Fatal("expected session")
+	}
+	readCh := make(chan codexWebsocketRead, 1)
+	sess.setActive(readCh)
+	defer func() {
+		sess.clearActive(readCh)
+	}()
+	sess.connMu.Lock()
+	sess.conn = currentConn
+	sess.readerConn = currentConn
+	sess.connMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		exec.readUpstreamLoop(sess, staleConn)
+		close(done)
+	}()
+	if errClose := staleConn.Close(); errClose != nil {
+		t.Fatalf("close stale websocket: %v", errClose)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale read loop")
+	}
+
+	select {
+	case ev, ok := <-readCh:
+		t.Fatalf("unexpected stale read event ok=%t ev=%+v", ok, ev)
+	default:
+	}
+	sess.activeMu.Lock()
+	activeCh := sess.activeCh
+	sess.activeMu.Unlock()
+	if activeCh != readCh {
+		t.Fatalf("expected active read channel to remain current")
 	}
 }
 
@@ -641,6 +834,15 @@ func TestParseCodexWebsocketErrorPreservesWrappedBodyAndHeaders(t *testing.T) {
 	withHeaders, ok := err.(interface{ Headers() http.Header })
 	if !ok || withHeaders.Headers().Get("x-request-id") != "req-1" {
 		t.Fatalf("headers = %#v, want x-request-id", err)
+	}
+}
+
+func TestIsCodexWebsocketPreviousResponseNotFound(t *testing.T) {
+	if !isCodexWebsocketPreviousResponseNotFound([]byte(`{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"previous response with id 'resp-1' not found"}}`)) {
+		t.Fatalf("expected previous response not found websocket error")
+	}
+	if isCodexWebsocketPreviousResponseNotFound([]byte(`{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached","message":"too many websockets"}}`)) {
+		t.Fatalf("connection limit error must not be classified as previous response not found")
 	}
 }
 
