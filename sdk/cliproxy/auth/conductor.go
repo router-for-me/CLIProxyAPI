@@ -2763,6 +2763,26 @@ func isModelSupportResultError(err *Error) bool {
 	return isModelSupportErrorMessage(err.Message)
 }
 
+func isContextWindowExceededError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	tokens := [...]string{
+		"context_too_large",
+		"context_length_exceeded",
+		"context window",
+		"context length",
+		"too many tokens",
+	}
+	for _, t := range tokens {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
+}
+
 func isRequestScopedNotFoundMessage(message string) bool {
 	if message == "" {
 		return false
@@ -2783,15 +2803,19 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// all 422 responses, and context-window errors (any HTTP status) as request-shape
+// failures where switching auths or pooled upstream models will not help.
+// Model-support errors are excluded so routing can fall through to another auth
+// or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if isModelSupportError(err) {
 		return false
+	}
+	if isContextWindowExceededError(err) {
+		return true
 	}
 	status := statusCodeFromError(err)
 	switch status {
