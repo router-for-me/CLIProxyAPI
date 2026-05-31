@@ -133,6 +133,10 @@ ws-auth: true
 # Default is false for safety.
 enable-gemini-cli-endpoint: false
 
+# When true, ordinary HTTP/SSE /v1/responses requests prefer Codex credentials
+# marked with websockets=true and use the upstream websocket transport.
+codex-prefer-upstream-websockets: false
+
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
@@ -176,6 +180,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
+#     websockets: true # optional: allow this credential to use the Codex Responses websocket transport
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override

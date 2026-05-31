@@ -89,6 +89,29 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_MixedPreferUpstreamWebsocketChoosesCodexWebsocket(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "openai-compat", Provider: "openai-compatible", Attributes: map[string]string{"priority": "10"}},
+		{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+	}
+
+	ctx := cliproxyexecutor.WithPreferUpstreamWebsocket(context.Background())
+	got, err := selector.Pick(ctx, "mixed", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Pick() auth = nil")
+	}
+	if got.ID != "codex-ws" {
+		t.Fatalf("Pick() auth.ID = %q, want codex-ws", got.ID)
+	}
+}
+
 func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	t.Parallel()
 

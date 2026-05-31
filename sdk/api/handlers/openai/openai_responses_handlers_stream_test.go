@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -30,6 +32,28 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 	}
 
 	return h, recorder, c, flusher
+}
+
+func TestCodexUpstreamWebsocketContextFollowsConfig(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexPreferUpstreamWebsockets: true}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	ctx := h.codexUpstreamWebsocketContext(context.Background())
+
+	if !cliproxyexecutor.PreferUpstreamWebsocket(ctx) {
+		t.Fatal("expected upstream websocket preference")
+	}
+}
+
+func TestCodexUpstreamWebsocketContextDisabledByDefault(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	ctx := h.codexUpstreamWebsocketContext(context.Background())
+
+	if cliproxyexecutor.PreferUpstreamWebsocket(ctx) {
+		t.Fatal("unexpected upstream websocket preference")
+	}
 }
 
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {

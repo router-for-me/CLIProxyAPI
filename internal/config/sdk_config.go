@@ -35,6 +35,10 @@ type SDKConfig struct {
 	// credentials as well.
 	ForceModelPrefix bool `yaml:"force-model-prefix" json:"force-model-prefix"`
 
+	// CodexPreferUpstreamWebsockets allows ordinary HTTP/SSE Responses requests to prefer
+	// Codex credentials marked with websockets=true and use the upstream websocket transport.
+	CodexPreferUpstreamWebsockets bool `yaml:"codex-prefer-upstream-websockets" json:"codex-prefer-upstream-websockets"`
+
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 

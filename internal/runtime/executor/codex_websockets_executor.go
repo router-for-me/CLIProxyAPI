@@ -208,6 +208,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -254,6 +255,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	var upstreamHeaders http.Header
+	if respHS != nil {
+		upstreamHeaders = respHS.Header.Clone()
+	}
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
@@ -300,6 +305,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
+				if respHSRetry != nil {
+					upstreamHeaders = respHSRetry.Header.Clone()
+				}
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -333,6 +341,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -361,6 +371,15 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		reporter.MarkFirstResponseByte()
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
+		if streamErr, ok := codexTerminalStreamContextLengthErr(payload); ok {
+			err = streamErr
+			if sess != nil {
+				e.invalidateUpstreamConn(sess, conn, "upstream_error", err)
+			}
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", err)
+			return resp, err
+		}
+
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
@@ -371,13 +390,26 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
+		if eventType == "response.output_item.done" {
+			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+			continue
+		}
+		if wsErr, ok := codexWebsocketTerminalError(payload); ok {
+			if sess != nil {
+				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+			}
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
+			return resp, wsErr
+		}
 		if eventType == "response.completed" {
+			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
+			publishCodexImageToolUsage(ctx, reporter, body, payload)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
-			resp = cliproxyexecutor.Response{Payload: out}
+			resp = cliproxyexecutor.Response{Payload: out, Headers: upstreamHeaders}
 			return resp, nil
 		}
 	}
@@ -403,7 +435,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	body := req.Payload
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -412,7 +450,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, body, requestedModel, requestPath, opts.Headers)
+	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "stream", true)
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -636,7 +679,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
 			for i := range chunks {
 				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
@@ -1078,6 +1121,29 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 		statusErr: statusError,
 		headers:   headers,
 	}, true
+}
+
+func codexWebsocketTerminalError(payload []byte) (error, bool) {
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	var body []byte
+	switch eventType {
+	case "error":
+		body = codexTerminalErrorBody(payload, "error")
+		if len(body) == 0 {
+			body = codexTerminalTopLevelErrorBody(payload)
+		}
+	case "response.failed":
+		body = codexTerminalErrorBody(payload, "response.error")
+		if len(body) == 0 {
+			body = codexTerminalErrorBody(payload, "error")
+		}
+	default:
+		return nil, false
+	}
+	if len(body) == 0 {
+		body = bytes.Clone(payload)
+	}
+	return newCodexStatusErr(http.StatusBadGateway, body), true
 }
 
 func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
@@ -1559,10 +1625,11 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:
-//  1. The downstream transport is websocket, and
+//  1. The downstream transport is websocket or upstream websocket transport is preferred, and
 //  2. The selected auth enables websockets.
 //
-// For non-websocket downstream requests, it always uses the legacy HTTP implementation.
+// For non-websocket downstream requests without an upstream websocket preference, it uses the
+// legacy HTTP implementation.
 type CodexAutoExecutor struct {
 	httpExec *CodexExecutor
 	wsExec   *CodexWebsocketsExecutor
@@ -1595,7 +1662,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexShouldUseWebsockets(ctx, auth) {
 		return e.wsExec.Execute(ctx, auth, req, opts)
 	}
 	return e.httpExec.Execute(ctx, auth, req, opts)
@@ -1605,7 +1672,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexShouldUseWebsockets(ctx, auth) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
@@ -1669,4 +1736,11 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 	default:
 	}
 	return false
+}
+
+func codexShouldUseWebsockets(ctx context.Context, auth *cliproxyauth.Auth) bool {
+	if !codexWebsocketsEnabled(auth) {
+		return false
+	}
+	return cliproxyexecutor.DownstreamWebsocket(ctx) || cliproxyexecutor.PreferUpstreamWebsocket(ctx)
 }
