@@ -22,6 +22,7 @@ const (
 	xaiVideosEditsAPI       = "/v1/videos/edits"
 	xaiVideosExtensionsAPI  = "/v1/videos/extensions"
 	defaultXAIVideosModel   = "grok-imagine-video"
+	xaiVideos15PreviewModel = "grok-imagine-video-1.5-preview"
 	xaiVideosHandlerType    = "openai-video"
 	defaultVideosSeconds    = "4"
 	defaultVideosSize       = "720x1280"
@@ -45,7 +46,7 @@ func videosModelBase(model string) string {
 func isXAIVideosModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
-	if baseModel != defaultXAIVideosModel {
+	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15PreviewModel {
 		return false
 	}
 
@@ -86,8 +87,11 @@ func rejectUnsupportedNativeVideosModel(c *gin.Context, model string) bool {
 }
 
 func canonicalXAIVideosModel(model string) string {
-	if videosModelBase(model) == defaultXAIVideosModel {
+	switch videosModelBase(model) {
+	case defaultXAIVideosModel:
 		return defaultXAIVideosModel
+	case xaiVideos15PreviewModel:
+		return xaiVideos15PreviewModel
 	}
 	return defaultXAIVideosModel
 }
@@ -190,8 +194,9 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 		seconds = "10"
 	}
 
+	videoModel := canonicalXAIVideosModel(model)
 	req := []byte(`{}`)
-	req, _ = sjson.SetBytes(req, "model", canonicalXAIVideosModel(model))
+	req, _ = sjson.SetBytes(req, "model", videoModel)
 	req, _ = sjson.SetBytes(req, "prompt", prompt)
 	req, _ = sjson.SetRawBytes(req, "duration", []byte(strconv.FormatInt(duration, 10)))
 	req, _ = sjson.SetBytes(req, "aspect_ratio", aspectRatio)
@@ -204,7 +209,7 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 	}
 
 	meta := xaiVideoCreateMetadata{
-		Model:     defaultXAIVideosModel,
+		Model:     videoModel,
 		Prompt:    prompt,
 		Seconds:   seconds,
 		Size:      size,
