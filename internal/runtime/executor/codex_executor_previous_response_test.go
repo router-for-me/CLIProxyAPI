@@ -101,3 +101,43 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForAssi
 		t.Fatalf("previous_response_id was not dropped for full transcript: %s", string(body))
 	}
 }
+
+func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPreviousResponseIDForToolCallIncrementalInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		item string
+	}{
+		{
+			name: "function_call",
+			item: `{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"}`,
+		},
+		{
+			name: "custom_tool_call",
+			item: `{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"apply_patch"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newCodexCacheHelperContext("", nil)
+			executor := &CodexExecutor{}
+			rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","previous_response_id":"resp-prev","input":[` + tc.item + `,{"type":"message","id":"msg-1"}]}`)
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.5",
+				Payload: []byte(`{"model":"gpt-5.5","prompt_cache_key":"cpa:session","input":[]}`),
+			}
+			url := "https://example.com/responses"
+
+			httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, req, rawJSON)
+			if err != nil {
+				t.Fatalf("cacheHelper error: %v", err)
+			}
+
+			body, errRead := io.ReadAll(httpReq.Body)
+			if errRead != nil {
+				t.Fatalf("read request body: %v", errRead)
+			}
+			if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp-prev" {
+				t.Fatalf("previous_response_id = %q, want resp-prev; body=%s", got, string(body))
+			}
+		})
+	}
+}

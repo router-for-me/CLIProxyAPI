@@ -986,10 +986,6 @@ func codexInputLooksLikeFullTranscript(input gjson.Result) bool {
 		if strings.TrimSpace(item.Get("role").String()) == "assistant" {
 			return true
 		}
-		switch strings.TrimSpace(item.Get("type").String()) {
-		case "function_call", "custom_tool_call":
-			return true
-		}
 	}
 	return false
 }
