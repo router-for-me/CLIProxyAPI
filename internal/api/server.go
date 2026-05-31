@@ -417,15 +417,26 @@ func (s *Server) setupRoutes() {
 		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 	}
 
-	// Root endpoint
+	// Root endpoint — dynamically lists all registered public API routes.
 	s.engine.GET("/", func(c *gin.Context) {
+		routes := s.engine.Routes()
+		endpoints := make([]string, 0, len(routes))
+		for _, r := range routes {
+			path := r.Path
+			// Include only public API routes; exclude root, health, management,
+			// OAuth callbacks, internal, and any other non-API paths.
+			if path == "/" || path == "/healthz" || path == "/management.html" {
+				continue
+			}
+			if strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/") ||
+				strings.HasPrefix(path, "/backend-api/") {
+				endpoints = append(endpoints, r.Method+" "+path)
+			}
+		}
+		sort.Strings(endpoints)
 		c.JSON(http.StatusOK, gin.H{
-			"message": "CLI Proxy API Server",
-			"endpoints": []string{
-				"POST /v1/chat/completions",
-				"POST /v1/completions",
-				"GET /v1/models",
-			},
+			"message":   "CLI Proxy API Server",
+			"endpoints": endpoints,
 		})
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
