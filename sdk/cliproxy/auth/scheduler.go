@@ -727,6 +727,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 		return
 	}
 	changed := false
+	var promotedIDs []string
 	for _, entry := range m.blocked {
 		if entry == nil || entry.auth == nil {
 			continue
@@ -739,6 +740,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 		case !blocked:
 			entry.state = scheduledStateReady
 			entry.nextRetryAt = time.Time{}
+			promotedIDs = append(promotedIDs, entry.auth.ID)
 		case reason == blockReasonCooldown:
 			entry.state = scheduledStateCooldown
 			entry.nextRetryAt = next
@@ -753,6 +755,51 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	}
 	if changed {
 		m.rebuildIndexesLocked()
+		if len(promotedIDs) > 0 {
+			m.advancePastPromoted(promotedIDs)
+		}
+	}
+}
+
+// advancePastPromoted adjusts cursors so that entries just promoted from cooldown
+// are not immediately re-selected. Without this, the restored cursor may point at
+// the promoted entry causing it to be picked again before other ready entries.
+func (m *modelScheduler) advancePastPromoted(promotedIDs []string) {
+	if m == nil || len(promotedIDs) == 0 {
+		return
+	}
+	promoted := make(map[string]struct{}, len(promotedIDs))
+	for _, id := range promotedIDs {
+		promoted[id] = struct{}{}
+	}
+	for _, bucket := range m.readyByPriority {
+		if bucket == nil {
+			continue
+		}
+		advanceViewPastPromoted(&bucket.all, promoted)
+		advanceViewPastPromoted(&bucket.ws, promoted)
+	}
+}
+
+func advanceViewPastPromoted(view *readyView, promoted map[string]struct{}) {
+	if view == nil || len(view.flat) == 0 || len(promoted) == 0 {
+		return
+	}
+	if len(view.parentOrder) > 1 && len(view.children) > 0 {
+		for _, child := range view.children {
+			if child == nil || len(child.items) == 0 {
+				continue
+			}
+			idx := child.cursor % len(child.items)
+			if _, ok := promoted[child.items[idx].auth.ID]; ok {
+				child.cursor = idx + 1
+			}
+		}
+		return
+	}
+	idx := view.cursor % len(view.flat)
+	if _, ok := promoted[view.flat[idx].auth.ID]; ok {
+		view.cursor = idx + 1
 	}
 }
 

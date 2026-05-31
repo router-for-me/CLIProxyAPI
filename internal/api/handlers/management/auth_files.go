@@ -724,7 +724,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	data, err := io.ReadAll(c.Request.Body)
+	data, err := io.ReadAll(io.LimitReader(c.Request.Body, 10<<20)) // 10MB limit for auth file uploads
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
@@ -895,7 +895,7 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 		return names, nil
 	}
 
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20)) // 1MB limit for auth file names
 	if err != nil {
 		return nil, fmt.Errorf("failed to read body")
 	}

@@ -554,7 +554,7 @@ func (s *Server) registerManagementRoutes() {
 	log.Info("management routes registered after secret key configuration")
 
 	mgmt := s.engine.Group("/v0/management")
-	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
+	mgmt.Use(managementCORSMiddleware(), s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
@@ -1320,6 +1320,47 @@ func corsMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// managementCORSMiddleware restricts CORS for management API routes to localhost origins only.
+func managementCORSMiddleware() gin.HandlerFunc {
+	allowedOrigins := map[string]bool{
+		"http://localhost":        true,
+		"http://127.0.0.1":       true,
+		"http://[::1]":           true,
+		"http://localhost:3000":   true,
+		"http://localhost:5173":   true,
+		"http://localhost:8080":   true,
+		"http://127.0.0.1:3000":  true,
+		"http://127.0.0.1:5173":  true,
+		"http://127.0.0.1:8080":  true,
+		"https://localhost":      true,
+		"https://127.0.0.1":      true,
+		"https://[::1]":          true,
+		"https://localhost:3000":  true,
+		"https://localhost:5173":  true,
+		"https://localhost:8080":  true,
+		"https://127.0.0.1:3000": true,
+		"https://127.0.0.1:5173": true,
+		"https://127.0.0.1:8080": true,
+	}
+
+	return func(c *gin.Context) {
+		origin := c.Request.Header.Get("Origin")
+		if origin != "" && allowedOrigins[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Management-Key")
+			c.Header("Access-Control-Allow-Credentials", "true")
+		}
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)

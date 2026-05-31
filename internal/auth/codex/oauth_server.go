@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"strings"
@@ -235,9 +236,10 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	setupRequired := query.Get("setup_required") == "true"
 	platformURL := query.Get("platform_url")
-	if platformURL == "" {
+	if platformURL == "" || !strings.HasPrefix(platformURL, "https://") {
 		platformURL = "https://platform.openai.com"
 	}
+	platformURL = html.EscapeString(platformURL)
 
 	// Generate success page HTML with dynamic content
 	successHTML := s.generateSuccessHTML(setupRequired, platformURL)
