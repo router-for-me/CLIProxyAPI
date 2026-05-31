@@ -245,7 +245,9 @@ func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []b
 		return rawJSON, nil
 	}
 	// Always strip thinking blocks with invalid signatures (empty or non-Claude-format).
+	before := countClaudeThinkingBlocks(rawJSON)
 	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
+	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "prefix_cleanup", "empty_or_non_claude_signature")
 	if cache.SignatureCacheEnabled() {
 		return rawJSON, nil
 	}
@@ -254,10 +256,49 @@ func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []b
 		// by dropping unsigned thinking blocks silently (no 400).
 		return rawJSON, nil
 	}
-	if err := antigravityclaude.ValidateClaudeBypassSignatures(rawJSON); err != nil {
-		return rawJSON, statusErr{code: http.StatusBadRequest, msg: err.Error()}
-	}
+	before = countClaudeThinkingBlocks(rawJSON)
+	rawJSON = antigravityclaude.StripInvalidBypassSignatureThinkingBlocks(rawJSON)
+	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "strict_bypass", "invalid_antigravity_claude_signature")
 	return rawJSON, nil
+}
+
+func countClaudeThinkingBlocks(rawJSON []byte) int {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return 0
+	}
+
+	count := 0
+	messages.ForEach(func(_, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "thinking" {
+				count++
+			}
+			return true
+		})
+		return true
+	})
+	return count
+}
+
+func logAntigravitySignatureStrip(before, after int, stage, reason string) {
+	removed := before - after
+	if removed <= 0 {
+		return
+	}
+	log.WithFields(log.Fields{
+		"component":       "signature_sanitizer",
+		"executor":        "antigravity",
+		"target_provider": "claude",
+		"action":          "drop_thinking_blocks",
+		"stage":           stage,
+		"reason":          reason,
+		"count":           removed,
+	}).Debug("antigravity executor: dropped Claude thinking blocks with invalid signatures")
 }
 
 // Identifier returns the executor identifier.
@@ -523,11 +564,13 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
@@ -721,11 +764,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -1182,11 +1227,13 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 

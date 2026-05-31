@@ -10,6 +10,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// DefaultServiceTier is used when a request does not specify service_tier.
+const DefaultServiceTier = "default"
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider  string
@@ -20,13 +23,16 @@ type Record struct {
 	AuthIndex string
 	AuthType  string
 	Source    string
-	// ReasoningEffort stores the client-requested thinking level for request event logs.
+	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
-	RequestedAt     time.Time
-	Latency         time.Duration
-	Failed          bool
-	Fail            Failure
-	Detail          Detail
+	// ServiceTier stores the client-requested service tier for request event logs.
+	ServiceTier string
+	RequestedAt time.Time
+	Latency     time.Duration
+	TTFT        time.Duration
+	Failed      bool
+	Fail        Failure
+	Detail      Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
@@ -50,6 +56,7 @@ type Detail struct {
 
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
+type serviceTierContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -104,6 +111,42 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 		return strings.TrimSpace(string(value))
 	default:
 		return ""
+	}
+}
+
+// WithServiceTier stores the client-requested service tier for usage sinks.
+func WithServiceTier(ctx context.Context, tier string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tier = strings.TrimSpace(tier)
+	if tier == "" {
+		tier = DefaultServiceTier
+	}
+	return context.WithValue(ctx, serviceTierContextKey{}, tier)
+}
+
+// ServiceTierFromContext returns the client-requested service tier stored in ctx.
+func ServiceTierFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return DefaultServiceTier
+	}
+	raw := ctx.Value(serviceTierContextKey{})
+	switch value := raw.(type) {
+	case string:
+		tier := strings.TrimSpace(value)
+		if tier == "" {
+			return DefaultServiceTier
+		}
+		return tier
+	case []byte:
+		tier := strings.TrimSpace(string(value))
+		if tier == "" {
+			return DefaultServiceTier
+		}
+		return tier
+	default:
+		return DefaultServiceTier
 	}
 }
 

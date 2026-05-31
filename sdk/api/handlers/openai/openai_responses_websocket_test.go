@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	requestlogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -76,6 +77,12 @@ type websocketPinnedFailoverExecutor struct {
 	payloads map[string][][]byte
 }
 
+type websocketBootstrapFallbackExecutor struct {
+	mu       sync.Mutex
+	authIDs  []string
+	payloads map[string][][]byte
+}
+
 type websocketPinnedFailoverStatusError struct {
 	status int
 	msg    string
@@ -84,6 +91,70 @@ type websocketPinnedFailoverStatusError struct {
 func (e websocketPinnedFailoverStatusError) Error() string { return e.msg }
 
 func (e websocketPinnedFailoverStatusError) StatusCode() int { return e.status }
+
+func (e *websocketBootstrapFallbackExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketBootstrapFallbackExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketBootstrapFallbackExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+
+	e.mu.Lock()
+	if e.payloads == nil {
+		e.payloads = make(map[string][][]byte)
+	}
+	e.authIDs = append(e.authIDs, authID)
+	e.payloads[authID] = append(e.payloads[authID], bytes.Clone(req.Payload))
+	e.mu.Unlock()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	if authID == "auth-ws" {
+		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+			status: http.StatusServiceUnavailable,
+			msg:    `{"error":{"message":"websocket bootstrap failed","type":"server_error","code":"ws_failed"}}`,
+		}}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-http","output":[{"type":"message","id":"out-http"}]}}`)}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketBootstrapFallbackExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketBootstrapFallbackExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketBootstrapFallbackExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketBootstrapFallbackExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketBootstrapFallbackExecutor) Payloads(authID string) [][]byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	src := e.payloads[authID]
+	out := make([][]byte, len(src))
+	for i := range src {
+		out[i] = bytes.Clone(src[i])
+	}
+	return out
+}
 
 type websocketUpstreamDisconnectExecutor struct {
 	mu         sync.Mutex
@@ -593,6 +664,34 @@ func TestSetWebsocketTimelineBody(t *testing.T) {
 	}
 }
 
+func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+
+	timelineLog := newWebsocketTimelineLog(true, nil)
+	timelineLog.BeginRequest()
+	timelineLog.Append("request", []byte(`{"type":"response.create"}`), ts)
+	timelineLog.SetContext(c)
+
+	value, exists := c.Get(wsTimelineBodyKey)
+	if !exists {
+		t.Fatalf("timeline body key not set")
+	}
+	bodyBytes, ok := value.([]byte)
+	if !ok {
+		t.Fatalf("timeline body key type mismatch")
+	}
+	got := string(bodyBytes)
+	if !strings.Contains(got, "Event: websocket.request") {
+		t.Fatalf("timeline event not found: %s", got)
+	}
+	if !strings.Contains(got, `{"type":"response.create"}`) {
+		t.Fatalf("timeline payload not found: %s", got)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -662,7 +761,7 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForOrphanOutput(t *te
 	}
 }
 
-func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForPreviousResponseOutput(t *testing.T) {
+func TestRepairResponsesWebsocketToolCallsKeepsPreviousResponseOutputIncremental(t *testing.T) {
 	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
 	callCache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -676,17 +775,39 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedCallForPreviousResponseOu
 		t.Fatalf("previous_response_id = %q, want resp-latest", got)
 	}
 	input := gjson.GetBytes(repaired, "input").Array()
-	if len(input) != 3 {
-		t.Fatalf("repaired input len = %d, want 3: %s", len(input), repaired)
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
+	}
+	if input[0].Get("type").String() != "function_call_output" || input[0].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected output item: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsKeepsPreviousResponseCallIncremental(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	outputCache.record(sessionKey, "call-1", []byte(`{"type":"function_call_output","call_id":"call-1","id":"tool-out-1","output":"ok"}`))
+
+	raw := []byte(`{"previous_response_id":"resp-latest","input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
+
+	if got := gjson.GetBytes(repaired, "previous_response_id").String(); got != "resp-latest" {
+		t.Fatalf("previous_response_id = %q, want resp-latest", got)
+	}
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
 	}
 	if input[0].Get("type").String() != "function_call" || input[0].Get("call_id").String() != "call-1" {
-		t.Fatalf("missing inserted call: %s", input[0].Raw)
+		t.Fatalf("unexpected call item: %s", input[0].Raw)
 	}
-	if input[1].Get("type").String() != "function_call_output" || input[1].Get("call_id").String() != "call-1" {
-		t.Fatalf("unexpected output item: %s", input[1].Raw)
-	}
-	if input[2].Get("type").String() != "message" || input[2].Get("id").String() != "msg-1" {
-		t.Fatalf("unexpected trailing item: %s", input[2].Raw)
+	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
 	}
 }
 
@@ -773,6 +894,31 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedCustomToolCallForOrphanOu
 	}
 	if input[2].Get("type").String() != "message" || input[2].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected trailing item: %s", input[2].Raw)
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsKeepsPreviousResponseCustomToolOutputIncremental(t *testing.T) {
+	outputCache := newWebsocketToolOutputCache(time.Minute, 10)
+	callCache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+
+	callCache.record(sessionKey, "call-1", []byte(`{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch"}`))
+
+	raw := []byte(`{"previous_response_id":"resp-latest","input":[{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"},{"type":"message","id":"msg-1"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
+
+	if got := gjson.GetBytes(repaired, "previous_response_id").String(); got != "resp-latest" {
+		t.Fatalf("previous_response_id = %q, want resp-latest", got)
+	}
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
+	}
+	if input[0].Get("type").String() != "custom_tool_call_output" || input[0].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected output item: %s", input[0].Raw)
+	}
+	if input[1].Get("type").String() != "message" || input[1].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected trailing item: %s", input[1].Raw)
 	}
 }
 
@@ -867,14 +1013,14 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		completedOutput, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 		)
 		if err != nil {
@@ -945,7 +1091,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		if errClose := conn.Close(); errClose != nil {
 			serverErrCh <- errClose
 			return
@@ -957,7 +1103,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 		)
 		if err == nil {
@@ -994,17 +1140,35 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
+	logsDir := t.TempDir()
 
 	timelineCh := make(chan string, 1)
 	router := gin.New()
 	router.GET("/v1/responses/ws", func(c *gin.Context) {
+		source, errSource := requestlogging.NewFileBodySourceInDir(logsDir, "websocket-timeline-test")
+		if errSource != nil {
+			timelineCh <- ""
+			return
+		}
+		c.Set(requestlogging.WebsocketTimelineSourceContextKey, source)
 		h.ResponsesWebsocket(c)
 		timeline := ""
 		if value, exists := c.Get(wsTimelineBodyKey); exists {
 			if body, ok := value.([]byte); ok {
 				timeline = string(body)
+			}
+		} else if value, exists := c.Get(requestlogging.WebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				body, _ := source.Bytes()
+				timeline = string(body)
+				_ = source.Cleanup()
+			}
+		}
+		if value, exists := c.Get(requestlogging.APIWebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				_ = source.Cleanup()
 			}
 		}
 		timelineCh <- timeline
@@ -1243,6 +1407,87 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	input := gjson.GetBytes(forwarded, "input").Array()
 	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected forwarded input: %s", forwarded)
+	}
+}
+
+func TestResponsesWebsocketStripsGenerateWhenWebsocketAttemptFallsBackToHTTP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	selector := &orderedWebsocketSelector{order: []string{"auth-ws", "auth-http"}}
+	executor := &websocketBootstrapFallbackExecutor{}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(executor)
+
+	authWS := &coreauth.Auth{
+		ID:         "auth-ws",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), authWS); err != nil {
+		t.Fatalf("Register websocket auth: %v", err)
+	}
+	authHTTP := &coreauth.Auth{ID: "auth-http", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), authHTTP); err != nil {
+		t.Fatalf("Register HTTP auth: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(authWS.ID, authWS.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authHTTP.ID, authHTTP.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authWS.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authHTTP.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	request := `{"type":"response.create","model":"test-model","generate":false,"input":[{"type":"message","id":"msg-1"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+		t.Fatalf("write websocket message: %v", errWrite)
+	}
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("payload type = %s, want %s: %s", got, wsEventTypeCompleted, payload)
+	}
+
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-ws" || got[1] != "auth-http" {
+		t.Fatalf("selected auth IDs = %v, want [auth-ws auth-http]", got)
+	}
+
+	wsPayloads := executor.Payloads("auth-ws")
+	if len(wsPayloads) != 1 {
+		t.Fatalf("auth-ws payload count = %d, want 1", len(wsPayloads))
+	}
+	if !gjson.GetBytes(wsPayloads[0], "generate").Exists() {
+		t.Fatalf("websocket attempt payload unexpectedly stripped generate: %s", wsPayloads[0])
+	}
+
+	httpPayloads := executor.Payloads("auth-http")
+	if len(httpPayloads) != 1 {
+		t.Fatalf("auth-http payload count = %d, want 1", len(httpPayloads))
+	}
+	if gjson.GetBytes(httpPayloads[0], "generate").Exists() {
+		t.Fatalf("generate leaked after HTTP fallback: %s", httpPayloads[0])
 	}
 }
 
@@ -1509,6 +1754,30 @@ func TestNormalizeResponsesWebsocketRequestDropsDuplicateFunctionCallsByCallID(t
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestDropsDuplicateInputItemsByID(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1","role":"user"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"}
+	]`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call","id":"fc-1","call_id":"call-2","name":"tool"},{"type":"function_call_output","id":"tool-out-1","call_id":"call-2"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("merged input len = %d, want 3: %s", len(items), normalized)
+	}
+	if items[0].Get("id").String() != "msg-1" ||
+		items[1].Get("id").String() != "fc-1" ||
+		items[1].Get("call_id").String() != "call-2" ||
+		items[2].Get("id").String() != "tool-out-1" {
+		t.Fatalf("unexpected merged input order: %s", normalized)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestTreatsCustomToolTranscriptReplacementAsReset(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"},{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"apply_patch"},{"type":"custom_tool_call_output","id":"tool-out-1","call_id":"call-1"},{"type":"message","id":"assistant-1","role":"assistant"}]}`)
 	lastResponseOutput := []byte(`[
@@ -1557,6 +1826,22 @@ func TestNormalizeResponsesWebsocketRequestDropsDuplicateCustomToolCallsByCallID
 		items[1].Get("id").String() != "tool-out-1" ||
 		items[2].Get("id").String() != "msg-2" {
 		t.Fatalf("unexpected merged input order: %s", normalized)
+	}
+}
+
+func TestDedupeResponsesWebsocketInputItemsByIDAfterRepair(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"custom_tool_call","id":"ctc-1","call_id":"call-1","name":"tool"},{"type":"custom_tool_call","id":"ctc-1","call_id":"call-2","name":"tool"},{"type":"custom_tool_call_output","id":"tool-out-1","call_id":"call-2"}]}`)
+
+	deduped := dedupeResponsesWebsocketInputItemsByID(payload)
+
+	items := gjson.GetBytes(deduped, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("deduped input len = %d, want 2: %s", len(items), deduped)
+	}
+	if items[0].Get("id").String() != "ctc-1" ||
+		items[0].Get("call_id").String() != "call-2" ||
+		items[1].Get("id").String() != "tool-out-1" {
+		t.Fatalf("unexpected deduped input: %s", deduped)
 	}
 }
 
