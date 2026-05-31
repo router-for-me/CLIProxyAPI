@@ -1593,6 +1593,17 @@ func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
 	if !requiresClaudeContentBlockDowngradeForCompat(compatKind) {
 		return false
 	}
+	if compatKind == "doubao" {
+		switch partType {
+		case "image":
+			return false
+		case "image_url", "document", "search_result", "redacted_thinking", "server_tool_use",
+			"web_search_tool_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result", "container_upload":
+			return true
+		default:
+			return false
+		}
+	}
 	switch partType {
 	case "image", "image_url", "document", "search_result", "redacted_thinking", "server_tool_use",
 		"web_search_tool_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result", "container_upload":
@@ -1604,7 +1615,7 @@ func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
 
 func requiresClaudeContentBlockDowngradeForCompat(compatKind string) bool {
 	switch compatKind {
-	case "deepseek", "minimax", "xiaomi":
+	case "deepseek", "doubao", "minimax", "xiaomi":
 		return true
 	default:
 		return false
@@ -1878,7 +1889,7 @@ func repairMiniMaxClaudeToolAdjacencyForCompat(compatKind string, body []byte) (
 
 func requiresClaudeToolAdjacencyRepair(compatKind string) bool {
 	switch strings.ToLower(strings.TrimSpace(compatKind)) {
-	case "minimax", "deepseek":
+	case "minimax", "deepseek", "doubao":
 		return true
 	default:
 		return false

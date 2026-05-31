@@ -1639,6 +1639,77 @@ func TestDowngradeClaudeUnsupportedBlocksForXiaomi(t *testing.T) {
 	}
 }
 
+func TestDowngradeClaudeUnsupportedBlocksForDoubaoKeepsImages(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":8},
+			{"name":"read_file","description":"Read files","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"inspect"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}},
+				{"type":"document","source":{"type":"base64","media_type":"text/plain","data":"aGVsbG8="}},
+				{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}
+			]},
+			{"role":"assistant","content":[
+				{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"current date"}},
+				{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[]},
+				{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"README.md"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"file ok"},
+					{"type":"document","source":{"type":"base64","media_type":"text/plain","data":"ZG9j"}}
+				]}
+			]}
+		]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompat("https://ark.cn-beijing.volces.com/api/coding", payload)
+
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "read_file" {
+		t.Fatalf("remaining tool = %q, want read_file: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice for removed server tool should be removed: %s", string(out))
+	}
+
+	userContent := gjson.GetBytes(out, "messages.0.content").Array()
+	if !hasClaudePartType(userContent, "image") {
+		t.Fatalf("Doubao image block should be preserved: %s", string(out))
+	}
+	for _, partType := range []string{"image_url", "document", "mcp_tool_result"} {
+		if hasClaudePartType(userContent, partType) {
+			t.Fatalf("Doubao unsupported %s block remained: %s", partType, string(out))
+		}
+	}
+	if !hasClaudeText(userContent, "inspect") || !hasClaudeText(userContent, "mcp ok") {
+		t.Fatalf("Doubao compatible text should be preserved: %s", string(out))
+	}
+
+	assistantContent := gjson.GetBytes(out, "messages.1.content").Array()
+	for _, partType := range []string{"server_tool_use", "web_search_tool_result"} {
+		if hasClaudePartType(assistantContent, partType) {
+			t.Fatalf("Doubao unsupported %s block remained: %s", partType, string(out))
+		}
+	}
+	toolResultContent := gjson.GetBytes(out, "messages.2.content.0.content").Array()
+	if hasClaudePartType(toolResultContent, "document") || !hasClaudeText(toolResultContent, "file ok") {
+		t.Fatalf("Doubao nested tool_result content not downgraded correctly: %s", string(out))
+	}
+	if err := validateClaudeUpstreamPayload("https://ark.cn-beijing.volces.com/api/coding", out); err != nil {
+		t.Fatalf("downgraded Doubao payload should pass validation: %v", err)
+	}
+}
+
 func TestApplyMiniMaxStreamingThinkingDefaultForCompat(t *testing.T) {
 	t.Parallel()
 
