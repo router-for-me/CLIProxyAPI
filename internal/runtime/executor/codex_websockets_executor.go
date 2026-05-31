@@ -224,12 +224,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
-	if identityState.promptCacheKey != "" {
-		wsHeaders.Set("Conversation_id", identityState.promptCacheKey)
-	}
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
-	applyCodexIdentityConfuseHeaders(wsHeaders, identityState)
+	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -442,12 +439,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
-	if identityState.promptCacheKey != "" {
-		wsHeaders.Set("Conversation_id", identityState.promptCacheKey)
-	}
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
-	applyCodexIdentityConfuseHeaders(wsHeaders, identityState)
+	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID
@@ -863,7 +857,6 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
-		headers.Set("Conversation_id", cache.ID)
 	}
 
 	return rawJSON, headers
@@ -909,21 +902,22 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	} else if !isAPIKey {
 		headers.Set("Originator", codexOriginator)
 	}
-	if !isAPIKey {
-		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-				}
-			}
-		}
-	}
+	// if !isAPIKey {
+	// 	if auth != nil && auth.Metadata != nil {
+	// 		if accountID, ok := auth.Metadata["account_id"].(string); ok {
+	// 			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+	// 				setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
+	// 			}
+	// 		}
+	// 	}
+	// }
 
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	deleteDeprecatedCodexConversationHeader(headers)
 
 	return headers
 }
@@ -997,6 +991,10 @@ func deleteHeaderCaseInsensitive(headers http.Header, key string) {
 			delete(headers, existingKey)
 		}
 	}
+}
+
+func deleteDeprecatedCodexConversationHeader(headers http.Header) {
+	deleteHeaderCaseInsensitive(headers, "Conversation_id")
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {

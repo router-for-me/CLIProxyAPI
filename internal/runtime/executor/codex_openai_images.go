@@ -105,7 +105,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		return resp, errCache
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	applyCodexIdentityConfuseHeaders(httpReq.Header, identityState)
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -198,7 +198,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		return nil, errCache
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	applyCodexIdentityConfuseHeaders(httpReq.Header, identityState)
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
