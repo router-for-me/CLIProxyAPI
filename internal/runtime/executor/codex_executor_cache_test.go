@@ -69,6 +69,7 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ginCtx.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	ginCtx.Request.Header.Set("Session_id", "client-session")
 	ginCtx.Request.Header.Set("X-Codex-Turn-Metadata", `{"prompt_cache_key":"cache-1","turn_id":"turn-1","window_id":"cache-1:0"}`)
 	ginCtx.Request.Header.Set("X-Client-Request-Id", "client-request-1")
 
@@ -155,5 +156,127 @@ func TestCodexIdentityConfuseKeepsClientBodySeparateFromUpstreamBody(t *testing.
 	}
 	if gotKey := gjson.GetBytes(clientBody, "prompt_cache_key").String(); gotKey != "cache-1" {
 		t.Fatalf("client prompt_cache_key = %q, want cache-1", gotKey)
+	}
+}
+
+func TestCodexClaudeCacheKeyPreservesLegacyKeyWithoutNamespace(t *testing.T) {
+	got := codexClaudeCacheKey("gpt-5-codex", nil, "user-1")
+	if got != "gpt-5-codex-user-1" {
+		t.Fatalf("codexClaudeCacheKey without namespace = %q, want legacy key", got)
+	}
+}
+
+func TestCodexClaudeCacheKeyDisambiguatesScopedComponents(t *testing.T) {
+	authAB := &cliproxyauth.Auth{Metadata: map[string]any{"codex_installation_id": "a-b"}}
+	authA := &cliproxyauth.Auth{Metadata: map[string]any{"codex_installation_id": "a"}}
+
+	keyABUserC := codexClaudeCacheKey("gpt-5-codex", authAB, "c")
+	keyAUserBC := codexClaudeCacheKey("gpt-5-codex", authA, "b-c")
+	if keyABUserC == "" || keyAUserBC == "" {
+		t.Fatalf("codexClaudeCacheKey returned empty scoped key")
+	}
+	if keyABUserC == "gpt-5-codex-a-b-c" || keyAUserBC == "gpt-5-codex-a-b-c" {
+		t.Fatalf("codexClaudeCacheKey used ambiguous delimiter-only key")
+	}
+	if keyABUserC == keyAUserBC {
+		t.Fatalf("codexClaudeCacheKey collided for namespace/user components containing hyphens")
+	}
+
+	keyABUserC2 := codexClaudeCacheKey("gpt-5-codex", authAB, "c")
+	if keyABUserC2 != keyABUserC {
+		t.Fatalf("codexClaudeCacheKey = %q, want stable %q", keyABUserC2, keyABUserC)
+	}
+}
+
+func TestCodexExecutorCacheHelper_OpenAIResponsesScopesPromptCacheKeyByAuth(t *testing.T) {
+	ctx := context.Background()
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5-codex","prompt_cache_key":"shared-session"}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: rawJSON,
+	}
+	url := "https://example.com/responses"
+	authA := &cliproxyauth.Auth{
+		ID:       "auth-a",
+		Metadata: map[string]any{"codex_installation_id": "install-a"},
+	}
+	authB := &cliproxyauth.Auth{
+		ID:       "auth-b",
+		Metadata: map[string]any{"codex_installation_id": "install-b"},
+	}
+
+	httpReqA, bodyA, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, authA, req, rawJSON, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper auth A error: %v", err)
+	}
+	keyA := gjson.GetBytes(bodyA, "prompt_cache_key").String()
+	if keyA == "" || keyA == "shared-session" {
+		t.Fatalf("auth A prompt_cache_key = %q, want scoped key", keyA)
+	}
+	if gotSession := httpReqA.Header.Get("Session_id"); gotSession != keyA {
+		t.Fatalf("auth A Session_id = %q, want %q", gotSession, keyA)
+	}
+
+	_, bodyB, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, authB, req, rawJSON, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper auth B error: %v", err)
+	}
+	keyB := gjson.GetBytes(bodyB, "prompt_cache_key").String()
+	if keyB == "" || keyB == keyA {
+		t.Fatalf("auth B prompt_cache_key = %q, want different from auth A %q", keyB, keyA)
+	}
+
+	_, bodyA2, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, authA, req, rawJSON, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper auth A second error: %v", err)
+	}
+	keyA2 := gjson.GetBytes(bodyA2, "prompt_cache_key").String()
+	if keyA2 != keyA {
+		t.Fatalf("auth A prompt_cache_key second = %q, want stable %q", keyA2, keyA)
+	}
+}
+
+func TestApplyCodexHeadersPreservesScopedSessionIDOverMacClientHeader(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	ginCtx.Request.Header.Set("User-Agent", codexUserAgent)
+	ginCtx.Request.Header.Set("Session_id", "client-session")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	httpReq := httptest.NewRequest("POST", "https://example.com/responses", nil).WithContext(ctx)
+	httpReq.Header.Set("Session_id", "scoped-session")
+
+	applyCodexHeaders(httpReq, &cliproxyauth.Auth{ID: "auth-a"}, "oauth-token", true, nil)
+
+	if gotSession := httpReq.Header.Get("Session_id"); gotSession != "scoped-session" {
+		t.Fatalf("Session_id = %q, want scoped-session", gotSession)
+	}
+}
+
+func TestScopedCodexPromptCacheKeyDisambiguatesScopedComponents(t *testing.T) {
+	authAB := &cliproxyauth.Auth{Metadata: map[string]any{"codex_installation_id": "a:b"}}
+	authA := &cliproxyauth.Auth{Metadata: map[string]any{"codex_installation_id": "a"}}
+
+	keyABWithC := scopedCodexPromptCacheKey(authAB, "c")
+	keyAWithBC := scopedCodexPromptCacheKey(authA, "b:c")
+	if keyABWithC == "" || keyAWithBC == "" {
+		t.Fatalf("scopedCodexPromptCacheKey returned empty scoped key")
+	}
+	if keyABWithC == keyAWithBC {
+		t.Fatalf("scopedCodexPromptCacheKey collided for namespace/prompt_cache_key components containing colons")
+	}
+
+	ambiguousDelimiterKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:auth-session:a:b:c")).String()
+	if keyABWithC == ambiguousDelimiterKey || keyAWithBC == ambiguousDelimiterKey {
+		t.Fatalf("scopedCodexPromptCacheKey used ambiguous delimiter-only input")
+	}
+
+	if got := scopedCodexPromptCacheKey(nil, " cache-1 "); got != "cache-1" {
+		t.Fatalf("scopedCodexPromptCacheKey without namespace = %q, want trimmed legacy key", got)
+	}
+	if got := scopedCodexPromptCacheKey(authA, "   "); got != "" {
+		t.Fatalf("scopedCodexPromptCacheKey blank key = %q, want empty", got)
 	}
 }

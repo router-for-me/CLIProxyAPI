@@ -344,13 +344,40 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 func TestApplyCodexPromptCacheHeadersDoesNotSetDeprecatedConversationHeader(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
 
-	_, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
+	_, headers := applyCodexPromptCacheHeaders("openai-response", nil, req, []byte(`{"model":"gpt-5-codex"}`))
 
 	if got := headerValueCaseInsensitive(headers, "session_id"); got != "" {
 		t.Fatalf("session_id = %q, want empty", got)
 	}
 	if got := headers.Get("Conversation_id"); got != "" {
 		t.Fatalf("Conversation_id = %q, want empty", got)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersScopesSessionByAuth(t *testing.T) {
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
+	authA := &cliproxyauth.Auth{ID: "auth-a", Metadata: map[string]any{"codex_installation_id": "install-a"}}
+	authB := &cliproxyauth.Auth{ID: "auth-b", Metadata: map[string]any{"codex_installation_id": "install-b"}}
+
+	bodyA, headersA := applyCodexPromptCacheHeaders("openai-response", authA, req, []byte(`{"model":"gpt-5-codex"}`))
+	bodyB, headersB := applyCodexPromptCacheHeaders("openai-response", authB, req, []byte(`{"model":"gpt-5-codex"}`))
+
+	keyA := gjson.GetBytes(bodyA, "prompt_cache_key").String()
+	keyB := gjson.GetBytes(bodyB, "prompt_cache_key").String()
+	if keyA == "" || keyA == "cache-1" {
+		t.Fatalf("auth A prompt_cache_key = %q, want scoped key", keyA)
+	}
+	if keyB == "" || keyB == keyA {
+		t.Fatalf("auth B prompt_cache_key = %q, want different from auth A %q", keyB, keyA)
+	}
+	if got := headersA.Get("Session-Id"); got != keyA {
+		t.Fatalf("auth A Session-Id = %q, want %q", got, keyA)
+	}
+	if got := headerValueCaseInsensitive(headersA, "session_id"); got != "" {
+		t.Fatalf("auth A deprecated session_id = %q, want empty", got)
+	}
+	if got := headersB.Get("Conversation_id"); got != "" {
+		t.Fatalf("auth B Conversation_id = %q, want empty", got)
 	}
 }
 
@@ -365,7 +392,7 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 		Payload: []byte(`{"prompt_cache_key":"cache-ws-1","client_metadata":{"x-codex-installation-id":"install-ws-1"}}`),
 	}
 
-	body, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
+	body, headers := applyCodexPromptCacheHeaders("openai-response", auth, req, []byte(`{"model":"gpt-5-codex"}`))
 	body, identityState := applyCodexIdentityConfuseBody(cfg, auth, req.Payload, body)
 	ctx := contextWithGinHeaders(map[string]string{
 		"X-Codex-Turn-Metadata": `{"prompt_cache_key":"cache-ws-1","turn_id":"turn-ws-1","window_id":"cache-ws-1:0"}`,
@@ -382,11 +409,10 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 	if gotSession := headerValueCaseInsensitive(headers, "session_id"); gotSession != "" {
 		t.Fatalf("session_id = %q, want empty", gotSession)
 	}
-	if gotRequestID := headers.Get("X-Client-Request-Id"); gotRequestID != expectedPromptCacheKey {
-		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, expectedPromptCacheKey)
-	}
-	if gotThreadID := headers.Get("Thread-Id"); gotThreadID != expectedPromptCacheKey {
-		t.Fatalf("Thread-Id = %q, want %q", gotThreadID, expectedPromptCacheKey)
+	for _, headerName := range []string{"Session-Id", "X-Client-Request-Id", "Thread-Id"} {
+		if gotHeader := headers.Get(headerName); gotHeader != expectedPromptCacheKey {
+			t.Fatalf("%s = %q, want %q", headerName, gotHeader, expectedPromptCacheKey)
+		}
 	}
 	if gotConversation := headers.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
