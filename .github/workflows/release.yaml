@@ -1,8 +1,8 @@
 name: goreleaser
 
 on:
+  workflow_dispatch:
   push:
-    # run only against tags
     tags:
       - '*'
 
@@ -16,6 +16,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Ensure manual release uses tag ref
+        if: github.event_name == 'workflow_dispatch' && github.ref_type != 'tag'
+        run: |
+          echo "Manual releases must be dispatched from a tag ref."
+          exit 1
       - name: Refresh models catalog
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
