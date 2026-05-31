@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -185,8 +186,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		statusError := newOpenAICompatStatusErr(httpResp.StatusCode, httpResp.Header, b)
+		logOpenAICompatRequestError(ctx, statusError, httpResp.Header, b)
+		err = statusError
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -283,8 +285,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		err = statusErr{code: httpResp.StatusCode, msg: string(body)}
+		statusError := newOpenAICompatStatusErr(httpResp.StatusCode, httpResp.Header, body)
+		logOpenAICompatRequestError(ctx, statusError, httpResp.Header, body)
+		err = statusError
 		return resp, err
 	}
 
@@ -391,11 +394,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		statusError := newOpenAICompatStatusErr(httpResp.StatusCode, httpResp.Header, b)
+		logOpenAICompatRequestError(ctx, statusError, httpResp.Header, b)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusError
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -550,8 +554,9 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			return nil, errRead
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		statusError := newOpenAICompatStatusErr(httpResp.StatusCode, httpResp.Header, body)
+		logOpenAICompatRequestError(ctx, statusError, httpResp.Header, body)
+		return nil, statusError
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -794,6 +799,51 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+func newOpenAICompatStatusErr(statusCode int, headers http.Header, body []byte) statusErr {
+	statusError := statusErr{code: statusCode, msg: string(body)}
+	if retryAfter := parseHTTPRetryAfter(headers, time.Now()); retryAfter != nil {
+		statusError.retryAfter = retryAfter
+	}
+	return statusError
+}
+
+func logOpenAICompatRequestError(ctx context.Context, statusError statusErr, headers http.Header, body []byte) {
+	entry := helps.LogWithRequestID(ctx)
+	if statusError.code == http.StatusTooManyRequests {
+		entry = entry.WithField("has_retry_after", statusError.retryAfter != nil)
+		if statusError.retryAfter != nil {
+			entry = entry.WithField("retry_after", statusError.retryAfter.String())
+		}
+	}
+	entry.Debugf("request error, error status: %d, error message: %s", statusError.code, helps.SummarizeErrorBody(headers.Get("Content-Type"), body))
+}
+
+func parseHTTPRetryAfter(headers http.Header, now time.Time) *time.Duration {
+	if headers == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return nil
+		}
+		retryAfter := time.Duration(seconds) * time.Second
+		return &retryAfter
+	}
+	retryAt, err := http.ParseTime(raw)
+	if err != nil {
+		return nil
+	}
+	retryAfter := retryAt.Sub(now)
+	if retryAfter <= 0 {
+		return nil
+	}
+	return &retryAfter
 }
 
 type statusErr struct {

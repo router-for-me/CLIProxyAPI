@@ -1238,10 +1238,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry, source := m.shouldRetryAfterErrorDetailed(errExec, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
+		logRetryWait(ctx, normalized, req.Model, attempt, wait, source)
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
@@ -1273,10 +1274,11 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry, source := m.shouldRetryAfterErrorDetailed(errExec, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
+		logRetryWait(ctx, normalized, req.Model, attempt, wait, source)
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
@@ -1304,10 +1306,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return result, nil
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry, source := m.shouldRetryAfterErrorDetailed(errStream, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
+		logRetryWait(ctx, normalized, req.Model, attempt, wait, source)
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return nil, errWait
 		}
@@ -2230,37 +2233,44 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 }
 
 func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
+	wait, shouldRetry, _ := m.shouldRetryAfterErrorDetailed(err, attempt, providers, model, maxWait)
+	return wait, shouldRetry
+}
+
+func (m *Manager) shouldRetryAfterErrorDetailed(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool, string) {
 	if err == nil {
-		return 0, false
+		return 0, false, ""
 	}
 	if maxWait <= 0 {
-		return 0, false
+		return 0, false, ""
 	}
 	status := statusCodeFromError(err)
 	if status == http.StatusOK {
-		return 0, false
+		return 0, false, ""
 	}
 	if isRequestInvalidError(err) {
-		return 0, false
+		return 0, false, ""
+	}
+	if status == http.StatusTooManyRequests {
+		retryAfter := retryAfterFromError(err)
+		if retryAfter != nil && *retryAfter > 0 && *retryAfter <= maxWait && m.retryAllowed(attempt, providers) {
+			return *retryAfter, true, "upstream"
+		}
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
 		if wait > maxWait {
-			return 0, false
+			return 0, false, ""
 		}
-		return wait, true
+		return wait, true, "local-cooldown"
 	}
 	if status != http.StatusTooManyRequests {
-		return 0, false
+		return 0, false, ""
 	}
 	if !m.retryAllowed(attempt, providers) {
-		return 0, false
+		return 0, false, ""
 	}
-	retryAfter := retryAfterFromError(err)
-	if retryAfter == nil || *retryAfter <= 0 || *retryAfter > maxWait {
-		return 0, false
-	}
-	return *retryAfter, true
+	return 0, false, ""
 }
 
 func waitForCooldown(ctx context.Context, wait time.Duration) error {
@@ -2275,6 +2285,20 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func logRetryWait(ctx context.Context, providers []string, model string, attempt int, wait time.Duration, source string) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	entry := logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"attempt":   attempt + 1,
+		"model":     model,
+		"providers": strings.Join(providers, ","),
+		"source":    source,
+		"wait":      wait.String(),
+	})
+	entry.Debug("retrying request after cooldown |")
 }
 
 // MarkResult records an execution result and notifies hooks.
@@ -2303,7 +2327,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if result.Success {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
-				resetModelState(state, now)
+				clearModelStateOnSuccess(state, now)
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -2370,15 +2394,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
+								cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
-									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
 									if cooldown > 0 {
 										next = now.Add(cooldown)
 									}
-									backoffLevel = nextLevel
 								}
+								backoffLevel = nextLevel
 							}
 							state.NextRetryAfter = next
 							state.Quota = QuotaState{
@@ -2461,6 +2485,23 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	state.Quota = QuotaState{}
+	state.UpdatedAt = now
+}
+
+func clearModelStateOnSuccess(state *ModelState, now time.Time) {
+	if state == nil {
+		return
+	}
+	backoffLevel := state.Quota.BackoffLevel
+	if backoffLevel < 0 {
+		backoffLevel = 0
+	}
+	state.Unavailable = false
+	state.Status = StatusActive
+	state.StatusMessage = ""
+	state.NextRetryAfter = time.Time{}
+	state.LastError = nil
+	state.Quota = QuotaState{BackoffLevel: backoffLevel}
 	state.UpdatedAt = now
 }
 

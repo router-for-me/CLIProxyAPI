@@ -84,3 +84,15 @@ Suggested solutions:
 - Stage only files directly tied to the issue being fixed.
 - When executor-side reasoning preservation logic changes independently, add focused tests for the specific reconstruction strategy before committing it.
 - Call out excluded local files explicitly in the handoff or commit summary.
+
+### [Retry Handling] OpenAI-compatible 429 errors currently drop upstream Retry-After hints
+Detailed description:
+`internal/runtime/executor/openai_compat_executor.go` uses `statusErr` for non-2xx responses, and `statusErr` already supports `RetryAfter()`. However, the 429 branches currently populate only `code` and `msg` and do not copy or parse any upstream `Retry-After` header/body hint into `retryAfter`. The auth conductor therefore falls back to the generic per-model quota cooldown ladder (`1s`, `2s`, `4s`, ...) instead of honoring provider guidance when available.
+
+Impact scope:
+Agents debugging repeated OpenAI-compatible 429 loops may misclassify the behavior as purely upstream instability. In practice, provider throttling can be amplified by overly short local retries, causing the same request ID to cycle across the same credentials and generate noisy `Marked model ... quota exceeded` logs before one credential finally succeeds.
+
+Suggested solutions:
+- When constructing `statusErr` in the OpenAI-compatible executor, parse and attach `Retry-After` when the upstream provides it.
+- If provider-specific bodies encode quota reset timing, consider parsing those hints as a fallback when headers are absent.
+- During incident analysis, distinguish the upstream 429 root cause from the local retry amplification caused by missing retry-after propagation.
