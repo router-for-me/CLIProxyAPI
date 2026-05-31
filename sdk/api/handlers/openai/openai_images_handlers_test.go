@@ -270,6 +270,29 @@ func TestShouldStreamImagesRequestRequiresSSEAccept(t *testing.T) {
 	}
 }
 
+func TestImageEmptyOutputMessageUsesUpstreamReason(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"status":"failed","error":{"message":"The content you provided is blocked."},"output":[]}}`)
+
+	got := imageEmptyOutputMessage(payload)
+
+	if !strings.Contains(got, "content you provided is blocked") {
+		t.Fatalf("message = %q, want upstream reason", got)
+	}
+	if strings.Contains(got, "upstream did not return image output") {
+		t.Fatalf("message should not use generic empty output fallback: %q", got)
+	}
+}
+
+func TestImageEmptyOutputMessageUsesToolCallStatus(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"image_generation_call","status":"failed","error":{"message":"image tool unavailable"}}]}}`)
+
+	got := imageEmptyOutputMessage(payload)
+
+	if !strings.Contains(got, "image tool unavailable") {
+		t.Fatalf("message = %q, want tool call reason", got)
+	}
+}
+
 func TestBuildImagesAPIResponseFromXAI(t *testing.T) {
 	payload := []byte(`{"created":123,"data":[{"b64_json":"AA==","revised_prompt":"refined","mime_type":"image/png"}],"usage":{"total_tokens":0}}`)
 

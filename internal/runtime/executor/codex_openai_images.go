@@ -209,7 +209,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 					return resp, errExtract
 				}
 				if len(results) == 0 {
-					return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+					return resp, codexOpenAIImageEmptyOutputErr(completedData)
 				}
 				out, errOutput := codexBuildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat)
 				if errOutput != nil {
@@ -347,7 +347,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 					return
 				}
 				if len(results) == 0 {
-					sendError(statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"})
+					sendError(codexOpenAIImageEmptyOutputErr(completedData))
 					return
 				}
 				for _, img := range results {
@@ -676,6 +676,85 @@ func codexExtractImagesFromResponsesCompleted(payload []byte) (results []codexIm
 		usageRaw = []byte(usage.Raw)
 	}
 	return results, createdAt, usageRaw, firstMeta, nil
+}
+
+func codexOpenAIImageEmptyOutputErr(payload []byte) statusErr {
+	message := codexOpenAIImageEmptyOutputMessage(payload)
+	if message == "" {
+		message = "upstream did not return image output"
+	}
+	return statusErr{code: http.StatusBadGateway, msg: message, errorCode: "codex_image_empty_output"}
+}
+
+func codexOpenAIImageEmptyOutputMessage(payload []byte) string {
+	if msg := codexOpenAIImageFirstNonEmpty(payload,
+		"response.error.message",
+		"response.status_details.error.message",
+		"response.status_details.message",
+		"response.incomplete_details.reason",
+	); msg != "" {
+		return "upstream image generation failed: " + msg
+	}
+
+	status := strings.TrimSpace(gjson.GetBytes(payload, "response.status").String())
+	if status != "" && !strings.EqualFold(status, "completed") {
+		return "upstream image generation did not complete: status " + status
+	}
+
+	for _, item := range gjson.GetBytes(payload, "response.output").Array() {
+		if item.Get("type").String() != "image_generation_call" {
+			continue
+		}
+		if msg := codexOpenAIImageFirstNonEmpty([]byte(item.Raw),
+			"error.message",
+			"status_details.error.message",
+			"status_details.message",
+			"incomplete_details.reason",
+		); msg != "" {
+			return "upstream image generation call failed: " + msg
+		}
+		itemStatus := strings.TrimSpace(item.Get("status").String())
+		if itemStatus != "" && !strings.EqualFold(itemStatus, "completed") {
+			return "upstream image generation call did not complete: status " + itemStatus
+		}
+	}
+
+	if msg := codexOpenAIImageFirstOutputText(payload); msg != "" {
+		return "upstream returned text instead of image output: " + msg
+	}
+	return ""
+}
+
+func codexOpenAIImageFirstNonEmpty(payload []byte, paths ...string) string {
+	for _, path := range paths {
+		if msg := codexOpenAIImageTrimMessage(gjson.GetBytes(payload, path).String()); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+func codexOpenAIImageFirstOutputText(payload []byte) string {
+	for _, item := range gjson.GetBytes(payload, "response.output").Array() {
+		for _, content := range item.Get("content").Array() {
+			if msg := codexOpenAIImageTrimMessage(content.Get("text").String()); msg != "" {
+				return msg
+			}
+		}
+	}
+	return ""
+}
+
+func codexOpenAIImageTrimMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	const maxLen = 500
+	if len(message) > maxLen {
+		return strings.TrimSpace(message[:maxLen]) + "..."
+	}
+	return message
 }
 
 func codexBuildImagesAPIResponse(results []codexImageCallResult, createdAt int64, usageRaw []byte, firstMeta codexImageCallResult, responseFormat string) ([]byte, error) {

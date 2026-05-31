@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -110,5 +111,31 @@ func TestCodexOpenAIImageStreamStatusErrWrapsHTTP2Reset(t *testing.T) {
 	}
 	if got := statusErr.StatusCode(); got != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want %d", got, http.StatusGatewayTimeout)
+	}
+}
+
+func TestCodexOpenAIImageEmptyOutputErrUsesUpstreamReason(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"status":"failed","error":{"message":"The content you provided is blocked."},"output":[]}}`)
+
+	err := codexOpenAIImageEmptyOutputErr(payload)
+
+	if got := err.StatusCode(); got != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", got, http.StatusBadGateway)
+	}
+	if !strings.Contains(err.Error(), "content you provided is blocked") {
+		t.Fatalf("error = %q, want upstream reason", err.Error())
+	}
+	if strings.Contains(err.Error(), "upstream did not return image output") {
+		t.Fatalf("error should not use generic empty output message: %q", err.Error())
+	}
+}
+
+func TestCodexOpenAIImageEmptyOutputErrUsesToolCallStatus(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"image_generation_call","status":"failed","error":{"message":"image tool unavailable"}}]}}`)
+
+	err := codexOpenAIImageEmptyOutputErr(payload)
+
+	if !strings.Contains(err.Error(), "image tool unavailable") {
+		t.Fatalf("error = %q, want tool call reason", err.Error())
 	}
 }
