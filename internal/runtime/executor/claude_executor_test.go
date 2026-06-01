@@ -2375,3 +2375,27 @@ func TestRemapOAuthToolNames_MCPDoubleUnderscore_Untouched(t *testing.T) {
 		t.Fatalf("reverseMap = %v, want empty", reverseMap)
 	}
 }
+
+// TestRemapOAuthToolNames_ToolChoiceBuiltin_NotRenamed verifies that forcing an
+// Anthropic built-in tool via tool_choice keeps the built-in's lowercase name so
+// it still matches the typed tool in the tools array (which is intentionally left
+// unchanged). A custom tool declared alongside it is still cloaked. Without the
+// built-in guard the generic fallback would rewrite the choice to "WebSearch",
+// producing a tool_choice/tools mismatch that Anthropic rejects.
+func TestRemapOAuthToolNames_ToolChoiceBuiltin_NotRenamed(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"browser_navigate","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"tool","name":"web_search"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "web_search" {
+		t.Fatalf("tool_choice.name = %q, want %q (built-in unchanged)", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+		t.Fatalf("tools.0.name = %q, want web_search (built-in unchanged)", got)
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tools.1.name = %q, want BrowserNavigate (custom still cloaked)", got)
+	}
+	if _, exists := reverseMap["WebSearch"]; exists {
+		t.Fatalf("web_search must not be renamed/reversed: %v", reverseMap)
+	}
+}
