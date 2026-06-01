@@ -257,6 +257,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			if joined := strings.Join(compat.AllowedKeys, ","); joined != "" {
+				attrs["allowed_keys"] = joined
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
@@ -296,6 +299,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			if joined := strings.Join(compat.AllowedKeys, ","); joined != "" {
+				attrs["allowed_keys"] = joined
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,

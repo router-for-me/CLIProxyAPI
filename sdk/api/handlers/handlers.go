@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -560,6 +561,32 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 	c.Set("API_RESPONSE", bytes.Clone(data))
 }
 
+// clientKeyModelAccessError enforces provider allow-lists (openai-compatibility allowed-keys).
+// It returns a 403 permission error when the requested client-facing model is served only by
+// providers private to other client API keys, so callers never reach the routing layer.
+// modelName must be the client-facing model id (alias), which is how models are keyed in the
+// registry. Returns nil when access is permitted or cannot be determined.
+func (h *BaseAPIHandler) clientKeyModelAccessError(ctx context.Context, modelName string) *interfaces.ErrorMessage {
+	base := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+	if base == "" {
+		base = strings.TrimSpace(modelName)
+	}
+	if base == "" {
+		return nil
+	}
+	clientKey := ""
+	if c, ok := ctx.Value("gin").(*gin.Context); ok && c != nil {
+		clientKey = strings.TrimSpace(c.GetString("userApiKey"))
+	}
+	if registry.GetGlobalRegistry().IsModelAllowedForKey(base, clientKey) {
+		return nil
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusForbidden,
+		Error:      fmt.Errorf("model %q is not allowed for this API key", base),
+	}
+}
+
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
@@ -575,6 +602,9 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if accessErr := h.clientKeyModelAccessError(ctx, modelName); accessErr != nil {
+		return nil, nil, accessErr
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
@@ -625,6 +655,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if accessErr := h.clientKeyModelAccessError(ctx, modelName); accessErr != nil {
+		return nil, nil, accessErr
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
@@ -686,6 +719,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
+	if accessErr := h.clientKeyModelAccessError(ctx, modelName); accessErr != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- accessErr
 		close(errChan)
 		return nil, nil, errChan
 	}

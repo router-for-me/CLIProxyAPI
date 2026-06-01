@@ -259,6 +259,12 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
+#     allowed-keys:          # optional: make this provider private to specific client API keys.
+#       - "your-api-key-1"   # values must match entries in the top-level api-keys list.
+#       # When omitted or empty the provider is public (every client key may use it).
+#       # When set, only the listed client keys can see this provider's models in the
+#       # model listings and route to them; other keys get HTTP 403 (model_not_allowed)
+#       # if they request a model that only this provider serves.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:

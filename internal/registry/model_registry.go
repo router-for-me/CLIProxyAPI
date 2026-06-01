@@ -122,6 +122,9 @@ type ModelRegistry struct {
 	clientModelInfos map[string]map[string]*ModelInfo
 	// clientProviders maps client ID to its provider identifier
 	clientProviders map[string]string
+	// clientKeyACL maps client ID to the list of client API keys allowed to use it.
+	// An absent or empty entry means the client (provider) is public to every key.
+	clientKeyACL map[string][]string
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
 	// availableModelsCache stores per-handler snapshots for GetAvailableModels.
@@ -142,6 +145,7 @@ func GetGlobalRegistry() *ModelRegistry {
 			clientModels:         make(map[string][]string),
 			clientModelInfos:     make(map[string]map[string]*ModelInfo),
 			clientProviders:      make(map[string]string),
+			clientKeyACL:         make(map[string][]string),
 			availableModelsCache: make(map[string]availableModelsCacheEntry),
 			mutex:                &sync.RWMutex{},
 		}
@@ -627,6 +631,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 
 	delete(r.clientModels, clientID)
 	delete(r.clientModelInfos, clientID)
+	delete(r.clientKeyACL, clientID)
 	if hasProvider {
 		delete(r.clientProviders, clientID)
 	}
@@ -777,7 +782,7 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 		return cloneModelMaps(cache.models)
 	}
 
-	models, expiresAt := r.buildAvailableModelsLocked(handlerType, now)
+	models, expiresAt := r.buildAvailableModelsLocked(handlerType, now, nil)
 	r.availableModelsCache[handlerType] = availableModelsCacheEntry{
 		models:    cloneModelMaps(models),
 		expiresAt: expiresAt,
@@ -786,11 +791,14 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	return models
 }
 
-func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.Time) ([]map[string]any, time.Time) {
+func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.Time, allow func(modelID string) bool) ([]map[string]any, time.Time) {
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
+		if allow != nil && !allow(modelID) {
+			continue
+		}
 		availableClients := registration.Count
 
 		expiredClients := 0
@@ -833,6 +841,109 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	}
 
 	return models, expiresAt
+}
+
+// SetClientKeyACL records which client API keys may access the given registry client
+// (provider auth). An empty keys slice removes any restriction, making the client public.
+// Keys are matched case-sensitively; callers should pass already-normalized values.
+func (r *ModelRegistry) SetClientKeyACL(clientID string, keys []string) {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return
+	}
+	cleaned := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k = strings.TrimSpace(k); k != "" {
+			cleaned = append(cleaned, k)
+		}
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.clientKeyACL == nil {
+		r.clientKeyACL = make(map[string][]string)
+	}
+	if len(cleaned) == 0 {
+		delete(r.clientKeyACL, clientID)
+		return
+	}
+	r.clientKeyACL[clientID] = cleaned
+}
+
+// clientAccessibleToKeyLocked reports whether the given client (provider auth) may be used
+// by the supplied client API key. Clients with no ACL are public.
+func (r *ModelRegistry) clientAccessibleToKeyLocked(clientID, clientKey string) bool {
+	acl := r.clientKeyACL[clientID]
+	if len(acl) == 0 {
+		return true
+	}
+	if clientKey == "" {
+		return false
+	}
+	for _, k := range acl {
+		if k == clientKey {
+			return true
+		}
+	}
+	return false
+}
+
+// GetAvailableModelsForKey returns the available models visible to the supplied client API
+// key, hiding models that are served only by providers private to other keys. When no
+// private providers are configured it is equivalent to GetAvailableModels.
+func (r *ModelRegistry) GetAvailableModelsForKey(handlerType, clientKey string) []map[string]any {
+	clientKey = strings.TrimSpace(clientKey)
+	r.mutex.RLock()
+	if len(r.clientKeyACL) == 0 {
+		r.mutex.RUnlock()
+		return r.GetAvailableModels(handlerType)
+	}
+	visible := make(map[string]struct{})
+	for clientID, modelIDs := range r.clientModels {
+		if !r.clientAccessibleToKeyLocked(clientID, clientKey) {
+			continue
+		}
+		for _, mid := range modelIDs {
+			visible[strings.ToLower(strings.TrimSpace(mid))] = struct{}{}
+		}
+	}
+	allow := func(modelID string) bool {
+		_, ok := visible[strings.ToLower(strings.TrimSpace(modelID))]
+		return ok
+	}
+	models, _ := r.buildAvailableModelsLocked(handlerType, time.Now(), allow)
+	r.mutex.RUnlock()
+	return models
+}
+
+// IsModelAllowedForKey reports whether the supplied client API key may use the given model.
+// It returns false only when the model is provided exclusively by providers that are private
+// to other keys. Unknown models return true so that normal not-found handling applies.
+func (r *ModelRegistry) IsModelAllowedForKey(modelID, clientKey string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return true
+	}
+	clientKey = strings.TrimSpace(clientKey)
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if len(r.clientKeyACL) == 0 {
+		return true
+	}
+	known := false
+	for clientID, modelIDs := range r.clientModels {
+		for _, mid := range modelIDs {
+			if strings.ToLower(strings.TrimSpace(mid)) != modelID {
+				continue
+			}
+			known = true
+			if r.clientAccessibleToKeyLocked(clientID, clientKey) {
+				return true
+			}
+			break
+		}
+	}
+	// Unknown model: defer to normal not-found handling. Known but no accessible provider: deny.
+	return !known
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {

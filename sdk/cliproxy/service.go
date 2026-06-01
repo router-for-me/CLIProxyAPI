@@ -456,6 +456,16 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		return
 	}
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, models)
+	// Propagate per-client-key provider access control (openai-compatibility allowed-keys).
+	// The synthesizer stamps the normalized allow-list onto the auth's "allowed_keys"
+	// attribute; an empty attribute clears any restriction (public provider).
+	var allowedKeys []string
+	if a.Attributes != nil {
+		if v := strings.TrimSpace(a.Attributes["allowed_keys"]); v != "" {
+			allowedKeys = strings.Split(v, ",")
+		}
+	}
+	GlobalModelRegistry().SetClientKeyACL(a.ID, allowedKeys)
 }
 
 // rebindExecutors refreshes provider executors so they observe the latest configuration.

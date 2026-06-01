@@ -3014,6 +3014,59 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 	return m.selectionModelKeyForAuth(auth, routeModel) != canonicalModelKey(routeModel)
 }
 
+// clientAPIKeyFromContext extracts the authenticated client API key that the API auth
+// middleware stored on the gin context carried inside ctx. Returns "" when unavailable.
+func clientAPIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(interface{ Get(string) (any, bool) })
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	if raw, exists := ginCtx.Get("userApiKey"); exists {
+		return strings.TrimSpace(contextStringValue(raw))
+	}
+	return ""
+}
+
+// authAllowedForClientKey reports whether the auth (provider) may be used by the given
+// client API key. Auths whose "allowed_keys" attribute is empty are public to every key;
+// otherwise the key must appear in the comma-separated, case-sensitive allow-list.
+func authAllowedForClientKey(auth *Auth, clientKey string) bool {
+	if auth == nil {
+		return false
+	}
+	raw := ""
+	if auth.Attributes != nil {
+		raw = strings.TrimSpace(auth.Attributes["allowed_keys"])
+	}
+	if raw == "" {
+		return true
+	}
+	if clientKey == "" {
+		return false
+	}
+	for _, k := range strings.Split(raw, ",") {
+		if strings.TrimSpace(k) == clientKey {
+			return true
+		}
+	}
+	return false
+}
+
+// errModelNotAllowedForKey is returned when every auth that could serve a model was
+// filtered out solely because the requesting client API key is not in the provider's
+// allow-list. It maps to HTTP 403 so clients receive a clear permission error rather
+// than a generic not-found.
+func errModelNotAllowedForKey() *Error {
+	return &Error{
+		Code:       "model_not_allowed",
+		Message:    "model not allowed for this API key",
+		HTTPStatus: http.StatusForbidden,
+	}
+}
+
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
@@ -3039,6 +3092,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	clientKey := clientAPIKeyFromContext(ctx)
+	clientKeyBlocked := false
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
 			continue
@@ -3055,10 +3110,17 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		if !authAllowedForClientKey(candidate, clientKey) {
+			clientKeyBlocked = true
+			continue
+		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if clientKeyBlocked {
+			return nil, nil, errModelNotAllowedForKey()
+		}
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
@@ -3181,6 +3243,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	clientKey := clientAPIKeyFromContext(ctx)
+	clientKeyBlocked := false
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
 			continue
@@ -3207,10 +3271,17 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		if !authAllowedForClientKey(candidate, clientKey) {
+			clientKeyBlocked = true
+			continue
+		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if clientKeyBlocked {
+			return nil, nil, "", errModelNotAllowedForKey()
+		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())

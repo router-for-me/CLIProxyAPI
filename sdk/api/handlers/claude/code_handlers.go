@@ -131,7 +131,8 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	models := h.Models()
+	// Hide models served only by providers private to other client API keys.
+	models := registry.GetGlobalRegistry().GetAvailableModelsForKey("claude", c.GetString("userApiKey"))
 	firstID := ""
 	lastID := ""
 	if len(models) > 0 {

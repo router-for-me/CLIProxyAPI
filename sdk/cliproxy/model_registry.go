@@ -17,6 +17,9 @@ type ModelRegistry interface {
 	ClientSupportsModel(clientID, modelID string) bool
 	GetAvailableModels(handlerType string) []map[string]any
 	GetAvailableModelsByProvider(provider string) []*ModelInfo
+	// SetClientKeyACL records which client API keys may access the given registry client
+	// (provider auth). An empty list makes the client public to every key.
+	SetClientKeyACL(clientID string, keys []string)
 }
 
 // GlobalModelRegistry returns the shared registry instance.

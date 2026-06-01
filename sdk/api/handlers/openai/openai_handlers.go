@@ -64,8 +64,10 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		return
 	}
 
-	// Get all available models
-	allModels := h.Models()
+	// Get the models visible to the requesting client API key. Providers configured with
+	// allowed-keys are hidden from keys that are not in their allow-list.
+	clientKey := c.GetString("userApiKey")
+	allModels := registry.GetGlobalRegistry().GetAvailableModelsForKey("openai", clientKey)
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))

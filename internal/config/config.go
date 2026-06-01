@@ -573,6 +573,13 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// AllowedKeys restricts this provider to the listed client API keys (values from the
+	// top-level api-keys list). When empty or omitted the provider is public and every
+	// client key may see and use its models. When non-empty the provider becomes private:
+	// only the listed client keys can see its models in the model listings and route to
+	// them; any other key is treated as if the provider's models do not exist.
+	AllowedKeys []string `yaml:"allowed-keys,omitempty" json:"allowed-keys,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -901,6 +908,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.AllowedKeys = NormalizeClientKeys(e.AllowedKeys)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -1021,6 +1029,33 @@ func NormalizeExcludedModels(models []string) []string {
 	out := make([]string, 0, len(models))
 	for _, raw := range models {
 		trimmed := strings.ToLower(strings.TrimSpace(raw))
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeClientKeys cleans a list of client API keys used for access control
+// (e.g. openai-compatibility.allowed-keys). It trims surrounding whitespace, drops
+// empty entries and removes duplicates while preserving order. Unlike model names,
+// API keys are opaque secrets and are matched case-sensitively, so case is preserved.
+func NormalizeClientKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, raw := range keys {
+		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			continue
 		}

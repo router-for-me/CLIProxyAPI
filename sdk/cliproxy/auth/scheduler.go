@@ -256,8 +256,12 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	clientKey := clientAPIKeyFromContext(ctx)
 	predicate := func(entry *scheduledAuth) bool {
 		if entry == nil || entry.auth == nil {
+			return false
+		}
+		if !authAllowedForClientKey(entry.auth, clientKey) {
 			return false
 		}
 		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
@@ -329,7 +333,14 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
-	predicate := triedPredicate(tried)
+	basePredicate := triedPredicate(tried)
+	clientKey := clientAPIKeyFromContext(ctx)
+	predicate := func(entry *scheduledAuth) bool {
+		if entry == nil || entry.auth == nil || !authAllowedForClientKey(entry.auth, clientKey) {
+			return false
+		}
+		return basePredicate(entry)
+	}
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
