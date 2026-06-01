@@ -750,6 +750,14 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
+func (m *Manager) preparedExecutionModelsForRequest(auth *Auth, routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]string, bool) {
+	candidates := m.executionModelCandidates(auth, routeModel)
+	pooled := len(candidates) > 1
+	models := m.filterExecutionModels(auth, routeModel, candidates, pooled)
+	models = filterMiniMaxM3RequiredExecutionModels(routeModel, req, opts, models)
+	return models, pooled
+}
+
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
 	models, _ := m.preparedExecutionModels(auth, routeModel)
 	return models
@@ -2114,7 +2122,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		models, pooled := m.preparedExecutionModelsForRequest(auth, routeModel, req, opts)
 		if len(models) == 0 {
 			continue
 		}
@@ -2251,7 +2259,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		models, pooled := m.preparedExecutionModelsForRequest(auth, routeModel, req, opts)
 		if len(models) == 0 {
 			continue
 		}
@@ -2386,7 +2394,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled := m.preparedExecutionModels(auth, routeModel)
+		models, pooled := m.preparedExecutionModelsForRequest(auth, routeModel, req, opts)
 		if len(models) == 0 {
 			continue
 		}
