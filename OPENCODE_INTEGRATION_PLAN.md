@@ -100,8 +100,10 @@ model. Behavior:
 1. Extract the requested model from the body (or Gemini URL path).
 2. If a provider is available locally for that model, use it as-is.
 3. Otherwise (or always, when `force-model-mappings: true`) consult the mapping table;
-   if a mapping resolves to a model with an available provider, rewrite the request
-   body's `model` field and proceed.
+   if a mapping resolves to a model with an available provider, apply it where the model
+   actually lives — rewrite the request body's `model` field for OpenAI/Claude, or
+   rewrite the Gemini native `:action` path param (`model:method`) since the shared
+   `GeminiHandler` resolves the model from the URL, not the body — and proceed.
 4. If nothing resolves, the underlying handler returns its normal error (no silent
    forwarding to an external paid gateway — OpenCode users point at us deliberately).
 

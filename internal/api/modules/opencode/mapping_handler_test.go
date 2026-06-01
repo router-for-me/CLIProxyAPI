@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -115,5 +116,33 @@ func TestMappingHandler_GeminiPathModelExtraction(t *testing.T) {
 	doPost(r, "/opencode/v1beta/models/gemini-2.5-pro:generateContent", "")
 	if captured != "gemini-2.5-pro" {
 		t.Fatalf("expected gemini-2.5-pro extracted from path, got %q", captured)
+	}
+}
+
+func TestMappingHandler_RewritesGeminiActionPath(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("opencode-mh-gemini", "gemini", []*registry.ModelInfo{
+		{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
+	})
+	defer reg.UnregisterClient("opencode-mh-gemini")
+
+	mapper := NewModelMapper([]config.OpenCodeModelMapping{
+		{From: "gemini-pro-alias", To: "gemini-2.5-pro"},
+	})
+	mh := NewMappingHandler(mapper, func() bool { return false })
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	// Downstream handler resolves the model from the :action path param, like GeminiHandler.
+	gotAction := ""
+	r.POST("/opencode/v1beta/models/*action", mh.Wrap(func(c *gin.Context) {
+		gotAction = strings.TrimPrefix(c.Param("action"), "/")
+		c.Status(http.StatusOK)
+	}))
+
+	doPost(r, "/opencode/v1beta/models/gemini-pro-alias:generateContent", "")
+
+	if gotAction != "gemini-2.5-pro:generateContent" {
+		t.Fatalf("expected action rewritten to gemini-2.5-pro:generateContent, got %q", gotAction)
 	}
 }

@@ -13,10 +13,6 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// MappedModelContextKey is the Gin context key for passing mapped model names to
-// downstream handlers that read it (e.g. the Gemini bridge in the merged routes).
-const MappedModelContextKey = "opencode_mapped_model"
-
 // MappingHandler wraps a standard SDK handler with OpenCode model-mapping logic.
 // Unlike Amp's FallbackHandler, it has no reverse-proxy fallback: OpenCode users
 // point a custom provider baseURL at the proxy deliberately, so when no provider
@@ -77,11 +73,15 @@ func (h *MappingHandler) Wrap(handler gin.HandlerFunc) gin.HandlerFunc {
 		}
 
 		if mappedModel != "" && mappedModel != modelName {
+			// OpenAI/Claude requests carry the model in the JSON body; Gemini native
+			// requests carry it in the :action URL path param (model:method). Apply
+			// the mapping to whichever location actually holds the model.
 			if rewritten, ok := rewriteModelInRequest(bodyBytes, mappedModel); ok {
 				bodyBytes = rewritten
-				c.Set(MappedModelContextKey, mappedModel)
-				log.Debugf("opencode model mapping: %s -> %s", modelName, mappedModel)
+			} else {
+				rewriteGeminiActionModel(c, mappedModel)
 			}
+			log.Debugf("opencode model mapping: %s -> %s", modelName, mappedModel)
 		}
 
 		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -102,6 +102,40 @@ func rewriteModelInRequest(body []byte, newModel string) ([]byte, bool) {
 		return body, false
 	}
 	return result, true
+}
+
+// rewriteGeminiActionModel substitutes the model in the Gemini native :action path
+// param (formatted as "model:method"), since the shared GeminiHandler resolves the
+// model from the URL path rather than the request body. It preserves the method and
+// any leading slash from the catch-all param value.
+func rewriteGeminiActionModel(c *gin.Context, mappedModel string) {
+	action := c.Param("action")
+	if action == "" {
+		return
+	}
+	leading := ""
+	trimmed := action
+	if strings.HasPrefix(trimmed, "/") {
+		leading = "/"
+		trimmed = trimmed[1:]
+	}
+	colon := strings.Index(trimmed, ":")
+	if colon < 0 {
+		return
+	}
+	setParam(c, "action", leading+mappedModel+trimmed[colon:])
+}
+
+// setParam replaces the value of an existing gin path param, or appends it if absent,
+// so a subsequent ShouldBindUri/Param read observes the mapped value.
+func setParam(c *gin.Context, key, value string) {
+	for i := range c.Params {
+		if c.Params[i].Key == key {
+			c.Params[i].Value = value
+			return
+		}
+	}
+	c.Params = append(c.Params, gin.Param{Key: key, Value: value})
 }
 
 // extractModelFromRequest attempts to extract the model name from various request
