@@ -42,6 +42,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if provider == "" {
 		provider = "unknown"
 	}
+	executorType := strings.TrimSpace(record.ExecutorType)
+	if executorType == "" {
+		executorType = "unknown"
+	}
 	authType := strings.TrimSpace(record.AuthType)
 	if authType == "" {
 		authType = "unknown"
@@ -94,6 +98,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	payload, err := json.Marshal(queuedUsageDetail{
 		requestDetail:   detail,
 		Provider:        provider,
+		ExecutorType:    executorType,
 		Model:           modelName,
 		Alias:           aliasName,
 		Endpoint:        resolveEndpoint(ctx),
@@ -112,6 +117,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 type queuedUsageDetail struct {
 	requestDetail
 	Provider        string `json:"provider"`
+	ExecutorType    string `json:"executor_type"`
 	Model           string `json:"model"`
 	Alias           string `json:"alias"`
 	Endpoint        string `json:"endpoint"`
