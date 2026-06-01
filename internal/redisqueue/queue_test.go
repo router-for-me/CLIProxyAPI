@@ -12,6 +12,9 @@ func TestEnqueueBroadcastsToUsageSubscribersAndSkipsQueue(t *testing.T) {
 		second, unsubscribeSecond := SubscribeUsage()
 		defer unsubscribeSecond()
 
+		requireUsageSubscriberPayload(t, first, usageSupportRefreshPayload)
+		requireUsageSubscriberPayload(t, second, usageSupportRefreshPayload)
+
 		Enqueue([]byte("usage-record"))
 
 		requireUsageSubscriberPayload(t, first, "usage-record")
@@ -37,6 +40,8 @@ func TestSetEnabledFalseClosesUsageSubscribers(t *testing.T) {
 		subscriber, unsubscribe := SubscribeUsage()
 		defer unsubscribe()
 
+		requireUsageSubscriberPayload(t, subscriber, usageSupportRefreshPayload)
+
 		SetEnabled(false)
 
 		select {
@@ -46,6 +51,24 @@ func TestSetEnabledFalseClosesUsageSubscribers(t *testing.T) {
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("timeout waiting for subscriber close")
+		}
+	})
+}
+
+func TestNotifyUsageRefreshBroadcastsOnlyToUsageSubscribers(t *testing.T) {
+	withEnabledQueue(t, func() {
+		subscriber, unsubscribe := SubscribeUsage()
+		defer unsubscribe()
+
+		requireUsageSubscriberPayload(t, subscriber, usageSupportRefreshPayload)
+
+		NotifyUsageRefresh()
+		requireUsageSubscriberPayload(t, subscriber, usageRefreshPayload)
+
+		unsubscribe()
+		NotifyUsageRefresh()
+		if items := PopOldest(1); len(items) != 0 {
+			t.Fatalf("PopOldest() items = %q, want empty after refresh notification without subscribers", items)
 		}
 	})
 }
