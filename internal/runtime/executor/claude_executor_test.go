@@ -2358,3 +2358,20 @@ func TestRemapOAuthToolNames_CustomTitleCase_Untouched(t *testing.T) {
 		t.Fatalf("reverseMap = %v, want empty", reverseMap)
 	}
 }
+
+// TestRemapOAuthToolNames_MCPDoubleUnderscore_Untouched verifies that MCP-style
+// tool names (mcp__server__tool, with consecutive underscores) are left
+// unchanged. Claude Code emits these lowercase MCP names natively, so they are
+// already first-party-safe; rewriting them would produce a form Claude Code
+// never sends and break MCP tool routing on the response side.
+func TestRemapOAuthToolNames_MCPDoubleUnderscore_Untouched(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"mcp__context7__query_docs","input_schema":{"type":"object","properties":{}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "mcp__context7__query_docs" {
+		t.Fatalf("tools.0.name = %q, want %q (unchanged)", got, "mcp__context7__query_docs")
+	}
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty", reverseMap)
+	}
+}

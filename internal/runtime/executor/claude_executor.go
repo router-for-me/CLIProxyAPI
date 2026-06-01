@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -111,25 +110,62 @@ var oauthToolRenameMap = map[string]string{
 // even after remapping. Currently empty — all tools are mapped instead of removed.
 var oauthToolsToRemove = map[string]bool{}
 
-// thirdPartyToolNamePattern matches OpenCode/MCP-style lowercase or snake_case
-// tool names (e.g. "bash", "browser_navigate", "list_dir") that Anthropic's OAuth
-// tool-name fingerprint flags as third-party. Names already in Claude Code's
-// TitleCase form (e.g. "Bash", "BrowserNavigate") or any mixed/camel case do NOT
-// match and are therefore left untouched — this is what keeps clients that
-// already send TitleCase names (e.g. Amp CLI's `Bash`) safe.
-var thirdPartyToolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
+// isSnakeCase reports whether name is a simple lowercase / snake_case tool name
+// (e.g. "bash", "browser_navigate", "list_dir") — the OpenCode/third-party form
+// Anthropic's OAuth tool-name fingerprint flags. It is a single-pass equivalent of
+// `^[a-z][a-z0-9]*(_[a-z0-9]+)*$` (no regexp/allocation in this per-request path).
+//
+// It deliberately returns false for:
+//   - names already in TitleCase / mixed / camel case (e.g. Amp CLI's `Bash`,
+//     `BrowserNavigate`) — these must pass through unchanged, and
+//   - MCP-style names using the `mcp__server__tool` convention (consecutive
+//     underscores / empty segments). Claude Code emits those lowercase MCP names
+//     natively (e.g. `mcp__context7__query_docs`), so they are already
+//     first-party-safe; rewriting them would produce a form Claude Code never
+//     sends and break MCP tool routing on the response side.
+func isSnakeCase(s string) bool {
+	if len(s) == 0 || s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	lastWasUnderscore := false
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '_':
+			if lastWasUnderscore {
+				return false
+			}
+			lastWasUnderscore = true
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'):
+			lastWasUnderscore = false
+		default:
+			return false
+		}
+	}
+	return !lastWasUnderscore
+}
 
 // titleCaseToolName converts a snake_case/lowercase tool name to Claude
-// Code-style TitleCase, e.g. "browser_navigate" -> "BrowserNavigate", "bash" -> "Bash".
+// Code-style TitleCase in a single pass (no intermediate slices/strings),
+// e.g. "browser_navigate" -> "BrowserNavigate", "bash" -> "Bash".
 func titleCaseToolName(name string) string {
-	parts := strings.Split(name, "_")
-	for i, p := range parts {
-		if p == "" {
+	var sb strings.Builder
+	sb.Grow(len(name))
+	upperNext := true
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' {
+			upperNext = true
 			continue
 		}
-		parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		if upperNext && c >= 'a' && c <= 'z' {
+			sb.WriteByte(c - 32)
+		} else {
+			sb.WriteByte(c)
+		}
+		upperNext = false
 	}
-	return strings.Join(parts, "")
+	return sb.String()
 }
 
 // oauthRenameToolName returns the cloaked tool name for an OAuth request and
@@ -150,7 +186,7 @@ func oauthRenameToolName(name string) (string, bool) {
 	if mapped, ok := oauthToolRenameMap[name]; ok && mapped != name {
 		return mapped, true
 	}
-	if thirdPartyToolNamePattern.MatchString(name) {
+	if isSnakeCase(name) {
 		if titled := titleCaseToolName(name); titled != name {
 			return titled, true
 		}
