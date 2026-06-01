@@ -1230,30 +1230,35 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 		}
 	}
 
-	// Built-in tool names (web_search, code_execution, etc.) must keep their exact
-	// names: the tools array leaves typed built-ins unchanged, so a forced
-	// tool_choice or a history reference to a built-in must NOT be renamed either,
-	// or it would no longer match any declared tool. Computed once up front.
-	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
-
-	// renameOnce resolves the upstream name for a client tool name once per request
-	// and memoizes it, so tool_choice and message references stay consistent with
-	// the tools array. It is collision-aware: `produced` is seeded with every
-	// declared tool name, so a generated TitleCase name is only used when it does
-	// not collide with another declared or already-produced name. This prevents two
-	// distinct inputs that title-case to the same value (e.g. "tool1_call" and
-	// "tool_1_call" -> "Tool1Call") from creating duplicate upstream tool names
-	// (which the reverse map could not unambiguously restore); the loser keeps its
-	// original name.
+	// One pre-pass over the declared tools collects two sets:
+	//   builtinTools: ONLY tools carrying an Anthropic built-in "type" in THIS request.
+	//     Their names must stay verbatim so a forced tool_choice / history reference
+	//     still matches the tools array. An untyped custom tool that merely happens to
+	//     share a built-in name (e.g. an OpenAI-translated user function "web_search"
+	//     with only name/input_schema and no type) is third-party and is still cloaked.
+	//   produced: every declared tool name, for collision avoidance below so two inputs
+	//     that title-case to the same value (e.g. "tool1_call" and "tool_1_call" ->
+	//     "Tool1Call") never create duplicate upstream tool names (which the reverse map
+	//     could not unambiguously restore); the loser keeps its original name.
+	builtinTools := map[string]bool{}
 	produced := map[string]bool{}
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if n := tool.Get("name").String(); n != "" {
-				produced[n] = true
+			n := tool.Get("name").String()
+			if n == "" {
+				return true
+			}
+			produced[n] = true
+			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				builtinTools[n] = true
 			}
 			return true
 		})
 	}
+
+	// renameOnce resolves the upstream name for a client tool name once per request and
+	// memoizes it, so tool_choice and message references stay consistent with the tools
+	// array (collision-aware via `produced`, built-in-safe via `builtinTools`).
 	forwardMap := map[string]string{}
 	renameOnce := func(name string) (string, bool) {
 		if fn, ok := forwardMap[name]; ok {

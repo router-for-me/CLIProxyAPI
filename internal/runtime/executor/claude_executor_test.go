@@ -2424,3 +2424,20 @@ func TestRemapOAuthToolNames_TitleCaseCollision_NoDuplicate(t *testing.T) {
 		t.Fatalf("reverseMap[Tool1Call] = %q, want tool1_call", reverseMap["Tool1Call"])
 	}
 }
+
+// TestRemapOAuthToolNames_UntypedCustomNamedLikeBuiltin_Renamed verifies that a
+// custom tool whose name merely matches an Anthropic built-in (e.g. "web_search")
+// but is declared WITHOUT a built-in "type" (only name/input_schema, as the OpenAI
+// chat-completions translator emits) is still cloaked to TitleCase — only tools
+// with an actual built-in "type" are protected.
+func TestRemapOAuthToolNames_UntypedCustomNamedLikeBuiltin_Renamed(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"web_search","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "WebSearch" {
+		t.Fatalf("tools.0.name = %q, want WebSearch (untyped custom tool must be cloaked)", got)
+	}
+	if reverseMap["WebSearch"] != "web_search" {
+		t.Fatalf("reverseMap[WebSearch] = %q, want web_search", reverseMap["WebSearch"])
+	}
+}
