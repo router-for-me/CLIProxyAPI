@@ -135,6 +135,10 @@ type Config struct {
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
+	// OpenCode contains OpenCode agent integration settings (model mappings for the
+	// dedicated /opencode/... route namespace). See OpenCode struct for details.
+	OpenCode OpenCode `yaml:"opencode" json:"opencode"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
@@ -313,6 +317,38 @@ type AmpUpstreamAPIKeyEntry struct {
 
 	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+}
+
+// OpenCode groups settings for the OpenCode agent integration. OpenCode is an
+// OpenAI/Anthropic-compatible client that points a custom provider baseURL at the
+// proxy's dedicated /opencode/... route namespace. Unlike Amp, OpenCode has no
+// proprietary control plane to proxy, so only model-mapping settings are exposed.
+type OpenCode struct {
+	// ModelMappings defines model name mappings for OpenCode requests.
+	// When OpenCode requests a model that isn't available locally, these mappings
+	// allow routing to an alternative model that IS available.
+	ModelMappings []OpenCodeModelMapping `yaml:"model-mappings" json:"model-mappings"`
+
+	// ForceModelMappings when true, model mappings take precedence over local providers.
+	// When false (default), local providers are used first if available.
+	ForceModelMappings bool `yaml:"force-model-mappings" json:"force-model-mappings"`
+}
+
+// OpenCodeModelMapping defines a model name mapping for OpenCode requests.
+// When OpenCode requests a model that isn't available locally, this mapping
+// allows routing to an alternative model that IS available.
+type OpenCodeModelMapping struct {
+	// From is the model name that OpenCode requests (e.g., "claude-sonnet-4-5").
+	From string `yaml:"from" json:"from"`
+
+	// To is the target model name to route to (e.g., "gpt-5").
+	// The target model must have available providers in the registry.
+	To string `yaml:"to" json:"to"`
+
+	// Regex indicates whether the 'from' field should be interpreted as a regular
+	// expression for matching model names. When true, this mapping is evaluated
+	// after exact matches and in the order provided. Defaults to false (exact match).
+	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
