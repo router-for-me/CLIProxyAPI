@@ -616,6 +616,9 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 
 	// 3. Session_id header (Codex)
 	if headers != nil {
+		if sid := headers.Get("Session-Id"); sid != "" {
+			return "codex:" + sid, ""
+		}
 		if sid := headers.Get("Session_id"); sid != "" {
 			return "codex:" + sid, ""
 		}
