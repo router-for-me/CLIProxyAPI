@@ -857,6 +857,8 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
+		setHeaderCasePreserved(headers, "session_id", cache.ID)
+		headers.Set("Conversation_id", cache.ID)
 	}
 
 	return rawJSON, headers
@@ -897,27 +899,30 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
+	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
+		ensureHeaderCasePreserved(headers, ginHeaders, "session_id", "", uuid.NewString())
+	}
+	ensureHeaderCasePreserved(headers, ginHeaders, "session_id", "", "")
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		headers.Set("Originator", originator)
 	} else if !isAPIKey {
 		headers.Set("Originator", codexOriginator)
 	}
-	// if !isAPIKey {
-	// 	if auth != nil && auth.Metadata != nil {
-	// 		if accountID, ok := auth.Metadata["account_id"].(string); ok {
-	// 			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-	// 				setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-	// 			}
-	// 		}
-	// 	}
-	// }
+	if !isAPIKey {
+		if auth != nil && auth.Metadata != nil {
+			if accountID, ok := auth.Metadata["account_id"].(string); ok {
+				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
+				}
+			}
+		}
+	}
 
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
-	deleteDeprecatedCodexConversationHeader(headers)
 
 	return headers
 }
@@ -991,10 +996,6 @@ func deleteHeaderCaseInsensitive(headers http.Header, key string) {
 			delete(headers, existingKey)
 		}
 	}
-}
-
-func deleteDeprecatedCodexConversationHeader(headers http.Header) {
-	deleteHeaderCaseInsensitive(headers, "Conversation_id")
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
