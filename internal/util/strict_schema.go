@@ -70,12 +70,39 @@ func normalizeStrictSchemaNode(node any) any {
 	case map[string]any:
 		normalized := make(map[string]any, len(value))
 		for key, raw := range value {
+			if key == "properties" {
+				normalized[key] = normalizeStrictSchemaProperties(raw)
+				continue
+			}
+			if key == "items" {
+				if raw == nil {
+					normalized[key] = map[string]any{"type": "string"}
+					continue
+				}
+				if next := normalizeStrictSchemaDefinition(raw); next != nil {
+					normalized[key] = next
+				} else {
+					normalized[key] = map[string]any{"type": "string"}
+				}
+				continue
+			}
+			if key == "additionalProperties" {
+				if raw == nil {
+					continue
+				}
+				if allow, ok := raw.(bool); ok {
+					normalized[key] = allow
+					continue
+				}
+				if next := normalizeStrictSchemaDefinition(raw); next != nil {
+					normalized[key] = next
+				}
+				continue
+			}
 			if raw == nil {
 				switch key {
 				case "items":
 					normalized[key] = map[string]any{"type": "string"}
-				case "properties":
-					normalized[key] = map[string]any{}
 				}
 				continue
 			}
@@ -132,6 +159,72 @@ func normalizeStrictSchemaNode(node any) any {
 	default:
 		return value
 	}
+}
+
+func normalizeStrictSchemaProperties(raw any) map[string]any {
+	properties, ok := raw.(map[string]any)
+	if !ok {
+		return map[string]any{}
+	}
+	normalized := make(map[string]any, len(properties))
+	for name, value := range properties {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		next := normalizeStrictSchemaDefinition(value)
+		if next == nil {
+			next = map[string]any{"type": "string"}
+		}
+		normalized[name] = next
+	}
+	return normalized
+}
+
+func normalizeStrictSchemaDefinition(node any) any {
+	if schemaType, ok := normalizeStrictSchemaScalarType(node); ok {
+		return strictSchemaForType(schemaType)
+	}
+	return normalizeStrictSchemaNode(node)
+}
+
+func normalizeStrictSchemaScalarType(value any) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return normalizeStrictSchemaType(typed)
+	case []any:
+		for _, item := range typed {
+			if str, ok := item.(string); ok {
+				if schemaType, okType := normalizeStrictSchemaType(str); okType && schemaType != "null" {
+					return schemaType, true
+				}
+			}
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+func normalizeStrictSchemaType(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "object", "array", "string", "number", "integer", "boolean", "null":
+		return strings.ToLower(strings.TrimSpace(raw)), true
+	default:
+		return "", false
+	}
+}
+
+func strictSchemaForType(schemaType string) map[string]any {
+	schema := map[string]any{"type": schemaType}
+	switch schemaType {
+	case "object":
+		schema["properties"] = map[string]any{}
+		schema["additionalProperties"] = false
+	case "array":
+		schema["items"] = map[string]any{"type": "string"}
+	}
+	return schema
 }
 
 func requireAllPropertiesForObjects(node any) {

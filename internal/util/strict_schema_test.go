@@ -107,6 +107,52 @@ func TestCleanJSONSchemaForStrictUpstream_AddsAdditionalPropertiesFalseRecursive
 	}
 }
 
+func TestCleanJSONSchemaForStrictUpstream_NormalizesScalarPropertySchemas(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"type": "object",
+			"required": "array",
+			"additionalProperties": "object",
+			"metadata": {
+				"type": "object",
+				"properties": {
+					"tags": ["array", "null"]
+				}
+			}
+		},
+		"additionalProperties": "object",
+		"required": null
+	}`
+
+	result := CleanJSONSchemaForStrictUpstream(input)
+
+	if got := gjson.Get(result, "properties.type.type").String(); got != "object" {
+		t.Fatalf("properties.type should be an object schema, got %q: %s", got, result)
+	}
+	if !gjson.Get(result, "properties.type.properties").IsObject() {
+		t.Fatalf("properties.type should include object properties: %s", result)
+	}
+	if got := gjson.Get(result, "properties.required.type").String(); got != "array" {
+		t.Fatalf("properties.required should be an array schema, got %q: %s", got, result)
+	}
+	if got := gjson.Get(result, "properties.required.items.type").String(); got != "string" {
+		t.Fatalf("properties.required.items should default to string, got %q: %s", got, result)
+	}
+	if got := gjson.Get(result, "properties.additionalProperties.type").String(); got != "object" {
+		t.Fatalf("property named additionalProperties should be an object schema, got %q: %s", got, result)
+	}
+	if got := gjson.Get(result, "properties.metadata.properties.tags.type").String(); got != "array" {
+		t.Fatalf("nullable scalar array property should normalize to array, got %q: %s", got, result)
+	}
+	if got := gjson.Get(result, "additionalProperties"); !got.Exists() || got.Bool() {
+		t.Fatalf("root additionalProperties should be strict false: %s", result)
+	}
+	if gjson.Get(result, "required").Exists() {
+		t.Fatalf("required=null should be removed: %s", result)
+	}
+}
+
 func TestCleanJSONSchemaForOpenAIStructuredOutput_RequiresAllObjectProperties(t *testing.T) {
 	input := `{
 		"type": "object",
