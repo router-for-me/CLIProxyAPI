@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -421,7 +422,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", "application/json")
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	rawJSON, modelName := normalizeResponsesCompactModel(rawJSON)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
@@ -434,6 +435,24 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
+}
+
+const openAIResponsesCompactModelSuffix = "-openai-compact"
+
+func normalizeResponsesCompactModel(rawJSON []byte) ([]byte, string) {
+	modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if modelName == "" || !strings.HasSuffix(modelName, openAIResponsesCompactModelSuffix) {
+		return rawJSON, modelName
+	}
+	baseModelName := strings.TrimSuffix(modelName, openAIResponsesCompactModelSuffix)
+	if strings.TrimSpace(baseModelName) == "" {
+		return rawJSON, modelName
+	}
+	updated, err := sjson.SetBytes(rawJSON, "model", baseModelName)
+	if err != nil {
+		return rawJSON, modelName
+	}
+	return updated, baseModelName
 }
 
 // handleNonStreamingResponse handles non-streaming chat completion responses
