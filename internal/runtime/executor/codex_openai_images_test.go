@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -368,6 +369,58 @@ func TestCodexOpenAIImageExecuteSuccessDoesNotIncludeUpstreamErrorSummary(t *tes
 		if strings.Contains(payload, forbidden) {
 			t.Fatalf("success payload leaked upstream error summary %q: %s", forbidden, payload)
 		}
+	}
+}
+
+func TestCodexOpenAIImageHTTPClientDisableHTTP2(t *testing.T) {
+	proxyURL, errParse := url.Parse("http://proxy.example.com:8080")
+	if errParse != nil {
+		t.Fatalf("url.Parse returned error: %v", errParse)
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", &http.Transport{
+		ForceAttemptHTTP2: true,
+		Proxy:             http.ProxyURL(proxyURL),
+	})
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{DisableHTTP2: true}})
+
+	client := executor.newCodexOpenAIImageHTTPClient(ctx, nil)
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ForceAttemptHTTP2 {
+		t.Fatal("ForceAttemptHTTP2 = true, want false")
+	}
+	if transport.TLSNextProto == nil || len(transport.TLSNextProto) != 0 {
+		t.Fatalf("TLSNextProto = %#v, want empty map", transport.TLSNextProto)
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("TLSClientConfig = nil")
+	}
+	if got := transport.TLSClientConfig.NextProtos; len(got) != 1 || got[0] != "http/1.1" {
+		t.Fatalf("NextProtos = %v, want [http/1.1]", got)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("Proxy function was not preserved")
+	}
+}
+
+func TestCodexOpenAIImageHTTPClientKeepsDefaultWhenHTTP2Enabled(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+
+	client := executor.newCodexOpenAIImageHTTPClient(context.Background(), nil)
+
+	if client.Transport != nil {
+		t.Fatalf("Transport = %T, want nil default transport", client.Transport)
+	}
+}
+
+func TestCodexImageCompletedWithoutOutputReasonUsesToolStatus(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"image_generation_call","status":"failed"}]}}`)
+
+	if got := codexImageCompletedWithoutOutputReason(payload); got != "failed" {
+		t.Fatalf("reason = %q, want failed", got)
 	}
 }
 

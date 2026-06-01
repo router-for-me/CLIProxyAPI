@@ -115,6 +115,9 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// Codex configures provider-wide Codex request behavior.
+	Codex CodexConfig `yaml:"codex" json:"codex"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -170,6 +173,11 @@ type ClaudeHeaderDefaults struct {
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+}
+
+// CodexConfig configures provider-wide Codex request behavior.
+type CodexConfig struct {
+	DisableHTTP2 bool `yaml:"disable-http2" json:"disable-http2"`
 }
 
 // TLSConfig holds HTTPS server settings.

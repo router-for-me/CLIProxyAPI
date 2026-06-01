@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -117,7 +118,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := e.newCodexOpenAIImageHTTPClient(ctx, auth)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
@@ -160,7 +161,9 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		return resp, errExtract
 	}
 	if len(results) == 0 {
-		return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+		reason := codexImageCompletedWithoutOutputReason(completedData)
+		logCodexImageCompletedWithoutOutput(ctx, completedData, reason)
+		return resp, statusErr{code: http.StatusBadGateway, msg: "upstream completed without image output: " + reason}
 	}
 	out, errOutput := codexBuildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat)
 	if errOutput != nil {
@@ -210,6 +213,31 @@ type codexImageSSEUpstreamErrorSummary struct {
 
 func codexReadOpenAIImageResponsesSSE(ctx context.Context, r io.Reader, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) ([]byte, error) {
 	return codexReadOpenAIImageResponsesSSEWithHeaders(ctx, r, nil, outputItemsByIndex, outputItemsFallback)
+}
+
+func (e *CodexExecutor) newCodexOpenAIImageHTTPClient(ctx context.Context, auth *cliproxyauth.Auth) *http.Client {
+	var cfg *config.Config
+	if e != nil {
+		cfg = e.cfg
+	}
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	if cfg == nil || !cfg.Codex.DisableHTTP2 {
+		return httpClient
+	}
+	if httpClient.Transport == nil {
+		if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+			httpClient.Transport = proxyutil.CloneTransportWithHTTP11(transport)
+		} else {
+			transport := &http.Transport{}
+			proxyutil.DisableHTTP2ForTransport(transport)
+			httpClient.Transport = transport
+		}
+		return httpClient
+	}
+	if transport, ok := httpClient.Transport.(*http.Transport); ok && transport != nil {
+		httpClient.Transport = proxyutil.CloneTransportWithHTTP11(transport)
+	}
+	return httpClient
 }
 
 func codexReadOpenAIImageResponsesSSEWithHeaders(ctx context.Context, r io.Reader, headers http.Header, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) ([]byte, error) {
@@ -703,6 +731,104 @@ func codexImageSafeSummaryValue(value string) string {
 	return b.String()
 }
 
+func codexImageCompletedWithoutOutputReason(payload []byte) string {
+	for _, path := range []string{
+		"response.error.code",
+		"response.error.type",
+		"response.error.message",
+		"response.incomplete_details.reason",
+		"response.incomplete_details.type",
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			return sanitizeCodexImageOutputReason(value)
+		}
+	}
+
+	output := gjson.GetBytes(payload, "response.output")
+	if output.IsArray() {
+		items := output.Array()
+		if len(items) == 0 {
+			return "empty_response_output"
+		}
+		for _, item := range items {
+			if item.Get("type").String() != "image_generation_call" {
+				continue
+			}
+			if status := strings.TrimSpace(item.Get("status").String()); status != "" {
+				return sanitizeCodexImageOutputReason(status)
+			}
+			if errCode := strings.TrimSpace(item.Get("error.code").String()); errCode != "" {
+				return sanitizeCodexImageOutputReason(errCode)
+			}
+			if errMessage := strings.TrimSpace(item.Get("error.message").String()); errMessage != "" {
+				return sanitizeCodexImageOutputReason(errMessage)
+			}
+			return "empty_image_generation_result"
+		}
+	}
+	if status := strings.TrimSpace(gjson.GetBytes(payload, "response.status").String()); status != "" {
+		return sanitizeCodexImageOutputReason(status)
+	}
+	return "empty_response_output"
+}
+
+func sanitizeCodexImageOutputReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "unknown"
+	}
+	replacer := strings.NewReplacer("\r", " ", "\n", " ", "\t", " ")
+	reason = replacer.Replace(reason)
+	reason = strings.Join(strings.Fields(reason), " ")
+	if len(reason) > 120 {
+		reason = strings.TrimSpace(reason[:120])
+	}
+	return reason
+}
+
+func codexImageOutputTypes(payload []byte) []string {
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.IsArray() {
+		return nil
+	}
+	types := make([]string, 0)
+	for _, item := range output.Array() {
+		if itemType := strings.TrimSpace(item.Get("type").String()); itemType != "" {
+			types = append(types, itemType)
+		}
+	}
+	return types
+}
+
+func codexImageGenerationStatuses(payload []byte) []string {
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.IsArray() {
+		return nil
+	}
+	statuses := make([]string, 0)
+	for _, item := range output.Array() {
+		if item.Get("type").String() != "image_generation_call" {
+			continue
+		}
+		if status := strings.TrimSpace(item.Get("status").String()); status != "" {
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses
+}
+
+func logCodexImageCompletedWithoutOutput(ctx context.Context, payload []byte, reason string) {
+	fields := log.Fields{
+		"reason":                    reason,
+		"response_status":           strings.TrimSpace(gjson.GetBytes(payload, "response.status").String()),
+		"response_error":            strings.TrimSpace(gjson.GetBytes(payload, "response.error").Raw),
+		"response_incomplete":       strings.TrimSpace(gjson.GetBytes(payload, "response.incomplete_details").Raw),
+		"response_output_types":     codexImageOutputTypes(payload),
+		"image_generation_statuses": codexImageGenerationStatuses(payload),
+	}
+	helps.LogWithRequestID(ctx).WithFields(fields).Warn("codex openai images: upstream completed without image output")
+}
+
 func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
 	if errPrepare != nil {
@@ -732,7 +858,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := e.newCodexOpenAIImageHTTPClient(ctx, auth)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
@@ -812,7 +938,9 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 					return
 				}
 				if len(results) == 0 {
-					sendError(statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"})
+					reason := codexImageCompletedWithoutOutputReason(completedData)
+					logCodexImageCompletedWithoutOutput(ctx, completedData, reason)
+					sendError(statusErr{code: http.StatusBadGateway, msg: "upstream completed without image output: " + reason})
 					return
 				}
 				for _, img := range results {
@@ -1209,6 +1337,21 @@ func codexBuildImageCompletedFrame(img codexImageCallResult, usageRaw []byte, re
 	}
 	if len(usageRaw) > 0 && json.Valid(usageRaw) {
 		data, _ = sjson.SetRawBytes(data, "usage", usageRaw)
+	}
+	if img.RevisedPrompt != "" {
+		data, _ = sjson.SetBytes(data, "revised_prompt", img.RevisedPrompt)
+	}
+	if img.OutputFormat != "" {
+		data, _ = sjson.SetBytes(data, "output_format", img.OutputFormat)
+	}
+	if img.Background != "" {
+		data, _ = sjson.SetBytes(data, "background", img.Background)
+	}
+	if img.Quality != "" {
+		data, _ = sjson.SetBytes(data, "quality", img.Quality)
+	}
+	if img.Size != "" {
+		data, _ = sjson.SetBytes(data, "size", img.Size)
 	}
 	return codexBuildSSEFrame(eventName, data)
 }

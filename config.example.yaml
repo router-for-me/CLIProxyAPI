@@ -126,6 +126,12 @@ routing:
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
 
+# Codex provider behavior.
+codex:
+  # When true, force Codex/OpenAI image upstream requests to use HTTP/1.1.
+  # Useful for diagnosing proxy paths that reset long HTTP/2 image streams.
+  disable-http2: false
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 

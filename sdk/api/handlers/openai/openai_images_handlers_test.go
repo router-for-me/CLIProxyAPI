@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,9 +20,56 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
+
+type imageBootstrapRetryExecutor struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *imageBootstrapRetryExecutor) Identifier() string { return "codex" }
+
+func (e *imageBootstrapRetryExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *imageBootstrapRetryExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	e.mu.Unlock()
+
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	if call == 1 {
+		close(ch)
+		return &coreexecutor.StreamResult{Chunks: ch}, nil
+	}
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: image_edit.completed\ndata: {\"type\":\"image_edit.completed\",\"b64_json\":\"AA==\"}\n\n")}
+	close(ch)
+	return &coreexecutor.StreamResult{Headers: http.Header{"X-Upstream-Attempt": {"2"}}, Chunks: ch}, nil
+}
+
+func (e *imageBootstrapRetryExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *imageBootstrapRetryExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *imageBootstrapRetryExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
+}
+
+func (e *imageBootstrapRetryExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
 
 func performImagesEndpointRequest(t *testing.T, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
@@ -375,6 +423,85 @@ data: {"type":"response.completed","response":{"created_at":123,"output":[{"type
 	}
 	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 7 {
 		t.Fatalf("usage.total_tokens = %d, want 7", got)
+	}
+}
+
+func TestCollectRoutedImagesRetriesBeforeFirstImageFrame(t *testing.T) {
+	executor := &imageBootstrapRetryExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	manager.SetRetryConfig(1, 30*time.Second, 0)
+
+	auth1 := &coreauth.Auth{ID: "image-auth-1", Provider: "codex", Status: coreauth.StatusActive}
+	auth2 := &coreauth.Auth{ID: "image-auth-2", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("register auth1: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), auth2); err != nil {
+		t.Fatalf("register auth2: %v", err)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: defaultImagesToolModel}})
+	modelRegistry.RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: defaultImagesToolModel}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth1.ID)
+		modelRegistry.UnregisterClient(auth2.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1},
+	}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"gpt-image-2","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
+
+	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := gjson.GetBytes(resp.Body.Bytes(), "data.0.b64_json").String(); got != "AA==" {
+		t.Fatalf("data.0.b64_json = %q, want AA==; body=%s", got, resp.Body.String())
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("calls = %d, want 2", executor.Calls())
+	}
+}
+
+func TestImageCompletedWithoutOutputReasonUsesToolStatus(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"image_generation_call","status":"failed"}]}}`)
+
+	if got := imageCompletedWithoutOutputReason(payload); got != "failed" {
+		t.Fatalf("reason = %q, want failed", got)
+	}
+}
+
+func TestCollectImagesFromResponsesStreamCompletedWithoutOutputIncludesReason(t *testing.T) {
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(`event: response.completed
+data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"image_generation_call","status":"failed"}]}}
+
+`)
+	close(data)
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+
+	if out != nil {
+		t.Fatalf("out = %s, want nil", string(out))
+	}
+	requireImagesStreamError(t, errMsg, http.StatusBadGateway, "upstream completed without image output: failed")
+}
+
+func TestClassifyMultipartReadErrorTreatsNetworkFailureAsServerError(t *testing.T) {
+	status, errType := classifyMultipartReadError(io.ErrUnexpectedEOF)
+
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadGateway)
+	}
+	if errType != "server_error" {
+		t.Fatalf("type = %q, want server_error", errType)
 	}
 }
 
