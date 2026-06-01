@@ -47,8 +47,8 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := httpReq.Header.Get("Session_id"); gotSession != "" {
-		t.Fatalf("Session_id = %q, want empty", gotSession)
+	if gotSession := httpReq.Header.Get("Session_id"); gotSession != expectedKey {
+		t.Fatalf("Session_id = %q, want %q", gotSession, expectedKey)
 	}
 
 	httpReq2, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, nil, req, req.Payload, rawJSON)
@@ -119,8 +119,8 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 			t.Fatalf("%s = %q, want %q", headerName, gotHeader, expectedPromptCacheKey)
 		}
 	}
-	if gotSession := httpReq.Header.Get("Session_id"); gotSession != "" {
-		t.Fatalf("Session_id = %q, want empty", gotSession)
+	if gotSession := httpReq.Header.Get("Session_id"); gotSession != expectedPromptCacheKey {
+		t.Fatalf("Session_id = %q, want %q", gotSession, expectedPromptCacheKey)
 	}
 	if gotWindow := httpReq.Header.Get("X-Codex-Window-Id"); gotWindow != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindow, expectedPromptCacheKey+":0")
@@ -134,6 +134,20 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	}
 	if gotMetadataWindowID := gjson.Get(gotHeaderMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Turn-Metadata.window_id = %q, want %q", gotMetadataWindowID, expectedPromptCacheKey+":0")
+	}
+}
+
+func TestApplyCodexHeadersUsesAccountHeaderForOAuth(t *testing.T) {
+	httpReq := httptest.NewRequest("POST", "https://example.com/responses", nil)
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct-1"},
+	}
+
+	applyCodexHeaders(httpReq, auth, "oauth-token", true, nil)
+
+	if got := httpReq.Header.Get("Chatgpt-Account-Id"); got != "acct-1" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want acct-1", got)
 	}
 }
 
