@@ -99,11 +99,13 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	reporter.SetTranslatedReasoningEffort(body, "codex")
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)
+	var identityState codexIdentityConfuseState
+	httpReq, body, identityState, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, auth, req, req.Payload, body)
 	if errCache != nil {
 		return resp, errCache
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -125,6 +127,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
+	data = applyCodexIdentityConfuseResponsePayload(data, identityState)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
@@ -189,11 +192,13 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	reporter.SetTranslatedReasoningEffort(body, "codex")
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body)
+	var identityState codexIdentityConfuseState
+	httpReq, body, identityState, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, auth, req, req.Payload, body)
 	if errCache != nil {
 		return nil, errCache
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -213,6 +218,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
+		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
@@ -250,7 +256,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		for scanner.Scan() {
-			line := scanner.Bytes()
+			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if !bytes.HasPrefix(line, dataTag) {
 				continue

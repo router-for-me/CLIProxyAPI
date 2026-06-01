@@ -33,7 +33,16 @@ func performVideosEndpointRequest(t *testing.T, method string, endpointPath stri
 }
 
 func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
-	for _, model := range []string{"grok-imagine-video", "xai/grok-imagine-video", "x-ai/grok-imagine-video", "grok/grok-imagine-video"} {
+	for _, model := range []string{
+		"grok-imagine-video",
+		"xai/grok-imagine-video",
+		"x-ai/grok-imagine-video",
+		"grok/grok-imagine-video",
+		"grok-imagine-video-1.5-preview",
+		"xai/grok-imagine-video-1.5-preview",
+		"x-ai/grok-imagine-video-1.5-preview",
+		"grok/grok-imagine-video-1.5-preview",
+	} {
 		if !isSupportedVideosModel(model) {
 			t.Fatalf("expected %s to be supported", model)
 		}
@@ -43,6 +52,9 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 	}
 	if isSupportedVideosModel("codex/grok-imagine-video") {
 		t.Fatal("expected codex/grok-imagine-video to be rejected")
+	}
+	if isSupportedVideosModel("codex/grok-imagine-video-1.5-preview") {
+		t.Fatal("expected codex/grok-imagine-video-1.5-preview to be rejected")
 	}
 }
 
@@ -74,6 +86,22 @@ func TestBuildXAIVideosCreateRequest(t *testing.T) {
 	}
 	if meta.Seconds != "8" || meta.Size != "1280x720" || meta.Prompt != "a cat playing piano" {
 		t.Fatalf("unexpected meta: %+v", meta)
+	}
+}
+
+func TestBuildXAIVideosCreateRequestAllowsPreviewModel(t *testing.T) {
+	rawJSON := []byte(`{"model":"xai/grok-imagine-video-1.5-preview","prompt":"a cat playing piano","seconds":"8"}`)
+
+	req, meta, err := buildXAIVideosCreateRequest(rawJSON, "xai/grok-imagine-video-1.5-preview")
+	if err != nil {
+		t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(req, "model").String(); got != xaiVideos15PreviewModel {
+		t.Fatalf("model = %q, want %s", got, xaiVideos15PreviewModel)
+	}
+	if meta.Model != xaiVideos15PreviewModel {
+		t.Fatalf("meta model = %q, want %s", meta.Model, xaiVideos15PreviewModel)
 	}
 }
 

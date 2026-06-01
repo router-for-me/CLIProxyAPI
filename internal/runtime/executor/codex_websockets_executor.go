@@ -221,8 +221,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
-	reporter.SetTranslatedReasoningEffort(body, to.String())
+	clientBody := body
+	var identityState codexIdentityConfuseState
+	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -244,7 +248,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	// when fast-service-tier is enabled — covers all processing steps above
 	// (including prompt cache) for multi-turn agent sessions.
 	body = applyCodexFastServiceTier(e.cfg, body)
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -307,7 +312,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if errDialRetry == nil && connRetry != nil {
 				// Re-apply fast service tier for the retry send as well.
 				body = applyCodexFastServiceTier(e.cfg, body)
-				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+				upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
 					Method:    "WEBSOCKET",
@@ -366,6 +372,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			continue
 		}
 		reporter.MarkFirstResponseByte()
+		payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
@@ -383,7 +390,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				reporter.Publish(ctx, detail)
 			}
 			var param any
-			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
+			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
+			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, clientBody, clientPayload, &param)
 			if displayModel := codexFallbackDisplayModel(opts); displayModel != "" {
 				out = rewriteCodexResponseModel(out, displayModel)
 			}
@@ -414,6 +422,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
 	body := req.Payload
+	userPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		userPayload = opts.OriginalRequest
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -436,8 +448,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
-	reporter.SetTranslatedReasoningEffort(body, to.String())
+	clientBody := body
+	var identityState codexIdentityConfuseState
+	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
+	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID
@@ -458,7 +474,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	// we pay the sjson cost when fast-service-tier is enabled. It covers
 	// prompt cache injection and all prior processing for agent follow-ups.
 	body = applyCodexFastServiceTier(e.cfg, body)
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
+	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -523,7 +540,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			// Re-apply for retry send on the new connection.
 			body = applyCodexFastServiceTier(e.cfg, body)
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+			upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
+			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
 				Method:    "WEBSOCKET",
@@ -634,6 +652,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				continue
 			}
 			reporter.MarkFirstResponseByte()
+			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 			if wsErr, ok := parseCodexWebsocketError(payload); ok {
@@ -656,8 +675,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 			}
 
-			line := encodeCodexWebsocketAsSSE(payload)
-			chunks := sdktranslator.TranslateStream(ctx, to, from, translateModel, body, body, line, &param)
+			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
+			line := encodeCodexWebsocketAsSSE(clientPayload)
+			chunks := sdktranslator.TranslateStream(ctx, to, from, translateModel, clientBody, clientBody, line, &param)
 			for i := range chunks {
 				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
