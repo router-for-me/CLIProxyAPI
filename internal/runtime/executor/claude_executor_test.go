@@ -1522,6 +1522,7 @@ func TestDowngradeClaudeToolSearchForCompat(t *testing.T) {
 
 func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 	payload := []byte(`{
+		"model":"MiniMax-M2.7",
 		"tools":[
 			{"type":"web_search_20250305","name":"web_search","max_uses":8},
 			{"name":"read_file","description":"Read files","input_schema":{"type":"object"}}
@@ -1530,7 +1531,9 @@ func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 		"messages":[
 			{"role":"user","content":[
 				{"type":"text","text":"search"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},
 				{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+				{"type":"video","source":{"type":"url","url":"https://example.com/demo.mp4"}},
 				{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}
 			]},
 			{"role":"assistant","content":[
@@ -1552,7 +1555,8 @@ func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 		t.Fatalf("tool_choice for removed server tool should be removed: %s", string(out))
 	}
 	userContent := gjson.GetBytes(out, "messages.0.content").Array()
-	if hasClaudePartType(userContent, "image_url") || hasClaudePartType(userContent, "mcp_tool_result") {
+	if hasClaudePartType(userContent, "image") || hasClaudePartType(userContent, "image_url") ||
+		hasClaudePartType(userContent, "video") || hasClaudePartType(userContent, "mcp_tool_result") {
 		t.Fatalf("MiniMax unsupported content block remained: %s", string(out))
 	}
 	if !hasClaudeText(userContent, "search") || !hasClaudeText(userContent, "mcp ok") {
@@ -1565,6 +1569,79 @@ func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
 	}
 	if err := validateClaudeUpstreamPayload("https://api.minimax.io/anthropic", out); err != nil {
 		t.Fatalf("downgraded MiniMax payload should pass validation: %v", err)
+	}
+}
+
+func TestDowngradeClaudeUnsupportedBlocksForMiniMaxM3KeepsImageAndVideo(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"MiniMax-M3-highspeed",
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":8},
+			{"name":"read_file","description":"Read files","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"inspect"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},
+				{"type":"video","source":{"type":"url","url":"https://example.com/demo.mp4"}},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}},
+				{"type":"video_url","video_url":{"url":"https://example.com/raw.mp4"}},
+				{"type":"document","source":{"type":"base64","media_type":"text/plain","data":"QkJCQg=="}},
+				{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}
+			]},
+			{"role":"assistant","content":[
+				{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"current date"}},
+				{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[]},
+				{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"README.md"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"file ok"},
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"CCCC"}},
+					{"type":"video","source":{"type":"url","url":"https://example.com/tool.mp4"}},
+					{"type":"document","source":{"type":"base64","media_type":"text/plain","data":"RERERA=="}}
+				]}
+			]}
+		]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompat("https://api.minimax.io/anthropic", payload)
+
+	userContent := gjson.GetBytes(out, "messages.0.content").Array()
+	if !hasClaudePartType(userContent, "image") || !hasClaudePartType(userContent, "video") {
+		t.Fatalf("MiniMax-M3 image/video blocks should be preserved: %s", string(out))
+	}
+	for _, partType := range []string{"image_url", "video_url", "document", "mcp_tool_result"} {
+		if hasClaudePartType(userContent, partType) {
+			t.Fatalf("MiniMax-M3 unsupported %s block remained: %s", partType, string(out))
+		}
+	}
+	if !hasClaudeText(userContent, "inspect") || !hasClaudeText(userContent, "mcp ok") {
+		t.Fatalf("MiniMax-M3 compatible text should be preserved: %s", string(out))
+	}
+
+	assistantContent := gjson.GetBytes(out, "messages.1.content").Array()
+	for _, partType := range []string{"server_tool_use", "web_search_tool_result"} {
+		if hasClaudePartType(assistantContent, partType) {
+			t.Fatalf("MiniMax-M3 server tool block should be downgraded: %s", string(out))
+		}
+	}
+	if !hasClaudePartType(assistantContent, "tool_use") {
+		t.Fatalf("MiniMax-M3 custom tool_use should be preserved: %s", string(out))
+	}
+
+	toolResultContent := gjson.GetBytes(out, "messages.2.content.0.content").Array()
+	if !hasClaudePartType(toolResultContent, "image") || !hasClaudePartType(toolResultContent, "video") {
+		t.Fatalf("MiniMax-M3 nested image/video blocks should be preserved: %s", string(out))
+	}
+	if hasClaudePartType(toolResultContent, "document") || !hasClaudeText(toolResultContent, "file ok") {
+		t.Fatalf("MiniMax-M3 nested tool_result content not downgraded correctly: %s", string(out))
+	}
+	if err := validateClaudeUpstreamPayload("https://api.minimax.io/anthropic", out); err != nil {
+		t.Fatalf("downgraded MiniMax-M3 payload should pass validation: %v", err)
 	}
 }
 

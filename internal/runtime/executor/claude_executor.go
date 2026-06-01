@@ -1429,6 +1429,7 @@ func downgradeClaudeToolSearchForCompatKind(compatKind, baseURL string, body []b
 	if err := json.Unmarshal(body, &root); err != nil {
 		return body
 	}
+	modelID := strings.TrimSpace(compatStringValue(root["model"]))
 
 	changed := false
 	removedToolNames := make(map[string]bool)
@@ -1488,7 +1489,7 @@ func downgradeClaudeToolSearchForCompatKind(compatKind, baseURL string, body []b
 				cleanedMessages = append(cleanedMessages, message)
 				continue
 			}
-			cleanedContent, contentChanged := downgradeClaudeToolSearchContentForCompat(compatKind, content)
+			cleanedContent, contentChanged := downgradeClaudeToolSearchContentForCompat(compatKind, modelID, content)
 			if contentChanged {
 				changed = true
 				if len(cleanedContent) == 0 {
@@ -1561,10 +1562,10 @@ func isUnsupportedClaudeServerToolForCompat(compatKind string, toolType string, 
 }
 
 func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
-	return downgradeClaudeToolSearchContentForCompat("", content)
+	return downgradeClaudeToolSearchContentForCompat("", "", content)
 }
 
-func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any) ([]any, bool) {
+func downgradeClaudeToolSearchContentForCompat(compatKind, modelID string, content []any) ([]any, bool) {
 	cleaned := make([]any, 0, len(content))
 	changed := false
 	for _, rawPart := range content {
@@ -1575,7 +1576,7 @@ func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any)
 		}
 		partType := strings.TrimSpace(compatStringValue(part["type"]))
 		switch {
-		case isUnsupportedClaudeContentPartForCompat(compatKind, partType):
+		case isUnsupportedClaudeContentPartForCompat(compatKind, modelID, partType):
 			changed = true
 			if text := claudeUnsupportedContentText(part); text != "" {
 				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
@@ -1602,7 +1603,7 @@ func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any)
 		case partType == "tool_result":
 			updated := part
 			updatedChanged := false
-			if next, nextChanged := downgradeClaudeToolResultContentForCompat(compatKind, updated); nextChanged {
+			if next, nextChanged := downgradeClaudeToolResultContentForCompat(compatKind, modelID, updated); nextChanged {
 				updated = next
 				updatedChanged = true
 			}
@@ -1621,15 +1622,18 @@ func downgradeClaudeToolSearchContentForCompat(compatKind string, content []any)
 	return cleaned, changed
 }
 
-func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
+func isUnsupportedClaudeContentPartForCompat(compatKind, modelID, partType string) bool {
 	if !requiresClaudeContentBlockDowngradeForCompat(compatKind) {
+		return false
+	}
+	if supportsMiniMaxM3ClaudeMultimodalPart(compatKind, modelID, partType) {
 		return false
 	}
 	if compatKind == "doubao" {
 		switch partType {
 		case "image":
 			return false
-		case "image_url", "document", "search_result", "redacted_thinking", "server_tool_use",
+		case "image_url", "video", "video_url", "document", "search_result", "redacted_thinking", "server_tool_use",
 			"web_search_tool_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result", "container_upload":
 			return true
 		default:
@@ -1637,12 +1641,29 @@ func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
 		}
 	}
 	switch partType {
-	case "image", "image_url", "document", "search_result", "redacted_thinking", "server_tool_use",
+	case "image", "image_url", "video", "video_url", "document", "search_result", "redacted_thinking", "server_tool_use",
 		"web_search_tool_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result", "container_upload":
 		return true
 	default:
 		return false
 	}
+}
+
+func supportsMiniMaxM3ClaudeMultimodalPart(compatKind, modelID, partType string) bool {
+	if compatKind != "minimax" || !isMiniMaxM3SeriesModel(modelID) {
+		return false
+	}
+	switch partType {
+	case "image", "video":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMiniMaxM3SeriesModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelID).ModelName))
+	return modelID == "minimax-m3" || strings.HasPrefix(modelID, "minimax-m3-")
 }
 
 func requiresClaudeContentBlockDowngradeForCompat(compatKind string) bool {
@@ -1658,7 +1679,7 @@ func isClaudeServerToolResultPart(partType string) bool {
 	return partType != "" && partType != "tool_result" && strings.HasSuffix(partType, "_tool_result")
 }
 
-func downgradeClaudeToolResultContentForCompat(compatKind string, part map[string]any) (map[string]any, bool) {
+func downgradeClaudeToolResultContentForCompat(compatKind, modelID string, part map[string]any) (map[string]any, bool) {
 	if !requiresClaudeContentBlockDowngradeForCompat(compatKind) {
 		return part, false
 	}
@@ -1678,7 +1699,7 @@ func downgradeClaudeToolResultContentForCompat(compatKind string, part map[strin
 				continue
 			}
 			nestedType := strings.TrimSpace(compatStringValue(nested["type"]))
-			if !isUnsupportedClaudeContentPartForCompat(compatKind, nestedType) {
+			if !isUnsupportedClaudeContentPartForCompat(compatKind, modelID, nestedType) {
 				cleaned = append(cleaned, rawNested)
 				continue
 			}
@@ -1694,7 +1715,7 @@ func downgradeClaudeToolResultContentForCompat(compatKind string, part map[strin
 		return part, true
 	case map[string]any:
 		nestedType := strings.TrimSpace(compatStringValue(typed["type"]))
-		if !isUnsupportedClaudeContentPartForCompat(compatKind, nestedType) {
+		if !isUnsupportedClaudeContentPartForCompat(compatKind, modelID, nestedType) {
 			return part, false
 		}
 		if text := claudeUnsupportedContentText(typed); text != "" {
