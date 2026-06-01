@@ -980,7 +980,10 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 
 	setHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
 	if headerValueCaseInsensitive(headers, "session_id") != "" {
-		setHeaderCasePreserved(headers, "session_id", state.promptCacheKey)
+		// Use the canonical "Session_id" key (same as cacheHelper) so that
+		// http.Header.Get("Session_id") can resolve it; a lowercase literal
+		// key bypasses Go header canonicalization and stays unreadable via Get.
+		setHeaderCasePreserved(headers, "Session_id", state.promptCacheKey)
 	}
 	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
 		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
