@@ -50,6 +50,7 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
 - Amp CLI and IDE extensions support with provider routing
+- OpenCode agent support via a dedicated `/opencode/...` route namespace
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
@@ -107,6 +108,48 @@ When you need the request/response shape of a specific backend family, use the p
 These routes help you select the protocol surface, but they do not by themselves guarantee a unique inference executor when the same client-visible model name is reused across multiple backends. Inference routing is still resolved from the request model/alias. For strict backend pinning, use unique aliases, prefixes, or otherwise avoid overlapping client-visible model names.
 
 **→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
+
+## OpenCode Support
+
+CLIProxyAPI includes integrated support for the [OpenCode](https://opencode.ai) coding
+agent, letting you drive it with your Google/ChatGPT/Claude OAuth subscriptions through
+a single proxy endpoint:
+
+- A dedicated `/opencode/...` route namespace (provider aliases consistent with the Amp pattern)
+- Merged routes — one `baseURL` serves OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages
+- Provider-scoped routes (`/opencode/provider/{provider}/v1/...`) for explicit protocol/backend selection
+- **Model mapping** scoped to OpenCode traffic, to route requested models to locally-available alternatives
+
+Point OpenCode at the proxy by adding a custom provider to `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "cliproxy": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "CLIProxyAPI",
+      "options": {
+        "baseURL": "http://127.0.0.1:8317/opencode/v1",
+        "apiKey": "{env:CLIPROXY_API_KEY}"
+      },
+      "models": {
+        "gpt-5": {},
+        "claude-sonnet-4-5": {}
+      }
+    }
+  }
+}
+```
+
+Set `CLIPROXY_API_KEY` to one of the proxy's configured `api-keys`. The same `baseURL`
+also serves Anthropic Messages (`@ai-sdk/anthropic`, appends `/messages`) and OpenAI
+Responses (`@ai-sdk/openai`, appends `/responses`). Use
+`/opencode/provider/{provider}/v1/...` for explicit protocol/backend selection, and the
+`opencode.model-mappings` config block to route requested models to locally-available
+alternatives.
+
+**→ Runnable example: `examples/opencode-provider`**
 
 ## SDK Docs
 

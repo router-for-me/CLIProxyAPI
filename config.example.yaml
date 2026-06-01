@@ -336,6 +336,23 @@ nonstream-keepalive-interval: 0
 #     - from: "claude-haiku-4-5-20251001"
 #       to: "gemini-2.5-flash"
 
+# OpenCode Integration (https://opencode.ai)
+# Point an OpenCode custom provider's baseURL at the proxy's dedicated route namespace:
+#   baseURL: "http://127.0.0.1:8317/opencode/v1"   (serves chat/completions, responses, messages)
+#   apiKey:  one of the top-level api-keys above (use {env:VAR} in opencode.json)
+# See docs/opencode.md for the full setup guide.
+# opencode:
+#   # Force model mappings to run before checking local providers (default: false).
+#   force-model-mappings: false
+#   # Route models OpenCode requests to models available in your local proxy.
+#   # Useful when OpenCode asks for a model you don't have, but you have a similar one.
+#   model-mappings:
+#     - from: "claude-sonnet-4-5"                 # Model requested by OpenCode
+#       to: "gpt-5"                               # Route to this available model instead
+#     - from: "^gpt-5.*$"                         # Optional regex match
+#       to: "claude-sonnet-4-5-20250929"
+#       regex: true
+
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
