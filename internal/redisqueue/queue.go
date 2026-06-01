@@ -10,6 +10,9 @@ const (
 	defaultRetentionSeconds int64 = 60
 	maxRetentionSeconds     int64 = 3600
 	usageSubscriberBuffer         = 256
+
+	usageSupportRefreshPayload = `{"support_refresh":true}`
+	usageRefreshPayload        = `{"refresh":true}`
 )
 
 type queueItem struct {
@@ -83,6 +86,10 @@ func SubscribeUsage() (<-chan []byte, func()) {
 	return global.subscribeUsage()
 }
 
+func NotifyUsageRefresh() {
+	global.publishToSubscribers([]byte(usageRefreshPayload))
+}
+
 func (q *queue) clear() {
 	q.mu.Lock()
 
@@ -137,6 +144,7 @@ func (q *queue) publishToSubscribers(payload []byte) bool {
 
 func (q *queue) subscribeUsage() (<-chan []byte, func()) {
 	subscriber := make(chan []byte, usageSubscriberBuffer)
+	subscriber <- []byte(usageSupportRefreshPayload)
 
 	q.mu.Lock()
 	if q.subscribers == nil {

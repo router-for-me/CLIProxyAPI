@@ -231,6 +231,18 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	}
 }
 
+func TestNewExecutorUsageReporterIncludesExecutorType(t *testing.T) {
+	reporter := NewExecutorUsageReporter(context.Background(), &TestUsageExecutor{}, "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Provider != "test-provider" {
+		t.Fatalf("provider = %q, want %q", record.Provider, "test-provider")
+	}
+	if record.ExecutorType != "TestUsageExecutor" {
+		t.Fatalf("executor type = %q, want %q", record.ExecutorType, "TestUsageExecutor")
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	ctx := usage.WithReasoningEffort(context.Background(), "medium")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
@@ -296,4 +308,10 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type TestUsageExecutor struct{}
+
+func (TestUsageExecutor) Identifier() string {
+	return "test-provider"
 }
