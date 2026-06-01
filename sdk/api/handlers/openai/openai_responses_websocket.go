@@ -728,20 +728,37 @@ func dedupeInputItemsByID(rawArray string) (string, error) {
 		return "", errUnmarshal
 	}
 
+	// Parse each item's type, id and call_id once; gjson is a scan-based
+	// parser, so reusing this metadata avoids rescanning every item in each of
+	// the loops below as the conversation history grows.
+	type itemMetadata struct {
+		itemType string
+		id       string
+		callID   string
+	}
+	meta := make([]itemMetadata, len(items))
+	for i, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		res := gjson.GetManyBytes(item, "type", "id", "call_id")
+		meta[i] = itemMetadata{
+			itemType: strings.TrimSpace(res[0].String()),
+			id:       strings.TrimSpace(res[1].String()),
+			callID:   strings.TrimSpace(res[2].String()),
+		}
+	}
+
 	// Collect the call_ids that are still referenced by tool-call output
 	// items. When several input items share the same id, the one we keep must
 	// preserve any call_id that has a matching output; otherwise the upstream
 	// rejects the request with "No tool call found for function call output".
 	referencedCallIDs := make(map[string]struct{}, len(items))
-	for _, item := range items {
-		if len(item) == 0 {
-			continue
-		}
-		switch strings.TrimSpace(gjson.GetBytes(item, "type").String()) {
+	for i := range items {
+		switch meta[i].itemType {
 		case "function_call_output", "custom_tool_call_output":
-			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-			if callID != "" {
-				referencedCallIDs[callID] = struct{}{}
+			if meta[i].callID != "" {
+				referencedCallIDs[meta[i].callID] = struct{}{}
 			}
 		}
 	}
@@ -753,17 +770,13 @@ func dedupeInputItemsByID(rawArray string) (string, error) {
 	// paired with their outputs.
 	keepIndexByID := make(map[string]int, len(items))
 	keepReferencedByID := make(map[string]bool, len(items))
-	for i, item := range items {
-		if len(item) == 0 {
-			continue
-		}
-		itemID := strings.TrimSpace(gjson.GetBytes(item, "id").String())
+	for i := range items {
+		itemID := meta[i].id
 		if itemID == "" {
 			continue
 		}
-		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-		_, referenced := referencedCallIDs[callID]
-		referenced = referenced && callID != ""
+		_, referenced := referencedCallIDs[meta[i].callID]
+		referenced = referenced && meta[i].callID != ""
 		if _, seen := keepIndexByID[itemID]; !seen {
 			keepIndexByID[itemID] = i
 			keepReferencedByID[itemID] = referenced
@@ -780,7 +793,7 @@ func dedupeInputItemsByID(rawArray string) (string, error) {
 		if len(item) == 0 {
 			continue
 		}
-		itemID := strings.TrimSpace(gjson.GetBytes(item, "id").String())
+		itemID := meta[i].id
 		if itemID != "" {
 			if keepIndexByID[itemID] != i {
 				continue
