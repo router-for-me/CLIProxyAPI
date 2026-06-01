@@ -206,6 +206,9 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 	if len(payload) == 0 {
 		return payload
 	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(payload); ok {
+		payload = repaired
+	}
 	if !profile.SupportsStore {
 		if updated, err := sjson.DeleteBytes(payload, "store"); err == nil {
 			payload = updated
@@ -240,6 +243,9 @@ func scrubOpenAICompatPayload(payload []byte, profile openAICompatProfile) []byt
 }
 
 func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfile, model string, baseURL string) []byte {
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(payload); ok {
+		payload = repaired
+	}
 	payload = scrubOpenAICompatPayload(payload, profile)
 	if profile.SystemMessagesAsUser {
 		payload = rewriteOpenAICompatSystemMessagesAsUser(payload)

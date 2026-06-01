@@ -124,6 +124,11 @@ func TestInferCompatKindFromBaseURL(t *testing.T) {
 			want:    "qianfan",
 		},
 		{
+			name:    "step plan",
+			baseURL: "https://api.stepfun.com/step_plan",
+			want:    "step",
+		},
+		{
 			name:    "minimax non anthropic path",
 			baseURL: "https://api.minimaxi.com/v1",
 			want:    "",

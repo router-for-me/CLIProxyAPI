@@ -373,6 +373,24 @@ func TestOpenAICompatExecutorMiniMaxClaudeSourceRewritesSystemRole(t *testing.T)
 	}
 }
 
+func TestOpenAICompatPayloadRepairsInvalidStringEscapesForMiniMax(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"MiniMax-M2.7-highspeed",
+		"messages":[{"role":"user","content":"- **归档**：\archive/20260516 and *破甲**\ufeff\v**"}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("minimax"), "MiniMax-M2.7-highspeed", "https://api.minimaxi.com/v1")
+
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("repaired MiniMax payload should be valid JSON: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); !strings.Contains(got, `\archive/20260516`) || !strings.Contains(got, `\v`) {
+		t.Fatalf("literal backslash text not preserved, got %q payload=%s", got, string(out))
+	}
+}
+
 func TestOpenAICompatPayloadGenericKeepsSystemRole(t *testing.T) {
 	payload := []byte(`{
 		"model":"gpt-5.5",

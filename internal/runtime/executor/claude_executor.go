@@ -162,9 +162,22 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	payloadSource := req.Payload
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(originalPayloadSource); ok {
+		originalPayloadSource = repaired
+	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(payloadSource); ok {
+		payloadSource = repaired
+	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, payloadSource, stream)
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(originalTranslated); ok {
+		originalTranslated = repaired
+	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(body); ok {
+		body = repaired
+	}
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -365,9 +378,22 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	payloadSource := req.Payload
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(originalPayloadSource); ok {
+		originalPayloadSource = repaired
+	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(payloadSource); ok {
+		payloadSource = repaired
+	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, payloadSource, true)
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(originalTranslated); ok {
+		originalTranslated = repaired
+	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(body); ok {
+		body = repaired
+	}
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -667,6 +693,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(body); ok {
+		body = repaired
+	}
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
@@ -1386,6 +1415,9 @@ func downgradeClaudeToolSearchForCompat(baseURL string, body []byte) []byte {
 }
 
 func downgradeClaudeToolSearchForCompatKind(compatKind, baseURL string, body []byte) []byte {
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(body); ok {
+		body = repaired
+	}
 	if isOfficialAnthropicBaseURL(baseURL) || len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
@@ -1615,7 +1647,7 @@ func isUnsupportedClaudeContentPartForCompat(compatKind, partType string) bool {
 
 func requiresClaudeContentBlockDowngradeForCompat(compatKind string) bool {
 	switch compatKind {
-	case "deepseek", "doubao", "minimax", "xiaomi":
+	case "deepseek", "doubao", "minimax", "qianfan", "step", "xiaomi":
 		return true
 	default:
 		return false
@@ -1889,7 +1921,7 @@ func repairMiniMaxClaudeToolAdjacencyForCompat(compatKind string, body []byte) (
 
 func requiresClaudeToolAdjacencyRepair(compatKind string) bool {
 	switch strings.ToLower(strings.TrimSpace(compatKind)) {
-	case "minimax", "deepseek", "doubao":
+	case "minimax", "deepseek", "doubao", "qianfan", "step":
 		return true
 	default:
 		return false
@@ -2456,6 +2488,9 @@ func sanitizeClaudeHTTPRequestToolNames(req *http.Request) (*claudeToolNameSanit
 	compatKind := ""
 	if req.URL != nil {
 		compatKind = config.InferCompatKindFromBaseURL(req.URL.String())
+	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(body); ok {
+		body = repaired
 	}
 	body = downgradeClaudeToolSearchForCompatKind(compatKind, requestURLString(req), body)
 	body = scrubDeepSeekThinkingBudgetForCompat(body, gjson.GetBytes(body, "model").String(), requestURLString(req), compatKind)

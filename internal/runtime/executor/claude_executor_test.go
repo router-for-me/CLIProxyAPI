@@ -1737,6 +1737,61 @@ func TestApplyMiniMaxStreamingThinkingDefaultForCompat(t *testing.T) {
 	}
 }
 
+func TestDowngradeClaudeToolSearchForCompatRepairsInvalidStringEscapes(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"messages":[{"role":"user","content":[{"type":"text","text":"- **归档**：\archive/20260516 and *破甲**\ufeff\v**"}]}]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompat("https://api.minimax.io/anthropic", payload)
+
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("repaired Claude compat payload should be valid JSON: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, `\archive/20260516`) || !strings.Contains(got, `\v`) {
+		t.Fatalf("literal backslash text not preserved, got %q payload=%s", got, string(out))
+	}
+}
+
+func TestDowngradeClaudeUnsupportedBlocksForStep(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":8},
+			{"name":"read_file","description":"Read files","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"search"},
+				{"type":"mcp_tool_result","content":[{"type":"text","text":"mcp ok"}]}
+			]},
+			{"role":"assistant","content":[
+				{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"current date"}},
+				{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[]}
+			]}
+		]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompat("https://api.stepfun.com/step_plan", payload)
+
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice for removed server tool should be removed: %s", string(out))
+	}
+	userContent := gjson.GetBytes(out, "messages.0.content").Array()
+	if hasClaudePartType(userContent, "mcp_tool_result") {
+		t.Fatalf("Step unsupported content block remained: %s", string(out))
+	}
+	if !hasClaudeText(userContent, "search") || !hasClaudeText(userContent, "mcp ok") {
+		t.Fatalf("Step compatible text should be preserved: %s", string(out))
+	}
+}
+
 func TestSanitizeClaudeHTTPRequestToolNames_DisablesImplicitMiniMaxStreamingThinking(t *testing.T) {
 	t.Parallel()
 

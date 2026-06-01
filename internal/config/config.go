@@ -725,6 +725,10 @@ func InferCompatKindFromBaseURL(rawBaseURL string) string {
 			path == "/v2/coding" || strings.HasPrefix(path, "/v2/coding/") {
 			return "qianfan"
 		}
+	case "api.stepfun.com":
+		if path == "/step_plan" || strings.HasPrefix(path, "/step_plan/") {
+			return "step"
+		}
 	}
 	if IsXiaomiTokenPlanBaseURLHost(host) && (path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") || path == "/v1" || strings.HasPrefix(path, "/v1/")) {
 		return "xiaomi"

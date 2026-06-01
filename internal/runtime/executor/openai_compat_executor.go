@@ -150,6 +150,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	payloadSource := req.Payload
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(originalPayloadSource); ok {
+		originalPayloadSource = repaired
+	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(payloadSource); ok {
+		payloadSource = repaired
+	}
 	if from.String() == "claude" {
 		originalPayloadSource = downgradeClaudeToolSearchForCompat(baseURL, originalPayloadSource)
 		payloadSource = downgradeClaudeToolSearchForCompat(baseURL, payloadSource)
@@ -359,6 +365,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		originalPayloadSource = opts.OriginalRequest
 	}
 	payloadSource := req.Payload
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(originalPayloadSource); ok {
+		originalPayloadSource = repaired
+	}
+	if repaired, ok := helps.RepairInvalidJSONStringEscapes(payloadSource); ok {
+		payloadSource = repaired
+	}
 	if from.String() == "claude" {
 		originalPayloadSource = downgradeClaudeToolSearchForCompat(baseURL, originalPayloadSource)
 		payloadSource = downgradeClaudeToolSearchForCompat(baseURL, payloadSource)
