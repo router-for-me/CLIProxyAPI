@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -109,6 +110,53 @@ var oauthToolRenameMap = map[string]string{
 // oauthToolsToRemove lists tool names that must be stripped from OAuth requests
 // even after remapping. Currently empty — all tools are mapped instead of removed.
 var oauthToolsToRemove = map[string]bool{}
+
+// thirdPartyToolNamePattern matches OpenCode/MCP-style lowercase or snake_case
+// tool names (e.g. "bash", "browser_navigate", "list_dir") that Anthropic's OAuth
+// tool-name fingerprint flags as third-party. Names already in Claude Code's
+// TitleCase form (e.g. "Bash", "BrowserNavigate") or any mixed/camel case do NOT
+// match and are therefore left untouched — this is what keeps clients that
+// already send TitleCase names (e.g. Amp CLI's `Bash`) safe.
+var thirdPartyToolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
+
+// titleCaseToolName converts a snake_case/lowercase tool name to Claude
+// Code-style TitleCase, e.g. "browser_navigate" -> "BrowserNavigate", "bash" -> "Bash".
+func titleCaseToolName(name string) string {
+	parts := strings.Split(name, "_")
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(p[:1]) + p[1:]
+	}
+	return strings.Join(parts, "")
+}
+
+// oauthRenameToolName returns the cloaked tool name for an OAuth request and
+// whether a rename occurred. It first honours the curated oauthToolRenameMap
+// (canonical official names), then falls back to a generic snake_case/lowercase
+// -> TitleCase transform so that custom and MCP tools — which are NOT in the
+// curated map (e.g. "browser_navigate", "list_dir") — are normalised too.
+//
+// Without this fallback, any tool name outside the curated map kept its
+// lowercase form and re-triggered Anthropic's third-party tool-name fingerprint,
+// causing tool-heavy requests to be metered/blocked as "out of extra usage" even
+// though the curated tools in the same request were cloaked correctly. Empirically
+// a request whose tools are all TitleCase passes while the same tools in
+// snake_case are rejected, regardless of whether the names are real Claude Code
+// tools — i.e. it is the casing/style that is fingerprinted, not a fixed
+// vocabulary, which is exactly what this generic fallback addresses.
+func oauthRenameToolName(name string) (string, bool) {
+	if mapped, ok := oauthToolRenameMap[name]; ok && mapped != name {
+		return mapped, true
+	}
+	if thirdPartyToolNamePattern.MatchString(name) {
+		if titled := titleCaseToolName(name); titled != name {
+			return titled, true
+		}
+	}
+	return name, false
+}
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
@@ -1174,7 +1222,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			}
 
 			toolJSON := tool.Raw
-			if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
+			if newName, ok := oauthRenameToolName(name); ok {
 				updatedTool, err := sjson.Set(toolJSON, "name", newName)
 				if err == nil {
 					toolJSON = updatedTool
@@ -1201,7 +1249,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			// The chosen tool was removed from the tools array, so drop tool_choice to
 			// keep the payload internally consistent and fall back to normal auto tool use.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
+		} else if newName, ok := oauthRenameToolName(tcName); ok {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
 			recordRename(tcName, newName)
 		}
@@ -1220,14 +1268,14 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
+					if newName, ok := oauthRenameToolName(name); ok {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						recordRename(name, newName)
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
+					if newName, ok := oauthRenameToolName(toolName); ok {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						recordRename(toolName, newName)
@@ -1241,7 +1289,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
+								if newName, ok := oauthRenameToolName(nestedToolName); ok {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, newName)
 									recordRename(nestedToolName, newName)

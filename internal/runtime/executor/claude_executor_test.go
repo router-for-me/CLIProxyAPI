@@ -2318,3 +2318,43 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testin
 		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
 	}
 }
+
+// TestRemapOAuthToolNames_CustomSnakeCase_GenericFallback verifies that custom /
+// MCP tools whose names are NOT in oauthToolRenameMap (e.g. "browser_navigate")
+// are still normalised to TitleCase via the generic fallback, and that the
+// response tool_use name is reversed back to the client's original snake_case.
+func TestRemapOAuthToolNames_CustomSnakeCase_GenericFallback(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"browser_navigate","input_schema":{"type":"object","properties":{"url":{"type":"string"}}}}],"tool_choice":{"type":"tool","name":"browser_navigate"},"messages":[{"role":"user","content":[{"type":"text","text":"open example.com"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "BrowserNavigate")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "BrowserNavigate")
+	}
+	if reverseMap["BrowserNavigate"] != "browser_navigate" {
+		t.Fatalf("reverseMap = %v, want entry BrowserNavigate->browser_navigate", reverseMap)
+	}
+
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"BrowserNavigate","input":{"url":"https://example.com"}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "browser_navigate" {
+		t.Fatalf("content.0.name = %q, want %q", got, "browser_navigate")
+	}
+}
+
+// TestRemapOAuthToolNames_CustomTitleCase_Untouched verifies that a custom tool
+// already supplied in TitleCase is left unchanged by the generic fallback and
+// produces no reverse-map entry (so it cannot corrupt the response).
+func TestRemapOAuthToolNames_CustomTitleCase_Untouched(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"BrowserNavigate","input_schema":{"type":"object","properties":{"url":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tools.0.name = %q, want %q (unchanged)", got, "BrowserNavigate")
+	}
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty", reverseMap)
+	}
+}
