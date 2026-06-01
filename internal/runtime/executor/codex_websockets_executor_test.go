@@ -217,8 +217,11 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	if got := headers.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
 	}
-	if got := headerValueCaseInsensitive(headers, "session_id"); got != "" {
-		t.Fatalf("session_id = %q, want empty", got)
+	if got := headerValueCaseInsensitive(headers, "session_id"); got != "legacy-session" {
+		t.Fatalf("session_id = %s, want legacy-session", got)
+	}
+	if _, ok := headers["session_id"]; !ok {
+		t.Fatalf("expected lowercase session_id header key, got %#v", headers)
 	}
 }
 
@@ -341,16 +344,36 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 	}
 }
 
-func TestApplyCodexPromptCacheHeadersDoesNotSetDeprecatedConversationHeader(t *testing.T) {
+func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
+
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
+	}
+	values, ok := headers["ChatGPT-Account-ID"]
+	if !ok {
+		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	}
+	if len(values) != 1 || values[0] != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersSetsLowercaseSessionAndLegacyConversation(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
 
 	_, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
 
-	if got := headerValueCaseInsensitive(headers, "session_id"); got != "" {
-		t.Fatalf("session_id = %q, want empty", got)
+	if got := headerValueCaseInsensitive(headers, "session_id"); got != "cache-1" {
+		t.Fatalf("session_id = %s, want cache-1", got)
 	}
-	if got := headers.Get("Conversation_id"); got != "" {
-		t.Fatalf("Conversation_id = %q, want empty", got)
+	if _, ok := headers["session_id"]; !ok {
+		t.Fatalf("expected lowercase session_id key, got %#v", headers)
+	}
+	if got := headers.Get("Conversation_id"); got != "cache-1" {
+		t.Fatalf("Conversation_id = %s, want cache-1", got)
 	}
 }
 
@@ -379,8 +402,8 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != expectedPromptCacheKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedPromptCacheKey)
 	}
-	if gotSession := headerValueCaseInsensitive(headers, "session_id"); gotSession != "" {
-		t.Fatalf("session_id = %q, want empty", gotSession)
+	if gotSession := headerValueCaseInsensitive(headers, "session_id"); gotSession != expectedPromptCacheKey {
+		t.Fatalf("session_id = %q, want %q", gotSession, expectedPromptCacheKey)
 	}
 	if gotRequestID := headers.Get("X-Client-Request-Id"); gotRequestID != expectedPromptCacheKey {
 		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, expectedPromptCacheKey)
@@ -388,8 +411,8 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 	if gotThreadID := headers.Get("Thread-Id"); gotThreadID != expectedPromptCacheKey {
 		t.Fatalf("Thread-Id = %q, want %q", gotThreadID, expectedPromptCacheKey)
 	}
-	if gotConversation := headers.Get("Conversation_id"); gotConversation != "" {
-		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
+	if gotConversation := headers.Get("Conversation_id"); gotConversation != expectedPromptCacheKey {
+		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedPromptCacheKey)
 	}
 	if gotWindowID := headers.Get("X-Codex-Window-Id"); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")

@@ -119,7 +119,7 @@ routing:
   strategy: "round-robin" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
-  # X-Session-ID, X-Amp-Thread-Id (Amp CLI),
+  # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
   # X-Client-Request-Id (PI), conversation_id, or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
