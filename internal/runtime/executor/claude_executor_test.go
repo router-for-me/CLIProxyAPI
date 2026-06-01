@@ -2399,3 +2399,28 @@ func TestRemapOAuthToolNames_ToolChoiceBuiltin_NotRenamed(t *testing.T) {
 		t.Fatalf("web_search must not be renamed/reversed: %v", reverseMap)
 	}
 }
+
+// TestRemapOAuthToolNames_TitleCaseCollision_NoDuplicate verifies that two
+// distinct client tool names that title-case to the same value (e.g. "tool1_call"
+// and "tool_1_call" -> "Tool1Call") never produce duplicate upstream tool names:
+// the first wins the TitleCase slot, the second keeps its original name, and the
+// reverse map restores each unambiguously.
+func TestRemapOAuthToolNames_TitleCaseCollision_NoDuplicate(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"tool1_call","input_schema":{"type":"object","properties":{}}},{"name":"tool_1_call","input_schema":{"type":"object","properties":{}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	n0 := gjson.GetBytes(out, "tools.0.name").String()
+	n1 := gjson.GetBytes(out, "tools.1.name").String()
+	if n0 == n1 {
+		t.Fatalf("duplicate upstream tool names: both %q", n0)
+	}
+	if n0 != "Tool1Call" {
+		t.Fatalf("tools.0.name = %q, want Tool1Call", n0)
+	}
+	if n1 != "tool_1_call" {
+		t.Fatalf("tools.1.name = %q, want tool_1_call (kept to avoid collision)", n1)
+	}
+	if reverseMap["Tool1Call"] != "tool1_call" {
+		t.Fatalf("reverseMap[Tool1Call] = %q, want tool1_call", reverseMap["Tool1Call"])
+	}
+}

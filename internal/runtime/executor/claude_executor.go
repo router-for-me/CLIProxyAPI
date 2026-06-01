@@ -1236,6 +1236,43 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 	// or it would no longer match any declared tool. Computed once up front.
 	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 
+	// renameOnce resolves the upstream name for a client tool name once per request
+	// and memoizes it, so tool_choice and message references stay consistent with
+	// the tools array. It is collision-aware: `produced` is seeded with every
+	// declared tool name, so a generated TitleCase name is only used when it does
+	// not collide with another declared or already-produced name. This prevents two
+	// distinct inputs that title-case to the same value (e.g. "tool1_call" and
+	// "tool_1_call" -> "Tool1Call") from creating duplicate upstream tool names
+	// (which the reverse map could not unambiguously restore); the loser keeps its
+	// original name.
+	produced := map[string]bool{}
+	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if n := tool.Get("name").String(); n != "" {
+				produced[n] = true
+			}
+			return true
+		})
+	}
+	forwardMap := map[string]string{}
+	renameOnce := func(name string) (string, bool) {
+		if fn, ok := forwardMap[name]; ok {
+			return fn, fn != name
+		}
+		final := name
+		if !builtinTools[name] {
+			if cand, ok := oauthRenameToolName(name); ok && (cand == name || !produced[cand]) {
+				final = cand
+			}
+		}
+		forwardMap[name] = final
+		if final != name {
+			produced[final] = true
+			recordRename(name, final)
+		}
+		return final, final != name
+	}
+
 	// 1. Rewrite tools array in a single pass (if present).
 	// IMPORTANT: do not mutate names first and then rebuild from an older gjson
 	// snapshot. gjson results are snapshots of the original bytes; rebuilding from a
@@ -1264,11 +1301,9 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			}
 
 			toolJSON := tool.Raw
-			if newName, ok := oauthRenameToolName(name); ok && !builtinTools[name] {
-				updatedTool, err := sjson.Set(toolJSON, "name", newName)
-				if err == nil {
+			if newName, ok := renameOnce(name); ok {
+				if updatedTool, err := sjson.Set(toolJSON, "name", newName); err == nil {
 					toolJSON = updatedTool
-					recordRename(name, newName)
 				}
 			}
 
@@ -1291,9 +1326,8 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			// The chosen tool was removed from the tools array, so drop tool_choice to
 			// keep the payload internally consistent and fall back to normal auto tool use.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		} else if newName, ok := oauthRenameToolName(tcName); ok && !builtinTools[tcName] {
+		} else if newName, ok := renameOnce(tcName); ok {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
-			recordRename(tcName, newName)
 		}
 	}
 
@@ -1310,17 +1344,15 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if newName, ok := oauthRenameToolName(name); ok && !builtinTools[name] {
+					if newName, ok := renameOnce(name); ok {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
-						recordRename(name, newName)
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if newName, ok := oauthRenameToolName(toolName); ok && !builtinTools[toolName] {
+					if newName, ok := renameOnce(toolName); ok {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
-						recordRename(toolName, newName)
 					}
 				case "tool_result":
 					// Handle nested tool_reference blocks inside tool_result.content[]
@@ -1331,10 +1363,9 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if newName, ok := oauthRenameToolName(nestedToolName); ok && !builtinTools[nestedToolName] {
+								if newName, ok := renameOnce(nestedToolName); ok {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, newName)
-									recordRename(nestedToolName, newName)
 								}
 							}
 							return true
