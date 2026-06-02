@@ -1498,10 +1498,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
-				rerr := &Error{Message: chunk.Err.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromCause(chunk.Err)
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: chunk.Err})
 				if shouldEvictUnauthorizedResult(rerr) {
 					if errEvict := m.evictUnauthorizedAuth(ctx, auth, provider, resultModel); errEvict != nil {
@@ -1564,10 +1561,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			rerr := &Error{Message: errStream.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
+			rerr := resultErrorFromCause(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: errStream}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
@@ -1594,10 +1588,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromCause(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
@@ -1611,10 +1602,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, bootstrapErr
 			}
 			if shouldEvictUnauthorizedError(bootstrapErr) {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromCause(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
@@ -1623,10 +1611,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			}
 			if idx < len(execModels)-1 {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromCause(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
@@ -1635,10 +1620,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				lastErr = bootstrapErr
 				continue
 			}
-			rerr := &Error{Message: bootstrapErr.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
+			rerr := resultErrorFromCause(bootstrapErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
@@ -2090,7 +2072,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
 			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
-			!isTransientNetworkError(lastErr) {
+			!isTransientRoutingError(lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2130,10 +2112,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPrepare); ok && se != nil {
-				result.Error.HTTPStatus = se.StatusCode()
-			}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromCause(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
 			continue
@@ -2156,11 +2135,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
+				result.Error = resultErrorFromCause(errExec)
 				result.Cause = errExec
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -2191,7 +2167,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		if authErr != nil {
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, authErr)
-			transientNetworkFallback := isTransientNetworkError(authErr)
+			transientNetworkFallback := isTransientRoutingError(authErr)
 			if isRequestInvalidError(authErr) {
 				if !routeFallback {
 					return cliproxyexecutor.Response{}, authErr
@@ -2227,7 +2203,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
 			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
-			!isTransientNetworkError(lastErr) {
+			!isTransientRoutingError(lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2267,10 +2243,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPrepare); ok && se != nil {
-				result.Error.HTTPStatus = se.StatusCode()
-			}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromCause(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
 			continue
@@ -2293,11 +2266,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
+				result.Error = resultErrorFromCause(errExec)
 				result.Cause = errExec
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -2328,7 +2298,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		if authErr != nil {
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, authErr)
-			transientNetworkFallback := isTransientNetworkError(authErr)
+			transientNetworkFallback := isTransientRoutingError(authErr)
 			if isRequestInvalidError(authErr) {
 				if !routeFallback {
 					return cliproxyexecutor.Response{}, authErr
@@ -2364,7 +2334,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
 			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
-			!isTransientNetworkError(lastErr) {
+			!isTransientRoutingError(lastErr) {
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -2402,10 +2372,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
-			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: &Error{Message: errPrepare.Error()}}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPrepare); ok && se != nil {
-				result.Error.HTTPStatus = se.StatusCode()
-			}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromCause(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
 			continue
@@ -2426,7 +2393,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				continue
 			}
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, errStream)
-			transientNetworkFallback := isTransientNetworkError(errStream)
+			transientNetworkFallback := isTransientRoutingError(errStream)
 			if isRequestInvalidError(errStream) {
 				if !routeFallback {
 					return nil, errStream
@@ -3243,7 +3210,7 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
-	if isTransientNetworkError(err) {
+	if isTransientRoutingError(err) {
 		return transientNetworkRetryDelay(attempt, maxWait)
 	}
 	if maxWait <= 0 {
@@ -3419,7 +3386,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					!isRequestScopedFeatureUnsupportedResultError(result.Error) &&
 					!isRequestScopedContentSafetyResultError(result.Error) &&
 					!isRequestScopedContextLimitResultError(result.Error) &&
-					!isTransientNetworkResultError(result.Error) {
+					!isTransientRoutingResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -3688,10 +3655,13 @@ func shouldCountChannelBreakerFailure(result Result) bool {
 	if result.Success || result.Error == nil {
 		return false
 	}
-	if isRequestScopedNotFoundResultError(result.Error) || isRequestScopedFeatureUnsupportedResultError(result.Error) {
+	if isRequestScopedNotFoundResultError(result.Error) ||
+		isRequestScopedFeatureUnsupportedResultError(result.Error) ||
+		isRequestScopedContentSafetyResultError(result.Error) ||
+		isRequestScopedContextLimitResultError(result.Error) {
 		return false
 	}
-	if isTransientNetworkResultError(result.Error) {
+	if isTransientRoutingResultError(result.Error) {
 		return false
 	}
 	if isModelSupportResultError(result.Error) || isBalanceExhaustedResultError(result.Error) {
@@ -4162,6 +4132,36 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+func errorCodeFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		return strings.TrimSpace(authErr.Code)
+	}
+	type errorCoder interface {
+		ErrorCode() string
+	}
+	var ec errorCoder
+	if errors.As(err, &ec) && ec != nil {
+		return strings.TrimSpace(ec.ErrorCode())
+	}
+	return ""
+}
+
+func resultErrorFromCause(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	resultErr := &Error{
+		Code:       errorCodeFromError(err),
+		Message:    err.Error(),
+		HTTPStatus: statusCodeFromError(err),
+	}
+	return resultErr
+}
+
 func isUnauthorizedError(err error) bool {
 	if err == nil {
 		return false
@@ -4529,13 +4529,50 @@ func isRequestScopedFeatureUnsupportedResultError(err *Error) bool {
 }
 
 func isRequestScopedContentSafetyMessage(message string) bool {
+	return isRequestScopedContentSafetySignal("", message)
+}
+
+func isRequestScopedContentSafetySignal(code, message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	if lower == "" {
+		return isMiniMaxNewSensitiveSignal(code, message)
+	}
+	return (strings.Contains(lower, "request was rejected") &&
+		(strings.Contains(lower, "high risk") || strings.Contains(lower, "high-risk"))) ||
+		(strings.Contains(lower, "content") && strings.Contains(lower, "blocked")) ||
+		isMiniMaxNewSensitiveSignal(code, message)
+}
+
+func isMiniMaxNewSensitiveMessage(message string) bool {
+	return isMiniMaxNewSensitiveSignal("", message)
+}
+
+func isMiniMaxNewSensitiveSignal(code, message string) bool {
+	normalizedCode := strings.Trim(strings.ToLower(strings.TrimSpace(code)), `"'(),:;[]{}<>`)
+	if normalizedCode == "1026" || normalizedCode == "1027" {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(lower, "new_sensitive") {
+		return true
+	}
+	if lower == "" || (!strings.Contains(lower, "sensitive") && !strings.Contains(lower, "涉敏")) {
 		return false
 	}
-	return strings.Contains(lower, "request was rejected") &&
-		(strings.Contains(lower, "high risk") || strings.Contains(lower, "high-risk")) ||
-		(strings.Contains(lower, "content") && strings.Contains(lower, "blocked"))
+	return strings.Contains(lower, "1026") || strings.Contains(lower, "1027")
+}
+
+func isMiniMaxUnknown1000Message(message string) bool {
+	return isMiniMaxUnknown1000Signal("", message)
+}
+
+func isMiniMaxUnknown1000Signal(code, message string) bool {
+	normalizedCode := strings.Trim(strings.ToLower(strings.TrimSpace(code)), `"'(),:;[]{}<>`)
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if !strings.Contains(lower, "unknown error") {
+		return false
+	}
+	return normalizedCode == "1000" || strings.Contains(lower, "1000")
 }
 
 func hasHTTPStatusInMessage(message string, statuses ...int) bool {
@@ -4557,7 +4594,18 @@ func hasHTTPStatusInMessage(message string, statuses ...int) bool {
 	return false
 }
 
-func isRequestScopedContentSafetyStatus(status int, message string) bool {
+func isRequestScopedContentSafetyStatus(status int, code, message string) bool {
+	if isMiniMaxNewSensitiveSignal(code, message) {
+		switch status {
+		case http.StatusBadRequest, http.StatusInternalServerError, http.StatusUnavailableForLegalReasons:
+			return true
+		case 0:
+			return !hasHTTPStatusInMessage(message, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests) ||
+				hasHTTPStatusInMessage(message, http.StatusBadRequest, http.StatusInternalServerError, http.StatusUnavailableForLegalReasons)
+		default:
+			return false
+		}
+	}
 	switch status {
 	case http.StatusBadRequest, http.StatusUnavailableForLegalReasons:
 		return true
@@ -4572,17 +4620,18 @@ func isRequestScopedContentSafetyResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
-	return isRequestScopedContentSafetyStatus(statusCodeFromResult(err), err.Message) &&
-		isRequestScopedContentSafetyMessage(err.Message)
+	return isRequestScopedContentSafetyStatus(statusCodeFromResult(err), err.Code, err.Message) &&
+		isRequestScopedContentSafetySignal(err.Code, err.Message)
 }
 
 func isRequestScopedContentSafetyError(err error) bool {
 	if err == nil {
 		return false
 	}
+	code := errorCodeFromError(err)
 	message := err.Error()
-	return isRequestScopedContentSafetyStatus(statusCodeFromError(err), message) &&
-		isRequestScopedContentSafetyMessage(message)
+	return isRequestScopedContentSafetyStatus(statusCodeFromError(err), code, message) &&
+		isRequestScopedContentSafetySignal(code, message)
 }
 
 func isRequestScopedContextLimitMessage(message string) bool {
@@ -4681,15 +4730,50 @@ func isTransientNetworkError(err error) bool {
 	return isTransientNetworkMessage(message) && isTransientNetworkStatus(statusCodeFromError(err), message)
 }
 
+func isMiniMaxTransientUpstreamStatus(status int, code, message string) bool {
+	if !isMiniMaxUnknown1000Signal(code, message) {
+		return false
+	}
+	if status == 0 {
+		return !hasHTTPStatusInMessage(message, http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity)
+	}
+	return status == http.StatusRequestTimeout || isTransientUpstreamStatus(status)
+}
+
+func isMiniMaxTransientUpstreamResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return isMiniMaxTransientUpstreamStatus(statusCodeFromResult(err), err.Code, err.Message)
+}
+
+func isMiniMaxTransientUpstreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isMiniMaxTransientUpstreamStatus(statusCodeFromError(err), errorCodeFromError(err), err.Error())
+}
+
+func isTransientRoutingResultError(err *Error) bool {
+	return isTransientNetworkResultError(err) || isMiniMaxTransientUpstreamResultError(err)
+}
+
+func isTransientRoutingError(err error) bool {
+	return isTransientNetworkError(err) || isMiniMaxTransientUpstreamError(err)
+}
+
 func isRequestScopedRouteFallbackError(err error) bool {
-	return isRequestScopedContentSafetyError(err) || isRequestScopedContextLimitError(err)
+	if isRequestScopedContentSafetyError(err) {
+		return !isMiniMaxNewSensitiveSignal(errorCodeFromError(err), err.Error())
+	}
+	return isRequestScopedContextLimitError(err)
 }
 
 func shouldFallbackRequestScopedContentSafetyError(routeModel string, err error) bool {
 	if !isClaudeSonnet46FallbackModel(routeModel) {
 		return false
 	}
-	return isRequestScopedContentSafetyError(err)
+	return isRequestScopedContentSafetyError(err) && isRequestScopedRouteFallbackError(err)
 }
 
 func shouldFallbackRequestScopedContentSafetyErrorForRequest(routeModel string, opts cliproxyexecutor.Options, err error) bool {
@@ -4848,7 +4932,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 	if isRequestScopedNotFoundResultError(resultErr) ||
 		isRequestScopedFeatureUnsupportedResultError(resultErr) ||
-		isRequestScopedContentSafetyResultError(resultErr) {
+		isRequestScopedContentSafetyResultError(resultErr) ||
+		isRequestScopedContextLimitResultError(resultErr) ||
+		isTransientRoutingResultError(resultErr) {
 		return
 	}
 	applyHealthFailure(&auth.Health, now, statusCodeFromResult(resultErr))
@@ -6039,10 +6125,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = resultErrorFromCause(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}

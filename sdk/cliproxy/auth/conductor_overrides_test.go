@@ -21,6 +21,8 @@ const requestScopedNotFoundMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca74e
 const requestScopedContentSafetyMessage = "The request was rejected because it was considered high risk"
 const requestScopedContentBlockedMessage = "The content you provided or machine outputted is blocked."
 const requestScopedContextLimitMessage = "invalid params, context window exceeds limit (2013)"
+const miniMaxNewSensitiveMessage = "server_error: input new_sensitive, messages[2]'s content[1] image is sensitive, please check your input (1026)"
+const miniMaxUnknown1000Message = "server_error: unknown error, 999 (1000)"
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
 	m := NewManager(nil, nil, nil)
@@ -132,6 +134,28 @@ func TestManager_ShouldRetryAfterError_TransientNetworkUsesBoundedShortBackoff(t
 		}
 	}
 	if wait, shouldRetry := m.shouldRetryAfterError(err, transientNetworkRetryAttempts, []string{"claude"}, "claude-sonnet-4-6", 10*time.Second); shouldRetry {
+		t.Fatalf("attempt %d should stop retrying, got wait %v", transientNetworkRetryAttempts, wait)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_MiniMaxUnknown1000UsesBoundedShortBackoff(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	err := &Error{
+		Code:       "server_error",
+		HTTPStatus: http.StatusInternalServerError,
+		Message:    miniMaxUnknown1000Message,
+	}
+
+	for attempt, want := range []time.Duration{time.Second, 2 * time.Second, 3 * time.Second} {
+		wait, shouldRetry := m.shouldRetryAfterError(err, attempt, []string{"minimax"}, "MiniMax-M2.7-highspeed", 10*time.Second)
+		if !shouldRetry {
+			t.Fatalf("attempt %d should retry", attempt)
+		}
+		if wait != want {
+			t.Fatalf("attempt %d wait = %v, want %v", attempt, wait, want)
+		}
+	}
+	if wait, shouldRetry := m.shouldRetryAfterError(err, transientNetworkRetryAttempts, []string{"minimax"}, "MiniMax-M2.7-highspeed", 10*time.Second); shouldRetry {
 		t.Fatalf("attempt %d should stop retrying, got wait %v", transientNetworkRetryAttempts, wait)
 	}
 }
@@ -716,6 +740,217 @@ func TestManager_Execute_TransientNetworkTriesAllCredentialsWithoutCooldown(t *t
 		if state := updated.ModelStates[model]; state != nil {
 			t.Fatalf("auth %s should not have model cooldown after transient network fallback: %#v", authID, state)
 		}
+	}
+}
+
+func TestManager_Execute_MiniMaxUnknown1000TriesCredentialsWithoutCooldown(t *testing.T) {
+	model := "MiniMax-M2.7-highspeed"
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 10)
+
+	executor := &authFallbackExecutor{
+		id: "minimax",
+		executeErrors: map[string]error{
+			"aa-unknown-auth": &Error{
+				Code:       "server_error",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxUnknown1000Message,
+			},
+			"bb-unknown-auth": &Error{
+				Code:       "1000",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    "unknown error",
+			},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auths := []*Auth{
+		{ID: "aa-unknown-auth", Provider: "minimax"},
+		{ID: "bb-unknown-auth", Provider: "minimax"},
+		{ID: "cc-good-auth", Provider: "minimax"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, "minimax", []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	resp, errExecute := manager.Execute(context.Background(), []string{"minimax"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success after MiniMax 1000 fallback", errExecute)
+	}
+	if string(resp.Payload) != "cc-good-auth" {
+		t.Fatalf("payload = %q, want cc-good-auth", string(resp.Payload))
+	}
+	got := executor.ExecuteCalls()
+	want := []string{"aa-unknown-auth", "bb-unknown-auth", "cc-good-auth"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, authID := range []string{"aa-unknown-auth", "bb-unknown-auth"} {
+		updated, ok := manager.GetByID(authID)
+		if !ok || updated == nil {
+			t.Fatalf("auth %s not found", authID)
+		}
+		if updated.Unavailable {
+			t.Fatalf("auth %s should remain available after MiniMax 1000 fallback", authID)
+		}
+		if state := updated.ModelStates[model]; state != nil {
+			t.Fatalf("auth %s should not have model cooldown after MiniMax 1000 fallback: %#v", authID, state)
+		}
+	}
+}
+
+func TestManager_Execute_MiniMaxNewSensitiveStopsRetryWithoutCooldown(t *testing.T) {
+	model := "MiniMax-M3"
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 10)
+
+	executor := &authFallbackExecutor{
+		id: "minimax",
+		executeErrors: map[string]error{
+			"aa-sensitive-auth": &Error{
+				Code:       "1026",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxNewSensitiveMessage,
+			},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auths := []*Auth{
+		{ID: "aa-sensitive-auth", Provider: "minimax"},
+		{ID: "bb-good-auth", Provider: "minimax"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, "minimax", []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	_, errExecute := manager.Execute(context.Background(), []string{"minimax"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected MiniMax new_sensitive error")
+	}
+	if !isRequestInvalidError(errExecute) {
+		t.Fatalf("expected request invalid error, got %v", errExecute)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{"aa-sensitive-auth"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+	updated, ok := manager.GetByID("aa-sensitive-auth")
+	if !ok || updated == nil {
+		t.Fatalf("sensitive auth not found")
+	}
+	if updated.Unavailable {
+		t.Fatal("sensitive auth should remain available after request-scoped content safety")
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("sensitive auth should not have model cooldown: %#v", state)
+	}
+}
+
+func TestManager_MarkResult_MiniMaxRequestScopedErrorsDoNotOpenChannelBreaker(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *Error
+	}{
+		{
+			name: "new sensitive",
+			err: &Error{
+				Code:       "1026",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxNewSensitiveMessage,
+			},
+		},
+		{
+			name: "unknown 1000",
+			err: &Error{
+				Code:       "server_error",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxUnknown1000Message,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := "MiniMax-M3"
+			manager := NewManager(nil, nil, nil)
+			auths := []*Auth{
+				openAICompatChannelBreakerAuth("minimax-1", "minimax", "https://api.minimax.io/v1", 10),
+				openAICompatChannelBreakerAuth("minimax-2", "minimax", "https://api.minimax.io/v1", 10),
+				openAICompatChannelBreakerAuth("minimax-3", "minimax", "https://api.minimax.io/v1", 10),
+			}
+
+			reg := registry.GetGlobalRegistry()
+			for _, auth := range auths {
+				reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+				}
+			}
+			t.Cleanup(func() {
+				for _, auth := range auths {
+					reg.UnregisterClient(auth.ID)
+				}
+			})
+
+			for i := 0; i < channelBreakerOpenFailures; i++ {
+				manager.MarkResult(context.Background(), Result{
+					AuthID:   auths[0].ID,
+					Provider: auths[0].Provider,
+					Model:    model,
+					Success:  false,
+					Error:    tt.err,
+				})
+			}
+
+			for _, auth := range auths {
+				updated, ok := manager.GetByID(auth.ID)
+				if !ok || updated == nil {
+					t.Fatalf("auth %s not found", auth.ID)
+				}
+				if updated.Unavailable {
+					t.Fatalf("auth %s should remain available", auth.ID)
+				}
+				blocked, reason, next := isAuthBlockedForModel(updated, model, time.Now())
+				if blocked || reason != blockReasonNone || !next.IsZero() {
+					t.Fatalf("auth %s blocked=%v reason=%v next=%v, want no channel breaker cooldown", auth.ID, blocked, reason, next)
+				}
+				if state := updated.ModelStates[model]; state != nil {
+					t.Fatalf("auth %s should not have model state after %s: %#v", auth.ID, tt.name, state)
+				}
+			}
+		})
 	}
 }
 
@@ -1881,6 +2116,7 @@ func TestManager_MarkResult_RequestScopedNotFoundDoesNotCooldownAuth(t *testing.
 func TestManager_MarkResult_RequestScopedContentSafetyDoesNotCooldownAuth(t *testing.T) {
 	tests := []struct {
 		name       string
+		code       string
 		httpStatus int
 		message    string
 	}{
@@ -1898,6 +2134,12 @@ func TestManager_MarkResult_RequestScopedContentSafetyDoesNotCooldownAuth(t *tes
 			name:       "blocked status in message",
 			httpStatus: 0,
 			message:    "status_code=451, " + requestScopedContentBlockedMessage,
+		},
+		{
+			name:       "minimax new sensitive internal server error",
+			code:       "1026",
+			httpStatus: http.StatusInternalServerError,
+			message:    miniMaxNewSensitiveMessage,
 		},
 	}
 	for _, tt := range tests {
@@ -1919,6 +2161,7 @@ func TestManager_MarkResult_RequestScopedContentSafetyDoesNotCooldownAuth(t *tes
 				Model:    model,
 				Success:  false,
 				Error: &Error{
+					Code:       tt.code,
 					HTTPStatus: tt.httpStatus,
 					Message:    tt.message,
 				},
@@ -1944,6 +2187,7 @@ func TestManager_MarkResult_RequestScopedContentSafetyDoesNotCooldownAuth(t *tes
 func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
 	tests := []struct {
 		name       string
+		code       string
 		httpStatus int
 		message    string
 	}{
@@ -1962,10 +2206,17 @@ func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
 			httpStatus: 0,
 			message:    "status_code=451, " + requestScopedContentBlockedMessage,
 		},
+		{
+			name:       "minimax new sensitive internal server error",
+			code:       "1026",
+			httpStatus: http.StatusInternalServerError,
+			message:    miniMaxNewSensitiveMessage,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := &Error{
+				Code:       tt.code,
 				HTTPStatus: tt.httpStatus,
 				Message:    tt.message,
 			}
@@ -1973,6 +2224,20 @@ func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
 				t.Fatalf("expected content safety error to be request invalid")
 			}
 		})
+	}
+}
+
+func TestMiniMaxNewSensitiveDoesNotFallbackClaudeSonnetAlias(t *testing.T) {
+	err := &Error{
+		Code:       "1026",
+		HTTPStatus: http.StatusInternalServerError,
+		Message:    miniMaxNewSensitiveMessage,
+	}
+	if !isRequestInvalidError(err) {
+		t.Fatal("expected MiniMax new_sensitive to be request invalid")
+	}
+	if shouldFallbackRequestScopedRouteErrorForRequest("claude-sonnet-4-6", cliproxyexecutor.Options{}, err) {
+		t.Fatal("expected MiniMax new_sensitive to stop without Claude Sonnet fallback")
 	}
 }
 
