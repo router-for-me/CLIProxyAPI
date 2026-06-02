@@ -111,6 +111,10 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// CompactDefault controls how credentials with compact mode "auto" are treated for
+	// /responses/compact routing: "allow" (default, backward compatible) or "deny".
+	CompactDefault string `yaml:"compact-default,omitempty" json:"compact-default,omitempty"`
+
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
@@ -465,6 +469,10 @@ type CodexKey struct {
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
+	// Compact controls /responses/compact eligibility for this credential:
+	// "auto" (default, follows compact-default), "force_on", or "force_off".
+	Compact string `yaml:"compact,omitempty" json:"compact,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -558,6 +566,10 @@ type OpenAICompatibility struct {
 
 	// Prefix optionally namespaces model aliases for this provider (e.g., "teamA/kimi-k2").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// Compact controls /responses/compact eligibility for all credentials of this provider:
+	// "auto" (default, follows compact-default), "force_on", or "force_off".
+	Compact string `yaml:"compact,omitempty" json:"compact,omitempty"`
 
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
@@ -720,6 +732,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+
+	cfg.CompactDefault = normalizeConfigCompactDefault(cfg.CompactDefault)
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
@@ -900,6 +914,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Compact = normalizeConfigCompactMode(e.Compact, fmt.Sprintf("openai-compatibility[%d].compact", i))
 		e.Headers = NormalizeHeaders(e.Headers)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
@@ -921,6 +936,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Compact = normalizeConfigCompactMode(e.Compact, fmt.Sprintf("codex-api-key[%d].compact", i))
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
@@ -984,6 +1000,37 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
+}
+
+func normalizeConfigCompactDefault(raw string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	switch trimmed {
+	case "", "allow":
+		return "allow"
+	case "deny":
+		return "deny"
+	default:
+		log.WithField("value", raw).Warn("invalid compact-default; falling back to allow")
+		return "allow"
+	}
+}
+
+func normalizeConfigCompactMode(raw string, location string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	switch trimmed {
+	case "", "auto":
+		return "auto"
+	case "force_on":
+		return "force_on"
+	case "force_off":
+		return "force_off"
+	default:
+		log.WithFields(log.Fields{
+			"field": location,
+			"value": raw,
+		}).Warn("invalid compact mode; falling back to auto")
+		return "auto"
+	}
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.

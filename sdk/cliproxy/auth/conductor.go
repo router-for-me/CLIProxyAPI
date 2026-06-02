@@ -3030,6 +3030,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	candidates := make([]*Auth, 0, len(m.auths))
+	requireCompact := requireCompactRequest(opts)
+	compactBlocked := false
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
@@ -3055,10 +3057,17 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		if !compactCandidateAllowed(candidate, requireCompact) {
+			compactBlocked = true
+			continue
+		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if requireCompact && compactBlocked {
+			return nil, nil, noCompactAuthError()
+		}
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
@@ -3092,6 +3101,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
+	}
+
+	if requireCompactRequest(opts) {
+		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 
 	if !m.useSchedulerFastPath() {
@@ -3172,6 +3185,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	m.mu.RLock()
 	candidates := make([]*Auth, 0, len(m.auths))
+	requireCompact := requireCompactRequest(opts)
+	compactBlocked := false
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
@@ -3207,10 +3222,17 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		if !compactCandidateAllowed(candidate, requireCompact) {
+			compactBlocked = true
+			continue
+		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if requireCompact && compactBlocked {
+			return nil, nil, "", noCompactAuthError()
+		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
@@ -3249,6 +3271,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
+	}
+
+	if requireCompactRequest(opts) {
+		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
 	if !m.useSchedulerFastPath() {
@@ -3564,12 +3590,21 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 	executionSessionID := homeExecutionSessionIDFromMetadata(opts.Metadata)
 	count := homeAuthCountFromMetadata(opts.Metadata)
+	requireCompact := requireCompactRequest(opts)
+	compactBlocked := false
+	blockedCompactAuths := make(map[string]struct{})
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && executionSessionID != "" && count <= 1 {
 		if pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata); pinnedAuthID != "" {
 			_, alreadyTried := tried[pinnedAuthID]
 			if !alreadyTried {
 				if auth, executor, providerKey, ok := m.homeRuntimeAuthByID(executionSessionID, pinnedAuthID); ok {
-					return auth, executor, providerKey, nil
+					if compactCandidateAllowed(auth, requireCompact) {
+						return auth, executor, providerKey, nil
+					}
+					compactBlocked = true
+					if auth != nil && strings.TrimSpace(auth.ID) != "" {
+						blockedCompactAuths[auth.ID] = struct{}{}
+					}
 				}
 			}
 		}
@@ -3583,82 +3618,96 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	requestedModel := requestedModelFromMetadata(opts.Metadata, model)
 	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
-
-	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
-	if err != nil {
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
-	}
-
-	var env homeErrorEnvelope
-	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
-		code := strings.TrimSpace(env.Error.Type)
-		if code == "" {
-			code = strings.TrimSpace(env.Error.Code)
+	requestCount := count
+	for {
+		raw, err := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, requestCount)
+		if err != nil {
+			if requireCompact && compactBlocked && errors.Is(err, home.ErrAuthNotFound) {
+				return nil, nil, "", noCompactAuthError()
+			}
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
 		}
-		msg := strings.TrimSpace(env.Error.Message)
-		if msg == "" {
-			msg = "home returned error"
-		}
-		status := http.StatusBadGateway
-		switch strings.ToLower(code) {
-		case "model_not_found":
-			status = http.StatusNotFound
-		case "authentication_error", "unauthorized":
-			status = http.StatusUnauthorized
-		}
-		return nil, nil, "", &Error{Code: code, Message: msg, HTTPStatus: status}
-	}
 
-	var dispatch homeAuthDispatchResponse
-	if errUnmarshal := json.Unmarshal(raw, &dispatch); errUnmarshal != nil {
-		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
-	}
-	setHomeUserAPIKeyOnGinContext(ctx, dispatch.UserAPIKey)
-	auth := dispatch.Auth
-	if strings.TrimSpace(auth.ID) == "" {
-		// Backward compatibility: older home instances returned the auth directly.
-		if errUnmarshal := json.Unmarshal(raw, &auth); errUnmarshal != nil {
+		var env homeErrorEnvelope
+		if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
+			code := strings.TrimSpace(env.Error.Type)
+			if code == "" {
+				code = strings.TrimSpace(env.Error.Code)
+			}
+			msg := strings.TrimSpace(env.Error.Message)
+			if msg == "" {
+				msg = "home returned error"
+			}
+			status := http.StatusBadGateway
+			switch strings.ToLower(code) {
+			case "model_not_found":
+				status = http.StatusNotFound
+			case "authentication_error", "unauthorized":
+				status = http.StatusUnauthorized
+			}
+			return nil, nil, "", &Error{Code: code, Message: msg, HTTPStatus: status}
+		}
+
+		var dispatch homeAuthDispatchResponse
+		if errUnmarshal := json.Unmarshal(raw, &dispatch); errUnmarshal != nil {
 			return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
 		}
-	}
-	if upstreamModel := strings.TrimSpace(dispatch.Model); upstreamModel != "" {
-		if auth.Attributes == nil {
-			auth.Attributes = make(map[string]string, 1)
+		setHomeUserAPIKeyOnGinContext(ctx, dispatch.UserAPIKey)
+		auth := dispatch.Auth
+		if strings.TrimSpace(auth.ID) == "" {
+			// Backward compatibility: older home instances returned the auth directly.
+			if errUnmarshal := json.Unmarshal(raw, &auth); errUnmarshal != nil {
+				return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway}
+			}
 		}
-		auth.Attributes[homeUpstreamModelAttributeKey] = upstreamModel
-	}
-	if strings.TrimSpace(auth.ID) == "" {
-		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
-	}
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
-	if providerKey == "" {
-		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without provider", HTTPStatus: http.StatusBadGateway}
-	}
-
-	homeAuthIndex := strings.TrimSpace(dispatch.AuthIndex)
-	if homeAuthIndex != "" {
-		auth.Index = homeAuthIndex
-		auth.indexAssigned = true
-	} else {
-		auth.EnsureIndex()
-	}
-
-	executor, ok := m.Executor(providerKey)
-	if !ok && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
-		executor, ok = m.Executor("openai-compatibility")
-		if ok {
-			providerKey = "openai-compatibility"
+		if upstreamModel := strings.TrimSpace(dispatch.Model); upstreamModel != "" {
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string, 1)
+			}
+			auth.Attributes[homeUpstreamModelAttributeKey] = upstreamModel
 		}
-	}
-	if !ok {
-		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered", HTTPStatus: http.StatusBadGateway}
-	}
+		if strings.TrimSpace(auth.ID) == "" {
+			return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
+		}
+		if !compactCandidateAllowed(&auth, requireCompact) {
+			compactBlocked = true
+			if _, seen := blockedCompactAuths[auth.ID]; seen {
+				return nil, nil, "", noCompactAuthError()
+			}
+			blockedCompactAuths[auth.ID] = struct{}{}
+			requestCount++
+			continue
+		}
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if providerKey == "" {
+			return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without provider", HTTPStatus: http.StatusBadGateway}
+		}
 
-	authCopy := auth.Clone()
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && executionSessionID != "" && authWebsocketsEnabled(authCopy) {
-		m.rememberHomeRuntimeAuth(executionSessionID, authCopy)
+		homeAuthIndex := strings.TrimSpace(dispatch.AuthIndex)
+		if homeAuthIndex != "" {
+			auth.Index = homeAuthIndex
+			auth.indexAssigned = true
+		} else {
+			auth.EnsureIndex()
+		}
+
+		executor, ok := m.Executor(providerKey)
+		if !ok && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
+			executor, ok = m.Executor("openai-compatibility")
+			if ok {
+				providerKey = "openai-compatibility"
+			}
+		}
+		if !ok {
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered", HTTPStatus: http.StatusBadGateway}
+		}
+
+		authCopy := auth.Clone()
+		if cliproxyexecutor.DownstreamWebsocket(ctx) && executionSessionID != "" && authWebsocketsEnabled(authCopy) {
+			m.rememberHomeRuntimeAuth(executionSessionID, authCopy)
+		}
+		return authCopy, executor, providerKey, nil
 	}
-	return authCopy, executor, providerKey, nil
 }
 
 func requestedModelFromMetadata(metadata map[string]any, fallback string) string {
