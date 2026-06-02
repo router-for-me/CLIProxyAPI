@@ -19,6 +19,7 @@ const (
 var defaultWebsocketToolOutputCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
 var defaultWebsocketToolCallCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
 var defaultWebsocketToolSessionRefs = newWebsocketToolSessionRefCounter()
+var defaultResponsesWebsocketCompactReplays = newResponsesWebsocketCompactReplayTracker(websocketToolOutputCacheTTL)
 
 type websocketToolOutputCache struct {
 	mu            sync.Mutex
@@ -156,6 +157,218 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 	return ""
 }
 
+func websocketDownstreamSessionKeys(req *http.Request) []string {
+	if req == nil {
+		return nil
+	}
+	var keys []string
+	addKey := func(key string) {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return
+		}
+		for _, existing := range keys {
+			if existing == key {
+				return
+			}
+		}
+		keys = append(keys, key)
+	}
+	addTypedKey := func(prefix, key string) {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return
+		}
+		addKey(prefix + ":" + key)
+	}
+
+	addKey(req.Header.Get("X-Client-Request-Id"))
+	if raw := strings.TrimSpace(req.Header.Get("X-Codex-Turn-Metadata")); raw != "" {
+		addKey(gjson.Get(raw, "session_id").String())
+		addKey(gjson.Get(raw, "thread_id").String())
+		addTypedKey("window", gjson.Get(raw, "window_id").String())
+	}
+	addKey(req.Header.Get("Session-Id"))
+	addKey(req.Header.Get("Session_id"))
+	addKey(req.Header.Get("Thread-Id"))
+	addKey(req.Header.Get("Thread_id"))
+	addTypedKey("window", req.Header.Get("X-Codex-Window-Id"))
+	return keys
+}
+
+type responsesWebsocketCompactReplayTracker struct {
+	mu       sync.Mutex
+	ttl      time.Duration
+	sessions map[string]*responsesWebsocketCompactReplayEntry
+}
+
+type responsesWebsocketCompactReplayEntry struct {
+	lastSeen time.Time
+	keys     []string
+}
+
+func newResponsesWebsocketCompactReplayTracker(ttl time.Duration) *responsesWebsocketCompactReplayTracker {
+	if ttl <= 0 {
+		ttl = websocketToolOutputCacheTTL
+	}
+	return &responsesWebsocketCompactReplayTracker{
+		ttl:      ttl,
+		sessions: make(map[string]*responsesWebsocketCompactReplayEntry),
+	}
+}
+
+func (t *responsesWebsocketCompactReplayTracker) mark(keys []string) {
+	if t == nil || len(keys) == 0 {
+		return
+	}
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cleanupLocked(now)
+
+	normalizedKeys := normalizeResponsesWebsocketCompactReplayKeys(keys)
+	if len(normalizedKeys) == 0 {
+		return
+	}
+	for _, key := range normalizedKeys {
+		if existing := t.sessions[key]; existing != nil {
+			t.deleteEntryLocked(existing)
+		}
+	}
+	entry := &responsesWebsocketCompactReplayEntry{
+		lastSeen: now,
+		keys:     normalizedKeys,
+	}
+	for _, key := range normalizedKeys {
+		t.sessions[key] = entry
+	}
+}
+
+func normalizeResponsesWebsocketCompactReplayKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range normalized {
+			if existing == key {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			normalized = append(normalized, key)
+		}
+	}
+	return normalized
+}
+
+func (t *responsesWebsocketCompactReplayTracker) has(keys []string) bool {
+	if t == nil || len(keys) == 0 {
+		return false
+	}
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cleanupLocked(now)
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := t.sessions[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *responsesWebsocketCompactReplayTracker) consume(keys []string) bool {
+	if t == nil || len(keys) == 0 {
+		return false
+	}
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cleanupLocked(now)
+
+	matched := make(map[*responsesWebsocketCompactReplayEntry]struct{})
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if entry := t.sessions[key]; entry != nil {
+			matched[entry] = struct{}{}
+		}
+	}
+	if len(matched) == 0 {
+		return false
+	}
+	for entry := range matched {
+		t.deleteEntryLocked(entry)
+	}
+	return true
+}
+
+func (t *responsesWebsocketCompactReplayTracker) cleanupLocked(now time.Time) {
+	if t == nil || t.ttl <= 0 {
+		return
+	}
+	seen := make(map[*responsesWebsocketCompactReplayEntry]struct{}, len(t.sessions))
+	for key, entry := range t.sessions {
+		if entry == nil {
+			delete(t.sessions, key)
+			continue
+		}
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		if now.Sub(entry.lastSeen) > t.ttl {
+			t.deleteEntryLocked(entry)
+		}
+	}
+}
+
+func (t *responsesWebsocketCompactReplayTracker) deleteEntryLocked(entry *responsesWebsocketCompactReplayEntry) {
+	if t == nil || entry == nil {
+		return
+	}
+	for _, key := range entry.keys {
+		key = strings.TrimSpace(key)
+		if key != "" && t.sessions[key] == entry {
+			delete(t.sessions, key)
+		}
+	}
+}
+
+func markResponsesWebsocketCompactReplayForRequest(req *http.Request) {
+	if defaultResponsesWebsocketCompactReplays == nil {
+		return
+	}
+	defaultResponsesWebsocketCompactReplays.mark(websocketDownstreamSessionKeys(req))
+}
+
+func hasResponsesWebsocketCompactReplay(keys []string) bool {
+	if defaultResponsesWebsocketCompactReplays == nil {
+		return false
+	}
+	return defaultResponsesWebsocketCompactReplays.has(keys)
+}
+
+func consumeResponsesWebsocketCompactReplay(keys []string) bool {
+	if defaultResponsesWebsocketCompactReplays == nil {
+		return false
+	}
+	return defaultResponsesWebsocketCompactReplays.consume(keys)
+}
+
 type websocketToolSessionRefCounter struct {
 	mu     sync.Mutex
 	counts map[string]int
@@ -210,6 +423,19 @@ func releaseResponsesWebsocketToolCaches(sessionKey string) {
 		return
 	}
 
+	if defaultWebsocketToolOutputCache != nil {
+		defaultWebsocketToolOutputCache.deleteSession(sessionKey)
+	}
+	if defaultWebsocketToolCallCache != nil {
+		defaultWebsocketToolCallCache.deleteSession(sessionKey)
+	}
+}
+
+func resetResponsesWebsocketToolCaches(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
 	if defaultWebsocketToolOutputCache != nil {
 		defaultWebsocketToolOutputCache.deleteSession(sessionKey)
 	}

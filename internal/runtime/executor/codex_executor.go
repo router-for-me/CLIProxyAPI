@@ -1416,6 +1416,7 @@ type codexIdentityConfuseState struct {
 	originalPromptCacheKey string
 	promptCacheKey         string
 	turnIDs                []codexIdentityReplacement
+	parentThreadIDs        []codexIdentityReplacement
 }
 
 type codexIdentityReplacement struct {
@@ -1464,20 +1465,24 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 	}
 
 	state := codexIdentityConfuseState{enabled: true, authID: strings.TrimSpace(auth.ID)}
-	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
-		state.originalPromptCacheKey = promptCacheKey
-		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
+	if promptCacheKey := codexIdentityPromptCacheKeyFromPayload(userPayload, rawJSON); promptCacheKey != "" {
+		state.setPromptCacheKey(promptCacheKey)
+	}
+	if state.promptCacheKey != "" && gjson.GetBytes(rawJSON, "prompt_cache_key").Exists() {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", state.promptCacheKey)
 	}
-	if installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String()); installationID != "" {
+	if installationID := codexIdentityInstallationIDFromPayload(userPayload, rawJSON); installationID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-installation-id", codexIdentityConfuseUUID(auth.ID, "installation", installationID))
+	}
+	if parentThreadID := codexIdentityParentThreadIDFromPayload(userPayload, rawJSON); parentThreadID != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-parent-thread-id", state.confuseParentThreadID(parentThreadID))
 	}
 	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-turn-metadata", applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state))
 	}
 	if state.promptCacheKey != "" {
 		if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
-			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", state.promptCacheKey+":0")
+			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", confuseCodexWindowID(windowID, &state))
 		}
 	}
 
@@ -1492,8 +1497,17 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 		return
 	}
 
+	if state.promptCacheKey == "" {
+		state.setPromptCacheKey(codexIdentityPromptCacheKeyFromHeaders(headers))
+	}
+
+	updatedTurnMetadata := ""
 	if rawTurnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); rawTurnMetadata != "" {
-		headers.Set("X-Codex-Turn-Metadata", applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata, state))
+		updatedTurnMetadata = applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata, state)
+		headers.Set("X-Codex-Turn-Metadata", updatedTurnMetadata)
+	}
+	if parentThreadID := strings.TrimSpace(headerValueCaseInsensitive(headers, "X-Codex-Parent-Thread-Id")); parentThreadID != "" {
+		headers.Set("X-Codex-Parent-Thread-Id", state.confuseParentThreadID(parentThreadID))
 	}
 	if state.promptCacheKey == "" {
 		return
@@ -1505,7 +1519,11 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 	}
 	headers.Set("X-Client-Request-Id", state.promptCacheKey)
 	headers.Set("Thread-Id", state.promptCacheKey)
-	headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
+	windowID := strings.TrimSpace(headerValueCaseInsensitive(headers, "X-Codex-Window-Id"))
+	if windowID == "" && updatedTurnMetadata != "" {
+		windowID = strings.TrimSpace(gjson.Get(updatedTurnMetadata, "window_id").String())
+	}
+	headers.Set("X-Codex-Window-Id", confuseCodexWindowID(windowID, state))
 }
 
 func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexIdentityConfuseState) string {
@@ -1521,16 +1539,146 @@ func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexI
 	if turnID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "turn_id").String()); turnID != "" {
 		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "turn_id", state.confuseTurnID(turnID))
 	}
+	if parentThreadID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "parent_thread_id").String()); parentThreadID != "" {
+		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "parent_thread_id", state.confuseParentThreadID(parentThreadID))
+	}
 	if state.promptCacheKey != "" && gjson.Get(rawTurnMetadata, "window_id").Exists() {
-		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "window_id", state.promptCacheKey+":0")
+		windowID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "window_id").String())
+		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "window_id", confuseCodexWindowID(windowID, state))
 	}
 	return updatedTurnMetadata
+}
+
+func codexIdentityPromptCacheKeyFromPayload(userPayload []byte, rawJSON []byte) string {
+	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
+		return promptCacheKey
+	}
+	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String()); promptCacheKey != "" {
+		return promptCacheKey
+	}
+	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
+		if promptCacheKey := strings.TrimSpace(gjson.Get(turnMetadata, "prompt_cache_key").String()); promptCacheKey != "" {
+			return promptCacheKey
+		}
+		if windowID := strings.TrimSpace(gjson.Get(turnMetadata, "window_id").String()); windowID != "" {
+			if promptCacheKey := codexPromptCacheKeyFromWindowID(windowID); promptCacheKey != "" {
+				return promptCacheKey
+			}
+		}
+	}
+	if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
+		return codexPromptCacheKeyFromWindowID(windowID)
+	}
+	return ""
+}
+
+func codexIdentityInstallationIDFromPayload(userPayload []byte, rawJSON []byte) string {
+	if installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String()); installationID != "" {
+		return installationID
+	}
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-installation-id").String())
+}
+
+func codexIdentityParentThreadIDFromPayload(userPayload []byte, rawJSON []byte) string {
+	if parentThreadID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-parent-thread-id").String()); parentThreadID != "" {
+		return parentThreadID
+	}
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-parent-thread-id").String())
+}
+
+func codexIdentityPromptCacheKeyFromHeaders(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	if turnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); turnMetadata != "" {
+		if promptCacheKey := strings.TrimSpace(gjson.Get(turnMetadata, "prompt_cache_key").String()); promptCacheKey != "" {
+			return promptCacheKey
+		}
+		if windowID := strings.TrimSpace(gjson.Get(turnMetadata, "window_id").String()); windowID != "" {
+			if promptCacheKey := codexPromptCacheKeyFromWindowID(windowID); promptCacheKey != "" {
+				return promptCacheKey
+			}
+		}
+	}
+	if windowID := strings.TrimSpace(headerValueCaseInsensitive(headers, "X-Codex-Window-Id")); windowID != "" {
+		if promptCacheKey := codexPromptCacheKeyFromWindowID(windowID); promptCacheKey != "" {
+			return promptCacheKey
+		}
+	}
+	if threadID := strings.TrimSpace(headerValueCaseInsensitive(headers, "Thread-Id")); threadID != "" {
+		return threadID
+	}
+	return ""
+}
+
+func codexPromptCacheKeyFromWindowID(windowID string) string {
+	windowID = strings.TrimSpace(windowID)
+	suffix, ok := codexWindowIDGenerationSuffix(windowID)
+	if !ok {
+		return windowID
+	}
+	return strings.TrimSpace(strings.TrimSuffix(windowID, suffix))
+}
+
+func confuseCodexWindowID(windowID string, state *codexIdentityConfuseState) string {
+	if state == nil || strings.TrimSpace(state.promptCacheKey) == "" {
+		return strings.TrimSpace(windowID)
+	}
+
+	windowID = strings.TrimSpace(windowID)
+	promptCacheKey := strings.TrimSpace(state.promptCacheKey)
+	if windowID == "" {
+		return promptCacheKey + ":0"
+	}
+	if windowID == promptCacheKey || strings.HasPrefix(windowID, promptCacheKey+":") {
+		if windowID == promptCacheKey {
+			return promptCacheKey
+		}
+		if suffix, ok := codexWindowIDGenerationSuffix(windowID); ok {
+			return promptCacheKey + suffix
+		}
+		return promptCacheKey + ":0"
+	}
+
+	originalPromptCacheKey := strings.TrimSpace(state.originalPromptCacheKey)
+	if originalPromptCacheKey != "" {
+		if windowID == originalPromptCacheKey {
+			return promptCacheKey
+		}
+		if strings.HasPrefix(windowID, originalPromptCacheKey+":") {
+			if suffix, ok := codexWindowIDGenerationSuffix(windowID); ok {
+				return promptCacheKey + suffix
+			}
+			return promptCacheKey + ":0"
+		}
+	}
+
+	if suffix, ok := codexWindowIDGenerationSuffix(windowID); ok {
+		return promptCacheKey + suffix
+	}
+	return promptCacheKey + ":0"
+}
+
+func codexWindowIDGenerationSuffix(windowID string) (string, bool) {
+	idx := strings.LastIndex(windowID, ":")
+	if idx < 0 || idx == len(windowID)-1 {
+		return "", false
+	}
+	for _, ch := range windowID[idx+1:] {
+		if ch < '0' || ch > '9' {
+			return "", false
+		}
+	}
+	return windowID[idx:], true
 }
 
 func applyCodexIdentityConfuseResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
 	payload = replaceCodexIdentityResponsePayload(payload, state.originalPromptCacheKey, state.promptCacheKey)
 	for _, turnID := range state.turnIDs {
 		payload = replaceCodexIdentityResponsePayload(payload, turnID.original, turnID.confused)
+	}
+	for _, parentThreadID := range state.parentThreadIDs {
+		payload = replaceCodexIdentityResponsePayload(payload, parentThreadID.original, parentThreadID.confused)
 	}
 	return payload
 }
@@ -1539,6 +1687,9 @@ func applyCodexIdentityExposeResponsePayload(payload []byte, state codexIdentity
 	payload = replaceCodexIdentityResponsePayload(payload, state.promptCacheKey, state.originalPromptCacheKey)
 	for _, turnID := range state.turnIDs {
 		payload = replaceCodexIdentityResponsePayload(payload, turnID.confused, turnID.original)
+	}
+	for _, parentThreadID := range state.parentThreadIDs {
+		payload = replaceCodexIdentityResponsePayload(payload, parentThreadID.confused, parentThreadID.original)
 	}
 	return payload
 }
@@ -1556,6 +1707,30 @@ func (state *codexIdentityConfuseState) confuseTurnID(turnID string) string {
 	confusedTurnID := codexIdentityConfuseUUID(state.authID, "turn", turnID)
 	state.turnIDs = append(state.turnIDs, codexIdentityReplacement{original: turnID, confused: confusedTurnID})
 	return confusedTurnID
+}
+
+func (state *codexIdentityConfuseState) confuseParentThreadID(parentThreadID string) string {
+	parentThreadID = strings.TrimSpace(parentThreadID)
+	if state == nil || !state.enabled || strings.TrimSpace(state.authID) == "" || parentThreadID == "" {
+		return parentThreadID
+	}
+	for _, replacement := range state.parentThreadIDs {
+		if replacement.original == parentThreadID || replacement.confused == parentThreadID {
+			return replacement.confused
+		}
+	}
+	confusedParentThreadID := codexIdentityConfuseUUID(state.authID, "parent-thread", parentThreadID)
+	state.parentThreadIDs = append(state.parentThreadIDs, codexIdentityReplacement{original: parentThreadID, confused: confusedParentThreadID})
+	return confusedParentThreadID
+}
+
+func (state *codexIdentityConfuseState) setPromptCacheKey(promptCacheKey string) {
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if state == nil || !state.enabled || strings.TrimSpace(state.authID) == "" || promptCacheKey == "" {
+		return
+	}
+	state.originalPromptCacheKey = promptCacheKey
+	state.promptCacheKey = codexIdentityConfuseUUID(state.authID, "prompt-cache", promptCacheKey)
 }
 
 func replaceCodexIdentityResponsePayload(payload []byte, from string, to string) []byte {
@@ -1594,7 +1769,10 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Window-Id", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Parent-Thread-Id", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "Thread-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
