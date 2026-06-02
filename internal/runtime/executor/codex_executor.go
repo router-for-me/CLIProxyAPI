@@ -979,8 +979,8 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 	}
 
 	setHeaderCasePreserved(headers, "Session-Id", state.promptCacheKey)
-	if headerValueCaseInsensitive(headers, "session_id") != "" {
-		setHeaderCasePreserved(headers, "session_id", state.promptCacheKey)
+	if headerValueCaseInsensitive(headers, "Session_id") != "" {
+		setHeaderCasePreserved(headers, "Session_id", state.promptCacheKey)
 	}
 	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
 		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)

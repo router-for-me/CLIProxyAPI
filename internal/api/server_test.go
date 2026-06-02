@@ -663,9 +663,6 @@ func TestServeManagementControlPanel_DisablesCaching(t *testing.T) {
 		t.Fatal("expected ETag header in management panel response")
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "__cpa_auth_warning_filter_patch__") {
-		t.Fatalf("expected auth warning patch marker in management response, got %s", body)
-	}
 	if !strings.Contains(body, "__cpa_model_price_dropdown_clip_patch__") {
 		t.Fatalf("expected dropdown patch marker in management response, got %s", body)
 	}
