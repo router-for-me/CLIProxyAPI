@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -51,6 +52,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	// Base Claude message payload
 	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+
+	// toolNameMap maps the *Anthropic-safe* name (i.e. what we send upstream)
+	// back to the original Codex tool name. Populated both when we sanitize a
+	// history function_call name and when a namespace tool's qualified name
+	// gets sanitized. Used downstream by tool_choice + by the response-side
+	// translator via setMcpToolNameOnItem to recover the original name.
+	toolNameMap := map[string]string{}
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -341,7 +349,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if callID == "" {
 					callID = genToolCallID()
 				}
-				name := item.Get("name").String()
+				rawName := item.Get("name").String()
+				if ns := item.Get("namespace").String(); ns != "" {
+					rawName = qualifyResponsesNamespaceToolName(ns, rawName)
+				}
+				name := sanitizeAnthropicToolName(rawName)
+				if name != rawName {
+					toolNameMap[name] = rawName
+				}
 				argsStr := item.Get("arguments").String()
 
 				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
@@ -354,26 +369,144 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 				}
 
-				asst := []byte(`{"role":"assistant","content":[]}`)
-				for _, partJSON := range pendingReasoningParts {
-					asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+				// FIX (parallel-tool-merge): If the last message in the array is already
+				// an assistant message whose content is an array (i.e., a tool_use container),
+				// append this tool_use to that message instead of creating a new assistant
+				// message. This avoids producing consecutive same-role messages, which violate
+				// the Anthropic Messages API requirement that user/assistant strictly alternate
+				// and which AWS Bedrock rejects as TOOL_USE_RESULT_MISMATCH (HTTP 400).
+				appendedToolUse := false
+				if msgsCount := gjson.GetBytes(out, "messages.#").Int(); msgsCount > 0 {
+					lastIdx := msgsCount - 1
+					lastRole := gjson.GetBytes(out, fmt.Sprintf("messages.%d.role", lastIdx)).String()
+					lastContent := gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
+					if lastRole == "assistant" {
+						// If the previous assistant message stored its content as a
+						// plain string (single-text case), promote it to an array so
+						// the tool_use can be appended instead of forcing a new
+						// consecutive assistant message (which Bedrock rejects with 400).
+						if lastContent.Type == gjson.String {
+							textBlock := []byte(`{"type":"text","text":""}`)
+							textBlock, _ = sjson.SetBytes(textBlock, "text", lastContent.String())
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content", lastIdx), []byte("[]"))
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), textBlock)
+							lastContent = gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
+						}
+						if lastContent.IsArray() {
+							// Flush any pending reasoning parts into this same assistant
+							// message *before* the tool_use, so the reasoning stays attached
+							// to the merged tool call instead of being emitted as a separate
+							// assistant message between the tool_use and its tool_result.
+							for _, partJSON := range pendingReasoningParts {
+								out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), []byte(partJSON))
+							}
+							pendingReasoningParts = nil
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), toolUse)
+							appendedToolUse = true
+						}
+					}
 				}
-				pendingReasoningParts = nil
-				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				if !appendedToolUse {
+					asst := []byte(`{"role":"assistant","content":[]}`)
+					// upstream reasoning-signature: flush any pending reasoning parts
+					// into the new assistant message before the tool_use.
+					for _, partJSON := range pendingReasoningParts {
+						asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+					}
+					pendingReasoningParts = nil
+					asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
+					out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				}
 
 			case "function_call_output":
 				flushPendingReasoning()
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
-				outputStr := item.Get("output").String()
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+				output := item.Get("output")
+				var resultParts []string
+				if output.IsArray() {
+					output.ForEach(func(_, part gjson.Result) bool {
+						if part.Get("type").String() == "input_image" {
+							url := part.Get("image_url").String()
+							if url == "" {
+								url = part.Get("url").String()
+							}
+							if url == "" {
+								return true
+							}
+							var contentPart []byte
+							if strings.HasPrefix(url, "data:") {
+								trimmed := strings.TrimPrefix(url, "data:")
+								mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+								mediaType := "application/octet-stream"
+								data := ""
+								if len(mediaAndData) == 2 {
+									if mediaAndData[0] != "" {
+										mediaType = mediaAndData[0]
+									}
+									data = mediaAndData[1]
+								}
+								if data != "" {
+									contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+									contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+									contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								}
+							} else {
+								contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+							}
+							if len(contentPart) > 0 {
+								resultParts = append(resultParts, string(contentPart))
+							}
+						} else if t := part.Get("text"); t.Exists() {
+							contentPart := []byte(`{"type":"text","text":""}`)
+							contentPart, _ = sjson.SetBytes(contentPart, "text", t.String())
+							resultParts = append(resultParts, string(contentPart))
+						}
+						return true
+					})
+				}
+				if len(resultParts) > 0 {
+					toolResult, _ = sjson.SetRawBytes(toolResult, "content", []byte("[]"))
+					for _, partJSON := range resultParts {
+						toolResult, _ = sjson.SetRawBytes(toolResult, "content.-1", []byte(partJSON))
+					}
+				} else {
+					toolResult, _ = sjson.SetBytes(toolResult, "content", output.String())
+				}
 
-				usr := []byte(`{"role":"user","content":[]}`)
-				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+				// FIX (parallel-tool-merge): Mirror of the function_call branch.
+				// If the last message is already a user message whose content is an array
+				// (i.e., a tool_result container), append this tool_result instead of creating
+				// a new user message, to keep user/assistant strictly alternating.
+				appendedToolResult := false
+				if msgsCount := gjson.GetBytes(out, "messages.#").Int(); msgsCount > 0 {
+					lastIdx := msgsCount - 1
+					lastRole := gjson.GetBytes(out, fmt.Sprintf("messages.%d.role", lastIdx)).String()
+					lastContent := gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
+					if lastRole == "user" {
+						// Promote a string-valued user content to an array first, so the
+						// tool_result merges in instead of creating a consecutive user message.
+						if lastContent.Type == gjson.String {
+							textBlock := []byte(`{"type":"text","text":""}`)
+							textBlock, _ = sjson.SetBytes(textBlock, "text", lastContent.String())
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content", lastIdx), []byte("[]"))
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), textBlock)
+							lastContent = gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
+						}
+						if lastContent.IsArray() {
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), toolResult)
+							appendedToolResult = true
+						}
+					}
+				}
+				if !appendedToolResult {
+					usr := []byte(`{"role":"user","content":[]}`)
+					usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
+					out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+				}
 			}
 			return true
 		})
@@ -381,7 +514,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	flushPendingReasoning()
 
 	includedToolNames := map[string]struct{}{}
-	toolNameMap := map[string]string{}
 
 	// tools mapping: parameters -> input_schema
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
@@ -427,7 +559,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				if _, ok := includedToolNames[fn]; ok {
 					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", sanitizeAnthropicToolName(fn))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				}
 			}
@@ -511,6 +643,13 @@ func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[st
 			if childName != "" {
 				toolNameMap[childName] = qualifiedName
 			}
+			// If the qualified name had to be sanitized for Anthropic, also
+			// register the sanitized form so the response-side can recover the
+			// original namespace-qualified name when the model echoes the
+			// sanitized version back in tool_use.name.
+			if cleaned := sanitizeAnthropicToolName(qualifiedName); cleaned != qualifiedName && cleaned != "" {
+				toolNameMap[cleaned] = qualifiedName
+			}
 		}
 		return true
 	})
@@ -526,8 +665,9 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 		return nil, false
 	}
 
+	cleanName := sanitizeAnthropicToolName(name)
 	tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", cleanName)
 	if d := responsesToolDescription(tool); d != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
@@ -545,7 +685,7 @@ func convertResponsesWebSearchToolToClaude(tool gjson.Result) ([]byte, bool) {
 		name = "web_search"
 	}
 	tJSON := []byte(`{"type":"web_search_20250305","name":""}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", sanitizeAnthropicToolName(name))
 	if maxUses := tool.Get("max_uses"); maxUses.Exists() {
 		tJSON, _ = sjson.SetBytes(tJSON, "max_uses", maxUses.Int())
 	}
@@ -606,6 +746,48 @@ func normalizeClaudeToolInputSchema(parameters gjson.Result) []byte {
 		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
 	}
 	return schema
+}
+
+// anthropicToolNameSafeRe matches characters that are NOT allowed in
+// Anthropic tool_use.name (which is constrained to ^[a-zA-Z0-9_-]{1,64}$).
+// Common offenders we have seen in the wild:
+//   - "computer-use:computer-use" (colon comes from a Codex plugin skill mention
+//     [$plugin:skill] being mis-interpreted as a tool name).
+//   - dotted names from non-Anthropic upstreams (e.g. "multi_agent_v1.spawn_agent").
+//   - whitespace from sloppy model output.
+var anthropicToolNameSafeRe = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+// sanitizeAnthropicToolName replaces every character that is illegal under the
+// Anthropic Messages API tool name pattern with "__". The mapping is reversible
+// at the response side via splitMcpFlatName + bareCodexInternalLeafToNamespace
+// for known Codex-internal namespaces, and otherwise via toolNameMap when the
+// translator records the original "<sanitized>" -> "<original>" pair.
+//
+// Empty input returns empty (caller is expected to have the usual TrimSpace
+// already done). Names that already match the Anthropic pattern are returned
+// unchanged so that there is zero behavior change for the 99% case.
+func sanitizeAnthropicToolName(name string) string {
+	if name == "" {
+		return name
+	}
+	if !anthropicToolNameSafeRe.MatchString(name) && len(name) <= 64 {
+		return name
+	}
+	cleaned := anthropicToolNameSafeRe.ReplaceAllString(name, "__")
+	// collapse runs of "__" that came from adjacent illegal chars
+	for strings.Contains(cleaned, "____") {
+		cleaned = strings.ReplaceAll(cleaned, "____", "__")
+	}
+	cleaned = strings.Trim(cleaned, "_")
+	if cleaned == "" {
+		// All chars were illegal; fall back to a deterministic placeholder so
+		// the upstream still gets *some* valid name and we don't crash schema.
+		cleaned = "tool"
+	}
+	if len(cleaned) > 64 {
+		cleaned = cleaned[:64]
+	}
+	return cleaned
 }
 
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {

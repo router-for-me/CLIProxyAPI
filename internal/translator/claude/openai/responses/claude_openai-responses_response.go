@@ -39,9 +39,61 @@ type claudeToResponsesState struct {
 	InputTokens  int64
 	OutputTokens int64
 	UsageSeen    bool
+	// web_search aggregation (server_tool_use + web_search_tool_result)
+	WebSearchID      string
+	WebSearchQuery   string
+	WebSearchItems   [][]byte // completed web_search_call items for output aggregation
 }
 
 var dataTag = []byte("data:")
+
+// webSearchToolName is the Anthropic server_tool_use name CPA translates into an
+// OpenAI Responses web_search_call item.
+const webSearchToolName = "web_search"
+
+// buildWebSearchCallItem builds an OpenAI Responses web_search_call output item.
+// The host (codex) parses {id?, status?, action:{type:"search",query,queries}};
+// it ignores unknown fields, so search results are attached under "result" to
+// preserve title/url/encrypted_content/page_age without breaking deserialization.
+func buildWebSearchCallItem(id, query, status string, results []byte) []byte {
+	item := []byte(`{"id":"","type":"web_search_call","status":"","action":{"type":"search"}}`)
+	if id != "" {
+		item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ws_%s", id))
+	}
+	item, _ = sjson.SetBytes(item, "status", status)
+	if query != "" {
+		item, _ = sjson.SetBytes(item, "action.query", query)
+		item, _ = sjson.SetBytes(item, "action.queries.-1", query)
+	}
+	if len(results) > 0 {
+		item, _ = sjson.SetRawBytes(item, "result", results)
+	}
+	return item
+}
+
+// buildWebSearchResultArray maps Anthropic web_search_result entries into a JSON
+// array, preserving title/url/encrypted_content/page_age (no native OpenAI slot,
+// so kept verbatim under the web_search_call item's "result" field).
+func buildWebSearchResultArray(content gjson.Result) []byte {
+	arr := []byte(`[]`)
+	if !content.IsArray() {
+		return arr
+	}
+	content.ForEach(func(_, r gjson.Result) bool {
+		entry := []byte(`{}`)
+		entry, _ = sjson.SetBytes(entry, "title", r.Get("title").String())
+		entry, _ = sjson.SetBytes(entry, "url", r.Get("url").String())
+		if enc := r.Get("encrypted_content"); enc.Exists() {
+			entry, _ = sjson.SetBytes(entry, "encrypted_content", enc.String())
+		}
+		if pageAge := r.Get("page_age"); pageAge.Exists() && pageAge.Type != gjson.Null {
+			entry, _ = sjson.SetBytes(entry, "page_age", pageAge.String())
+		}
+		arr, _ = sjson.SetRawBytes(arr, "-1", entry)
+		return true
+	})
+	return arr
+}
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
@@ -99,6 +151,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.InputTokens = 0
 			st.OutputTokens = 0
 			st.UsageSeen = false
+			st.WebSearchID = ""
+			st.WebSearchQuery = ""
+			st.WebSearchItems = nil
 			if usage := msg.Get("usage"); usage.Exists() {
 				if v := usage.Get("input_tokens"); v.Exists() {
 					st.InputTokens = v.Int()
@@ -183,6 +238,30 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			part, _ = sjson.SetBytes(part, "output_index", idx)
 			out = append(out, emitEvent("response.reasoning_summary_part.added", part))
 			st.ReasoningPartAdded = true
+		} else if typ == "server_tool_use" && cb.Get("name").String() == webSearchToolName {
+			// Anthropic server_tool_use(web_search): input arrives complete here
+			// (no input_json_delta), so emit an in_progress web_search_call item.
+			st.WebSearchID = cb.Get("id").String()
+			st.WebSearchQuery = cb.Get("input.query").String()
+			item := buildWebSearchCallItem(st.WebSearchID, st.WebSearchQuery, "in_progress", nil)
+			added := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{}}`)
+			added, _ = sjson.SetBytes(added, "sequence_number", nextSeq())
+			added, _ = sjson.SetBytes(added, "output_index", idx)
+			added, _ = sjson.SetRawBytes(added, "item", item)
+			out = append(out, emitEvent("response.output_item.added", added))
+		} else if typ == "web_search_tool_result" {
+			// Anthropic web_search_tool_result: results arrive complete here. Emit a
+			// completed web_search_call item carrying the mapped results.
+			results := buildWebSearchResultArray(cb.Get("content"))
+			item := buildWebSearchCallItem(st.WebSearchID, st.WebSearchQuery, "completed", results)
+			st.WebSearchItems = append(st.WebSearchItems, item)
+			done := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
+			done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
+			done, _ = sjson.SetBytes(done, "output_index", idx)
+			done, _ = sjson.SetRawBytes(done, "item", item)
+			out = append(out, emitEvent("response.output_item.done", done))
+			st.WebSearchID = ""
+			st.WebSearchQuery = ""
 		}
 	case "content_block_delta":
 		d := root.Get("delta")
@@ -442,6 +521,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 			}
 		}
+		// web_search_call items (completed during the message)
+		for _, item := range st.WebSearchItems {
+			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+		}
 		if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
 			completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
 		}
@@ -518,6 +601,13 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 	toolCalls := make(map[int]*toolState)
 
+	// web_search aggregation (server_tool_use + web_search_tool_result)
+	var (
+		webSearchID    string
+		webSearchQuery string
+		webSearchItems [][]byte
+	)
+
 	// Walk through SSE chunks to fill state
 	for _, ch := range chunks {
 		root := gjson.ParseBytes(ch)
@@ -559,6 +649,16 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				if signature := cb.Get("signature"); signature.Exists() && signature.String() != "" {
 					reasoningSig = signature.String()
 				}
+			case "server_tool_use":
+				if cb.Get("name").String() == webSearchToolName {
+					webSearchID = cb.Get("id").String()
+					webSearchQuery = cb.Get("input.query").String()
+				}
+			case "web_search_tool_result":
+				results := buildWebSearchResultArray(cb.Get("content"))
+				webSearchItems = append(webSearchItems, buildWebSearchCallItem(webSearchID, webSearchQuery, "completed", results))
+				webSearchID = ""
+				webSearchQuery = ""
 			}
 
 		case "content_block_delta":
@@ -721,6 +821,9 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 		}
 	}
+	for _, item := range webSearchItems {
+		outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+	}
 	if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
 		out, _ = sjson.SetRawBytes(out, "output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
 	}
@@ -740,3 +843,4 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	return out
 }
+
