@@ -107,6 +107,9 @@ func sanitizeOpenAICompatHTTPRequestBody(req *http.Request, profile openAICompat
 	}
 	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	updated := scrubOpenAICompatPayloadForModel(body, profile, model, baseURL)
+	if inlined, changed := inlineMiniMaxM3RemoteImageURLs(req.Context(), updated, profile, model); changed {
+		updated = inlined
+	}
 	req.Body = io.NopCloser(bytes.NewReader(updated))
 	req.ContentLength = int64(len(updated))
 	req.GetBody = func() (io.ReadCloser, error) {
@@ -184,6 +187,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			translated = updated
 		}
 	}
+	requestLogBody := translated
+	if inlined, changed := inlineMiniMaxM3RemoteImageURLs(ctx, translated, profile, baseModel); changed {
+		translated = inlined
+		requestLogBody = redactOpenAICompatImageDataURLsForLog(translated)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -211,7 +219,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
+		Body:      requestLogBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -399,6 +407,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		// are captured even when the upstream is an OpenAI-compatible provider.
 		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	}
+	requestLogBody := translated
+	if inlined, changed := inlineMiniMaxM3RemoteImageURLs(ctx, translated, profile, baseModel); changed {
+		translated = inlined
+		requestLogBody = redactOpenAICompatImageDataURLsForLog(translated)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -428,7 +441,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
+		Body:      requestLogBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
