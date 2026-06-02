@@ -2299,6 +2299,25 @@
           "high"
         ]
       }
+    },
+    {
+      "id": "grok-composer-2.5-fast",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Composer 2.5 Fast",
+      "name": "grok-composer-2.5-fast",
+      "description": "xAI Composer 2.5 Fast model for the Responses API.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
     }
   ]
 }
