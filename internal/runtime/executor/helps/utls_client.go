@@ -84,7 +84,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
+	tlsConfig := &tls.Config{ServerName: host, InsecureSkipVerify: true}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	if err := tlsConn.Handshake(); err != nil {
@@ -163,15 +163,15 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 
 	utlsRT := newUtlsRoundTripper(proxyURL)
 
-	var standardTransport http.RoundTripper = &http.Transport{
+	var standardTransport http.RoundTripper = CloneTransportSkippingTLSVerify(&http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-	}
+	})
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
-			standardTransport = transport
+			standardTransport = CloneTransportSkippingTLSVerify(transport)
 		}
 	}
 

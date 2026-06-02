@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"strings"
 	"time"
@@ -46,7 +47,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
-			httpClient.Transport = transport
+			httpClient.Transport = CloneTransportSkippingTLSVerify(transport)
 			return httpClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
@@ -54,11 +55,45 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
-	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+	if ctx != nil {
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			httpClient.Transport = RoundTripperSkippingTLSVerify(rt)
+			return httpClient
+		}
 	}
 
+	httpClient.Transport = CloneTransportSkippingTLSVerify(nil)
 	return httpClient
+}
+
+// RoundTripperSkippingTLSVerify returns a transport for model upstream calls that
+// skips TLS certificate verification when the round tripper exposes TLS settings.
+func RoundTripperSkippingTLSVerify(rt http.RoundTripper) http.RoundTripper {
+	if transport, ok := rt.(*http.Transport); ok {
+		return CloneTransportSkippingTLSVerify(transport)
+	}
+	return rt
+}
+
+// CloneTransportSkippingTLSVerify clones a transport and disables TLS certificate
+// verification for model upstream compatibility.
+func CloneTransportSkippingTLSVerify(base *http.Transport) *http.Transport {
+	if base == nil {
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
+			base = defaultTransport
+		} else {
+			base = &http.Transport{}
+		}
+	}
+
+	clone := base.Clone()
+	if clone.TLSClientConfig == nil {
+		clone.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		return clone
+	}
+	clone.TLSClientConfig = clone.TLSClientConfig.Clone()
+	clone.TLSClientConfig.InsecureSkipVerify = true
+	return clone
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

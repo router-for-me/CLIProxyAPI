@@ -7,6 +7,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// OpenAIResponsesToChatCompletionsOptions controls optional compatibility behavior
+// for Responses API request conversion.
+type OpenAIResponsesToChatCompletionsOptions struct {
+	PreserveReasoningContent bool
+}
+
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
@@ -27,6 +33,12 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI chat completions format
 func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions(modelName, inputRawJSON, stream, OpenAIResponsesToChatCompletionsOptions{})
+}
+
+// ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions converts an
+// OpenAI Responses request to Chat Completions with optional compatibility flags.
+func ConvertOpenAIResponsesRequestToOpenAIChatCompletionsWithOptions(modelName string, inputRawJSON []byte, stream bool, opts OpenAIResponsesToChatCompletionsOptions) []byte {
 	rawJSON := inputRawJSON
 	// Base OpenAI chat completions template with default values
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
@@ -81,6 +93,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if opts.PreserveReasoningContent {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", "")
+			}
 			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
@@ -106,6 +121,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			return false
 		}
 		appendRegularMessage := func(message []byte) {
+			if opts.PreserveReasoningContent && gjson.GetBytes(message, "role").String() == "assistant" && !gjson.GetBytes(message, "reasoning_content").Exists() {
+				message, _ = sjson.SetBytes(message, "reasoning_content", "")
+			}
 			// Keep tool-call adjacency strict for providers that require
 			// assistant(tool_calls) -> tool(tool_call_id) with no message in between.
 			if hasAwaitingToolOutput() {
@@ -170,7 +188,27 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
+				if opts.PreserveReasoningContent && role == "assistant" {
+					if reasoningContent := responsesInputReasoningContent(item); reasoningContent != "" {
+						contentNode := gjson.GetBytes(message, "content")
+						if !contentNode.Exists() || (contentNode.IsArray() && len(contentNode.Array()) == 0) {
+							message, _ = sjson.SetBytes(message, "content", "")
+						}
+						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
+					}
+				}
+
 				appendRegularMessage(message)
+
+			case "reasoning":
+				if opts.PreserveReasoningContent {
+					reasoningContent := responsesInputReasoningContent(item)
+					if reasoningContent != "" {
+						message := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
+						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
+						appendRegularMessage(message)
+					}
+				}
 
 			case "function_call":
 				// Buffer consecutive function calls and emit them as one assistant message.
@@ -280,4 +318,47 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func responsesInputReasoningContent(item gjson.Result) string {
+	if reasoning := item.Get("reasoning_content").String(); strings.TrimSpace(reasoning) != "" {
+		return reasoning
+	}
+
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+		parts := make([]string, 0)
+		summary.ForEach(func(_, part gjson.Result) bool {
+			partType := part.Get("type").String()
+			if partType != "" && partType != "summary_text" {
+				return true
+			}
+			text := part.Get("text").String()
+			if strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+			return true
+		})
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n\n")
+		}
+	}
+
+	if content := item.Get("content"); content.Exists() && content.IsArray() {
+		parts := make([]string, 0)
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() != "reasoning" {
+				return true
+			}
+			text := responsesInputReasoningContent(part)
+			if text != "" {
+				parts = append(parts, text)
+			}
+			return true
+		})
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n\n")
+		}
+	}
+
+	return ""
 }

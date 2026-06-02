@@ -202,12 +202,14 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
 	clone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 	if clone.TLSClientConfig == nil {
-		clone.TLSClientConfig = &tls.Config{}
+		clone.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	} else {
 		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
+		clone.TLSClientConfig.InsecureSkipVerify = true
 	}
 	// Actively advertise only HTTP/1.1 in the ALPN handshake.
 	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	clone.TLSClientConfig.InsecureSkipVerify = true
 	return clone
 }
 
