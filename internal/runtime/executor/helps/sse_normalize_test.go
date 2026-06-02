@@ -254,6 +254,27 @@ func TestSSENormalizer_BlankLinesPassThrough(t *testing.T) {
 	}
 }
 
+func TestSSEEventType_MultipleSpaces(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"event: message_stop", "message_stop"},
+		{"event:message_stop", "message_stop"},
+		{"event:  message_stop", "message_stop"},
+		{"event:\tmessage_stop", "message_stop"},
+		{"  event: message_stop  ", "message_stop"},
+		{"data: {}", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := sseEventType([]byte(tt.input))
+		if got != tt.expected {
+			t.Errorf("sseEventType(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
 func TestNormalizeNonStreamContentOrder_CorrectOrder(t *testing.T) {
 	input := []byte(`{"content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"4"}],"stop_reason":"end_turn"}`)
 	result := NormalizeNonStreamContentOrder(input)

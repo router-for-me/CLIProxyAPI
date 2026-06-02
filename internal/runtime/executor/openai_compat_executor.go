@@ -430,6 +430,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				// protocol. The normalizer buffers and reorders so that
 				// message_stop is always the last event.
 				for _, sseLine := range bytes.Split(chunks[i], []byte("\n")) {
+					if len(sseLine) == 0 {
+						continue
+					}
 					for _, outLine := range sseNormalizer.ProcessLine(sseLine) {
 						cloned := make([]byte, len(outLine)+1)
 						copy(cloned, outLine)
@@ -467,8 +470,29 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// response.completed events are still emitted exactly once.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
 			for i := range chunks {
+				for _, sseLine := range bytes.Split(chunks[i], []byte("\n")) {
+					if len(sseLine) == 0 {
+						continue
+					}
+					for _, outLine := range sseNormalizer.ProcessLine(sseLine) {
+						cloned := make([]byte, len(outLine)+1)
+						copy(cloned, outLine)
+						cloned[len(outLine)] = '\n'
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+			}
+			// Flush normalizer after synthetic [DONE].
+			for _, outLine := range sseNormalizer.Flush() {
+				cloned := make([]byte, len(outLine)+1)
+				copy(cloned, outLine)
+				cloned[len(outLine)] = '\n'
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
 				case <-ctx.Done():
 					return
 				}

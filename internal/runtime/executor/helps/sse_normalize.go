@@ -26,13 +26,11 @@ type SSENormalizer struct {
 }
 
 // sseEventType extracts the event type from an SSE "event:" line.
+// Handles both "event: type" and "event:type" with optional extra whitespace.
 func sseEventType(line []byte) string {
 	trimmed := bytes.TrimSpace(line)
-	if bytes.HasPrefix(trimmed, []byte("event: ")) {
-		return string(bytes.TrimPrefix(trimmed, []byte("event: ")))
-	}
 	if bytes.HasPrefix(trimmed, []byte("event:")) {
-		return string(bytes.TrimPrefix(trimmed, []byte("event:")))
+		return string(bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("event:"))))
 	}
 	return ""
 }
