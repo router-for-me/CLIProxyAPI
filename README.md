@@ -1,3 +1,6 @@
+> **Work state:** ACTIVE · **Progress:** `███████░░░ 70%`
+> CLIProxyAPI++ — multi-provider LLM proxy fork. Builds + CI workflows repaired (25 files). Residual: pre-existing Go test failures surfaced now that CI runs. · updated 2026-06-02
+
 # cliproxyapi-plusplus
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FKooshaPari%2Fcliproxyapi-plusplus.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2FKooshaPari%2Fcliproxyapi-plusplus?ref=badge_shield)
 [![AI Slop Inside](https://sladge.net/badge.svg)](https://sladge.net)
