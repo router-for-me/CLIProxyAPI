@@ -249,6 +249,64 @@ func TestOpenAIResponsesCompactAugmentsHiddenOnlyOutputWithSameTurnEvidence(t *t
 	}
 }
 
+func TestOpenAIResponsesCompactAugmentsHiddenOnlyOutputWithTypelessAssistantEvidence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{
+		payload: []byte(`{"id":"resp-compact","output":[{"type":"compaction_summary","summary":"hidden"}]}`),
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-typeless-evidence", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	body := `{
+		"model":"test-model",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"old turn"}]},
+			{"type":"message","role":"assistant","id":"stale-assistant","content":[{"type":"output_text","text":"stale assistant"}]},
+			{"role":"user","content":[{"type":"input_text","text":"please preserve typeless assistant"}]},
+			{"role":"assistant","id":"latest-typeless-assistant","content":[{"type":"output_text","text":"typeless assistant evidence"}]}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	output := gjson.GetBytes(resp.Body.Bytes(), "output")
+	if got, want := len(output.Array()), 2; got != want {
+		t.Fatalf("output item count = %d, want %d; body=%s", got, want, resp.Body.String())
+	}
+	merged := output.Array()[1]
+	if got := merged.Get("type").String(); got != "" {
+		t.Fatalf("merged assistant type = %q, want empty", got)
+	}
+	if got := merged.Get("role").String(); got != "assistant" {
+		t.Fatalf("merged assistant role = %q, want assistant", got)
+	}
+	if got := merged.Get("id").String(); got != "latest-typeless-assistant" {
+		t.Fatalf("merged assistant id = %q, want latest-typeless-assistant", got)
+	}
+	if strings.Contains(resp.Body.String(), "stale-assistant") {
+		t.Fatalf("response injected stale evidence: %s", resp.Body.String())
+	}
+}
+
 func TestOpenAIResponsesCompactSkipsOrphanToolOutputEvidence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{

@@ -127,7 +127,7 @@ func compactSameTurnEvidenceJSON(rawJSON []byte) (compactSameTurnEvidence, error
 	items := make([]string, 0, len(tail))
 	for _, item := range tail {
 		itemType := strings.TrimSpace(item.Get("type").String())
-		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
+		if isResponsesMessageRole(item, "assistant") {
 			items = append(items, item.Raw)
 			continue
 		}
@@ -181,7 +181,12 @@ func isCompactTailMarker(item gjson.Result) bool {
 	if itemType == "compaction" || itemType == "compaction_summary" {
 		return true
 	}
-	return (itemType == "" || itemType == "message") && strings.TrimSpace(item.Get("role").String()) == "user"
+	return isResponsesMessageRole(item, "user")
+}
+
+func isResponsesMessageRole(item gjson.Result, role string) bool {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	return (itemType == "" || itemType == "message") && strings.TrimSpace(item.Get("role").String()) == role
 }
 
 func compactResponseOutputJSON(root gjson.Result) ([]byte, string) {
@@ -229,7 +234,7 @@ func compactEvidenceCountsAndHasEvidence(input gjson.Result) (compactEvidenceCou
 	hasEvidence := false
 	for _, item := range array {
 		itemType := strings.TrimSpace(item.Get("type").String())
-		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
+		if isResponsesMessageRole(item, "assistant") {
 			counts.assistantMessageCount++
 			hasEvidence = true
 		}
