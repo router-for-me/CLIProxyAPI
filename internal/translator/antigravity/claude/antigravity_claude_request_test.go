@@ -133,6 +133,53 @@ func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testin
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"system": [{"type": "text", "text": "Top-level rules"}],
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+			{"role": "system", "content": "String mid-conversation rule"},
+			{"role": "system", "content": [{"type": "text", "text": "Array mid-conversation rule"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3-flash-agent", inputJSON, false)
+	outputStr := string(output)
+
+	if systemContent := gjson.Get(outputStr, `request.contents.#(role=="system")`); systemContent.Exists() {
+		t.Fatalf("system role should not be emitted in request.contents: %s", systemContent.Raw)
+	}
+
+	contents := gjson.Get(outputStr, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("Expected the user and message-level system turns in request.contents, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected first content role user, got %q", got)
+	}
+	if got := contents[1].Get("role").String(); got != "user" {
+		t.Fatalf("Expected message-level system content to be downgraded to user role, got %q", got)
+	}
+	if got := contents[1].Get("parts.0.text").String(); got != "String mid-conversation rule" {
+		t.Fatalf("Unexpected string message-level system content text: %q", got)
+	}
+	if got := contents[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected array message-level system content to be downgraded to user role, got %q", got)
+	}
+	if got := contents[2].Get("parts.0.text").String(); got != "Array mid-conversation rule" {
+		t.Fatalf("Unexpected array message-level system content text: %q", got)
+	}
+
+	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "Top-level rules" {
+		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
 func testNonAnthropicRawSignature(t *testing.T) string {
 	t.Helper()
 
