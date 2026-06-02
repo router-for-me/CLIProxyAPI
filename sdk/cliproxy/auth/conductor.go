@@ -3368,12 +3368,38 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	return isHomeRequestRetryExceededError(errPick)
 }
 
+func homeAuthAlreadyTried(tried map[string]struct{}, authID string) bool {
+	authID = strings.TrimSpace(authID)
+	if authID == "" || len(tried) == 0 {
+		return false
+	}
+	_, ok := tried[authID]
+	return ok
+}
+
+func repeatedHomeAuthError() *Error {
+	return &Error{
+		Code:       homeRequestRetryExceededErrorCode,
+		Message:    "home returned a previously tried auth",
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
 type homeAuthDispatchResponse struct {
 	Model      string `json:"model"`
 	Provider   string `json:"provider"`
 	AuthIndex  string `json:"auth_index"`
 	UserAPIKey string `json:"user_api_key"`
 	Auth       Auth   `json:"auth"`
+}
+
+type homeAuthDispatcher interface {
+	HeartbeatOK() bool
+	RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error)
+}
+
+var currentHomeDispatcher = func() homeAuthDispatcher {
+	return home.Current()
 }
 
 func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
@@ -3575,7 +3601,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 		}
 	}
 
-	client := home.Current()
+	client := currentHomeDispatcher()
 	if client == nil || !client.HeartbeatOK() {
 		return nil, nil, "", &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -3629,6 +3655,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 	if strings.TrimSpace(auth.ID) == "" {
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
+	}
+	if homeAuthAlreadyTried(tried, auth.ID) {
+		return nil, nil, "", repeatedHomeAuthError()
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if providerKey == "" {
