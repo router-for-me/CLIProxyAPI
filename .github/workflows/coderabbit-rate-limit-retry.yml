@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Re-request CodeRabbit when backlog is high and check is stale
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7with:
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;

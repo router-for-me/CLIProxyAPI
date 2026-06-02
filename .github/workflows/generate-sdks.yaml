@@ -11,8 +11,10 @@ jobs:
   generate-python-sdk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5with:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
           python-version: '3.14'
       
       - name: Install OpenAPI Generator
@@ -29,7 +31,8 @@ jobs:
             --additional-properties=pythonVersion==3.12,generateSourceCodeOnly=true
       
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6with:
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
+        with:
           commit-message: 'chore: generate Python SDK'
           title: 'chore: generate Python SDK'
           body: |
@@ -40,8 +43,10 @@ jobs:
   generate-typescript-sdk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4with:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
           node-version: '20'
       
       - name: Install OpenAPI Generator
@@ -57,7 +62,8 @@ jobs:
             --additional-properties=typescriptVersion=5.0,npmName=@cliproxy/api
       
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6with:
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
+        with:
           commit-message: 'chore: generate TypeScript SDK'
           title: 'chore: generate TypeScript SDK'
           body: |
