@@ -2178,5 +2178,31 @@
         ]
       }
     }
+  ],
+  "minimax": [
+    {
+      "id": "MiniMax-M3",
+      "object": "model",
+      "created": 1777420800,
+      "owned_by": "MiniMax",
+      "type": "minimax",
+      "display_name": "MiniMax M3",
+      "name": "MiniMax-M3",
+      "description": "MiniMax M3 - default MiniMax model with 512K context, 128K max output, supports image input.",
+      "context_length": 512000,
+      "max_completion_tokens": 128000
+    },
+    {
+      "id": "MiniMax-M2.7",
+      "object": "model",
+      "created": 1771372800,
+      "owned_by": "MiniMax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7",
+      "name": "MiniMax-M2.7",
+      "description": "MiniMax M2.7 - prior generation MiniMax model with 1M context, 40960 max output.",
+      "context_length": 1048576,
+      "max_completion_tokens": 40960
+    }
   ]
 }
