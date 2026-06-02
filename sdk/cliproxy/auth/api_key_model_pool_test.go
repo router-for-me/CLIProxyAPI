@@ -237,6 +237,7 @@ func TestManagerExecute_ClaudeSonnetMiniMaxMultimodalRoutesToM3(t *testing.T) {
 	m := newClaudeAPIKeyPoolTestManager(t, alias, []internalconfig.ClaudeModel{
 		{Name: "MiniMax-M2.7-highspeed", Alias: alias},
 		{Name: "MiniMax-M3-highspeed", Alias: alias},
+		{Name: "MiniMax-M3", Alias: alias},
 	}, executor)
 
 	resp, err := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
@@ -244,6 +245,33 @@ func TestManagerExecute_ClaudeSonnetMiniMaxMultimodalRoutesToM3(t *testing.T) {
 		Payload: []byte(`{"messages":[{"role":"user","content":[
 			{"type":"text","text":"describe this"},
 			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+		]}],"max_tokens":1024}`),
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != "MiniMax-M3" {
+		t.Fatalf("payload = %q, want MiniMax-M3", string(resp.Payload))
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 1 || got[0] != "MiniMax-M3" {
+		t.Fatalf("execute models = %v, want only MiniMax-M3", got)
+	}
+}
+
+func TestManagerExecute_ClaudeSonnetMiniMaxVideoCanUseM3Highspeed(t *testing.T) {
+	alias := "claude-sonnet-4-6"
+	executor := &apiKeyPoolExecutor{id: "claude"}
+	m := newClaudeAPIKeyPoolTestManager(t, alias, []internalconfig.ClaudeModel{
+		{Name: "MiniMax-M2.7-highspeed", Alias: alias},
+		{Name: "MiniMax-M3-highspeed", Alias: alias},
+	}, executor)
+
+	resp, err := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model: alias,
+		Payload: []byte(`{"messages":[{"role":"user","content":[
+			{"type":"text","text":"describe this"},
+			{"type":"video","source":{"type":"url","url":"https://example.com/a.mp4"}}
 		]}],"max_tokens":1024}`),
 	}, cliproxyexecutor.Options{})
 	if err != nil {

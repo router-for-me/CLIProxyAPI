@@ -29,10 +29,15 @@ func filterMiniMaxM3RequiredExecutionModels(routeModel string, req cliproxyexecu
 		return candidates
 	}
 
+	imageOnlyOnStandardM3 := miniMaxRequestHasImageInput(req, opts)
 	filtered := make([]string, 0, len(candidates))
 	removed := false
 	for _, candidate := range candidates {
 		if isMiniMaxModel(candidate) && !isMiniMaxM3SeriesModel(candidate) {
+			removed = true
+			continue
+		}
+		if imageOnlyOnStandardM3 && isMiniMaxM3HighspeedModel(candidate) {
 			removed = true
 			continue
 		}
@@ -89,7 +94,19 @@ func miniMaxRoutingPayload(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 	return req.Payload
 }
 
+func miniMaxRequestHasImageInput(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	return requestHasMiniMaxM3ImageInput(miniMaxRoutingPayload(req, opts))
+}
+
+func requestHasMiniMaxM3ImageInput(payload []byte) bool {
+	return requestHasMiniMaxM3PartType(payload, isMiniMaxM3ImagePartType)
+}
+
 func requestHasMiniMaxM3MultimodalInput(payload []byte) bool {
+	return requestHasMiniMaxM3PartType(payload, isMiniMaxM3MultimodalPartType)
+}
+
+func requestHasMiniMaxM3PartType(payload []byte, match func(string) bool) bool {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return false
 	}
@@ -100,7 +117,7 @@ func requestHasMiniMaxM3MultimodalInput(payload []byte) bool {
 			return false
 		}
 		if node.Type == gjson.JSON {
-			if partType := strings.ToLower(strings.TrimSpace(node.Get("type").String())); isMiniMaxM3MultimodalPartType(partType) {
+			if partType := strings.ToLower(strings.TrimSpace(node.Get("type").String())); match(partType) {
 				found = true
 				return false
 			}
@@ -112,6 +129,15 @@ func requestHasMiniMaxM3MultimodalInput(payload []byte) bool {
 	}
 	walk(gjson.ParseBytes(payload))
 	return found
+}
+
+func isMiniMaxM3ImagePartType(partType string) bool {
+	switch partType {
+	case "image", "image_url", "input_image":
+		return true
+	default:
+		return false
+	}
 }
 
 func isMiniMaxM3MultimodalPartType(partType string) bool {
@@ -202,4 +228,9 @@ func isMiniMaxModel(model string) bool {
 func isMiniMaxM3SeriesModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
 	return model == "minimax-m3" || strings.HasPrefix(model, "minimax-m3-")
+}
+
+func isMiniMaxM3HighspeedModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	return isMiniMaxM3SeriesModel(model) && strings.Contains(model, "highspeed")
 }
