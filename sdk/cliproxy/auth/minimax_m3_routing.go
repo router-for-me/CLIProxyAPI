@@ -13,6 +13,7 @@ import (
 const (
 	miniMaxM2SafeTotalTokens     int64 = 180000
 	miniMaxM3RequiredMetadataKey       = "__cliproxy_minimax_m3_required"
+	miniMaxM3StandardModel             = "MiniMax-M3"
 )
 
 var (
@@ -22,6 +23,8 @@ var (
 )
 
 func filterMiniMaxM3RequiredExecutionModels(routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []string) []string {
+	candidates = rewriteMiniMaxM3HighspeedRouteToStandard(routeModel, opts, candidates)
+	candidates = filterClaudeSonnetMiniMaxM3Highspeed(routeModel, opts, candidates)
 	if len(candidates) == 0 || !miniMaxCandidateSetCanRouteToM3(routeModel, opts, candidates) {
 		return candidates
 	}
@@ -29,7 +32,6 @@ func filterMiniMaxM3RequiredExecutionModels(routeModel string, req cliproxyexecu
 		return candidates
 	}
 
-	imageOnlyOnStandardM3 := miniMaxRequestHasImageInput(req, opts)
 	filtered := make([]string, 0, len(candidates))
 	removed := false
 	for _, candidate := range candidates {
@@ -37,7 +39,65 @@ func filterMiniMaxM3RequiredExecutionModels(routeModel string, req cliproxyexecu
 			removed = true
 			continue
 		}
-		if imageOnlyOnStandardM3 && isMiniMaxM3HighspeedModel(candidate) {
+		if isMiniMaxM3HighspeedModel(candidate) {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	if !removed {
+		return candidates
+	}
+	return filtered
+}
+
+func rewriteMiniMaxM3HighspeedRouteToStandard(routeModel string, opts cliproxyexecutor.Options, candidates []string) []string {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	if !isMiniMaxM3HighspeedModel(routeModel) &&
+		!isMiniMaxM3HighspeedModel(requestedModelAliasFromOptions(opts, routeModel)) {
+		return candidates
+	}
+
+	out := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	changed := false
+	for _, candidate := range candidates {
+		resolved := candidate
+		if isMiniMaxM3HighspeedModel(candidate) {
+			resolved = preserveResolvedModelSuffix(miniMaxM3StandardModel, thinking.ParseSuffix(candidate))
+			changed = true
+		}
+		key := strings.ToLower(strings.TrimSpace(resolved))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, resolved)
+	}
+	if !changed {
+		return candidates
+	}
+	return out
+}
+
+func filterClaudeSonnetMiniMaxM3Highspeed(routeModel string, opts cliproxyexecutor.Options, candidates []string) []string {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	if !isClaudeSonnet46FallbackModel(routeModel) &&
+		!isClaudeSonnet46FallbackModel(requestedModelAliasFromOptions(opts, routeModel)) {
+		return candidates
+	}
+
+	filtered := make([]string, 0, len(candidates))
+	removed := false
+	for _, candidate := range candidates {
+		if isMiniMaxM3HighspeedModel(candidate) {
 			removed = true
 			continue
 		}
