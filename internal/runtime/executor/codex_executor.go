@@ -465,7 +465,17 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 
 	hasInputReasoning := codexInputHasValidReasoningEncryptedContent(body)
 	existingCalls := make(map[string]bool)
+	existingOutputs := make(map[string]bool)
 	for _, inputItem := range input.Array() {
+		itemType := strings.TrimSpace(inputItem.Get("type").String())
+		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+			callID := strings.TrimSpace(inputItem.Get("call_id").String())
+			if callID != "" {
+				for _, candidate := range codexReplayComparableCallIDs(callID) {
+					existingOutputs[candidate] = true
+				}
+			}
+		}
 		for _, key := range codexReplayToolCallKeys(inputItem) {
 			existingCalls[key] = true
 		}
@@ -482,6 +492,20 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 		case "function_call", "custom_tool_call":
 			keys := codexReplayToolCallKeys(itemResult)
 			if len(keys) == 0 || codexReplayAnyToolCallKeyExists(existingCalls, keys) {
+				continue
+			}
+			// Only inject if there is a matching output in the request
+			hasMatchingOutput := false
+			callID := strings.TrimSpace(itemResult.Get("call_id").String())
+			if callID != "" {
+				for _, candidate := range codexReplayComparableCallIDs(callID) {
+					if existingOutputs[candidate] {
+						hasMatchingOutput = true
+						break
+					}
+				}
+			}
+			if !hasMatchingOutput {
 				continue
 			}
 			for _, key := range keys {
