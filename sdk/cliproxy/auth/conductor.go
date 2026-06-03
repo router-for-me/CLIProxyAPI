@@ -2351,6 +2351,30 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
+					} else if isCloudflareChallengeResultError(result.Error) {
+						var next time.Time
+						backoffLevel := state.Quota.BackoffLevel
+						if !disableCooling {
+							cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
+							if cooldown < 10*time.Second {
+								cooldown = 10 * time.Second
+							}
+							if cooldown > 0 {
+								next = now.Add(cooldown)
+							}
+							backoffLevel = nextLevel
+						}
+						state.NextRetryAfter = next
+						state.StatusMessage = "cloudflare challenge"
+						if auth.LastError != nil {
+							auth.StatusMessage = "cloudflare challenge"
+						}
+						state.Quota = QuotaState{
+							Exceeded:      true,
+							Reason:        "cloudflare challenge",
+							NextRecoverAt: next,
+							BackoffLevel:  backoffLevel,
+						}
 					} else {
 						switch statusCode {
 						case 401:
@@ -2750,6 +2774,27 @@ func isModelSupportResultError(err *Error) bool {
 	return isModelSupportErrorMessage(err.Message)
 }
 
+func isCloudflareChallengeErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "cf-mitigated") ||
+		strings.Contains(lower, "challenge") ||
+		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html"))
+}
+
+func isCloudflareChallengeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isCloudflareChallengeErrorMessage(err.Error())
+}
+
+func isCloudflareChallengeResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return isCloudflareChallengeErrorMessage(err.Message)
+}
 func isRequestScopedNotFoundMessage(message string) bool {
 	if message == "" {
 		return false
@@ -2775,6 +2820,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // routing can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isCloudflareChallengeError(err) {
 		return false
 	}
 	if isModelSupportError(err) {
@@ -2818,6 +2866,29 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	if isCloudflareChallengeResultError(resultErr) {
+		auth.StatusMessage = "cloudflare challenge"
+		var next time.Time
+		backoffLevel := auth.Quota.BackoffLevel
+		if !disableCooling {
+			cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
+			if cooldown < 10*time.Second {
+				cooldown = 10 * time.Second
+			}
+			if cooldown > 0 {
+				next = now.Add(cooldown)
+			}
+			backoffLevel = nextLevel
+		}
+		auth.Quota = QuotaState{
+			Exceeded:      true,
+			Reason:        "cloudflare challenge",
+			NextRecoverAt: next,
+			BackoffLevel:  backoffLevel,
+		}
+		auth.NextRetryAfter = next
+		return
+	}
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
