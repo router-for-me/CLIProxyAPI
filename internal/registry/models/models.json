@@ -2200,7 +2200,7 @@
       "type": "minimax",
       "display_name": "MiniMax M2.7",
       "name": "MiniMax-M2.7",
-      "description": "MiniMax M2.7 - prior generation MiniMax model with 1M context, 40960 max output.",
+      "description": "MiniMax M2.7 - prior generation MiniMax model with 192K context, 40960 max output.",
       "context_length": 1048576,
       "max_completion_tokens": 40960
     }
