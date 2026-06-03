@@ -2998,6 +2998,10 @@ func isCodexAuth(auth *Auth) bool {
 	return auth != nil && isCodexProviderName(auth.Provider)
 }
 
+func isCodexAPIKeyAuth(auth *Auth) bool {
+	return isCodexAuth(auth) && isAPIKeyAuth(auth)
+}
+
 func (m *Manager) retrySettings() (int, int, time.Duration) {
 	if m == nil {
 		return 0, 0, 0
@@ -3310,7 +3314,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
-		codexBypassCooling := isCodexAuth(auth)
+		codexAPIKeyHealthOnly := isCodexAPIKeyAuth(auth)
+		codexBypassCooling := isCodexAuth(auth) && !codexAPIKeyHealthOnly
 		auth.recordRecentRequest(now, result.Success)
 		if result.Success {
 			auth.Success++
@@ -3381,6 +3386,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				} else {
 					clearAuthStateOnSuccess(auth, now)
 				}
+			} else if codexAPIKeyHealthOnly {
+				applyCodexAPIKeyFailureState(auth, result, now)
 			} else if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) &&
 					!isRequestScopedFeatureUnsupportedResultError(result.Error) &&
@@ -3541,9 +3548,106 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.hook.OnResult(ctx, result)
 }
 
+func applyCodexAPIKeyFailureState(auth *Auth, result Result, now time.Time) {
+	if auth == nil {
+		return
+	}
+	if isCodexAPIKeyRequestScopedResultError(result.Error) {
+		return
+	}
+	statusCode := statusCodeFromResult(result.Error)
+	shouldLowerHealth := shouldCountCodexAPIKeyHealthFailure(result)
+	var resultErr *Error
+	if result.Error != nil {
+		resultErr = cloneError(result.Error)
+	}
+	if result.Model != "" {
+		state := ensureModelState(auth, result.Model)
+		if state == nil {
+			return
+		}
+		state.Unavailable = false
+		state.NextRetryAfter = time.Time{}
+		state.Quota = QuotaState{}
+		state.Status = StatusError
+		state.UpdatedAt = now
+		if resultErr != nil {
+			state.LastError = cloneError(resultErr)
+			state.StatusMessage = resultErr.Message
+			auth.LastError = cloneError(resultErr)
+			auth.StatusMessage = resultErr.Message
+		}
+		if shouldLowerHealth {
+			applyCodexAPIKeyHealthFailure(&state.Health, now, statusCode)
+		}
+		updateAggregatedAvailability(auth, now)
+	} else {
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		auth.Quota = QuotaState{}
+		if shouldLowerHealth {
+			applyCodexAPIKeyHealthFailure(&auth.Health, now, statusCode)
+		}
+	}
+	if auth.Status != StatusDisabled {
+		auth.Status = StatusError
+	}
+	if resultErr != nil {
+		auth.LastError = cloneError(resultErr)
+		auth.StatusMessage = resultErr.Message
+	}
+	auth.UpdatedAt = now
+}
+
+func shouldCountCodexAPIKeyHealthFailure(result Result) bool {
+	if result.Success || result.Error == nil {
+		return false
+	}
+	if isCodexAPIKeyRequestScopedResultError(result.Error) {
+		return false
+	}
+	statusCode := statusCodeFromResult(result.Error)
+	if statusCode == 0 {
+		return true
+	}
+	if isTransientNetworkResultError(result.Error) ||
+		isModelSupportResultError(result.Error) ||
+		isAccountQuotaExhaustedResultError(result.Error) {
+		return true
+	}
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden,
+		http.StatusNotFound, http.StatusTooManyRequests:
+		return true
+	default:
+		return isTransientUpstreamStatus(statusCode) ||
+			isRetryableAvailabilityErrorMessage(result.Error.Code+" "+result.Error.Message)
+	}
+}
+
+func isCodexAPIKeyRequestScopedResultError(err *Error) bool {
+	return isRequestScopedNotFoundResultError(err) ||
+		isRequestScopedFeatureUnsupportedResultError(err) ||
+		isRequestScopedContentSafetyResultError(err) ||
+		isRequestScopedContextLimitResultError(err)
+}
+
+func applyCodexAPIKeyHealthFailure(health *HealthState, now time.Time, statusCode int) {
+	if health == nil {
+		return
+	}
+	applyHealthFailure(health, now, statusCode)
+	health.BreakerState = HealthBreakerClosed
+	health.OpenUntil = time.Time{}
+	health.HalfOpenSuccesses = 0
+}
+
 func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, now time.Time) []*Auth {
 	if m == nil || auth == nil || quotaCooldownDisabledForAuth(auth) {
 		return nil
+	}
+	if isCodexAPIKeyAuth(auth) {
+		return m.applyCodexAPIKeyChannelHealthResultLocked(auth, result, now)
 	}
 	key := channelBreakerKey(auth, result.Model)
 	if key == "" {
@@ -3678,6 +3782,108 @@ func shouldCountChannelBreakerFailure(result Result) bool {
 		return false
 	}
 	return isRetryableAvailabilityErrorMessage(result.Error.Code + " " + result.Error.Message)
+}
+
+func (m *Manager) applyCodexAPIKeyChannelHealthResultLocked(auth *Auth, result Result, now time.Time) []*Auth {
+	key := codexAPIKeyChannelKey(auth, result.Model)
+	if key == "" {
+		return nil
+	}
+	m.pruneChannelBreakersLocked(now)
+	if result.Success {
+		m.recordChannelBreakerSuccessLocked(key, now)
+		return nil
+	}
+	if !shouldCountCodexAPIKeyHealthFailure(result) {
+		return nil
+	}
+
+	statusCode := statusCodeFromResult(result.Error)
+	health := m.channelBreakers[key]
+	applyCodexAPIKeyHealthFailure(&health, now, statusCode)
+	if health.BreakerState == HealthBreakerClosed && health.ConsecutiveFailures == 0 {
+		delete(m.channelBreakers, key)
+		return nil
+	}
+	if m.channelBreakers == nil {
+		m.channelBreakers = make(map[string]HealthState)
+	}
+	m.channelBreakers[key] = health
+	if health.ConsecutiveFailures < channelBreakerOpenFailures {
+		return nil
+	}
+	return m.applyCodexAPIKeyChannelHealthPenaltyLocked(auth, result, health, now)
+}
+
+func (m *Manager) applyCodexAPIKeyChannelHealthPenaltyLocked(auth *Auth, result Result, health HealthState, now time.Time) []*Auth {
+	baseKey := codexAPIKeyChannelBaseKey(auth)
+	if m == nil || baseKey == "" || result.Model == "" {
+		return nil
+	}
+	snapshots := make([]*Auth, 0)
+	for _, peer := range m.auths {
+		if peer == nil || peer.Disabled || peer.Status == StatusDisabled {
+			continue
+		}
+		if codexAPIKeyChannelBaseKey(peer) != baseKey {
+			continue
+		}
+		state := ensureModelState(peer, result.Model)
+		if state == nil || state.Status == StatusDisabled {
+			continue
+		}
+		if !shouldApplyCodexAPIKeyChannelHealth(state.Health, health, now) {
+			continue
+		}
+		state.Health = health
+		state.UpdatedAt = now
+		snapshots = append(snapshots, peer.Clone())
+	}
+	return snapshots
+}
+
+func shouldApplyCodexAPIKeyChannelHealth(current, candidate HealthState, now time.Time) bool {
+	if !healthStateKnown(candidate) {
+		return false
+	}
+	if !healthStateKnown(current) {
+		return true
+	}
+	currentScore := recoveredHealthScore(current, now)
+	candidateScore := recoveredHealthScore(candidate, now)
+	if candidateScore < currentScore {
+		return true
+	}
+	return candidateScore == currentScore && candidate.ConsecutiveFailures > current.ConsecutiveFailures
+}
+
+func codexAPIKeyChannelBaseKey(auth *Auth) string {
+	if !isCodexAPIKeyAuth(auth) || auth.Attributes == nil {
+		return ""
+	}
+	baseURL := normalizeChannelBreakerURL(auth.Attributes["base_url"])
+	proxyURL := normalizeChannelBreakerURL(auth.ProxyURL)
+	prefix := strings.ToLower(strings.TrimSpace(auth.Prefix))
+	routingGroup := normalizeRoutingGroupKey(auth.Attributes["routing_group"])
+	return strings.Join([]string{
+		"codex-api-key",
+		baseURL,
+		proxyURL,
+		prefix,
+		routingGroup,
+	}, "\x00")
+}
+
+func codexAPIKeyChannelKey(auth *Auth, model string) string {
+	baseKey := codexAPIKeyChannelBaseKey(auth)
+	modelKey := canonicalModelKey(model)
+	if modelKey == "" {
+		modelKey = strings.ToLower(strings.TrimSpace(model))
+	}
+	if baseKey == "" || modelKey == "" {
+		return ""
+	}
+	return baseKey + "\x00model=" + modelKey
 }
 
 func channelBreakerBaseKey(auth *Auth) string {

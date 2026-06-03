@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -450,6 +451,138 @@ func TestManagerMarkResult_CodexFailureDoesNotCooldown(t *testing.T) {
 	}
 	if state.Health.BreakerState != "" || state.Health.Observed {
 		t.Fatalf("codex model health = %+v, want clear", state.Health)
+	}
+}
+
+func TestManagerMarkResult_CodexAPIKeyFailureLowersHealthWithoutCooling(t *testing.T) {
+	t.Parallel()
+
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.auths["codex-key"] = &Auth{
+		ID:       "codex-key",
+		Provider: "codex",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": "https://gpt-upstream.example/v1",
+			"priority": "10",
+		},
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "codex-key",
+		Provider: "codex",
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusServiceUnavailable,
+			Code:       "upstream_timeout",
+			Message:    "upstream timeout",
+			Retryable:  true,
+		},
+	})
+
+	updated := manager.auths["codex-key"]
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() || updated.Quota.Exceeded {
+		t.Fatalf("codex api-key auth cooling = unavailable:%v next:%v quota:%+v, want no hard cooling", updated.Unavailable, updated.NextRetryAfter, updated.Quota)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("codex api-key model state missing")
+	}
+	if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded {
+		t.Fatalf("codex api-key model cooling = unavailable:%v next:%v quota:%+v, want no hard cooling", state.Unavailable, state.NextRetryAfter, state.Quota)
+	}
+	if !state.Health.Observed || state.Health.Score >= healthScoreDefault {
+		t.Fatalf("codex api-key model health = %+v, want lowered observed score", state.Health)
+	}
+	if state.Health.BreakerState != HealthBreakerClosed || !state.Health.OpenUntil.IsZero() {
+		t.Fatalf("codex api-key model health breaker = %+v, want soft health only", state.Health)
+	}
+}
+
+func TestManagerMarkResult_CodexAPIKeyBaseURLFailuresLowerPeerHealth(t *testing.T) {
+	t.Parallel()
+
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.auths["codex-a"] = codexAPIKeyHealthTestAuth("codex-a", "https://gpt-upstream.example/v1")
+	manager.auths["codex-b"] = codexAPIKeyHealthTestAuth("codex-b", "https://gpt-upstream.example/v1")
+	manager.auths["codex-c"] = codexAPIKeyHealthTestAuth("codex-c", "https://backup.example/v1")
+
+	for i := 0; i < channelBreakerOpenFailures; i++ {
+		manager.MarkResult(context.Background(), Result{
+			AuthID:   "codex-a",
+			Provider: "codex",
+			Model:    model,
+			Success:  false,
+			Error: &Error{
+				HTTPStatus: http.StatusServiceUnavailable,
+				Code:       "upstream_timeout",
+				Message:    "upstream timeout",
+				Retryable:  true,
+			},
+		})
+	}
+
+	sameBase := manager.auths["codex-b"]
+	state := sameBase.ModelStates[model]
+	if state == nil || !state.Health.Observed {
+		t.Fatalf("same-base peer health = %+v, want propagated health penalty", state)
+	}
+	if state.Unavailable || !state.NextRetryAfter.IsZero() {
+		t.Fatalf("same-base peer cooling = unavailable:%v next:%v, want no hard cooling", state.Unavailable, state.NextRetryAfter)
+	}
+	otherBase := manager.auths["codex-c"]
+	if state := otherBase.ModelStates[model]; state != nil && state.Health.Observed {
+		t.Fatalf("other-base peer health = %+v, want no propagated penalty", state.Health)
+	}
+	now := time.Now()
+	if spreadSelectionWeight(sameBase, model, now) >= spreadSelectionWeight(otherBase, model, now) {
+		t.Fatalf("same-base weight = %d, other-base weight = %d, want same-base lowered",
+			spreadSelectionWeight(sameBase, model, now), spreadSelectionWeight(otherBase, model, now))
+	}
+}
+
+func TestManagerMarkResult_CodexAPIKeyContentSafetyDoesNotLowerPeerHealth(t *testing.T) {
+	t.Parallel()
+
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.auths["codex-a"] = codexAPIKeyHealthTestAuth("codex-a", "https://gpt-upstream.example/v1")
+	manager.auths["codex-b"] = codexAPIKeyHealthTestAuth("codex-b", "https://gpt-upstream.example/v1")
+
+	for i := 0; i < channelBreakerOpenFailures; i++ {
+		manager.MarkResult(context.Background(), Result{
+			AuthID:   "codex-a",
+			Provider: "codex",
+			Model:    model,
+			Success:  false,
+			Error: &Error{
+				HTTPStatus: http.StatusUnavailableForLegalReasons,
+				Code:       "content_blocked",
+				Message:    "The content you provided or machine outputted is blocked.",
+			},
+		})
+	}
+
+	peer := manager.auths["codex-b"]
+	if state := peer.ModelStates[model]; state != nil && state.Health.Observed {
+		t.Fatalf("same-base peer health = %+v, want content safety to avoid channel penalty", state.Health)
+	}
+}
+
+func codexAPIKeyHealthTestAuth(id, baseURL string) *Auth {
+	return &Auth{
+		ID:       id,
+		Provider: "codex",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":  id + "-key",
+			"base_url": baseURL,
+			"priority": "10",
+		},
 	}
 }
 
