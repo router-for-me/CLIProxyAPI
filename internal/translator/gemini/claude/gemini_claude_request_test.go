@@ -107,6 +107,52 @@ func TestConvertClaudeRequestToGemini_StripsClaudeCodeAttribution(t *testing.T) 
 	}
 }
 
+func TestConvertClaudeRequestToGemini_ConvertsMessageSystemRoleToUserContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"system": [{"type": "text", "text": "Top-level rules"}],
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+			{"role": "system", "content": "String mid-conversation rule"},
+			{"role": "system", "content": [{"type": "text", "text": "Array mid-conversation rule"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	if systemContent := gjson.GetBytes(output, `contents.#(role=="system")`); systemContent.Exists() {
+		t.Fatalf("system role should not be emitted in contents: %s", systemContent.Raw)
+	}
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("Expected the user and message-level system turns in contents, got %d: %s", len(contents), gjson.GetBytes(output, "contents").Raw)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected first content role user, got %q", got)
+	}
+	if got := contents[1].Get("role").String(); got != "user" {
+		t.Fatalf("Expected message-level string system content to be downgraded to user role, got %q", got)
+	}
+	if got := contents[1].Get("parts.0.text").String(); got != "String mid-conversation rule" {
+		t.Fatalf("Unexpected string message-level system content text: %q", got)
+	}
+	if got := contents[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected message-level array system content to be downgraded to user role, got %q", got)
+	}
+	if got := contents[2].Get("parts.0.text").String(); got != "Array mid-conversation rule" {
+		t.Fatalf("Unexpected array message-level system content text: %q", got)
+	}
+
+	parts := gjson.GetBytes(output, "system_instruction.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.GetBytes(output, "system_instruction.parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "Top-level rules" {
+		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_SkipsEmptyTextParts(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet",

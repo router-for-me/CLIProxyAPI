@@ -308,6 +308,8 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			role := originalRole
 			if role == "assistant" {
 				role = "model"
+			} else if role == "system" {
+				role = "user"
 			}
 			clientContentJSON := []byte(`{"role":"","parts":[]}`)
 			clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "role", role)

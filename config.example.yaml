@@ -126,6 +126,14 @@ routing:
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
 
+# Codex provider behavior.
+codex:
+  # When true, and routing.strategy is fill-first or routing.session-affinity is true,
+  # remap Codex prompt_cache_key and installation identity per selected auth.
+  # Some superstitious users believe request tracking identifiers can be used
+  # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
+  identity-confuse: false
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 
