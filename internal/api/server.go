@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules/amp"
+	opencodemodule "github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules/opencode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
@@ -176,6 +177,9 @@ type Server struct {
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
+	// opencodeModule is the OpenCode routing module for model mapping hot-reload
+	opencodeModule *opencodemodule.OpenCodeModule
+
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -306,6 +310,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	if err := modules.RegisterModule(ctx, s.ampModule); err != nil {
 		log.Errorf("Failed to register Amp module: %v", err)
+	}
+
+	// Register OpenCode module using V2 interface with Context
+	s.opencodeModule = opencodemodule.New(opencodemodule.WithAuthMiddleware(AuthMiddleware(accessManager)))
+	if err := modules.RegisterModule(ctx, s.opencodeModule); err != nil {
+		log.Errorf("Failed to register OpenCode module: %v", err)
 	}
 
 	// Apply additional router configurators from options
@@ -1470,6 +1480,15 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			}
 		} else {
 			log.Warnf("amp module is nil, skipping config update")
+		}
+	}
+
+	// Notify OpenCode module only when OpenCode config has changed.
+	opencodeConfigChanged := oldCfg == nil || !reflect.DeepEqual(oldCfg.OpenCode, cfg.OpenCode)
+	if opencodeConfigChanged && s.opencodeModule != nil {
+		log.Debugf("triggering opencode module config update")
+		if err := s.opencodeModule.OnConfigUpdated(cfg); err != nil {
+			log.Errorf("failed to update OpenCode module config: %v", err)
 		}
 	}
 
