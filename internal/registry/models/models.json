@@ -2032,6 +2032,27 @@
           "high"
         ]
       }
+    },
+    {
+      "id": "gemini-3.5-flash-extra-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.5 Flash (Extra Low)",
+      "name": "gemini-3.5-flash-extra-low",
+      "description": "Gemini 3.5 Flash (Extra Low)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
     }
 
   ],
