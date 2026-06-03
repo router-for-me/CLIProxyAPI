@@ -359,6 +359,60 @@ func TestRedisProtocol_SUBSCRIBE_UsageSendsSupportRefresh(t *testing.T) {
 	}
 }
 
+func TestRedisProtocol_SUBSCRIBE_ErrorsReceivesErrorEvents(t *testing.T) {
+	const managementPassword = "test-management-password"
+
+	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	server := newTestServer(t)
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatalf("expected managementRoutesEnabled to be true")
+	}
+
+	addr, stop := startRedisMuxListener(t, server)
+	t.Cleanup(stop)
+
+	conn, errDial := net.DialTimeout("tcp", addr, time.Second)
+	if errDial != nil {
+		t.Fatalf("failed to dial redis listener: %v", errDial)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	reader := bufio.NewReader(conn)
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if errWrite := writeTestRESPCommand(conn, "AUTH", managementPassword); errWrite != nil {
+		t.Fatalf("failed to write AUTH command: %v", errWrite)
+	}
+	if msg, errRead := readTestRESPSimpleString(reader); errRead != nil {
+		t.Fatalf("failed to read AUTH response: %v", errRead)
+	} else if msg != "OK" {
+		t.Fatalf("unexpected AUTH response: %q", msg)
+	}
+
+	if errWrite := writeTestRESPCommand(conn, "SUBSCRIBE", "errors"); errWrite != nil {
+		t.Fatalf("failed to write SUBSCRIBE command: %v", errWrite)
+	}
+	channel, subscriptions, errSubscribe := readTestRESPPubSubSubscribe(reader)
+	if errSubscribe != nil {
+		t.Fatalf("failed to read subscribe response: %v", errSubscribe)
+	}
+	if channel != "errors" || subscriptions != 1 {
+		t.Fatalf("unexpected subscribe response channel=%q subscriptions=%d", channel, subscriptions)
+	}
+
+	redisqueue.EnqueueError([]byte(`{"auth_index":"auth-1","status_code":401}`))
+	channel, payload, errMessage := readTestRESPPubSubMessage(reader)
+	if errMessage != nil {
+		t.Fatalf("failed to read error message: %v", errMessage)
+	}
+	if channel != "errors" || string(payload) != `{"auth_index":"auth-1","status_code":401}` {
+		t.Fatalf("unexpected error message channel=%q payload=%q", channel, string(payload))
+	}
+}
+
 func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	const managementPassword = "test-management-password"
 
@@ -449,5 +503,14 @@ func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	}
 	if len(emptyItems) != 0 {
 		t.Fatalf("expected empty array for empty queue with count, got %#v", emptyItems)
+	}
+
+	if errWrite := writeTestRESPCommand(conn, "RPOP", "errors", "2"); errWrite != nil {
+		t.Fatalf("failed to write RPOP errors count command: %v", errWrite)
+	}
+	if msg, errRead := readTestRESPError(reader); errRead != nil {
+		t.Fatalf("failed to read RPOP errors response: %v", errRead)
+	} else if msg != "ERR unsupported channel 'errors'" {
+		t.Fatalf("unexpected RPOP errors response: %q", msg)
 	}
 }

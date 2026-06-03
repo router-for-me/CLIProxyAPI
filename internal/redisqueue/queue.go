@@ -10,6 +10,7 @@ const (
 	defaultRetentionSeconds int64 = 60
 	maxRetentionSeconds     int64 = 3600
 	usageSubscriberBuffer         = 256
+	errorSubscriberBuffer         = 256
 
 	usageSupportRefreshPayload = `{"support_refresh":true}`
 	usageRefreshPayload        = `{"refresh":true}`
@@ -32,6 +33,7 @@ var (
 	enabled          atomic.Bool
 	retentionSeconds atomic.Int64
 	global           queue
+	errorGlobal      queue
 )
 
 func init() {
@@ -42,6 +44,7 @@ func SetEnabled(value bool) {
 	enabled.Store(value)
 	if !value {
 		global.clear()
+		errorGlobal.clear()
 	}
 }
 
@@ -72,6 +75,16 @@ func Enqueue(payload []byte) {
 	global.enqueue(payload)
 }
 
+func EnqueueError(payload []byte) {
+	if !Enabled() {
+		return
+	}
+	if len(payload) == 0 {
+		return
+	}
+	errorGlobal.publishToSubscribers(payload)
+}
+
 func PopOldest(count int) [][]byte {
 	if !Enabled() {
 		return nil
@@ -83,7 +96,11 @@ func PopOldest(count int) [][]byte {
 }
 
 func SubscribeUsage() (<-chan []byte, func()) {
-	return global.subscribeUsage()
+	return global.subscribe(usageSubscriberBuffer, []byte(usageSupportRefreshPayload))
+}
+
+func SubscribeErrors() (<-chan []byte, func()) {
+	return errorGlobal.subscribe(errorSubscriberBuffer, nil)
 }
 
 func NotifyUsageRefresh() {
@@ -142,9 +159,11 @@ func (q *queue) publishToSubscribers(payload []byte) bool {
 	return true
 }
 
-func (q *queue) subscribeUsage() (<-chan []byte, func()) {
-	subscriber := make(chan []byte, usageSubscriberBuffer)
-	subscriber <- []byte(usageSupportRefreshPayload)
+func (q *queue) subscribe(buffer int, initialPayload []byte) (<-chan []byte, func()) {
+	subscriber := make(chan []byte, buffer)
+	if len(initialPayload) > 0 {
+		subscriber <- append([]byte(nil), initialPayload...)
+	}
 
 	q.mu.Lock()
 	if q.subscribers == nil {
@@ -158,13 +177,13 @@ func (q *queue) subscribeUsage() (<-chan []byte, func()) {
 	var once sync.Once
 	unsubscribe := func() {
 		once.Do(func() {
-			q.unsubscribeUsage(id)
+			q.unsubscribe(id)
 		})
 	}
 	return subscriber, unsubscribe
 }
 
-func (q *queue) unsubscribeUsage(id uint64) {
+func (q *queue) unsubscribe(id uint64) {
 	q.mu.Lock()
 	subscriber, ok := q.subscribers[id]
 	if ok {
