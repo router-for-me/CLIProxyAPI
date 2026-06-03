@@ -196,6 +196,11 @@ const (
 	halfOpenProbeStateLimit          = 4096
 	transientNetworkRetryAttempts    = 3
 	transientNetworkRetryMaxDelay    = 5 * time.Second
+	slowRequestSoftThreshold         = 30 * time.Second
+	slowRequestHardThreshold         = time.Minute
+	slowRequestSoftPenalty           = 10
+	slowRequestHardPenalty           = 25
+	slowRequestMinHealthScore        = 10
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -236,6 +241,8 @@ type Result struct {
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
+	// Duration records the upstream attempt duration for health-weight adjustment.
+	Duration time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
 	// Cause keeps the original executor error for typed infrastructure failures.
@@ -1594,7 +1601,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, releaseSlot func()) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, startedAt time.Time, releaseSlot func()) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -1607,7 +1614,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if chunk.Err != nil && !failed {
 				failed = true
 				rerr := resultErrorFromCause(chunk.Err)
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: chunk.Err})
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Duration: time.Since(startedAt), Error: rerr, Cause: chunk.Err})
 				if shouldEvictUnauthorizedResult(rerr) {
 					if errEvict := m.evictUnauthorizedAuth(ctx, auth, provider, resultModel); errEvict != nil {
 						logEntryWithRequestID(ctx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
@@ -1642,7 +1649,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed {
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true, Duration: time.Since(startedAt)})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -1663,6 +1670,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			m.markSelectorLoadDone(auth.ID, resultModel)
 			return nil, errReserve
 		}
+		startedAt := time.Now()
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
 			releaseSlot()
@@ -1670,7 +1678,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errCtx
 			}
 			rerr := resultErrorFromCause(errStream)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: errStream}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Duration: time.Since(startedAt), Error: rerr, Cause: errStream}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
 			m.recordContentSafetyRequest(ctx, auth, provider, routeModel, execModel, opts, req.Payload, errStream)
@@ -1697,7 +1705,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromCause(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Duration: time.Since(startedAt), Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				m.recordContentSafetyRequest(ctx, auth, provider, routeModel, execModel, opts, req.Payload, bootstrapErr)
@@ -1711,7 +1719,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if shouldEvictUnauthorizedError(bootstrapErr) {
 				rerr := resultErrorFromCause(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Duration: time.Since(startedAt), Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -1720,7 +1728,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if idx < len(execModels)-1 {
 				rerr := resultErrorFromCause(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Duration: time.Since(startedAt), Error: rerr, Cause: bootstrapErr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -1729,7 +1737,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				continue
 			}
 			rerr := resultErrorFromCause(bootstrapErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Cause: bootstrapErr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Duration: time.Since(startedAt), Error: rerr, Cause: bootstrapErr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
 			discardStreamChunks(streamResult.Chunks)
@@ -1739,7 +1747,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 		if closed && len(buffered) == 0 {
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Duration: time.Since(startedAt), Error: emptyErr}
 			m.MarkResult(ctx, result)
 			releaseSlot()
 			if idx < len(execModels)-1 {
@@ -1755,7 +1763,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, releaseSlot), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, startedAt, releaseSlot), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -2278,9 +2286,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				m.markSelectorLoadDone(auth.ID, resultModel)
 				return cliproxyexecutor.Response{}, errReserve
 			}
+			startedAt := time.Now()
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			duration := time.Since(startedAt)
 			releaseSlot()
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Duration: duration}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -2417,9 +2427,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				m.markSelectorLoadDone(auth.ID, resultModel)
 				return cliproxyexecutor.Response{}, errReserve
 			}
+			startedAt := time.Now()
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			duration := time.Since(startedAt)
 			releaseSlot()
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Duration: duration}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -3485,6 +3497,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		now := time.Now()
 		codexAPIKeyHealthOnly := isCodexAPIKeyAuth(auth)
 		codexBypassCooling := isCodexAuth(auth) && !codexAPIKeyHealthOnly
+		slowPenalty := 0
+		if result.Success && m.slowRequestPenaltyEnabledLocked(auth) {
+			slowPenalty = slowRequestHealthPenalty(result.Duration)
+		}
 		auth.recordRecentRequest(now, result.Success)
 		if result.Success {
 			auth.Success++
@@ -3523,6 +3539,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
 				applyHealthSuccess(&state.Health, now)
+				applySlowRequestHealthPenalty(&state.Health, now, slowPenalty)
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -3535,6 +3552,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 				applyHealthSuccess(&auth.Health, now)
+				applySlowRequestHealthPenalty(&auth.Health, now, slowPenalty)
 			}
 		} else {
 			if codexBypassCooling {
@@ -3674,6 +3692,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 		schedulerSnapshots = append(schedulerSnapshots, m.applyChannelBreakerResultLocked(auth, result, now)...)
+		if slowPenalty > 0 {
+			schedulerSnapshots = append(schedulerSnapshots, m.applySlowRequestGroupPenaltyLocked(auth, result, now, slowPenalty)...)
+		}
 
 		if errPersist := m.persist(ctx, auth); errPersist != nil {
 			logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth result state: %v", errPersist)
@@ -4024,6 +4045,93 @@ func shouldApplyCodexAPIKeyChannelHealth(current, candidate HealthState, now tim
 		return true
 	}
 	return candidateScore == currentScore && candidate.ConsecutiveFailures > current.ConsecutiveFailures
+}
+
+func slowRequestHealthPenalty(duration time.Duration) int {
+	if duration >= slowRequestHardThreshold {
+		return slowRequestHardPenalty
+	}
+	if duration >= slowRequestSoftThreshold {
+		return slowRequestSoftPenalty
+	}
+	return 0
+}
+
+func applySlowRequestHealthPenalty(health *HealthState, now time.Time, penalty int) bool {
+	if health == nil || penalty <= 0 {
+		return false
+	}
+	score := recoveredHealthScore(*health, now)
+	score -= penalty
+	if score < slowRequestMinHealthScore {
+		score = slowRequestMinHealthScore
+	}
+	if score > healthScoreDefault {
+		score = healthScoreDefault
+	}
+	health.Observed = true
+	health.Score = score
+	health.LastUpdatedAt = now
+	health.LastStatusCode = http.StatusOK
+	if health.BreakerState == "" {
+		health.BreakerState = HealthBreakerClosed
+	}
+	return true
+}
+
+func (m *Manager) slowRequestPenaltyEnabledLocked(auth *Auth) bool {
+	if m == nil || auth == nil {
+		return false
+	}
+	return selectorUsesSpread(m.selectorForAuths([]*Auth{auth}))
+}
+
+func slowRequestPenaltyBaseKey(auth *Auth) string {
+	if isCodexAPIKeyAuth(auth) {
+		return codexAPIKeyChannelBaseKey(auth)
+	}
+	return channelBreakerBaseKey(auth)
+}
+
+func (m *Manager) applySlowRequestGroupPenaltyLocked(auth *Auth, result Result, now time.Time, penalty int) []*Auth {
+	if m == nil || auth == nil || penalty <= 0 {
+		return nil
+	}
+	baseKey := slowRequestPenaltyBaseKey(auth)
+	if baseKey == "" {
+		return nil
+	}
+	snapshots := make([]*Auth, 0)
+	for _, peer := range m.auths {
+		if peer == nil || peer.ID == auth.ID || peer.Disabled || peer.Status == StatusDisabled {
+			continue
+		}
+		if slowRequestPenaltyBaseKey(peer) != baseKey {
+			continue
+		}
+		if !m.slowRequestPenaltyEnabledLocked(peer) {
+			continue
+		}
+		changed := false
+		if result.Model != "" {
+			state := ensureModelState(peer, result.Model)
+			if state == nil || state.Status == StatusDisabled {
+				continue
+			}
+			changed = applySlowRequestHealthPenalty(&state.Health, now, penalty)
+			if changed {
+				state.UpdatedAt = now
+			}
+		} else {
+			changed = applySlowRequestHealthPenalty(&peer.Health, now, penalty)
+		}
+		if !changed {
+			continue
+		}
+		peer.UpdatedAt = now
+		snapshots = append(snapshots, peer.Clone())
+	}
+	return snapshots
 }
 
 func codexAPIKeyChannelBaseKey(auth *Auth) string {
@@ -7093,6 +7201,12 @@ func (m *Manager) logAuthResultMetric(ctx context.Context, auth *Auth, result Re
 	fields["event"] = "auth_result"
 	fields["success"] = result.Success
 	addRequestAttemptLogFields(ctx, fields)
+	if result.Duration > 0 {
+		fields["duration_ms"] = result.Duration.Milliseconds()
+		if penalty := slowRequestHealthPenalty(result.Duration); result.Success && penalty > 0 {
+			fields["slow_penalty"] = penalty
+		}
+	}
 	status := statusCodeFromResult(result.Error)
 	if result.Success && status == 0 {
 		status = http.StatusOK

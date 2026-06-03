@@ -573,6 +573,115 @@ func TestManagerMarkResult_CodexAPIKeyContentSafetyDoesNotLowerPeerHealth(t *tes
 	}
 }
 
+func TestManagerMarkResult_SlowSuccessLowersSpreadHealthWithoutCooling(t *testing.T) {
+	t.Parallel()
+
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &SpreadSelector{}, nil)
+	manager.auths["codex-key"] = codexAPIKeyHealthTestAuth("codex-key", "https://gpt-upstream.example/v1")
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "codex-key",
+		Provider: "codex",
+		Model:    model,
+		Success:  true,
+		Duration: slowRequestHardThreshold + time.Second,
+	})
+
+	updated := manager.auths["codex-key"]
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() || updated.Quota.Exceeded {
+		t.Fatalf("slow success cooling = unavailable:%v next:%v quota:%+v, want no hard cooling", updated.Unavailable, updated.NextRetryAfter, updated.Quota)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded {
+		t.Fatalf("slow success model cooling = unavailable:%v next:%v quota:%+v, want no hard cooling", state.Unavailable, state.NextRetryAfter, state.Quota)
+	}
+	if !state.Health.Observed {
+		t.Fatal("model health was not observed")
+	}
+	wantScore := healthScoreDefault - slowRequestHardPenalty
+	if state.Health.Score != wantScore {
+		t.Fatalf("health score = %d, want %d", state.Health.Score, wantScore)
+	}
+	if state.Health.ConsecutiveFailures != 0 || state.Health.FailureCount != 0 {
+		t.Fatalf("health failures = consecutive:%d total:%d, want zero", state.Health.ConsecutiveFailures, state.Health.FailureCount)
+	}
+	if state.Health.BreakerState != HealthBreakerClosed || !state.Health.OpenUntil.IsZero() {
+		t.Fatalf("health breaker = %+v, want closed without cooldown", state.Health)
+	}
+}
+
+func TestManagerMarkResult_SlowSuccessLowersSameBaseURLPeerHealth(t *testing.T) {
+	t.Parallel()
+
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &SpreadSelector{}, nil)
+	manager.auths["codex-a"] = codexAPIKeyHealthTestAuth("codex-a", "https://gpt-upstream.example/v1")
+	manager.auths["codex-b"] = codexAPIKeyHealthTestAuth("codex-b", "https://gpt-upstream.example/v1")
+	manager.auths["codex-c"] = codexAPIKeyHealthTestAuth("codex-c", "https://backup.example/v1")
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "codex-a",
+		Provider: "codex",
+		Model:    model,
+		Success:  true,
+		Duration: slowRequestHardThreshold + time.Second,
+	})
+
+	sameBase := manager.auths["codex-b"]
+	state := sameBase.ModelStates[model]
+	if state == nil || !state.Health.Observed {
+		t.Fatalf("same-base peer health = %+v, want propagated slow penalty", state)
+	}
+	wantScore := healthScoreDefault - slowRequestHardPenalty
+	if state.Health.Score != wantScore {
+		t.Fatalf("same-base peer health score = %d, want %d", state.Health.Score, wantScore)
+	}
+	if state.Health.SuccessCount != 0 || state.Health.FailureCount != 0 || state.Health.ConsecutiveFailures != 0 {
+		t.Fatalf("same-base peer counters = %+v, want only score adjustment", state.Health)
+	}
+	if state.Unavailable || !state.NextRetryAfter.IsZero() {
+		t.Fatalf("same-base peer cooling = unavailable:%v next:%v, want no hard cooling", state.Unavailable, state.NextRetryAfter)
+	}
+
+	otherBase := manager.auths["codex-c"]
+	if state := otherBase.ModelStates[model]; state != nil && state.Health.Observed {
+		t.Fatalf("other-base peer health = %+v, want no propagated slow penalty", state.Health)
+	}
+	now := time.Now()
+	if spreadSelectionWeight(sameBase, model, now) >= spreadSelectionWeight(otherBase, model, now) {
+		t.Fatalf("same-base weight = %d, other-base weight = %d, want same-base lowered",
+			spreadSelectionWeight(sameBase, model, now), spreadSelectionWeight(otherBase, model, now))
+	}
+}
+
+func TestManagerMarkResult_SlowSuccessDoesNotLowerRoundRobinHealth(t *testing.T) {
+	t.Parallel()
+
+	const model = "gpt-5.5"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.auths["codex-key"] = codexAPIKeyHealthTestAuth("codex-key", "https://gpt-upstream.example/v1")
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "codex-key",
+		Provider: "codex",
+		Model:    model,
+		Success:  true,
+		Duration: slowRequestHardThreshold + time.Second,
+	})
+
+	state := manager.auths["codex-key"].ModelStates[model]
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.Health.Score != healthScoreDefault {
+		t.Fatalf("round-robin health score = %d, want %d", state.Health.Score, healthScoreDefault)
+	}
+}
+
 func codexAPIKeyHealthTestAuth(id, baseURL string) *Auth {
 	return &Auth{
 		ID:       id,
