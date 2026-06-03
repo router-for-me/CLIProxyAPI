@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
@@ -17,6 +18,8 @@ const (
 	defaultFlushInterval   = 5 * time.Second
 	defaultRetentionDays   = 30
 	defaultCleanupInterval = 4 * time.Hour
+	finalCacheMaxEntries   = 20000
+	finalCacheTTL          = time.Hour
 )
 
 var (
@@ -32,6 +35,14 @@ func (databasePluginAdapter) HandleUsage(ctx context.Context, record coreusage.R
 		return
 	}
 	plugin.HandleUsage(ctx, record)
+}
+
+func (databasePluginAdapter) HandleRequestFinal(ctx context.Context, final coreusage.RequestFinal) {
+	plugin := GetDatabasePlugin()
+	if plugin == nil {
+		return
+	}
+	plugin.HandleRequestFinal(ctx, final)
 }
 
 func init() {
@@ -58,6 +69,14 @@ type DatabasePlugin struct {
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	wg        sync.WaitGroup
+
+	finalMu    sync.Mutex
+	finalCache map[string]requestFinalState
+}
+
+type requestFinalState struct {
+	success bool
+	seenAt  time.Time
 }
 
 // InitDatabasePlugin initializes the global database plugin.
@@ -94,6 +113,7 @@ func InitDatabasePlugin(ctx context.Context, pgDSN, pgSchema, authDir string, re
 		buffer:            make([]UsageRecord, 0, defaultBufferSize),
 		flushCh:           make(chan struct{}, 1),
 		closeCh:           make(chan struct{}),
+		finalCache:        make(map[string]requestFinalState),
 	}
 	plugin.wg.Add(1)
 	go plugin.flushLoop()
@@ -273,12 +293,38 @@ func (p *DatabasePlugin) HandleUsage(ctx context.Context, record coreusage.Recor
 	}
 
 	method, path := ginMethodPath(ctx)
+	attempt := coreusage.RequestAttemptFromContext(ctx)
+	requestID := strings.TrimSpace(record.RequestID)
+	if requestID == "" {
+		requestID = strings.TrimSpace(attempt.RequestID)
+	}
+	if requestID == "" {
+		requestID = internallogging.GetRequestID(ctx)
+	}
+	attemptNo := record.AttemptNo
+	if attemptNo <= 0 {
+		attemptNo = attempt.AttemptNo
+	}
+	retryReason := strings.TrimSpace(record.RetryReason)
+	if retryReason == "" {
+		retryReason = attempt.RetryReason
+	}
+	finalSuccess := finalSuccessUnknown
+	if record.FinalSuccess != nil {
+		finalSuccess = boolToFinalSuccess(*record.FinalSuccess)
+	} else if cached, ok := p.requestFinal(requestID); ok {
+		finalSuccess = boolToFinalSuccess(cached)
+	}
 
 	dbRecord := UsageRecord{
 		APIKey:             record.APIKey,
 		Model:              record.Model,
 		Source:             record.Source,
 		AuthIndex:          record.AuthIndex,
+		RequestID:          requestID,
+		AttemptNo:          attemptNo,
+		RetryReason:        retryReason,
+		FinalSuccess:       finalSuccess,
 		Failed:             record.Failed,
 		RequestedAt:        record.RequestedAt,
 		InputTokens:        record.Detail.InputTokens,
@@ -299,6 +345,103 @@ func (p *DatabasePlugin) HandleUsage(ctx context.Context, record coreusage.Recor
 
 	if shouldFlush {
 		p.triggerFlush()
+	}
+}
+
+// HandleRequestFinal records the final outcome for all attempt rows sharing a request_id.
+func (p *DatabasePlugin) HandleRequestFinal(ctx context.Context, final coreusage.RequestFinal) {
+	if p == nil || p.store == nil {
+		return
+	}
+	requestID := strings.TrimSpace(final.RequestID)
+	if requestID == "" {
+		return
+	}
+	p.rememberRequestFinal(requestID, final.FinalSuccess, final.CompletedAt)
+
+	finalValue := boolToFinalSuccess(final.FinalSuccess)
+	p.bufferMu.Lock()
+	for i := range p.buffer {
+		if p.buffer[i].RequestID == requestID {
+			p.buffer[i].FinalSuccess = finalValue
+		}
+	}
+	p.bufferMu.Unlock()
+
+	p.triggerFlush()
+	go func() {
+		if err := p.store.UpdateRequestFinal(context.Background(), requestID, final.FinalSuccess); err != nil {
+			log.WithError(err).WithField("request_id", requestID).Warn("usage: failed to update request final outcome")
+		}
+	}()
+}
+
+func boolToFinalSuccess(success bool) int {
+	if success {
+		return finalSuccessTrue
+	}
+	return finalSuccessFalse
+}
+
+func finalSuccessValue(success *bool) int {
+	if success == nil {
+		return finalSuccessUnknown
+	}
+	return boolToFinalSuccess(*success)
+}
+
+func (p *DatabasePlugin) requestFinal(requestID string) (bool, bool) {
+	if p == nil {
+		return false, false
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return false, false
+	}
+	p.finalMu.Lock()
+	defer p.finalMu.Unlock()
+	state, ok := p.finalCache[requestID]
+	if !ok {
+		return false, false
+	}
+	if time.Since(state.seenAt) > finalCacheTTL {
+		delete(p.finalCache, requestID)
+		return false, false
+	}
+	return state.success, true
+}
+
+func (p *DatabasePlugin) rememberRequestFinal(requestID string, success bool, seenAt time.Time) {
+	if p == nil {
+		return
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return
+	}
+	if seenAt.IsZero() {
+		seenAt = time.Now()
+	}
+	p.finalMu.Lock()
+	defer p.finalMu.Unlock()
+	if p.finalCache == nil {
+		p.finalCache = make(map[string]requestFinalState)
+	}
+	p.finalCache[requestID] = requestFinalState{success: success, seenAt: seenAt}
+	if len(p.finalCache) <= finalCacheMaxEntries {
+		return
+	}
+	cutoff := time.Now().Add(-finalCacheTTL)
+	for id, state := range p.finalCache {
+		if state.seenAt.Before(cutoff) {
+			delete(p.finalCache, id)
+		}
+	}
+	for len(p.finalCache) > finalCacheMaxEntries/2 {
+		for id := range p.finalCache {
+			delete(p.finalCache, id)
+			break
+		}
 	}
 }
 
@@ -337,6 +480,10 @@ func (p *DatabasePlugin) ImportRecords(snapshot StatisticsSnapshot) (added, skip
 					Model:              model,
 					Source:             detail.Source,
 					AuthIndex:          detail.AuthIndex,
+					RequestID:          detail.RequestID,
+					AttemptNo:          detail.AttemptNo,
+					RetryReason:        detail.RetryReason,
+					FinalSuccess:       finalSuccessValue(detail.FinalSuccess),
 					Failed:             detail.Failed,
 					RequestedAt:        detail.Timestamp,
 					InputTokens:        detail.Tokens.InputTokens,

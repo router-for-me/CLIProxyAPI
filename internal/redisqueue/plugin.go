@@ -48,6 +48,21 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	attempt := coreusage.RequestAttemptFromContext(ctx)
+	if requestID == "" {
+		requestID = strings.TrimSpace(record.RequestID)
+	}
+	if requestID == "" {
+		requestID = strings.TrimSpace(attempt.RequestID)
+	}
+	attemptNo := record.AttemptNo
+	if attemptNo <= 0 {
+		attemptNo = attempt.AttemptNo
+	}
+	retryReason := strings.TrimSpace(record.RetryReason)
+	if retryReason == "" {
+		retryReason = attempt.RetryReason
+	}
 	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
@@ -80,6 +95,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		LatencyMs:          record.Latency.Milliseconds(),
 		Source:             record.Source,
 		AuthIndex:          record.AuthIndex,
+		AttemptNo:          attemptNo,
+		RetryReason:        strings.TrimSpace(retryReason),
+		FinalSuccess:       record.FinalSuccess,
 		Tokens:             tokens,
 		Failed:             failed,
 		ProviderStatusCode: record.ProviderStatusCode,
@@ -122,6 +140,9 @@ type requestDetail struct {
 	LatencyMs          int64       `json:"latency_ms"`
 	Source             string      `json:"source"`
 	AuthIndex          string      `json:"auth_index"`
+	AttemptNo          int         `json:"attempt_no,omitempty"`
+	RetryReason        string      `json:"retry_reason,omitempty"`
+	FinalSuccess       *bool       `json:"final_success,omitempty"`
 	Tokens             tokenStats  `json:"tokens"`
 	Failed             bool        `json:"failed"`
 	ProviderStatusCode int         `json:"provider_status_code,omitempty"`

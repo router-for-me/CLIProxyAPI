@@ -18,6 +18,7 @@ func (s *fakeUsageStore) Insert(context.Context, UsageRecord) error { return nil
 func (s *fakeUsageStore) InsertBatch(context.Context, []UsageRecord) (int64, int64, error) {
 	return 0, 0, nil
 }
+func (s *fakeUsageStore) UpdateRequestFinal(context.Context, string, bool) error { return nil }
 
 func (s *fakeUsageStore) GetAggregatedStats(context.Context) (AggregatedStats, error) {
 	return s.stats, nil

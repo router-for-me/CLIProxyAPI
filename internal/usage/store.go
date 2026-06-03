@@ -21,6 +21,10 @@ type UsageRecord struct {
 	Model              string
 	Source             string
 	AuthIndex          string
+	RequestID          string
+	AttemptNo          int
+	RetryReason        string
+	FinalSuccess       int
 	Failed             bool
 	RequestedAt        time.Time
 	InputTokens        int64
@@ -33,6 +37,12 @@ type UsageRecord struct {
 	ProviderStatusCode int
 	ErrorCode          string
 }
+
+const (
+	finalSuccessUnknown = -1
+	finalSuccessFalse   = 0
+	finalSuccessTrue    = 1
+)
 
 // APIStats holds aggregated metrics for a single API key from database.
 type APIStats struct {
@@ -68,6 +78,10 @@ type DetailRecord struct {
 	Model              string
 	Source             string
 	AuthIndex          string
+	RequestID          string
+	AttemptNo          int
+	RetryReason        string
+	FinalSuccess       int
 	Failed             bool
 	RequestedAt        time.Time
 	InputTokens        int64
@@ -83,6 +97,7 @@ type DetailRecord struct {
 type UsageStore interface {
 	Insert(ctx context.Context, record UsageRecord) error
 	InsertBatch(ctx context.Context, records []UsageRecord) (added, skipped int64, err error)
+	UpdateRequestFinal(ctx context.Context, requestID string, finalSuccess bool) error
 	GetAggregatedStats(ctx context.Context) (AggregatedStats, error)
 	GetDetails(ctx context.Context, offset, limit int) ([]DetailRecord, error)
 	DeleteOldRecords(ctx context.Context, retentionDays int) (deleted int64, err error)
@@ -290,6 +305,24 @@ func (s *mirrorUsageStore) InsertBatch(ctx context.Context, records []UsageRecor
 	return added, skipped, nil
 }
 
+func (s *mirrorUsageStore) UpdateRequestFinal(ctx context.Context, requestID string, finalSuccess bool) error {
+	if s == nil {
+		return fmt.Errorf("usage store: mirror store not initialized")
+	}
+	var errPrimary error
+	if s.primary != nil {
+		errPrimary = s.primary.UpdateRequestFinal(ctx, requestID, finalSuccess)
+	}
+	var errLocal error
+	if s.local != nil {
+		errLocal = s.local.UpdateRequestFinal(ctx, requestID, finalSuccess)
+	}
+	if errPrimary != nil {
+		return errPrimary
+	}
+	return errLocal
+}
+
 func (s *mirrorUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedStats, error) {
 	if s == nil || s.local == nil {
 		return AggregatedStats{}, fmt.Errorf("usage store: mirror store not initialized")
@@ -420,6 +453,10 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 			model            TEXT NOT NULL,
 			source           TEXT,
 			auth_index       TEXT,
+			request_id       TEXT NOT NULL DEFAULT '',
+			attempt_no       INTEGER NOT NULL DEFAULT 0,
+			retry_reason     TEXT NOT NULL DEFAULT '',
+			final_success    INTEGER NOT NULL DEFAULT -1,
 			failed           INTEGER NOT NULL DEFAULT 0,
 			requested_at     TIMESTAMPTZ NOT NULL,
 			input_tokens     BIGINT NOT NULL DEFAULT 0,
@@ -467,6 +504,10 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS path TEXT NOT NULL DEFAULT ''", table),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS provider_status_code INTEGER NOT NULL DEFAULT 0", table),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS error_code TEXT NOT NULL DEFAULT ''", table),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''", table),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS attempt_no INTEGER NOT NULL DEFAULT 0", table),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS retry_reason TEXT NOT NULL DEFAULT ''", table),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS final_success INTEGER NOT NULL DEFAULT -1", table),
 	}
 	for _, m := range pgMigrations {
 		if _, err := s.db.ExecContext(ctx, m); err != nil {
@@ -478,6 +519,7 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON %s(path, requested_at DESC)", table),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed_status_requested ON %s(provider_status_code, requested_at DESC) WHERE failed = 1", table),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed_error_code_requested ON %s(error_code, requested_at DESC) WHERE failed = 1 AND error_code <> ''", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_request_id_attempt ON %s(request_id, attempt_no) WHERE request_id <> ''", table),
 	}
 	for _, idx := range postMigrationIndexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
@@ -497,8 +539,9 @@ func (s *pgUsageStore) Insert(ctx context.Context, record UsageRecord) error {
 	query := fmt.Sprintf(`
 		INSERT INTO %s (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path, provider_status_code, error_code)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			method, path, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 	`, table)
 	_, err := s.db.ExecContext(ctx, query,
 		record.APIKey,
@@ -516,6 +559,10 @@ func (s *pgUsageStore) Insert(ctx context.Context, record UsageRecord) error {
 		record.Path,
 		record.ProviderStatusCode,
 		record.ErrorCode,
+		record.RequestID,
+		record.AttemptNo,
+		record.RetryReason,
+		record.FinalSuccess,
 	)
 	if err != nil {
 		return fmt.Errorf("usage store: insert record: %w", err)
@@ -554,8 +601,9 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 	query := fmt.Sprintf(`
 		INSERT INTO %s (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path, provider_status_code, error_code)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			method, path, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 	`, table)
 
 	stmt, err := tx.PrepareContext(ctx, query)
@@ -588,6 +636,10 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 			record.Path,
 			record.ProviderStatusCode,
 			record.ErrorCode,
+			record.RequestID,
+			record.AttemptNo,
+			record.RetryReason,
+			record.FinalSuccess,
 		)
 		if execErr != nil {
 			skipped++
@@ -608,6 +660,23 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 	return added, skipped, nil
 }
 
+func (s *pgUsageStore) UpdateRequestFinal(ctx context.Context, requestID string, finalSuccess bool) error {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return nil
+	}
+	finalValue := finalSuccessFalse
+	if finalSuccess {
+		finalValue = finalSuccessTrue
+	}
+	table := s.fullTableName("usage_records")
+	query := fmt.Sprintf("UPDATE %s SET final_success = $1 WHERE request_id = $2 AND final_success <> $1", table)
+	if _, err := s.db.ExecContext(ctx, query, finalValue, requestID); err != nil {
+		return fmt.Errorf("usage store: update request final: %w", err)
+	}
+	return nil
+}
+
 func (s *pgUsageStore) ListRecordsAfterID(ctx context.Context, afterID int64, limit int) ([]UsageRecord, int64, error) {
 	if limit <= 0 {
 		limit = defaultMirrorSyncBatchSize
@@ -623,7 +692,8 @@ func (s *pgUsageStore) ListRecordsAfterID(ctx context.Context, afterID int64, li
 	query := fmt.Sprintf(`
 		SELECT id, api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path, provider_status_code, error_code
+			method, path, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM %s
 		WHERE id > $1
 		ORDER BY id ASC
@@ -661,6 +731,10 @@ func (s *pgUsageStore) ListRecordsAfterID(ctx context.Context, afterID int64, li
 			&record.Path,
 			&record.ProviderStatusCode,
 			&record.ErrorCode,
+			&record.RequestID,
+			&record.AttemptNo,
+			&record.RetryReason,
+			&record.FinalSuccess,
 		); err != nil {
 			return nil, afterID, fmt.Errorf("usage store: scan list records after id: %w", err)
 		}
@@ -802,7 +876,8 @@ func (s *pgUsageStore) GetDetails(ctx context.Context, offset, limit int) ([]Det
 	query := fmt.Sprintf(`
 		SELECT api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			provider_status_code, error_code
+			provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM %s ORDER BY requested_at DESC
 		LIMIT $1 OFFSET $2
 	`, table)
@@ -823,6 +898,7 @@ func (s *pgUsageStore) GetDetails(ctx context.Context, offset, limit int) ([]Det
 			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
 			&detail.CachedTokens, &detail.TotalTokens,
 			&detail.ProviderStatusCode, &detail.ErrorCode,
+			&detail.RequestID, &detail.AttemptNo, &detail.RetryReason, &detail.FinalSuccess,
 		); err != nil {
 			return nil, fmt.Errorf("usage store: scan detail: %w", err)
 		}
@@ -913,6 +989,10 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 			model            TEXT NOT NULL,
 			source           TEXT,
 			auth_index       TEXT,
+			request_id       TEXT NOT NULL DEFAULT '',
+			attempt_no       INTEGER NOT NULL DEFAULT 0,
+			retry_reason     TEXT NOT NULL DEFAULT '',
+			final_success    INTEGER NOT NULL DEFAULT -1,
 			failed           INTEGER NOT NULL DEFAULT 0,
 			requested_at     INTEGER NOT NULL,
 			input_tokens     INTEGER NOT NULL DEFAULT 0,
@@ -960,6 +1040,10 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 		"ALTER TABLE usage_records ADD COLUMN path TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE usage_records ADD COLUMN provider_status_code INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE usage_records ADD COLUMN error_code TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE usage_records ADD COLUMN request_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE usage_records ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE usage_records ADD COLUMN retry_reason TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE usage_records ADD COLUMN final_success INTEGER NOT NULL DEFAULT -1",
 	}
 	for _, m := range migrations {
 		_, _ = s.db.ExecContext(ctx, m) // ignore "duplicate column" errors
@@ -969,6 +1053,7 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON usage_records(path, requested_at DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_failed_status_requested ON usage_records(provider_status_code, requested_at DESC) WHERE failed = 1",
 		"CREATE INDEX IF NOT EXISTS idx_usage_failed_error_code_requested ON usage_records(error_code, requested_at DESC) WHERE failed = 1 AND error_code <> ''",
+		"CREATE INDEX IF NOT EXISTS idx_usage_request_id_attempt ON usage_records(request_id, attempt_no) WHERE request_id <> ''",
 	}
 	for _, idx := range postMigrationIndexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
@@ -1008,8 +1093,9 @@ func (s *sqliteUsageStore) Insert(ctx context.Context, record UsageRecord) error
 	query := `
 		INSERT INTO usage_records (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path, provider_status_code, error_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			method, path, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := s.db.ExecContext(ctx, query,
 		record.APIKey,
@@ -1027,6 +1113,10 @@ func (s *sqliteUsageStore) Insert(ctx context.Context, record UsageRecord) error
 		record.Path,
 		record.ProviderStatusCode,
 		record.ErrorCode,
+		record.RequestID,
+		record.AttemptNo,
+		record.RetryReason,
+		record.FinalSuccess,
 	)
 	if err != nil {
 		return fmt.Errorf("usage store: insert record: %w", err)
@@ -1048,8 +1138,9 @@ func (s *sqliteUsageStore) InsertBatch(ctx context.Context, records []UsageRecor
 	query := `
 		INSERT INTO usage_records (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path, provider_status_code, error_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			method, path, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	stmt, err := tx.PrepareContext(ctx, query)
@@ -1079,6 +1170,10 @@ func (s *sqliteUsageStore) InsertBatch(ctx context.Context, records []UsageRecor
 			record.Path,
 			record.ProviderStatusCode,
 			record.ErrorCode,
+			record.RequestID,
+			record.AttemptNo,
+			record.RetryReason,
+			record.FinalSuccess,
 		)
 		if execErr != nil {
 			skipped++
@@ -1091,6 +1186,21 @@ func (s *sqliteUsageStore) InsertBatch(ctx context.Context, records []UsageRecor
 		return 0, 0, fmt.Errorf("usage store: commit tx: %w", err)
 	}
 	return added, skipped, nil
+}
+
+func (s *sqliteUsageStore) UpdateRequestFinal(ctx context.Context, requestID string, finalSuccess bool) error {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return nil
+	}
+	finalValue := finalSuccessFalse
+	if finalSuccess {
+		finalValue = finalSuccessTrue
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE usage_records SET final_success = ? WHERE request_id = ? AND final_success <> ?", finalValue, requestID, finalValue); err != nil {
+		return fmt.Errorf("usage store: update request final: %w", err)
+	}
+	return nil
 }
 
 func (s *sqliteUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedStats, error) {
@@ -1218,7 +1328,8 @@ func (s *sqliteUsageStore) GetDetails(ctx context.Context, offset, limit int) ([
 	query := `
 		SELECT api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			provider_status_code, error_code
+			provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM usage_records ORDER BY requested_at DESC
 		LIMIT ? OFFSET ?
 	`
@@ -1240,6 +1351,7 @@ func (s *sqliteUsageStore) GetDetails(ctx context.Context, offset, limit int) ([
 			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
 			&detail.CachedTokens, &detail.TotalTokens,
 			&detail.ProviderStatusCode, &detail.ErrorCode,
+			&detail.RequestID, &detail.AttemptNo, &detail.RetryReason, &detail.FinalSuccess,
 		); err != nil {
 			return nil, fmt.Errorf("usage store: scan detail: %w", err)
 		}
@@ -1286,7 +1398,8 @@ func (s *sqliteUsageStore) ExportTo(ctx context.Context, dest UsageStore, batchS
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path, provider_status_code, error_code
+			method, path, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM usage_records
 		ORDER BY id ASC
 	`)
@@ -1337,6 +1450,10 @@ func (s *sqliteUsageStore) ExportTo(ctx context.Context, dest UsageStore, batchS
 			&record.Path,
 			&record.ProviderStatusCode,
 			&record.ErrorCode,
+			&record.RequestID,
+			&record.AttemptNo,
+			&record.RetryReason,
+			&record.FinalSuccess,
 		); err != nil {
 			return total, fmt.Errorf("usage store: scan legacy sqlite record: %w", err)
 		}

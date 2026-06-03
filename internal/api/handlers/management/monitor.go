@@ -66,6 +66,10 @@ type monitorRequestLogItem struct {
 	Source             string                 `json:"source"`
 	SourceRef          monitorSourceRef       `json:"source_ref"`
 	AuthIndex          string                 `json:"auth_index"`
+	RequestID          string                 `json:"request_id,omitempty"`
+	AttemptNo          int                    `json:"attempt_no,omitempty"`
+	RetryReason        string                 `json:"retry_reason,omitempty"`
+	FinalSuccess       *bool                  `json:"final_success,omitempty"`
 	Failed             bool                   `json:"failed"`
 	InputTokens        int64                  `json:"input_tokens"`
 	OutputTokens       int64                  `json:"output_tokens"`
@@ -221,6 +225,10 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 					Source:             row.Source,
 					SourceRef:          sourceResolver.Resolve(row.Source, row.AuthIndex),
 					AuthIndex:          row.AuthIndex,
+					RequestID:          row.RequestID,
+					AttemptNo:          row.AttemptNo,
+					RetryReason:        row.RetryReason,
+					FinalSuccess:       row.FinalSuccess,
 					Failed:             row.Failed,
 					InputTokens:        row.InputTokens,
 					OutputTokens:       row.OutputTokens,
@@ -2226,6 +2234,10 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 		Model              string    `json:"model"`
 		Source             string    `json:"source"`
 		AuthIndex          string    `json:"auth_index"`
+		RequestID          string    `json:"request_id,omitempty"`
+		AttemptNo          int       `json:"attempt_no,omitempty"`
+		RetryReason        string    `json:"retry_reason,omitempty"`
+		FinalSuccess       *bool     `json:"final_success,omitempty"`
 		Failed             bool      `json:"failed"`
 		ProviderStatusCode int       `json:"provider_status_code,omitempty"`
 		ErrorCode          string    `json:"error_code,omitempty"`
@@ -2240,6 +2252,10 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 			Model:              r.Model,
 			Source:             r.Source,
 			AuthIndex:          r.AuthIndex,
+			RequestID:          r.RequestID,
+			AttemptNo:          r.AttemptNo,
+			RetryReason:        r.RetryReason,
+			FinalSuccess:       r.FinalSuccess,
 			Failed:             r.Failed,
 			ProviderStatusCode: r.ProviderStatusCode,
 			ErrorCode:          r.ErrorCode,

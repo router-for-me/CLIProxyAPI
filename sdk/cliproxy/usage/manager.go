@@ -23,6 +23,14 @@ type Record struct {
 	AuthIndex string
 	AuthType  string
 	Source    string
+	// RequestID links all upstream attempts for one client request.
+	RequestID string
+	// AttemptNo is the 1-based upstream attempt number within the request.
+	AttemptNo int
+	// RetryReason explains why this attempt followed a previous failure.
+	RetryReason string
+	// FinalSuccess is filled when the request's final outcome is known.
+	FinalSuccess *bool
 	// ReasoningEffort stores the client-requested thinking level for request event logs.
 	ReasoningEffort string
 	RequestedAt     time.Time
@@ -56,8 +64,24 @@ type Detail struct {
 	TotalTokens         int64
 }
 
+// RequestAttempt stores request-scoped retry metadata for usage sinks.
+type RequestAttempt struct {
+	RequestID   string
+	AttemptNo   int
+	RetryReason string
+}
+
+// RequestFinal stores the final outcome for one client request.
+type RequestFinal struct {
+	RequestID    string
+	FinalSuccess bool
+	AttemptCount int
+	CompletedAt  time.Time
+}
+
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
+type requestAttemptContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -115,9 +139,51 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 	}
 }
 
+// WithRequestAttempt stores request-scoped retry attempt metadata.
+func WithRequestAttempt(ctx context.Context, attempt RequestAttempt) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	attempt.RequestID = strings.TrimSpace(attempt.RequestID)
+	attempt.RetryReason = strings.TrimSpace(attempt.RetryReason)
+	if attempt.RequestID == "" && attempt.AttemptNo <= 0 && attempt.RetryReason == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestAttemptContextKey{}, attempt)
+}
+
+// RequestAttemptFromContext returns request-scoped retry attempt metadata.
+func RequestAttemptFromContext(ctx context.Context) RequestAttempt {
+	if ctx == nil {
+		return RequestAttempt{}
+	}
+	raw := ctx.Value(requestAttemptContextKey{})
+	switch value := raw.(type) {
+	case RequestAttempt:
+		value.RequestID = strings.TrimSpace(value.RequestID)
+		value.RetryReason = strings.TrimSpace(value.RetryReason)
+		return value
+	case *RequestAttempt:
+		if value == nil {
+			return RequestAttempt{}
+		}
+		out := *value
+		out.RequestID = strings.TrimSpace(out.RequestID)
+		out.RetryReason = strings.TrimSpace(out.RetryReason)
+		return out
+	default:
+		return RequestAttempt{}
+	}
+}
+
 // Plugin consumes usage records emitted by the proxy runtime.
 type Plugin interface {
 	HandleUsage(ctx context.Context, record Record)
+}
+
+// RequestFinalizer is implemented by plugins that can update request outcomes.
+type RequestFinalizer interface {
+	HandleRequestFinal(ctx context.Context, final RequestFinal)
 }
 
 type queueItem struct {
@@ -261,6 +327,32 @@ func (m *Manager) dispatch(item queueItem) {
 	}
 }
 
+// PublishRequestFinal notifies interested plugins about a completed request.
+func (m *Manager) PublishRequestFinal(ctx context.Context, final RequestFinal) {
+	if m == nil {
+		return
+	}
+	final.RequestID = strings.TrimSpace(final.RequestID)
+	if final.RequestID == "" {
+		return
+	}
+	if final.CompletedAt.IsZero() {
+		final.CompletedAt = time.Now()
+	}
+
+	m.pluginsMu.RLock()
+	plugins := make([]Plugin, len(m.plugins))
+	copy(plugins, m.plugins)
+	m.pluginsMu.RUnlock()
+	for _, plugin := range plugins {
+		finalizer, ok := plugin.(RequestFinalizer)
+		if !ok || finalizer == nil {
+			continue
+		}
+		safeInvokeFinalizer(finalizer, ctx, final)
+	}
+}
+
 func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -268,6 +360,15 @@ func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 		}
 	}()
 	plugin.HandleUsage(ctx, record)
+}
+
+func safeInvokeFinalizer(plugin RequestFinalizer, ctx context.Context, final RequestFinal) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("usage: finalizer plugin panic recovered: %v", r)
+		}
+	}()
+	plugin.HandleRequestFinal(ctx, final)
 }
 
 var defaultManager = NewManager(512)
@@ -280,6 +381,11 @@ func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }
+
+// PublishRequestFinal notifies plugins that one client request has completed.
+func PublishRequestFinal(ctx context.Context, final RequestFinal) {
+	DefaultManager().PublishRequestFinal(ctx, final)
+}
 
 // StartDefault starts the default manager's dispatcher.
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }

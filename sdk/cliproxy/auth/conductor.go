@@ -65,6 +65,114 @@ const (
 	CloseAllExecutionSessionsID = "__all_execution_sessions__"
 )
 
+type requestAttemptTraceContextKey struct{}
+
+type requestAttemptTrace struct {
+	mu        sync.Mutex
+	requestID string
+	attempts  int
+}
+
+func ensureRequestAttemptTrace(ctx context.Context) (context.Context, *requestAttemptTrace) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if trace, ok := ctx.Value(requestAttemptTraceContextKey{}).(*requestAttemptTrace); ok && trace != nil {
+		return ctx, trace
+	}
+	requestID := strings.TrimSpace(logging.GetRequestID(ctx))
+	if requestID == "" {
+		requestID = logging.GenerateRequestID()
+		ctx = logging.WithRequestID(ctx, requestID)
+	}
+	trace := &requestAttemptTrace{requestID: requestID}
+	return context.WithValue(ctx, requestAttemptTraceContextKey{}, trace), trace
+}
+
+func requestAttemptTraceFromContext(ctx context.Context) *requestAttemptTrace {
+	if ctx == nil {
+		return nil
+	}
+	trace, _ := ctx.Value(requestAttemptTraceContextKey{}).(*requestAttemptTrace)
+	return trace
+}
+
+func (t *requestAttemptTrace) nextAttempt(retryReason string) coreusage.RequestAttempt {
+	if t == nil {
+		return coreusage.RequestAttempt{}
+	}
+	retryReason = strings.TrimSpace(retryReason)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.attempts++
+	return coreusage.RequestAttempt{
+		RequestID:   t.requestID,
+		AttemptNo:   t.attempts,
+		RetryReason: retryReason,
+	}
+}
+
+func (t *requestAttemptTrace) attemptCount() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.attempts
+}
+
+func (t *requestAttemptTrace) requestIDValue() string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.requestID
+}
+
+func retryReasonFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if isTransientRoutingError(err) {
+		return "transient_routing_error"
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		code := strings.TrimSpace(authErr.Code)
+		if code != "" {
+			return code
+		}
+		if authErr.Retryable {
+			return "retryable_error"
+		}
+	}
+	if status := statusCodeFromError(err); status > 0 {
+		return "status_" + strconv.Itoa(status)
+	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) && cooldownErr != nil {
+		return "model_cooldown"
+	}
+	return "upstream_error"
+}
+
+func addRequestAttemptLogFields(ctx context.Context, fields log.Fields) {
+	if len(fields) == 0 {
+		return
+	}
+	attempt := coreusage.RequestAttemptFromContext(ctx)
+	if attempt.RequestID != "" {
+		fields["request_id"] = attempt.RequestID
+	}
+	if attempt.AttemptNo > 0 {
+		fields["attempt_no"] = attempt.AttemptNo
+	}
+	if attempt.RetryReason != "" {
+		fields["retry_reason"] = attempt.RetryReason
+	}
+}
+
 // RefreshEvaluator allows runtime state to override refresh decisions.
 type RefreshEvaluator interface {
 	ShouldRefresh(now time.Time, auth *Auth) bool
@@ -1946,6 +2054,16 @@ func (m *Manager) Load(ctx context.Context) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx, trace := ensureRequestAttemptTrace(ctx)
+	finalSuccess := false
+	defer func() {
+		coreusage.PublishRequestFinal(ctx, coreusage.RequestFinal{
+			RequestID:    trace.requestIDValue(),
+			FinalSuccess: finalSuccess,
+			AttemptCount: trace.attemptCount(),
+			CompletedAt:  time.Now(),
+		})
+	}()
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -1957,6 +2075,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
+			finalSuccess = true
 			return resp, nil
 		}
 		lastErr = errExec
@@ -1974,6 +2093,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
+				finalSuccess = true
 				return resp, nil
 			}
 		}
@@ -1984,6 +2104,16 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx, trace := ensureRequestAttemptTrace(ctx)
+	finalSuccess := false
+	defer func() {
+		coreusage.PublishRequestFinal(ctx, coreusage.RequestFinal{
+			RequestID:    trace.requestIDValue(),
+			FinalSuccess: finalSuccess,
+			AttemptCount: trace.attemptCount(),
+			CompletedAt:  time.Now(),
+		})
+	}()
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -1995,6 +2125,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
+			finalSuccess = true
 			return resp, nil
 		}
 		lastErr = errExec
@@ -2018,6 +2149,16 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx, trace := ensureRequestAttemptTrace(ctx)
+	finalSuccess := false
+	defer func() {
+		coreusage.PublishRequestFinal(ctx, coreusage.RequestFinal{
+			RequestID:    trace.requestIDValue(),
+			FinalSuccess: finalSuccess,
+			AttemptCount: trace.attemptCount(),
+			CompletedAt:  time.Now(),
+		})
+	}()
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -2029,6 +2170,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
+			finalSuccess = true
 			return result, nil
 		}
 		lastErr = errStream
@@ -2046,6 +2188,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
+				finalSuccess = true
 				return result, nil
 			}
 		}
@@ -2068,6 +2211,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	trace := requestAttemptTraceFromContext(ctx)
+	nextRetryReason := ""
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
@@ -2103,6 +2248,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		if trace != nil {
+			execCtx = coreusage.WithRequestAttempt(execCtx, trace.nextAttempt(nextRetryReason))
+			nextRetryReason = ""
+		}
 
 		models, pooled := m.preparedExecutionModelsForRequest(auth, routeModel, req, opts)
 		if len(models) == 0 {
@@ -2115,6 +2264,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromCause(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			nextRetryReason = retryReasonFromError(errPrepare)
 			continue
 		}
 		var authErr error
@@ -2177,6 +2327,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				attempted[auth.ID] = struct{}{}
 			}
 			lastErr = authErr
+			nextRetryReason = retryReasonFromError(authErr)
 			if homeMode {
 				homeAuthCount++
 			} else if !routeFallback && !transientNetworkFallback {
@@ -2199,6 +2350,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	trace := requestAttemptTraceFromContext(ctx)
+	nextRetryReason := ""
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
@@ -2234,6 +2387,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		if trace != nil {
+			execCtx = coreusage.WithRequestAttempt(execCtx, trace.nextAttempt(nextRetryReason))
+			nextRetryReason = ""
+		}
 
 		models, pooled := m.preparedExecutionModelsForRequest(auth, routeModel, req, opts)
 		if len(models) == 0 {
@@ -2246,6 +2403,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromCause(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			nextRetryReason = retryReasonFromError(errPrepare)
 			continue
 		}
 		var authErr error
@@ -2308,6 +2466,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				attempted[auth.ID] = struct{}{}
 			}
 			lastErr = authErr
+			nextRetryReason = retryReasonFromError(authErr)
 			if homeMode {
 				homeAuthCount++
 			} else if !routeFallback && !transientNetworkFallback {
@@ -2330,6 +2489,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	trace := requestAttemptTraceFromContext(ctx)
+	nextRetryReason := ""
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
@@ -2364,6 +2525,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		if trace != nil {
+			execCtx = coreusage.WithRequestAttempt(execCtx, trace.nextAttempt(nextRetryReason))
+			nextRetryReason = ""
+		}
 		models, pooled := m.preparedExecutionModelsForRequest(auth, routeModel, req, opts)
 		if len(models) == 0 {
 			continue
@@ -2375,6 +2541,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromCause(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			nextRetryReason = retryReasonFromError(errPrepare)
 			continue
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
@@ -2387,6 +2554,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
 				}
 				lastErr = errStream
+				nextRetryReason = retryReasonFromError(errStream)
 				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
 					return nil, errWait
 				}
@@ -2401,6 +2569,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			attempted[auth.ID] = struct{}{}
 			lastErr = errStream
+			nextRetryReason = retryReasonFromError(errStream)
 			if homeMode {
 				homeAuthCount++
 			} else if !routeFallback && !transientNetworkFallback {
@@ -6885,6 +7054,7 @@ func (m *Manager) logAuthSelectionMetric(ctx context.Context, auth *Auth, provid
 	}
 	fields := m.authMetricFields(auth, provider, model)
 	fields["event"] = "auth_selection"
+	addRequestAttemptLogFields(ctx, fields)
 	logEntryWithRequestID(ctx).WithFields(fields).Info("auth_selection")
 }
 
@@ -6897,6 +7067,7 @@ func (m *Manager) logAuthSelectionFailureMetric(ctx context.Context, providers [
 		"providers": strings.Join(normalizeProviderKeys(providers), ","),
 		"model":     canonicalModelKey(model),
 	}
+	addRequestAttemptLogFields(ctx, fields)
 	if status := statusCodeFromError(err); status > 0 {
 		fields["status"] = status
 	}
@@ -6921,6 +7092,7 @@ func (m *Manager) logAuthResultMetric(ctx context.Context, auth *Auth, result Re
 	fields := m.authMetricFields(auth, result.Provider, result.Model)
 	fields["event"] = "auth_result"
 	fields["success"] = result.Success
+	addRequestAttemptLogFields(ctx, fields)
 	status := statusCodeFromResult(result.Error)
 	if result.Success && status == 0 {
 		status = http.StatusOK

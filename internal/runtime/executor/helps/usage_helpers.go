@@ -29,6 +29,9 @@ type UsageReporter struct {
 	authType    string
 	apiKey      string
 	source      string
+	requestID   string
+	attemptNo   int
+	retryReason string
 	reasoning   string
 	requestedAt time.Time
 	once        sync.Once
@@ -40,6 +43,11 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if alias == "" {
 		alias = model
 	}
+	attempt := usage.RequestAttemptFromContext(ctx)
+	requestID := strings.TrimSpace(attempt.RequestID)
+	if requestID == "" {
+		requestID = internallogging.GetRequestID(ctx)
+	}
 	reporter := &UsageReporter{
 		provider:    provider,
 		model:       model,
@@ -48,6 +56,9 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
 		authType:    resolveUsageAuthType(auth),
+		requestID:   requestID,
+		attemptNo:   attempt.AttemptNo,
+		retryReason: attempt.RetryReason,
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
 	}
 	if auth != nil {
@@ -169,6 +180,9 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthID:             r.authID,
 		AuthIndex:          r.authIndex,
 		AuthType:           r.authType,
+		RequestID:          r.requestID,
+		AttemptNo:          r.attemptNo,
+		RetryReason:        r.retryReason,
 		ReasoningEffort:    r.reasoning,
 		RequestedAt:        r.requestedAt,
 		Latency:            r.latency(),

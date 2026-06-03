@@ -98,6 +98,10 @@ type RequestDetail struct {
 	LatencyMs          int64      `json:"latency_ms"`
 	Source             string     `json:"source"`
 	AuthIndex          string     `json:"auth_index"`
+	RequestID          string     `json:"request_id,omitempty"`
+	AttemptNo          int        `json:"attempt_no,omitempty"`
+	RetryReason        string     `json:"retry_reason,omitempty"`
+	FinalSuccess       *bool      `json:"final_success,omitempty"`
 	Tokens             TokenStats `json:"tokens"`
 	Failed             bool       `json:"failed"`
 	ProviderStatusCode int        `json:"provider_status_code,omitempty"`
@@ -209,6 +213,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		LatencyMs:          normaliseLatency(record.Latency),
 		Source:             record.Source,
 		AuthIndex:          record.AuthIndex,
+		RequestID:          strings.TrimSpace(record.RequestID),
+		AttemptNo:          record.AttemptNo,
+		RetryReason:        strings.TrimSpace(record.RetryReason),
+		FinalSuccess:       record.FinalSuccess,
 		Tokens:             detail,
 		Failed:             failed,
 		ProviderStatusCode: record.ProviderStatusCode,

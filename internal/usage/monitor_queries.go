@@ -52,6 +52,10 @@ type MonitorRequestLog struct {
 	Model              string
 	Source             string
 	AuthIndex          string
+	RequestID          string
+	AttemptNo          int
+	RetryReason        string
+	FinalSuccess       *bool
 	Failed             bool
 	InputTokens        int64
 	OutputTokens       int64
@@ -144,6 +148,10 @@ type MonitorRequestDetail struct {
 	Model              string
 	Source             string
 	AuthIndex          string
+	RequestID          string
+	AttemptNo          int
+	RetryReason        string
+	FinalSuccess       *bool
 	Failed             bool
 	ProviderStatusCode int
 	ErrorCode          string
@@ -395,7 +403,8 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 	query := fmt.Sprintf(`
 		SELECT api_key, model, COALESCE(NULLIF(source, ''), 'unknown'), auth_index,
 			failed, requested_at, input_tokens, output_tokens, reasoning_tokens,
-			cached_tokens, total_tokens, provider_status_code, error_code
+			cached_tokens, total_tokens, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM %s
 		WHERE %s
 		ORDER BY requested_at DESC, id DESC
@@ -415,6 +424,7 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 		var (
 			item      MonitorRequestLog
 			failed    int
+			final     int
 			rawSource string
 		)
 		if err = rows.Scan(
@@ -431,10 +441,15 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 			&item.TotalTokens,
 			&item.ProviderStatusCode,
 			&item.ErrorCode,
+			&item.RequestID,
+			&item.AttemptNo,
+			&item.RetryReason,
+			&final,
 		); err != nil {
 			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan monitor request logs: %w", err)
 		}
 		item.Failed = failed != 0
+		item.FinalSuccess = finalSuccessPtr(final)
 		item.Source = normalizeMonitorSource(rawSource)
 		items = append(items, item)
 
@@ -1229,7 +1244,8 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 	query := fmt.Sprintf(`
 		SELECT api_key, model, COALESCE(NULLIF(source, ''), 'unknown'), auth_index,
 			failed, requested_at, input_tokens, output_tokens, reasoning_tokens,
-			cached_tokens, total_tokens, provider_status_code, error_code
+			cached_tokens, total_tokens, provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM usage_records
 		WHERE %s
 		ORDER BY requested_at DESC, id DESC
@@ -1250,6 +1266,7 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 			item      MonitorRequestLog
 			failed    int
 			unixTime  int64
+			final     int
 			rawSource string
 		)
 		if err = rows.Scan(
@@ -1266,10 +1283,15 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 			&item.TotalTokens,
 			&item.ProviderStatusCode,
 			&item.ErrorCode,
+			&item.RequestID,
+			&item.AttemptNo,
+			&item.RetryReason,
+			&final,
 		); err != nil {
 			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan monitor request logs: %w", err)
 		}
 		item.Failed = failed != 0
+		item.FinalSuccess = finalSuccessPtr(final)
 		item.Timestamp = time.Unix(unixTime, 0)
 		item.Source = normalizeMonitorSource(rawSource)
 		items = append(items, item)
@@ -2287,6 +2309,19 @@ func normalizeMonitorSource(source string) string {
 	return trimmed
 }
 
+func finalSuccessPtr(value int) *bool {
+	switch value {
+	case finalSuccessTrue:
+		v := true
+		return &v
+	case finalSuccessFalse:
+		v := false
+		return &v
+	default:
+		return nil
+	}
+}
+
 func escapeSQLiteLike(value string) string {
 	replacer := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")
 	return replacer.Replace(value)
@@ -2499,7 +2534,8 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 	query := fmt.Sprintf(`
 		SELECT requested_at, method, path, model,
 			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed,
-			provider_status_code, error_code
+			provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM usage_records
 		WHERE %s
 		ORDER BY requested_at DESC
@@ -2519,12 +2555,28 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 			item     MonitorRequestDetail
 			unixTime int64
 			failed   int
+			final    int
 		)
-		if err = rows.Scan(&unixTime, &item.Method, &item.Path, &item.Model, &item.Source, &item.AuthIndex, &failed, &item.ProviderStatusCode, &item.ErrorCode); err != nil {
+		if err = rows.Scan(
+			&unixTime,
+			&item.Method,
+			&item.Path,
+			&item.Model,
+			&item.Source,
+			&item.AuthIndex,
+			&failed,
+			&item.ProviderStatusCode,
+			&item.ErrorCode,
+			&item.RequestID,
+			&item.AttemptNo,
+			&item.RetryReason,
+			&final,
+		); err != nil {
 			return nil, fmt.Errorf("usage store: scan monitor request detail: %w", err)
 		}
 		item.Timestamp = time.Unix(unixTime, 0)
 		item.Failed = failed != 0
+		item.FinalSuccess = finalSuccessPtr(final)
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {
@@ -2572,7 +2624,8 @@ func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *t
 	query := fmt.Sprintf(`
 		SELECT requested_at, method, path, model,
 			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed,
-			provider_status_code, error_code
+			provider_status_code, error_code,
+			request_id, attempt_no, retry_reason, final_success
 		FROM %s
 		WHERE %s
 		ORDER BY requested_at DESC, id DESC
@@ -2591,11 +2644,27 @@ func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *t
 		var (
 			item   MonitorRequestDetail
 			failed int
+			final  int
 		)
-		if err = rows.Scan(&item.Timestamp, &item.Method, &item.Path, &item.Model, &item.Source, &item.AuthIndex, &failed, &item.ProviderStatusCode, &item.ErrorCode); err != nil {
+		if err = rows.Scan(
+			&item.Timestamp,
+			&item.Method,
+			&item.Path,
+			&item.Model,
+			&item.Source,
+			&item.AuthIndex,
+			&failed,
+			&item.ProviderStatusCode,
+			&item.ErrorCode,
+			&item.RequestID,
+			&item.AttemptNo,
+			&item.RetryReason,
+			&final,
+		); err != nil {
 			return nil, fmt.Errorf("usage store: scan monitor request detail: %w", err)
 		}
 		item.Failed = failed != 0
+		item.FinalSuccess = finalSuccessPtr(final)
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {
