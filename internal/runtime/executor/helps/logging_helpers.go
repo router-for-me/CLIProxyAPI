@@ -25,6 +25,16 @@ const (
 	apiResponseKey          = "API_RESPONSE"
 	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
 	creditsUsedKey          = "__antigravity_credits_used__"
+
+	// Context keys written regardless of RequestLog; available to plugins and middleware.
+	UpstreamURLKey          = "upstream_url"
+	UpstreamFirstUserMsgKey = "upstream_first_user_msg"
+	UpstreamResponseTextKey = "upstream_response_text"
+	UpstreamRawUsageKey     = "upstream_raw_usage"
+
+	// Private keys used by accumulateResponseText; reset alongside public keys on retry.
+	responseTextBuilderKey  = "upstream_response_text_builder"
+	sawOutputTextDeltaKey   = "upstream_saw_output_text_delta"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -55,6 +65,25 @@ type upstreamAttempt struct {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	// Always-on: store the upstream URL and first user message for plugins.
+	// Response and usage keys are reset here so retried attempts do not mix
+	// data from a failed attempt with the final response.
+	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+		ginCtx.Set(UpstreamResponseTextKey, "")
+		ginCtx.Set(UpstreamRawUsageKey, nil)
+		// Reset private streaming accumulators so a retry starts clean.
+		ginCtx.Set(responseTextBuilderKey, nil)
+		ginCtx.Set(sawOutputTextDeltaKey, false)
+		if info.URL != "" {
+			ginCtx.Set(UpstreamURLKey, info.URL)
+		}
+		if len(info.Body) > 0 {
+			if msg := extractFirstUserText(info.Body); msg != "" {
+				ginCtx.Set(UpstreamFirstUserMsgKey, msg)
+			}
+		}
+	}
+
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -154,6 +183,11 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	// Always-on: accumulate response text for plugins.
+	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+		accumulateResponseText(ginCtx, chunk)
+	}
+
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -196,10 +230,23 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		// Always-on: populate context keys for plugins regardless of RequestLog.
+		ginCtx.Set(UpstreamResponseTextKey, "")
+		ginCtx.Set(UpstreamRawUsageKey, nil)
+		if info.URL != "" {
+			ginCtx.Set(UpstreamURLKey, info.URL)
+		}
+		if len(info.Body) > 0 {
+			if msg := extractFirstUserText(info.Body); msg != "" {
+				ginCtx.Set(UpstreamFirstUserMsgKey, msg)
+			}
+		}
+	}
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
@@ -287,14 +334,30 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(payload)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		// Always-on: accumulate response text and usage for plugins.
+		// Websocket frames are raw JSON objects. Route by event type:
+		// - Streaming events (response.output_text.delta, response.output_item.done)
+		//   must go through the SSE path so the streaming branch handles them.
+		// - Completed/non-streaming frames (response.completed with response.output[])
+		//   must go through the non-streaming path.
+		eventType := gjson.GetBytes(data, "type").String()
+		if eventType == "response.output_text.delta" || eventType == "response.output_item.done" {
+			sse := append([]byte("data: "), data...)
+			sse = append(sse, '\n', '\n')
+			accumulateResponseText(ginCtx, sse)
+		} else {
+			accumulateResponseText(ginCtx, data)
+		}
+	}
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
 	if ginCtx == nil {
 		return
 	}
@@ -568,6 +631,441 @@ func extractHTMLTitle(body []byte) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(title), " ")
+}
+
+// extractFirstUserText returns the text of the first user message in a
+// request body. Supports Anthropic /v1/messages and Gemini /generateContent
+// geminiPartsText walks a gjson array of Gemini content parts and returns
+// the first non-empty text field. Handles responses where the first part is
+// a function call, inline data, or thought and text appears in a later part.
+func geminiPartsText(parts gjson.Result) string {
+	var text string
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if t := strings.TrimSpace(part.Get("text").String()); t != "" {
+			text = t
+			return false
+		}
+		return true
+	})
+	return text
+}
+
+// formats. Returns empty string on any parse error.
+func extractFirstUserText(body []byte) string {
+	// Antigravity: request.contents[].parts[].text
+	if contents := gjson.GetBytes(body, "request.contents"); contents.Exists() && contents.IsArray() {
+		var text string
+		contents.ForEach(func(_, item gjson.Result) bool {
+			role := item.Get("role").String()
+			if role != "" && role != "user" {
+				return true
+			}
+			item.Get("parts").ForEach(func(_, part gjson.Result) bool {
+				if t := strings.TrimSpace(part.Get("text").String()); t != "" {
+					text = t
+					return false
+				}
+				return true
+			})
+			return text == ""
+		})
+		if text != "" {
+			const maxLen = 2000
+			if len(text) > maxLen {
+				text = text[:maxLen] + "..."
+			}
+			return text
+		}
+	}
+
+	// Gemini: contents[].parts[].text (role=user or no role)
+	if contents := gjson.GetBytes(body, "contents"); contents.Exists() && contents.IsArray() {
+		var text string
+		contents.ForEach(func(_, item gjson.Result) bool {
+			role := item.Get("role").String()
+			if role != "" && role != "user" {
+				return true
+			}
+			item.Get("parts").ForEach(func(_, part gjson.Result) bool {
+				if t := strings.TrimSpace(part.Get("text").String()); t != "" {
+					text = t
+					return false
+				}
+				return true
+			})
+			return text == ""
+		})
+		if text != "" {
+			const maxLen = 2000
+			if len(text) > maxLen {
+				text = text[:maxLen] + "..."
+			}
+			return text
+		}
+	}
+
+	// Responses API (Codex): input as string or input[].content[].text
+	if input := gjson.GetBytes(body, "input"); input.Exists() {
+		var text string
+		if input.Type == gjson.String {
+			text = strings.TrimSpace(input.String())
+		} else if input.IsArray() {
+			input.ForEach(func(_, item gjson.Result) bool {
+				if role := item.Get("role").String(); role != "" && role != "user" {
+					return true
+				}
+				item.Get("content").ForEach(func(_, block gjson.Result) bool {
+					// Accept explicit input_text blocks and blocks with no type
+					// (the Responses converter treats missing type as input_text).
+					blockType := block.Get("type").String()
+					if blockType == "input_text" || blockType == "" {
+						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+							text = t
+							return false
+						}
+					}
+					return true
+				})
+				return text == ""
+			})
+		}
+		if text != "" {
+			const maxLen = 2000
+			if len(text) > maxLen {
+				text = text[:maxLen] + "..."
+			}
+			return text
+		}
+	}
+
+	// Anthropic/OpenAI: messages[].content
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return ""
+	}
+	var text string
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "user" {
+			return true
+		}
+		content := msg.Get("content")
+		if content.IsArray() {
+			content.ForEach(func(_, block gjson.Result) bool {
+				if block.Get("type").String() == "text" {
+					t := strings.TrimSpace(block.Get("text").String())
+					if t != "" {
+						text = t
+						return false
+					}
+				}
+				return true
+			})
+		} else if content.Type == gjson.String {
+			text = strings.TrimSpace(content.String())
+		}
+		return false
+	})
+	const maxLen = 2000
+	if len(text) > maxLen {
+		text = text[:maxLen] + "..."
+	}
+	return text
+}
+
+// accumulateResponseText appends text content from SSE chunks or a full JSON
+// body into UpstreamResponseTextKey and usage counters into UpstreamRawUsageKey.
+func accumulateResponseText(ginCtx *gin.Context, chunk []byte) {
+	chunk = bytes.TrimSpace(chunk)
+	if len(chunk) == 0 {
+		return
+	}
+	const maxLen = 4000
+	// Non-streaming: full JSON body.
+	if bytes.HasPrefix(chunk, []byte("{")) {
+		accumulateUsage(ginCtx, chunk)
+		// Anthropic: walk content blocks to find the first text block.
+		// content[0].text misses responses where a thinking/tool block
+		// comes first; content.#.text returns a JSON array, not a string.
+		var text string
+		gjson.GetBytes(chunk, "content").ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "text" {
+				if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+					text = t
+					return false
+				}
+			}
+			return true
+		})
+		// OpenAI-compatible: choices[0].message.content
+		if text == "" {
+			text = gjson.GetBytes(chunk, "choices.0.message.content").String()
+		}
+		// Gemini/Vertex non-streaming: walk parts to find first text field.
+		if text == "" {
+			text = geminiPartsText(gjson.GetBytes(chunk, "candidates.0.content.parts"))
+		}
+		// Antigravity wrapper: response.candidates[0].content.parts[]
+		if text == "" {
+			text = geminiPartsText(gjson.GetBytes(chunk, "response.candidates.0.content.parts"))
+		}
+		// Codex Responses API: top-level output[].content[].text (compact/non-streaming)
+		if text == "" {
+			gjson.GetBytes(chunk, "output").ForEach(func(_, item gjson.Result) bool {
+				item.Get("content").ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "output_text" {
+						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+							text = t
+							return false
+						}
+					}
+					return true
+				})
+				return text == ""
+			})
+		}
+		// Codex Responses API: response.completed event - response.output[].content[].text
+		if text == "" {
+			gjson.GetBytes(chunk, "response.output").ForEach(func(_, item gjson.Result) bool {
+				item.Get("content").ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "output_text" {
+						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+							text = t
+							return false
+						}
+					}
+					return true
+				})
+				return text == ""
+			})
+		}
+		if text != "" {
+			if len(text) > maxLen {
+				text = text[:maxLen] + "..."
+			}
+			ginCtx.Set(UpstreamResponseTextKey, text)
+		}
+		return
+	}
+	// Streaming SSE: one TCP chunk may carry multiple events.
+	// Use a *strings.Builder stored in the gin context to avoid O(n²)
+	// allocations from repeated string concatenation across chunks.
+	var sb *strings.Builder
+	if v, ok := ginCtx.Get(responseTextBuilderKey); ok {
+		sb, _ = v.(*strings.Builder)
+	}
+	if sb == nil {
+		sb = &strings.Builder{}
+		ginCtx.Set(responseTextBuilderKey, sb)
+	}
+	updated := false
+	sawOutputTextDelta := false
+	if v, ok := ginCtx.Get(sawOutputTextDeltaKey); ok {
+		sawOutputTextDelta, _ = v.(bool)
+	}
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		accumulateUsage(ginCtx, data)
+		// Anthropic: delta.text, only when delta.type is text_delta to avoid
+		// capturing non-text deltas such as input_json_delta.
+		var delta string
+		if dt := gjson.GetBytes(data, "delta.type").String(); dt == "" || dt == "text_delta" {
+			delta = gjson.GetBytes(data, "delta.text").String()
+		}
+		if delta == "" {
+			// OpenAI-compatible: choices[0].delta.content
+			delta = gjson.GetBytes(data, "choices.0.delta.content").String()
+		}
+		if delta == "" {
+			// Responses API (Codex): response.output_text.delta
+			if gjson.GetBytes(data, "type").String() == "response.output_text.delta" {
+				delta = gjson.GetBytes(data, "delta").String()
+				if delta != "" {
+					sawOutputTextDelta = true
+					ginCtx.Set(sawOutputTextDeltaKey, true)
+				}
+			}
+		}
+		if delta == "" && !sawOutputTextDelta {
+			// Responses API (Codex): response.output_item.done - final text in item.content[].text.
+			// Only use when no output_text.delta events were seen; otherwise the
+			// full text is already accumulated from deltas and this would duplicate it.
+			if gjson.GetBytes(data, "type").String() == "response.output_item.done" {
+				gjson.GetBytes(data, "item.content").ForEach(func(_, block gjson.Result) bool {
+					if block.Get("type").String() == "output_text" {
+						if t := strings.TrimSpace(block.Get("text").String()); t != "" {
+							delta = t
+							return false
+						}
+					}
+					return true
+				})
+			}
+		}
+		if delta == "" {
+			// Gemini SSE (native): walk parts to find first text field.
+			delta = geminiPartsText(gjson.GetBytes(data, "candidates.0.content.parts"))
+		}
+		if delta == "" {
+			// Gemini SSE (Antigravity wrapper): response.candidates[0].content.parts[]
+			delta = geminiPartsText(gjson.GetBytes(data, "response.candidates.0.content.parts"))
+		}
+		if delta == "" {
+			continue
+		}
+		if sb.Len() < maxLen {
+			sb.WriteString(delta)
+			updated = true
+		}
+	}
+	if updated {
+		s := sb.String()
+		if len(s) > maxLen {
+			s = s[:maxLen] + "..."
+		}
+		ginCtx.Set(UpstreamResponseTextKey, s)
+	}
+}
+
+func accumulateUsage(ginCtx *gin.Context, data []byte) {
+	// Responses API: response.completed event carries usage under response.usage.
+	usage := gjson.GetBytes(data, "response.usage")
+	if !usage.Exists() {
+		usage = gjson.GetBytes(data, "usage")
+	}
+	// Claude streaming: message_start event carries usage under message.usage.
+	if !usage.Exists() {
+		usage = gjson.GetBytes(data, "message.usage")
+	}
+	if !usage.Exists() {
+		// Check Gemini usageMetadata path before giving up (both camelCase
+		// and snake_case variants used by different Gemini/Antigravity paths).
+		hasMetadata := gjson.GetBytes(data, "usageMetadata").Exists() ||
+			gjson.GetBytes(data, "usage_metadata").Exists() ||
+			gjson.GetBytes(data, "response.usageMetadata").Exists() ||
+			gjson.GetBytes(data, "response.usage_metadata").Exists()
+		if !hasMetadata {
+			return
+		}
+	}
+	current := map[string]int64{}
+	if v, ok := ginCtx.Get(UpstreamRawUsageKey); ok {
+		if m, ok := v.(map[string]int64); ok {
+			for k, val := range m {
+				current[k] = val
+			}
+		}
+	}
+	setMax := func(key string) {
+		if r := usage.Get(key); r.Exists() {
+			if v := r.Int(); v > current[key] {
+				current[key] = v
+			}
+		}
+	}
+	for _, key := range []string{
+		// Anthropic
+		"input_tokens", "output_tokens",
+		"cache_read_input_tokens", "cache_creation_input_tokens",
+		"reasoning_tokens", "total_tokens",
+		// OpenAI-compatible
+		"prompt_tokens", "completion_tokens",
+	} {
+		setMax(key)
+	}
+	// OpenAI/Codex nested details.
+	for _, path := range []string{
+		"prompt_tokens_details.cached_tokens",  // chat completions
+		"input_tokens_details.cached_tokens",   // Responses API
+	} {
+		if r := usage.Get(path); r.Exists() {
+			if v := r.Int(); v > current["cache_read_input_tokens"] {
+				current["cache_read_input_tokens"] = v
+			}
+		}
+	}
+	for _, path := range []string{
+		"output_tokens_details.reasoning_tokens",
+		"completion_tokens_details.reasoning_tokens",
+	} {
+		if r := usage.Get(path); r.Exists() {
+			if v := r.Int(); v > current["reasoning_tokens"] {
+				current["reasoning_tokens"] = v
+			}
+		}
+	}
+	// Antigravity wrapper: response.usageMetadata / response.usage_metadata
+	var sawGeminiMeta bool
+	for _, metaKey := range []string{"response.usageMetadata", "response.usage_metadata"} {
+		if meta := gjson.GetBytes(data, metaKey); meta.Exists() {
+			setFromPath := func(key, path string) {
+				if r := meta.Get(path); r.Exists() {
+					if v := r.Int(); v > current[key] {
+						current[key] = v
+					}
+				}
+			}
+			setFromPath("prompt_tokens", "promptTokenCount")
+			setFromPath("completion_tokens", "candidatesTokenCount")
+			setFromPath("total_tokens", "totalTokenCount")
+			setFromPath("reasoning_tokens", "thoughtsTokenCount")
+			setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
+			sawGeminiMeta = true
+			break
+		}
+	}
+
+	// Gemini usageMetadata lives at the top level, not under "usage".
+	for _, metaKey := range []string{"usageMetadata", "usage_metadata"} {
+		if meta := gjson.GetBytes(data, metaKey); meta.Exists() {
+			setFromPath := func(key, path string) {
+				if r := meta.Get(path); r.Exists() {
+					if v := r.Int(); v > current[key] {
+						current[key] = v
+					}
+				}
+			}
+			setFromPath("prompt_tokens", "promptTokenCount")
+			setFromPath("completion_tokens", "candidatesTokenCount")
+			setFromPath("total_tokens", "totalTokenCount")
+			setFromPath("reasoning_tokens", "thoughtsTokenCount")
+			setFromPath("cache_read_input_tokens", "cachedContentTokenCount")
+			sawGeminiMeta = true
+			break
+		}
+	}
+
+	// Derive total_tokens after all fields (including Gemini metadata) are
+	// mapped. Use max(input, prompt) + max(output, completion) + reasoning
+	// to handle Gemini responses that omit totalTokenCount but report
+	// thoughtsTokenCount separately.
+	inputSide := current["input_tokens"]
+	if current["prompt_tokens"] > inputSide {
+		inputSide = current["prompt_tokens"]
+	}
+	outputSide := current["output_tokens"]
+	if current["completion_tokens"] > outputSide {
+		outputSide = current["completion_tokens"]
+	}
+	// For Gemini, reasoning_tokens (thoughtsTokenCount) is separate from
+	// candidatesTokenCount and must be included in the fallback total.
+	// For OpenAI, reasoning_tokens is already a subset of output/completion
+	// and must not be added again. Use sawGeminiMeta to distinguish.
+	reasoningSide := int64(0)
+	if sawGeminiMeta {
+		reasoningSide = current["reasoning_tokens"]
+	}
+	if derived := inputSide + outputSide + reasoningSide; derived > current["total_tokens"] {
+		current["total_tokens"] = derived
+	}
+
+	ginCtx.Set(UpstreamRawUsageKey, current)
 }
 
 // extractJSONErrorMessage attempts to extract error.message from JSON error responses
