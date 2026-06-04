@@ -709,6 +709,9 @@ func claudeToolResultIDsInNextUserMessage(messages []gjson.Result, assistantIdx 
 
 func sanitizeKimiOpenAICompatibleRequestBody(body []byte) ([]byte, error) {
 	body = repairOpenAICompatToolCallHistory(body)
+	profile := openAICompatProfileForKind("kimi")
+	body = sanitizeOpenAICompatToolSchemas(body)
+	body = scrubOpenAICompatProviderToolPayload(body, profile)
 	return normalizeKimiToolMessageLinks(body)
 }
 

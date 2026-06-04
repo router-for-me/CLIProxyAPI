@@ -75,6 +75,54 @@ func TestSanitizeKimiOpenAICompatibleRequestBodyDropsOrphanReplyToolCall(t *test
 	}
 }
 
+func TestSanitizeKimiOpenAICompatibleRequestBodyRemovesMoonshotAnyOfParentSchema(t *testing.T) {
+	body := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"run_tool",
+			"input_schema":{
+				"type":"object",
+				"properties":{
+					"arguments":{
+						"type":"object",
+						"properties":{"command":{"type":"string"}},
+						"required":["command"],
+						"additionalProperties":false,
+						"anyOf":[
+							{"type":"object","properties":{"command":{"type":"string"}}},
+							{"type":"string"}
+						]
+					}
+				}
+			},
+			"strict":true
+		}]
+	}`)
+
+	out, err := sanitizeKimiOpenAICompatibleRequestBody(body)
+	if err != nil {
+		t.Fatalf("sanitizeKimiOpenAICompatibleRequestBody() error = %v", err)
+	}
+
+	argumentsPath := "tools.0.function.parameters.properties.arguments"
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tool type = %q, want function: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.strict").Bool(); got {
+		t.Fatalf("kimi strict should be disabled: %s", string(out))
+	}
+	if !gjson.GetBytes(out, argumentsPath+".anyOf").Exists() {
+		t.Fatalf("arguments anyOf should be preserved: %s", string(out))
+	}
+	if gjson.GetBytes(out, argumentsPath+".properties").Exists() {
+		t.Fatalf("arguments parent properties should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, argumentsPath+".anyOf.0.properties.command.type").String(); got != "string" {
+		t.Fatalf("anyOf command type = %q, want string: %s", got, string(out))
+	}
+}
+
 func TestKimiExecutorHttpRequestSanitizesDirectChatBody(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

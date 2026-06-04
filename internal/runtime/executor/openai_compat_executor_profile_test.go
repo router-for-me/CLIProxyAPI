@@ -691,6 +691,49 @@ func TestOpenAICompatPayloadKimiRemovesParentTypeFromAnyOfSchema(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatPayloadKimiRemovesParentPropertiesFromAnyOfSchema(t *testing.T) {
+	payload := []byte(`{
+		"model":"k2.6-code-preview",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"run_tool",
+				"parameters":{
+					"type":"object",
+					"properties":{
+						"arguments":{
+							"type":"object",
+							"properties":{"path":{"type":"string"}},
+							"required":["path"],
+							"additionalProperties":false,
+							"anyOf":[
+								{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},
+								{"type":"string"}
+							]
+						}
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "k2.6-code-preview", "https://api.moonshot.ai/v1")
+	argumentsPath := "tools.0.function.parameters.properties.arguments"
+
+	if !gjson.GetBytes(out, argumentsPath+".anyOf").Exists() {
+		t.Fatalf("arguments anyOf should be preserved: %s", string(out))
+	}
+	for _, path := range []string{"type", "properties", "required", "additionalProperties"} {
+		if gjson.GetBytes(out, argumentsPath+"."+path).Exists() {
+			t.Fatalf("arguments parent %s should be removed for moonshot schema flavor: %s", path, string(out))
+		}
+	}
+	if got := gjson.GetBytes(out, argumentsPath+".anyOf.0.properties.path.type").String(); got != "string" {
+		t.Fatalf("anyOf object branch should preserve path schema, got %q: %s", got, string(out))
+	}
+}
+
 func TestOpenAICompatPayloadZhipuForcesAutoToolChoice(t *testing.T) {
 	payload := []byte(`{
 		"model":"glm-4.6",

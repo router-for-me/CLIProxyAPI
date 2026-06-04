@@ -596,6 +596,9 @@ func scrubOpenAICompatFunctionToolPayload(payload []byte, profile openAICompatPr
 		if profileKind == "kimi" {
 			if function, okFunction := cleaned["function"].(map[string]any); okFunction {
 				function["strict"] = false
+				if parameters, okParameters := function["parameters"].(map[string]any); okParameters {
+					function["parameters"] = normalizeMoonshotSchemaCombiners(parameters)
+				}
 			}
 		}
 		if originalName := openAICompatOriginalFunctionName(rawTool); originalName != "" {
@@ -621,6 +624,42 @@ func scrubOpenAICompatFunctionToolPayload(payload []byte, profile openAICompatPr
 		return payload
 	}
 	return out
+}
+
+func normalizeMoonshotSchemaCombiners(node any) any {
+	switch typed := node.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, value := range typed {
+			out[key] = normalizeMoonshotSchemaCombiners(value)
+		}
+		if hasMoonshotSchemaCombiner(out) {
+			for _, key := range []string{"type", "properties", "required", "items", "additionalProperties"} {
+				delete(out, key)
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, normalizeMoonshotSchemaCombiners(item))
+		}
+		return out
+	default:
+		return node
+	}
+}
+
+func hasMoonshotSchemaCombiner(schema map[string]any) bool {
+	if schema == nil {
+		return false
+	}
+	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+		if _, ok := schema[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func scrubOpenAICompatToolChoice(payload []byte, profile openAICompatProfile) []byte {
