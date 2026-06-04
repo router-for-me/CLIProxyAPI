@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -39,6 +40,36 @@ func TestBuildAuthFileEntry_ExposesCodexSubscriptionFields(t *testing.T) {
 	}
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	entry := h.buildAuthFileEntry(record)
+	if entry == nil {
+		t.Fatalf("expected auth entry")
+	}
+
+	assertCodexSubscriptionFields(t, entry)
+}
+
+func TestBuildAuthFileEntry_ExposesCodexSubscriptionFieldsFromStorage(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	idToken := testCodexIDToken(t)
+	record := &coreauth.Auth{
+		ID:       "codex-user@example.com-plus.json",
+		FileName: "codex-user@example.com-plus.json",
+		Provider: "codex",
+		Storage: &codex.CodexTokenStorage{
+			IDToken: idToken,
+			Email:   "user@example.com",
+		},
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+		Metadata: map[string]any{
+			"email": "user@example.com",
+		},
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	entry := h.buildAuthFileEntry(record)
 	if entry == nil {
 		t.Fatalf("expected auth entry")

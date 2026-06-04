@@ -505,17 +505,23 @@ func authProjectID(auth *coreauth.Auth) string {
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
-	if auth == nil || auth.Metadata == nil {
+	if auth == nil {
 		return nil
 	}
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	idTokenRaw, ok := auth.Metadata["id_token"].(string)
-	if !ok {
-		return nil
+	if auth.Metadata != nil {
+		if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok {
+			if claims := extractCodexIDTokenClaimsFromRaw(idTokenRaw); claims != nil {
+				return claims
+			}
+		}
 	}
-	return extractCodexIDTokenClaimsFromRaw(idTokenRaw)
+	if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
+		return extractCodexIDTokenClaimsFromRaw(storage.IDToken)
+	}
+	return nil
 }
 
 func extractCodexIDTokenClaimsFromRaw(idTokenRaw string) gin.H {
