@@ -39,6 +39,8 @@ func TestSetEnabledFalseClosesUsageSubscribers(t *testing.T) {
 	withEnabledQueue(t, func() {
 		subscriber, unsubscribe := SubscribeUsage()
 		defer unsubscribe()
+		errorSubscriber, unsubscribeErrors := SubscribeErrors()
+		defer unsubscribeErrors()
 
 		requireUsageSubscriberPayload(t, subscriber, usageSupportRefreshPayload)
 
@@ -52,6 +54,30 @@ func TestSetEnabledFalseClosesUsageSubscribers(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("timeout waiting for subscriber close")
 		}
+
+		select {
+		case _, ok := <-errorSubscriber:
+			if ok {
+				t.Fatalf("error subscriber channel remained open after SetEnabled(false)")
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timeout waiting for error subscriber close")
+		}
+	})
+}
+
+func TestEnqueueErrorBroadcastsToErrorSubscribersAndDiscardsWithoutSubscribers(t *testing.T) {
+	withEnabledQueue(t, func() {
+		subscriber, unsubscribe := SubscribeErrors()
+		defer unsubscribe()
+
+		EnqueueError([]byte("error-record"))
+		requireUsageSubscriberPayload(t, subscriber, "error-record")
+
+		unsubscribe()
+
+		EnqueueError([]byte("discarded-error"))
+		requireErrorQueueEmpty(t)
 	})
 }
 
@@ -59,11 +85,19 @@ func TestNotifyUsageRefreshBroadcastsOnlyToUsageSubscribers(t *testing.T) {
 	withEnabledQueue(t, func() {
 		subscriber, unsubscribe := SubscribeUsage()
 		defer unsubscribe()
+		errorSubscriber, unsubscribeErrors := SubscribeErrors()
+		defer unsubscribeErrors()
 
 		requireUsageSubscriberPayload(t, subscriber, usageSupportRefreshPayload)
 
 		NotifyUsageRefresh()
 		requireUsageSubscriberPayload(t, subscriber, usageRefreshPayload)
+
+		select {
+		case got := <-errorSubscriber:
+			t.Fatalf("error subscriber received usage refresh payload %q", string(got))
+		default:
+		}
 
 		unsubscribe()
 		NotifyUsageRefresh()
@@ -86,5 +120,16 @@ func requireUsageSubscriberPayload(t *testing.T, subscriber <-chan []byte, want 
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("timeout waiting for subscriber payload %q", want)
+	}
+}
+
+func requireErrorQueueEmpty(t *testing.T) {
+	t.Helper()
+
+	errorGlobal.mu.Lock()
+	defer errorGlobal.mu.Unlock()
+
+	if len(errorGlobal.items)-errorGlobal.head != 0 {
+		t.Fatalf("error queue retained %d item(s), want none", len(errorGlobal.items)-errorGlobal.head)
 	}
 }
