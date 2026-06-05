@@ -61,6 +61,42 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		keepAliveC = keepAlive.C
 	}
 
+	flushInterval := StreamingFlushInterval(h.Cfg)
+	var flushTimer *time.Timer
+	var flushC <-chan time.Time
+	pendingFlush := false
+	stopFlushTimer := func() {
+		if flushTimer == nil {
+			return
+		}
+		if !flushTimer.Stop() {
+			select {
+			case <-flushTimer.C:
+			default:
+			}
+		}
+		flushTimer = nil
+		flushC = nil
+	}
+	defer stopFlushTimer()
+	flushImmediate := func() {
+		stopFlushTimer()
+		pendingFlush = false
+		flusher.Flush()
+	}
+	flushChunk := func() {
+		if flushInterval <= 0 {
+			flusher.Flush()
+			return
+		}
+		pendingFlush = true
+		if flushTimer != nil {
+			return
+		}
+		flushTimer = time.NewTimer(flushInterval)
+		flushC = flushTimer.C
+	}
+
 	var terminalErr *interfaces.ErrorMessage
 	for {
 		select {
@@ -83,19 +119,19 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					if opts.WriteTerminalError != nil {
 						opts.WriteTerminalError(terminalErr)
 					}
-					flusher.Flush()
+					flushImmediate()
 					cancel(terminalErr.Error)
 					return
 				}
 				if opts.WriteDone != nil {
 					opts.WriteDone()
 				}
-				flusher.Flush()
+				flushImmediate()
 				cancel(nil)
 				return
 			}
 			writeChunk(chunk)
-			flusher.Flush()
+			flushChunk()
 		case errMsg, ok := <-errs:
 			if !ok {
 				continue
@@ -104,7 +140,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				terminalErr = errMsg
 				if opts.WriteTerminalError != nil {
 					opts.WriteTerminalError(errMsg)
-					flusher.Flush()
+					flushImmediate()
 				}
 			}
 			var execErr error
@@ -115,7 +151,14 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			return
 		case <-keepAliveC:
 			writeKeepAlive()
-			flusher.Flush()
+			flushImmediate()
+		case <-flushC:
+			if pendingFlush {
+				flusher.Flush()
+			}
+			pendingFlush = false
+			flushTimer = nil
+			flushC = nil
 		}
 	}
 }

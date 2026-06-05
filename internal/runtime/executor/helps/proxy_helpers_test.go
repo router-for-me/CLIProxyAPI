@@ -27,6 +27,19 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	if transport.Proxy != nil {
 		t.Fatal("expected direct transport to disable proxy function")
 	}
+	assertTransportConnectionLimits(t, transport)
+}
+
+func TestNewProxyAwareHTTPClientDefaultTransportHasConnectionLimits(t *testing.T) {
+	t.Parallel()
+
+	client := NewProxyAwareHTTPClient(context.Background(), &config.Config{}, nil, 0)
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	assertTransportConnectionLimits(t, transport)
 }
 
 func TestNewProxyAwareHTTPClientReusesAuthProxyTransport(t *testing.T) {
@@ -45,6 +58,11 @@ func TestNewProxyAwareHTTPClientReusesAuthProxyTransport(t *testing.T) {
 	if clientOne.Transport != clientTwo.Transport {
 		t.Fatal("expected auth proxy transport to be reused")
 	}
+	transport, ok := clientOne.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", clientOne.Transport)
+	}
+	assertTransportConnectionLimits(t, transport)
 }
 
 func TestNewProxyAwareHTTPClientReusesGlobalProxyTransport(t *testing.T) {
@@ -64,5 +82,26 @@ func TestNewProxyAwareHTTPClientReusesGlobalProxyTransport(t *testing.T) {
 	}
 	if clientOne.Transport != clientTwo.Transport {
 		t.Fatal("expected global proxy transport to be reused")
+	}
+	transport, ok := clientOne.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", clientOne.Transport)
+	}
+	assertTransportConnectionLimits(t, transport)
+}
+
+func assertTransportConnectionLimits(t *testing.T, transport *http.Transport) {
+	t.Helper()
+	if transport.MaxIdleConns <= 0 {
+		t.Fatalf("MaxIdleConns = %d, want positive limit", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost <= 0 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want positive limit", transport.MaxIdleConnsPerHost)
+	}
+	if transport.MaxConnsPerHost <= 0 {
+		t.Fatalf("MaxConnsPerHost = %d, want positive limit", transport.MaxConnsPerHost)
+	}
+	if transport.IdleConnTimeout <= 0 {
+		t.Fatalf("IdleConnTimeout = %s, want positive timeout", transport.IdleConnTimeout)
 	}
 }

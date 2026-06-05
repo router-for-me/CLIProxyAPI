@@ -92,6 +92,17 @@ type StreamResult struct {
 	Headers http.Header
 	// Chunks is the channel of streaming payload units.
 	Chunks <-chan StreamChunk
+	// Cancel aborts the upstream stream when downstream no longer needs it.
+	// It must be safe to call multiple times.
+	Cancel func()
+}
+
+// Close aborts the upstream stream if a cancellation hook is available.
+func (r *StreamResult) Close() {
+	if r == nil || r.Cancel == nil {
+		return
+	}
+	r.Cancel()
 }
 
 // StatusError represents an error that carries an HTTP-like status code.

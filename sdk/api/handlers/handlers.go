@@ -189,6 +189,18 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
+// StreamingFlushInterval returns the maximum delay before flushing buffered stream chunks.
+func StreamingFlushInterval(cfg *config.SDKConfig) time.Duration {
+	milliseconds := 0
+	if cfg != nil {
+		milliseconds = cfg.Streaming.FlushIntervalMilliseconds
+	}
+	if milliseconds <= 0 {
+		return 0
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
 // Default is false.
 func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {

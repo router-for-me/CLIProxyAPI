@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -153,10 +154,38 @@ func Parse(raw string) (Setting, error) {
 }
 
 func cloneDefaultTransport() *http.Transport {
+	var clone *http.Transport
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
-		return transport.Clone()
+		clone = transport.Clone()
+	} else {
+		clone = &http.Transport{}
 	}
-	return &http.Transport{}
+	return ApplyHTTPTransportLimits(clone)
+}
+
+// NewDefaultTransport returns a default outbound transport with explicit pool limits.
+func NewDefaultTransport() *http.Transport {
+	return cloneDefaultTransport()
+}
+
+// ApplyHTTPTransportLimits caps outbound connection pools for long-running API streams.
+func ApplyHTTPTransportLimits(transport *http.Transport) *http.Transport {
+	if transport == nil {
+		return nil
+	}
+	if transport.MaxIdleConns <= 0 {
+		transport.MaxIdleConns = 256
+	}
+	if transport.MaxIdleConnsPerHost <= 0 {
+		transport.MaxIdleConnsPerHost = 32
+	}
+	if transport.MaxConnsPerHost <= 0 {
+		transport.MaxConnsPerHost = 256
+	}
+	if transport.IdleConnTimeout <= 0 {
+		transport.IdleConnTimeout = 90 * time.Second
+	}
+	return transport
 }
 
 // NewDirectTransport returns a transport that bypasses environment proxies.

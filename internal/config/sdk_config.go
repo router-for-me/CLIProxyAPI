@@ -59,4 +59,8 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// FlushIntervalMilliseconds coalesces stream chunk flushes for this many milliseconds.
+	// <= 0 flushes every chunk immediately. Default is 0.
+	FlushIntervalMilliseconds int `yaml:"flush-interval-ms,omitempty" json:"flush-interval-ms,omitempty"`
 }
