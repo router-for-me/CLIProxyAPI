@@ -1532,6 +1532,176 @@ func TestManager_MaxRetryCredentials_LimitsTransientRoutingFallback(t *testing.T
 	}
 }
 
+func TestManager_GPTLargeToolResponses_LimitsCodexCredentialFallback(t *testing.T) {
+	const model = "gpt-5.5"
+	testCases := []struct {
+		name      string
+		invoke    func(*Manager, cliproxyexecutor.Request, cliproxyexecutor.Options) error
+		getCalls  func(*authFallbackExecutor) []string
+		errorMap  func(error) *authFallbackExecutor
+		wantCalls []string
+	}{
+		{
+			name: "execute",
+			invoke: func(m *Manager, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, errExecute := m.executeMixedOnce(context.Background(), []string{"codex"}, req, opts, 0)
+				return errExecute
+			},
+			getCalls: func(e *authFallbackExecutor) []string { return e.ExecuteCalls() },
+			errorMap: func(err error) *authFallbackExecutor {
+				return &authFallbackExecutor{
+					id: "codex",
+					executeErrors: map[string]error{
+						"aa-codex-1": err,
+						"ab-codex-2": err,
+						"ba-codex-3": err,
+					},
+				}
+			},
+			wantCalls: []string{"aa-codex-1", "ba-codex-3"},
+		},
+		{
+			name: "execute_count",
+			invoke: func(m *Manager, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, errExecute := m.executeCountMixedOnce(context.Background(), []string{"codex"}, req, opts, 0)
+				return errExecute
+			},
+			getCalls: func(e *authFallbackExecutor) []string { return e.CountCalls() },
+			errorMap: func(err error) *authFallbackExecutor {
+				return &authFallbackExecutor{
+					id: "codex",
+					countErrors: map[string]error{
+						"aa-codex-1": err,
+						"ab-codex-2": err,
+						"ba-codex-3": err,
+					},
+				}
+			},
+			wantCalls: []string{"aa-codex-1", "ba-codex-3"},
+		},
+		{
+			name: "execute_stream",
+			invoke: func(m *Manager, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, errExecute := m.executeStreamMixedOnce(context.Background(), []string{"codex"}, req, opts, 0)
+				return errExecute
+			},
+			getCalls: func(e *authFallbackExecutor) []string { return e.StreamCalls() },
+			errorMap: func(err error) *authFallbackExecutor {
+				return &authFallbackExecutor{
+					id: "codex",
+					streamFirstErrors: map[string]error{
+						"aa-codex-1": err,
+						"ab-codex-2": err,
+						"ba-codex-3": err,
+					},
+				}
+			},
+			wantCalls: []string{"aa-codex-1", "ba-codex-3"},
+		},
+	}
+
+	errUpstream := &Error{HTTPStatus: http.StatusInternalServerError, Message: "api_error"}
+	request := cliproxyexecutor.Request{Model: model}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RequestPathMetadataKey:     "/v1/responses",
+		cliproxyexecutor.MessageCountMetadataKey:    187,
+		cliproxyexecutor.ToolCountMetadataKey:       60,
+		cliproxyexecutor.ReasoningEffortMetadataKey: "high",
+	}}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			manager, executor := newGPTLargeToolResponsesFallbackManager(t, model, tc.errorMap(errUpstream))
+
+			if errInvoke := tc.invoke(manager, request, opts); errInvoke == nil {
+				t.Fatalf("expected guarded large tool request to fail after capped fallback")
+			}
+			if got := tc.getCalls(executor); !stringSlicesEqual(got, tc.wantCalls) {
+				t.Fatalf("calls = %v, want %v", got, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestManager_GPTSmallResponses_KeepsConfiguredCodexFallback(t *testing.T) {
+	const model = "gpt-5.5"
+	errUpstream := &Error{HTTPStatus: http.StatusInternalServerError, Message: "api_error"}
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"aa-codex-1": errUpstream,
+			"ab-codex-2": errUpstream,
+			"ba-codex-3": errUpstream,
+		},
+	}
+	manager, executor := newGPTLargeToolResponsesFallbackManager(t, model, executor)
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RequestPathMetadataKey:  "/v1/responses",
+		cliproxyexecutor.MessageCountMetadataKey: 20,
+		cliproxyexecutor.ToolCountMetadataKey:    8,
+	}}
+	resp, errExecute := manager.executeMixedOnce(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts, 0)
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success through normal fallback", errExecute)
+	}
+	if string(resp.Payload) != "ca-codex-4" {
+		t.Fatalf("payload = %q, want ca-codex-4", string(resp.Payload))
+	}
+	want := []string{"aa-codex-1", "ab-codex-2", "ba-codex-3", "ca-codex-4"}
+	if got := executor.ExecuteCalls(); !stringSlicesEqual(got, want) {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+}
+
+func newGPTLargeToolResponsesFallbackManager(t *testing.T, model string, executor *authFallbackExecutor) (*Manager, *authFallbackExecutor) {
+	t.Helper()
+
+	selector := &SequentialFillSelector{
+		current: map[string]string{
+			"codex:" + model: "aa-codex-1",
+		},
+	}
+	manager := NewManager(nil, selector, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(executor)
+
+	auths := []*Auth{
+		{ID: "aa-codex-1", Provider: "codex", Attributes: map[string]string{"routing_group": "group-a"}},
+		{ID: "ab-codex-2", Provider: "codex", Attributes: map[string]string{"routing_group": "group-a"}},
+		{ID: "ba-codex-3", Provider: "codex", Attributes: map[string]string{"routing_group": "group-b"}},
+		{ID: "ca-codex-4", Provider: "codex", Attributes: map[string]string{"routing_group": "group-c"}},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	return manager, executor
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestManager_Execute_UnauthorizedAuthEviction(t *testing.T) {
 	manager, executor, store, model, badAuthID, goodAuthID := newUnauthorizedEvictionTestManager(t)
 

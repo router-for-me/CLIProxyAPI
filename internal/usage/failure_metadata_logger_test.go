@@ -33,10 +33,12 @@ func TestFailureMetadataLoggerLogsOnlySafeFields(t *testing.T) {
 	ctx = coreusage.WithRequestShape(ctx, coreusage.RequestShape{MessageCount: 127, ToolCount: 49})
 	ctx = coreusage.WithRequestAttempt(ctx, coreusage.RequestAttempt{AttemptNo: 4})
 	ctx = coreusage.WithReasoningEffort(ctx, "minimal")
+	ctx = coreusage.WithRoutingGroup(ctx, "codex-primary")
 
 	plugin := &FailureMetadataLogger{}
 	plugin.HandleUsage(ctx, coreusage.Record{
 		Model:              "gpt-5.5",
+		AuthIndex:          "safe-auth-index",
 		RequestedAt:        time.Now(),
 		Latency:            3*time.Second + 25*time.Millisecond,
 		Failed:             true,
@@ -73,6 +75,8 @@ func TestFailureMetadataLoggerLogsOnlySafeFields(t *testing.T) {
 	requireJSONNumberField(t, payload, "upstream_status", http.StatusInternalServerError)
 	requireJSONField(t, payload, "upstream_error_code", "api_error")
 	requireJSONField(t, payload, "request_id", "req-safe-1")
+	requireJSONField(t, payload, "auth_index", "safe-auth-index")
+	requireJSONField(t, payload, "routing_group", "codex-primary")
 }
 
 func TestFailureMetadataLoggerSkipsSuccessfulRecords(t *testing.T) {

@@ -2219,6 +2219,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	fallbackGuard := newGPTLargeToolHistoryFallbackGuard(providers, routeModel, opts)
+	maxRetryCredentials = fallbackGuard.effectiveMaxRetryCredentials(maxRetryCredentials)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -2246,19 +2248,24 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
+		tried[auth.ID] = struct{}{}
+		if fallbackGuard.shouldSkipAuth(auth) {
+			continue
+		}
+		fallbackGuard.markAuth(auth)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		m.logAuthSelectionMetric(ctx, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
-		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithSelectedAuthRoutingGroup(execCtx, auth)
 		if trace != nil {
 			execCtx = coreusage.WithRequestAttempt(execCtx, trace.nextAttempt(nextRetryReason))
 			nextRetryReason = ""
@@ -2360,6 +2367,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	fallbackGuard := newGPTLargeToolHistoryFallbackGuard(providers, routeModel, opts)
+	maxRetryCredentials = fallbackGuard.effectiveMaxRetryCredentials(maxRetryCredentials)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -2387,19 +2396,24 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
+		tried[auth.ID] = struct{}{}
+		if fallbackGuard.shouldSkipAuth(auth) {
+			continue
+		}
+		fallbackGuard.markAuth(auth)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		m.logAuthSelectionMetric(ctx, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
-		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithSelectedAuthRoutingGroup(execCtx, auth)
 		if trace != nil {
 			execCtx = coreusage.WithRequestAttempt(execCtx, trace.nextAttempt(nextRetryReason))
 			nextRetryReason = ""
@@ -2501,6 +2515,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	fallbackGuard := newGPTLargeToolHistoryFallbackGuard(providers, routeModel, opts)
+	maxRetryCredentials = fallbackGuard.effectiveMaxRetryCredentials(maxRetryCredentials)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -2528,19 +2544,24 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, errPick
 		}
+		tried[auth.ID] = struct{}{}
+		if fallbackGuard.shouldSkipAuth(auth) {
+			continue
+		}
+		fallbackGuard.markAuth(auth)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		m.logAuthSelectionMetric(ctx, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
-		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithSelectedAuthRoutingGroup(execCtx, auth)
 		if trace != nil {
 			execCtx = coreusage.WithRequestAttempt(execCtx, trace.nextAttempt(nextRetryReason))
 			nextRetryReason = ""

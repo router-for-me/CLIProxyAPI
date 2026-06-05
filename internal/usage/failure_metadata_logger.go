@@ -79,6 +79,12 @@ func (p *FailureMetadataLogger) HandleUsage(ctx context.Context, record coreusag
 	if requestID := safeFailureMetadataString(resolveFailureMetadataRequestID(ctx, record, attempt)); requestID != "" {
 		fields["request_id"] = requestID
 	}
+	if authIndex := safeFailureMetadataString(record.AuthIndex); authIndex != "" {
+		fields["auth_index"] = authIndex
+	}
+	if routingGroup := safeFailureMetadataString(coreusage.RoutingGroupFromContext(ctx)); routingGroup != "" {
+		fields["routing_group"] = routingGroup
+	}
 
 	log.WithFields(fields).Warn("failure_metadata")
 }

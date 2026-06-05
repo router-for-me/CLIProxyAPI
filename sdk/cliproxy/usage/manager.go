@@ -93,6 +93,7 @@ type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type requestShapeContextKey struct{}
 type requestAttemptContextKey struct{}
+type routingGroupContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -194,6 +195,34 @@ func normalizeRequestShape(shape RequestShape) RequestShape {
 		shape.ToolCount = 0
 	}
 	return shape
+}
+
+// WithRoutingGroup stores the safe routing group selected for the upstream attempt.
+func WithRoutingGroup(ctx context.Context, group string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	group = strings.TrimSpace(group)
+	if group == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, routingGroupContextKey{}, group)
+}
+
+// RoutingGroupFromContext returns the selected upstream routing group stored in ctx.
+func RoutingGroupFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(routingGroupContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }
 
 // WithRequestAttempt stores request-scoped retry attempt metadata.
