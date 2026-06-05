@@ -2224,8 +2224,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
-			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
-			!isTransientRoutingError(lastErr) {
+			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2365,8 +2364,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
-			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
-			!isTransientRoutingError(lastErr) {
+			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -2506,8 +2504,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) > maxRetryCredentials &&
-			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) &&
-			!isTransientRoutingError(lastErr) {
+			!shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, lastErr) {
 			if lastErr != nil {
 				return nil, lastErr
 			}

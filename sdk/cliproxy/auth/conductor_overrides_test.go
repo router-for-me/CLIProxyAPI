@@ -970,7 +970,8 @@ func openAICompatChannelBreakerAuth(id, provider, baseURL string, priority int) 
 }
 
 type credentialRetryLimitExecutor struct {
-	id string
+	id  string
+	err error
 
 	mu    sync.Mutex
 	calls int
@@ -982,12 +983,12 @@ func (e *credentialRetryLimitExecutor) Identifier() string {
 
 func (e *credentialRetryLimitExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.recordCall()
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "boom"}
+	return cliproxyexecutor.Response{}, e.executionError()
 }
 
 func (e *credentialRetryLimitExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.recordCall()
-	return nil, &Error{HTTPStatus: 500, Message: "boom"}
+	return nil, e.executionError()
 }
 
 func (e *credentialRetryLimitExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
@@ -996,7 +997,7 @@ func (e *credentialRetryLimitExecutor) Refresh(_ context.Context, auth *Auth) (*
 
 func (e *credentialRetryLimitExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.recordCall()
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "boom"}
+	return cliproxyexecutor.Response{}, e.executionError()
 }
 
 func (e *credentialRetryLimitExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
@@ -1007,6 +1008,13 @@ func (e *credentialRetryLimitExecutor) recordCall() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.calls++
+}
+
+func (e *credentialRetryLimitExecutor) executionError() error {
+	if e.err != nil {
+		return e.err
+	}
+	return &Error{HTTPStatus: 500, Message: "boom"}
 }
 
 func (e *credentialRetryLimitExecutor) Calls() int {
@@ -1387,6 +1395,77 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 			}
 			if calls := unlimitedExecutor.Calls(); calls != 2 {
 				t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
+			}
+		})
+	}
+}
+
+func TestManager_MaxRetryCredentials_LimitsTransientRoutingFallback(t *testing.T) {
+	model := "MiniMax-M2.7-highspeed"
+	request := cliproxyexecutor.Request{Model: model}
+	transientErr := &Error{
+		Code:       "server_error",
+		HTTPStatus: http.StatusInternalServerError,
+		Message:    miniMaxUnknown1000Message,
+	}
+	testCases := []struct {
+		name   string
+		invoke func(*Manager) error
+	}{
+		{
+			name: "execute",
+			invoke: func(m *Manager) error {
+				_, errExecute := m.executeMixedOnce(context.Background(), []string{"minimax"}, request, cliproxyexecutor.Options{}, 1)
+				return errExecute
+			},
+		},
+		{
+			name: "execute_count",
+			invoke: func(m *Manager) error {
+				_, errExecute := m.executeCountMixedOnce(context.Background(), []string{"minimax"}, request, cliproxyexecutor.Options{}, 1)
+				return errExecute
+			},
+		},
+		{
+			name: "execute_stream",
+			invoke: func(m *Manager) error {
+				_, errExecute := m.executeStreamMixedOnce(context.Background(), []string{"minimax"}, request, cliproxyexecutor.Options{}, 1)
+				return errExecute
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			executor := &credentialRetryLimitExecutor{id: "minimax", err: transientErr}
+			manager.RegisterExecutor(executor)
+
+			auths := []*Auth{
+				{ID: "transient-auth-1", Provider: "minimax"},
+				{ID: "transient-auth-2", Provider: "minimax"},
+				{ID: "transient-auth-3", Provider: "minimax"},
+				{ID: "transient-auth-4", Provider: "minimax"},
+			}
+			reg := registry.GetGlobalRegistry()
+			for _, auth := range auths {
+				reg.RegisterClient(auth.ID, "minimax", []*registry.ModelInfo{{ID: model}})
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+				}
+			}
+			t.Cleanup(func() {
+				for _, auth := range auths {
+					reg.UnregisterClient(auth.ID)
+				}
+			})
+
+			if errInvoke := tc.invoke(manager); errInvoke == nil {
+				t.Fatalf("expected transient routing error for limited retry execution")
+			}
+			if calls := executor.Calls(); calls != 2 {
+				t.Fatalf("expected 2 calls with max-retry-credentials=1, got %d", calls)
 			}
 		})
 	}
