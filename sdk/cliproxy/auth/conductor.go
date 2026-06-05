@@ -1295,13 +1295,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	var failedAuthID string
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, &failedAuthID)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait, failedAuthID)
 		if !shouldRetry {
 			break
 		}
@@ -1330,13 +1331,14 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	var failedAuthID string
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, &failedAuthID)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait, failedAuthID)
 		if !shouldRetry {
 			break
 		}
@@ -1361,13 +1363,14 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	var failedAuthID string
 	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, &failedAuthID)
 		if errStream == nil {
 			return result, nil
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait, failedAuthID)
 		if !shouldRetry {
 			break
 		}
@@ -1390,7 +1393,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
-func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, failedAuthID *string) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -1423,6 +1426,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		if failedAuthID != nil {
+			*failedAuthID = auth.ID
+		}
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1489,7 +1495,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 }
 
-func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, failedAuthID *string) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -1522,6 +1528,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		if failedAuthID != nil {
+			*failedAuthID = auth.ID
+		}
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1588,7 +1597,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 }
 
-func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, failedAuthID *string) (*cliproxyexecutor.StreamResult, error) {
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -1621,6 +1630,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		if failedAuthID != nil {
+			*failedAuthID = auth.ID
+		}
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -2305,7 +2317,46 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 	return false
 }
 
-func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
+// eofRetryAllowed decides whether a statusless "unexpected EOF" may be retried.
+// It honors the auth-file scoped request_retry override of the credential that
+// actually failed (failedAuthID) so a credential that disabled retries is not
+// retried just because another credential for the provider still allows it.
+// When the failing auth is unknown it falls back to the provider-wide check.
+func (m *Manager) eofRetryAllowed(attempt int, providers []string, failedAuthID string) bool {
+	if allowed, known := m.authRetryAllowed(attempt, failedAuthID); known {
+		return allowed
+	}
+	return m.retryAllowed(attempt, providers)
+}
+
+// authRetryAllowed reports whether the specific auth permits another attempt,
+// honoring its auth-file scoped request_retry override. The second return value
+// is false when the auth is unknown (empty ID or not registered).
+func (m *Manager) authRetryAllowed(attempt int, authID string) (bool, bool) {
+	if m == nil || attempt < 0 {
+		return false, false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false, false
+	}
+	m.mu.RLock()
+	auth := m.auths[authID]
+	m.mu.RUnlock()
+	if auth == nil {
+		return false, false
+	}
+	effectiveRetry := int(m.requestRetry.Load())
+	if override, ok := auth.RequestRetryOverride(); ok {
+		effectiveRetry = override
+	}
+	if effectiveRetry < 0 {
+		effectiveRetry = 0
+	}
+	return attempt < effectiveRetry, true
+}
+
+func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration, failedAuthID string) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
 	}
@@ -2327,9 +2378,10 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	// body merely contains "unexpected EOF") has already had a cooldown applied
 	// by MarkResult, so it must fall through to the cooldown-aware path below
 	// rather than force an immediate retry that selection would reject with a
-	// model-cooldown error.
+	// model-cooldown error. eofRetryAllowed also honors the failed credential's
+	// auth-file scoped request_retry override.
 	if status == 0 && isUnexpectedEOFError(err) {
-		if !m.retryAllowed(attempt, providers) {
+		if !m.eofRetryAllowed(attempt, providers, failedAuthID) {
 			return 0, false
 		}
 		return 0, true
