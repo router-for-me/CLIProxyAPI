@@ -480,6 +480,7 @@ type xaiPreparedRequest struct {
 
 func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel = xaiCompactionModel(baseModel, opts)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
 	originalPayloadSource := req.Payload
@@ -599,6 +600,43 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		return strings.TrimSpace(promptCacheKey.String())
 	}
 	return ""
+}
+
+func xaiCompactionModel(model string, opts cliproxyexecutor.Options) string {
+	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	if name != "grok-build-0.1" || !xaiIsCompactionRequest(opts) {
+		return model
+	}
+	return "grok-4.3"
+}
+
+func xaiIsCompactionRequest(opts cliproxyexecutor.Options) bool {
+	if opts.Alt == "responses/compact" {
+		return true
+	}
+	if opts.Headers != nil {
+		if xaiTurnMetadataIsCompaction(opts.Headers.Get("X-Codex-Turn-Metadata")) {
+			return true
+		}
+	}
+	if raw, ok := opts.Metadata["X-Codex-Turn-Metadata"]; ok {
+		return xaiTurnMetadataIsCompaction(fmt.Sprint(raw))
+	}
+	if raw, ok := opts.Metadata["x-codex-turn-metadata"]; ok {
+		return xaiTurnMetadataIsCompaction(fmt.Sprint(raw))
+	}
+	return false
+}
+
+func xaiTurnMetadataIsCompaction(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !gjson.Valid(raw) {
+		return false
+	}
+	return strings.TrimSpace(gjson.Get(raw, "request_kind").String()) == "compaction"
 }
 
 func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {

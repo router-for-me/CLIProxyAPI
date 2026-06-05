@@ -196,6 +196,57 @@ func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorUsesLargeContextModelForGrokBuildCompaction(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	req := cliproxyexecutor.Request{
+		Model:   "grok-build-0.1",
+		Payload: []byte(`{"model":"grok-build-0.1","input":"hello"}`),
+	}
+
+	for _, opts := range []cliproxyexecutor.Options{
+		{
+			SourceFormat: sdktranslator.FormatOpenAIResponse,
+			Alt:          "responses/compact",
+		},
+		{
+			SourceFormat: sdktranslator.FormatOpenAIResponse,
+			Headers: http.Header{
+				"X-Codex-Turn-Metadata": []string{`{"request_kind":"compaction","compaction":{"trigger":"auto","reason":"context_limit"}}`},
+			},
+		},
+	} {
+		prepared, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+		if err != nil {
+			t.Fatalf("prepareResponsesRequest() error = %v", err)
+		}
+		if prepared.baseModel != "grok-4.3" {
+			t.Fatalf("baseModel = %q, want grok-4.3", prepared.baseModel)
+		}
+		if got := gjson.GetBytes(prepared.body, "model").String(); got != "grok-4.3" {
+			t.Fatalf("body model = %q, want grok-4.3; body=%s", got, string(prepared.body))
+		}
+	}
+}
+
+func TestXAIExecutorKeepsGrokBuildModelForNormalRequests(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-build-0.1",
+		Payload: []byte(`{"model":"grok-build-0.1","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+	if prepared.baseModel != "grok-build-0.1" {
+		t.Fatalf("baseModel = %q, want grok-build-0.1", prepared.baseModel)
+	}
+	if got := gjson.GetBytes(prepared.body, "model").String(); got != "grok-build-0.1" {
+		t.Fatalf("body model = %q, want grok-build-0.1; body=%s", got, string(prepared.body))
+	}
+}
+
 func TestXAIExecutorAppliesThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
