@@ -1,8 +1,16 @@
 package executor
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -22,6 +30,69 @@ func TestNormalizeKimiToolMessageLinks_UsesCallIDFallback(t *testing.T) {
 	got := gjson.GetBytes(out, "messages.1.tool_call_id").String()
 	if got != "list_directory:1" {
 		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "list_directory:1")
+	}
+}
+
+func TestKimiExecutor_ClaudeSourceAddsReasoningContentToAssistantToolUse(t *testing.T) {
+	var seenBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if got := req.URL.String(); got != "https://api.kimi.com/coding/v1/messages?beta=true" {
+			t.Fatalf("request URL = %q, want Kimi Claude-compatible messages endpoint", got)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		seenBody = body
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","type":"message","model":"kimi-k2.6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{
+		"model":"kimi-k2.6",
+		"max_tokens":4096,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"text","text":"I will inspect the file."},
+				{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"AGENTS.md"}}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]},
+			{"role":"user","content":[{"type":"text","text":"continue"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want enabled; body=%s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.reasoning_content").String(); got != "I will inspect the file." {
+		t.Fatalf("messages.0.reasoning_content = %q, want assistant text fallback; body=%s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.type").String(); got != "thinking" {
+		t.Fatalf("messages.0.content.0.type = %q, want thinking; body=%s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.thinking").String(); got != "I will inspect the file." {
+		t.Fatalf("messages.0.content.0.thinking = %q, want assistant text fallback; body=%s", got, seenBody)
+	}
+	if _, ok := auth.Attributes["base_url"]; ok {
+		t.Fatal("Execute() mutated original auth attributes")
 	}
 }
 
