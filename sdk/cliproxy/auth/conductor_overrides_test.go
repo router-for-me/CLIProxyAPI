@@ -230,6 +230,45 @@ func TestManager_ShouldRetryAfterError_UnexpectedEOFRespectsAuthRequestRetryOver
 	}
 }
 
+// TestManager_ShouldRetryAfterError_UnexpectedEOFRetriesWhenMaxRetryIntervalZero
+// verifies that the immediate statusless EOF retry stays gated by the retry
+// count alone and is not suppressed by max-retry-interval=0. An EOF retry needs
+// no cooldown wait budget, so it must remain available even when waiting on
+// cooled-down credentials is disabled (maxWait=0). Status-bearing errors that
+// would need a wait budget are still correctly gated off.
+func TestManager_ShouldRetryAfterError_UnexpectedEOFRetriesWhenMaxRetryIntervalZero(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	// request-retry: 3, max-retry-interval: 0 (a documented, valid config).
+	m.SetRetryConfig(3, 0, 0)
+
+	model := "test-model"
+	auth := &Auth{ID: "auth-1", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	if maxWait != 0 {
+		t.Fatalf("expected maxWait=0 from max-retry-interval=0, got %v", maxWait)
+	}
+
+	eof := &Error{Message: "unexpected EOF"}
+	if wait, shouldRetry := m.shouldRetryAfterError(eof, 0, []string{"claude"}, model, maxWait, ""); !shouldRetry || wait != 0 {
+		t.Fatalf("expected immediate EOF retry (wait=0, shouldRetry=true) with max-retry-interval=0, got wait=%v shouldRetry=%v", wait, shouldRetry)
+	}
+
+	// Once the retry count is exhausted the EOF stops being retried.
+	if _, shouldRetry := m.shouldRetryAfterError(eof, 3, []string{"claude"}, model, maxWait, ""); shouldRetry {
+		t.Fatalf("expected no EOF retry once request-retry is exhausted, got true")
+	}
+
+	// A status-bearing error that needs a cooldown wait budget remains gated by
+	// max-retry-interval=0.
+	if _, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait, ""); shouldRetry {
+		t.Fatalf("expected no retry for status-bearing error with max-retry-interval=0, got true")
+	}
+}
+
 // TestManager_Execute_UnexpectedEOFHonorsFailingAuthRequestRetryOverride drives
 // the full Execute/ExecuteStream retry loop to verify that the credential which
 // actually produced the statusless "unexpected EOF" is the one whose
