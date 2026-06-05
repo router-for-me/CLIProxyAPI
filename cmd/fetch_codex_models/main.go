@@ -195,7 +195,7 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 	}
 
 	svc := codexauth.NewCodexAuthWithProxyURL(nil, auth.ProxyURL)
-	tokenData, errRefresh := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	tokenData, errRefresh := svc.RefreshTokensWithRetry(ctx, refreshToken, 3, auth.ID)
 	if errRefresh != nil {
 		return "", false, errRefresh
 	}

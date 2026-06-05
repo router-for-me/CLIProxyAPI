@@ -1386,7 +1386,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		return auth, nil
 	}
 	svc := codexauth.NewCodexAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3, auth.ID)
 	if err != nil {
 		return nil, err
 	}
