@@ -2319,6 +2319,16 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
+	// Treat transient upstream stream interruptions (e.g. "unexpected EOF")
+	// like a normal retryable API error instead of surfacing them to the
+	// client. These carry no HTTP status, so they would otherwise fall through
+	// the 429-only retry path below and abort the request.
+	if isUnexpectedEOFError(err) {
+		if !m.retryAllowed(attempt, providers) {
+			return 0, false
+		}
+		return 0, true
+	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
 		if wait > maxWait {
@@ -2703,6 +2713,20 @@ func errorString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// isUnexpectedEOFError reports whether err represents an "unexpected EOF"
+// surfaced when an upstream connection or stream is cut off mid-response.
+// These are transient connection failures rather than genuine API errors, so
+// callers should retry them instead of returning them to the client.
+func isUnexpectedEOFError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unexpected eof")
 }
 
 func statusCodeFromError(err error) int {

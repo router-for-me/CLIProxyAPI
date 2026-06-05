@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -105,6 +107,55 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 	if wait <= 0 {
 		t.Fatalf("expected wait > 0, got %v", wait)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_RetriesUnexpectedEOF(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "test-model"
+	auth := &Auth{ID: "auth-1", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+
+	// A statusless "unexpected EOF" error (as produced by a truncated upstream
+	// stream) must be retried immediately rather than surfaced to the client.
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 0, []string{"claude"}, model, maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for unexpected EOF, got false")
+	}
+	if wait != 0 {
+		t.Fatalf("expected immediate retry (wait=0), got %v", wait)
+	}
+
+	// io.ErrUnexpectedEOF (possibly wrapped) is detected as well.
+	wrapped := fmt.Errorf("read stream: %w", io.ErrUnexpectedEOF)
+	if _, shouldRetry = m.shouldRetryAfterError(wrapped, 0, []string{"claude"}, model, maxWait); !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for wrapped io.ErrUnexpectedEOF, got false")
+	}
+
+	// Retries stop once the configured request-retry count is exhausted.
+	if _, shouldRetry = m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 3, []string{"claude"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false on attempt=3 for request_retry=3, got true")
+	}
+}
+
+func TestManager_ShouldRetryAfterError_UnexpectedEOFRespectsRetryDisabled(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 30*time.Second, 0)
+
+	auth := &Auth{ID: "auth-1", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	if _, shouldRetry := m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 0, []string{"claude"}, "test-model", maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false when request-retry=0, got true")
 	}
 }
 
