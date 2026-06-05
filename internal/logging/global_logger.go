@@ -34,6 +34,8 @@ var logFieldOrder = []string{
 	"provider", "model", "auth_index", "routing_strategy", "routing_scope", "routing_group",
 	"status", "success", "error_code", "retryable", "retry_after_ms", "reset_ms", "providers",
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
+	"event", "failure_class", "endpoint", "message_count", "tool_count", "reasoning_effort",
+	"attempt_count", "duration_ms", "upstream_status", "upstream_error_code",
 }
 
 // Format renders a single log entry with custom formatting.
