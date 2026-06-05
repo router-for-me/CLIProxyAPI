@@ -144,6 +144,38 @@ func TestManager_ShouldRetryAfterError_RetriesUnexpectedEOF(t *testing.T) {
 	}
 }
 
+func TestManager_ShouldRetryAfterError_StatusBearingEOFUsesCooldownPath(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "test-model"
+	// MarkResult applies a one-minute cooldown for transient 5xx responses.
+	next := time.Now().Add(time.Minute)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: next,
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	// A 5xx whose body merely contains "unexpected EOF" must NOT take the
+	// immediate fast path; with a single cooled-down credential and a cooldown
+	// exceeding max-retry-interval, the cooldown-aware path declines the retry.
+	statusErr := &Error{HTTPStatus: 500, Message: "internal error: unexpected EOF"}
+	if wait, shouldRetry := m.shouldRetryAfterError(statusErr, 0, []string{"claude"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false for status-bearing EOF beyond cooldown, got true (wait=%v)", wait)
+	}
+}
+
 func TestManager_ShouldRetryAfterError_UnexpectedEOFRespectsRetryDisabled(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(0, 30*time.Second, 0)
