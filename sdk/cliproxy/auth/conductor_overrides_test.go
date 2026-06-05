@@ -43,7 +43,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 	}
 
 	_, _, maxWait := m.retrySettings()
-	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait)
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait, "")
 	if shouldRetry {
 		t.Fatalf("expected shouldRetry=false for request_retry=0, got true (wait=%v)", wait)
 	}
@@ -53,7 +53,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 		t.Fatalf("update auth: %v", errUpdate)
 	}
 
-	wait, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait)
+	wait, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait, "")
 	if !shouldRetry {
 		t.Fatalf("expected shouldRetry=true for request_retry=1, got false")
 	}
@@ -61,7 +61,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 		t.Fatalf("expected wait > 0, got %v", wait)
 	}
 
-	_, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 1, []string{"claude"}, model, maxWait)
+	_, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 1, []string{"claude"}, model, maxWait, "")
 	if shouldRetry {
 		t.Fatalf("expected shouldRetry=false on attempt=1 for request_retry=1, got true")
 	}
@@ -101,7 +101,7 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 
 	_, _, maxWait := m.retrySettings()
-	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 429, Message: "quota"}, 0, []string{"kimi"}, routeModel, maxWait)
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 429, Message: "quota"}, 0, []string{"kimi"}, routeModel, maxWait, "")
 	if !shouldRetry {
 		t.Fatalf("expected shouldRetry=true, got false (wait=%v)", wait)
 	}
@@ -124,7 +124,7 @@ func TestManager_ShouldRetryAfterError_RetriesUnexpectedEOF(t *testing.T) {
 
 	// A statusless "unexpected EOF" error (as produced by a truncated upstream
 	// stream) must be retried immediately rather than surfaced to the client.
-	wait, shouldRetry := m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 0, []string{"claude"}, model, maxWait)
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 0, []string{"claude"}, model, maxWait, "")
 	if !shouldRetry {
 		t.Fatalf("expected shouldRetry=true for unexpected EOF, got false")
 	}
@@ -134,12 +134,12 @@ func TestManager_ShouldRetryAfterError_RetriesUnexpectedEOF(t *testing.T) {
 
 	// io.ErrUnexpectedEOF (possibly wrapped) is detected as well.
 	wrapped := fmt.Errorf("read stream: %w", io.ErrUnexpectedEOF)
-	if _, shouldRetry = m.shouldRetryAfterError(wrapped, 0, []string{"claude"}, model, maxWait); !shouldRetry {
+	if _, shouldRetry = m.shouldRetryAfterError(wrapped, 0, []string{"claude"}, model, maxWait, ""); !shouldRetry {
 		t.Fatalf("expected shouldRetry=true for wrapped io.ErrUnexpectedEOF, got false")
 	}
 
 	// Retries stop once the configured request-retry count is exhausted.
-	if _, shouldRetry = m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 3, []string{"claude"}, model, maxWait); shouldRetry {
+	if _, shouldRetry = m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 3, []string{"claude"}, model, maxWait, ""); shouldRetry {
 		t.Fatalf("expected shouldRetry=false on attempt=3 for request_retry=3, got true")
 	}
 }
@@ -171,7 +171,7 @@ func TestManager_ShouldRetryAfterError_StatusBearingEOFUsesCooldownPath(t *testi
 	// immediate fast path; with a single cooled-down credential and a cooldown
 	// exceeding max-retry-interval, the cooldown-aware path declines the retry.
 	statusErr := &Error{HTTPStatus: 500, Message: "internal error: unexpected EOF"}
-	if wait, shouldRetry := m.shouldRetryAfterError(statusErr, 0, []string{"claude"}, model, maxWait); shouldRetry {
+	if wait, shouldRetry := m.shouldRetryAfterError(statusErr, 0, []string{"claude"}, model, maxWait, ""); shouldRetry {
 		t.Fatalf("expected shouldRetry=false for status-bearing EOF beyond cooldown, got true (wait=%v)", wait)
 	}
 }
@@ -186,8 +186,47 @@ func TestManager_ShouldRetryAfterError_UnexpectedEOFRespectsRetryDisabled(t *tes
 	}
 
 	_, _, maxWait := m.retrySettings()
-	if _, shouldRetry := m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 0, []string{"claude"}, "test-model", maxWait); shouldRetry {
+	if _, shouldRetry := m.shouldRetryAfterError(&Error{Message: "unexpected EOF"}, 0, []string{"claude"}, "test-model", maxWait, ""); shouldRetry {
 		t.Fatalf("expected shouldRetry=false when request-retry=0, got true")
+	}
+}
+
+func TestManager_ShouldRetryAfterError_UnexpectedEOFRespectsAuthRequestRetryOverride(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "test-model"
+	// The credential that fails has retries disabled via its auth-file override.
+	disabled := &Auth{
+		ID:       "auth-disabled",
+		Provider: "claude",
+		Metadata: map[string]any{"request_retry": float64(0)},
+	}
+	// A sibling credential for the same provider still allows retries.
+	enabled := &Auth{ID: "auth-enabled", Provider: "claude"}
+	for _, a := range []*Auth{disabled, enabled} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register %s: %v", a.ID, errRegister)
+		}
+	}
+
+	_, _, maxWait := m.retrySettings()
+	eof := &Error{Message: "unexpected EOF"}
+
+	// When the failing credential disabled retries, its statusless EOF must not
+	// be retried even though a sibling credential still allows retries.
+	if _, shouldRetry := m.shouldRetryAfterError(eof, 0, []string{"claude"}, model, maxWait, "auth-disabled"); shouldRetry {
+		t.Fatalf("expected shouldRetry=false for EOF on request_retry=0 credential, got true")
+	}
+
+	// The retry-enabled credential still retries its EOF.
+	if _, shouldRetry := m.shouldRetryAfterError(eof, 0, []string{"claude"}, model, maxWait, "auth-enabled"); !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for EOF on retry-enabled credential, got false")
+	}
+
+	// An unknown failing auth falls back to the provider-wide retry check.
+	if _, shouldRetry := m.shouldRetryAfterError(eof, 0, []string{"claude"}, model, maxWait, ""); !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for EOF with unknown auth fallback, got false")
 	}
 }
 
