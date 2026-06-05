@@ -196,6 +196,58 @@ func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorNormalizesCustomToolCallInput(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","stream":false,"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"custom_tool_call","call_id":"c0","name":"ApplyPatch","input":"*** Begin Patch"},{"type":"custom_tool_call_output","call_id":"c0","output":"done"}],"tools":[],"tool_choice":"auto","parallel_tool_calls":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gjson.GetBytes(gotBody, "tool_choice").Exists() {
+		t.Fatalf("tool_choice should be removed when tools are empty: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "parallel_tool_calls").Exists() {
+		t.Fatalf("parallel_tool_calls should be removed when tools are empty: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "tools").Exists() {
+		t.Fatalf("empty tools should be removed: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.type").String(); got != "function_call" {
+		t.Fatalf("input.1.type = %q, want function_call: %s", got, string(gotBody))
+	}
+	arguments := gjson.GetBytes(gotBody, "input.1.arguments").String()
+	if got := gjson.Get(arguments, "input").String(); got != "*** Begin Patch" {
+		t.Fatalf("arguments.input = %q, want patch text; arguments=%s body=%s", got, arguments, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.2.type").String(); got != "function_call_output" {
+		t.Fatalf("input.2.type = %q, want function_call_output: %s", got, string(gotBody))
+	}
+}
+
 func TestXAIExecutorAppliesThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -644,5 +696,56 @@ func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
 
 	if gjson.GetBytes(out, "tool_choice").Exists() {
 		t.Fatalf("tool_choice should not appear: %s", string(out))
+	}
+}
+
+func TestNormalizeXAIInputCustomToolCalls_ConvertsCustomCalls(t *testing.T) {
+	body := []byte(`{"model":"grok-4","input":[{"type":"custom_tool_call","call_id":"c0","name":"ApplyPatch","input":"*** Begin Patch"},{"type":"custom_tool_call_output","call_id":"c0","output":"done"},{"type":"function_call","call_id":"f0","name":"lookup","arguments":"{}"}]}`)
+	out := normalizeXAIInputCustomToolCalls(body)
+
+	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
+		t.Fatalf("input.0.type = %q, want function_call: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.0.input").Exists() {
+		t.Fatalf("input.0.input should be removed after conversion: %s", string(out))
+	}
+	arguments := gjson.GetBytes(out, "input.0.arguments").String()
+	if got := gjson.Get(arguments, "input").String(); got != "*** Begin Patch" {
+		t.Fatalf("arguments.input = %q, want patch text; arguments=%s body=%s", got, arguments, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call_output" {
+		t.Fatalf("input.1.type = %q, want function_call_output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.output").String(); got != "done" {
+		t.Fatalf("input.1.output = %q, want done: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("input.2.type = %q, want existing function_call preserved: %s", got, string(out))
+	}
+}
+
+func TestNormalizeXAIInputCustomToolCalls_KeepsObjectArguments(t *testing.T) {
+	body := []byte(`{"model":"grok-4","input":[{"type":"custom_tool_call","call_id":"c0","name":"custom_lookup","input":"{\"query\":\"weather\"}"}]}`)
+	out := normalizeXAIInputCustomToolCalls(body)
+
+	arguments := gjson.GetBytes(out, "input.0.arguments").String()
+	if got := gjson.Get(arguments, "query").String(); got != "weather" {
+		t.Fatalf("arguments.query = %q, want weather; arguments=%s body=%s", got, arguments, string(out))
+	}
+	if gjson.Get(arguments, "input").Exists() {
+		t.Fatalf("object input should not be wrapped under input: arguments=%s body=%s", arguments, string(out))
+	}
+}
+
+func TestNormalizeXAIInputCustomToolCalls_PreservesExistingArguments(t *testing.T) {
+	body := []byte(`{"model":"grok-4","input":[{"type":"custom_tool_call","call_id":"c0","name":"custom_lookup","arguments":"{\"query\":\"weather\"}"}]}`)
+	out := normalizeXAIInputCustomToolCalls(body)
+
+	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
+		t.Fatalf("input.0.type = %q, want function_call: %s", got, string(out))
+	}
+	arguments := gjson.GetBytes(out, "input.0.arguments").String()
+	if got := gjson.Get(arguments, "query").String(); got != "weather" {
+		t.Fatalf("arguments.query = %q, want weather; arguments=%s body=%s", got, arguments, string(out))
 	}
 }
