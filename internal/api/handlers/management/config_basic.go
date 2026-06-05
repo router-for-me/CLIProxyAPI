@@ -19,8 +19,12 @@ import (
 )
 
 const (
-	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
 	latestReleaseUserAgent = "CLIProxyAPI"
+)
+
+var (
+	latestReleaseAPIURL  = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
+	latestReleasePageURL = "https://github.com/router-for-me/CLIProxyAPI/releases/latest"
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
@@ -36,30 +40,20 @@ type releaseInfo struct {
 	Name    string `json:"name"`
 }
 
-// GetLatestVersion returns the latest release version from GitHub without downloading assets.
-func (h *Handler) GetLatestVersion(c *gin.Context) {
+func latestVersionHTTPClient(proxyURL string) *http.Client {
 	client := &http.Client{Timeout: 10 * time.Second}
-	proxyURL := ""
-	if h != nil && h.cfg != nil {
-		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+	if strings.TrimSpace(proxyURL) == "" {
+		return client
 	}
-	if proxyURL != "" {
-		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
-		util.SetProxy(sdkCfg, client)
-	}
+	sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
+	util.SetProxy(sdkCfg, client)
+	return client
+}
 
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
-		return
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", latestReleaseUserAgent)
-
+func fetchLatestVersionFromAPI(req *http.Request, client *http.Client) (string, error) {
 	resp, err := client.Do(req)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request_failed", "message": err.Error()})
-		return
+		return "", err
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -69,14 +63,12 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected_status", "message": fmt.Sprintf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))})
-		return
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var info releaseInfo
 	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "decode_failed", "message": errDecode.Error()})
-		return
+		return "", errDecode
 	}
 
 	version := strings.TrimSpace(info.TagName)
@@ -84,7 +76,88 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		version = strings.TrimSpace(info.Name)
 	}
 	if version == "" {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid_response", "message": "missing release version"})
+		return "", fmt.Errorf("missing release version")
+	}
+
+	return version, nil
+}
+
+func parseReleaseVersionFromURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	marker := "/releases/tag/"
+	index := strings.LastIndex(rawURL, marker)
+	if index < 0 {
+		return ""
+	}
+	version := rawURL[index+len(marker):]
+	version = strings.Trim(version, "/")
+	if version == "" {
+		return ""
+	}
+	if cut := strings.IndexAny(version, "?#"); cut >= 0 {
+		version = version[:cut]
+	}
+	return strings.TrimSpace(version)
+}
+
+func fetchLatestVersionFromReleasePage(ctx *gin.Context, client *http.Client) (string, error) {
+	req, err := http.NewRequestWithContext(ctx.Request.Context(), http.MethodGet, latestReleasePageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", latestReleaseUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Debug("failed to close latest release page response body")
+		}
+	}()
+
+	if resp.Request == nil || resp.Request.URL == nil {
+		return "", fmt.Errorf("missing final release URL")
+	}
+	version := parseReleaseVersionFromURL(resp.Request.URL.String())
+	if version == "" {
+		return "", fmt.Errorf("unable to parse release version from %s", resp.Request.URL.String())
+	}
+	return version, nil
+}
+
+// GetLatestVersion returns the latest release version from GitHub without downloading assets.
+func (h *Handler) GetLatestVersion(c *gin.Context) {
+	proxyURL := ""
+	if h != nil && h.cfg != nil {
+		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+	}
+	client := latestVersionHTTPClient(proxyURL)
+
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseAPIURL, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
+		return
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", latestReleaseUserAgent)
+
+	version, err := fetchLatestVersionFromAPI(req, client)
+	if err != nil {
+		fallbackVersion, fallbackErr := fetchLatestVersionFromReleasePage(c, client)
+		if fallbackErr == nil {
+			log.WithError(err).Warn("latest version API request failed, falling back to release page redirect")
+			c.JSON(http.StatusOK, gin.H{"latest-version": fallbackVersion})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "request_failed",
+			"message": fmt.Sprintf("api error: %v; fallback error: %v", err, fallbackErr),
+		})
 		return
 	}
 
