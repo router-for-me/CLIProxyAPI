@@ -187,6 +187,19 @@ func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordIncludesRequestShape(t *testing.T) {
+	ctx := usage.WithRequestShape(context.Background(), usage.RequestShape{MessageCount: 127, ToolCount: 49})
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, true)
+	if record.MessageCount != 127 {
+		t.Fatalf("message count = %d, want 127", record.MessageCount)
+	}
+	if record.ToolCount != 49 {
+		t.Fatalf("tool count = %d, want 49", record.ToolCount)
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",

@@ -33,9 +33,13 @@ type Record struct {
 	FinalSuccess *bool
 	// ReasoningEffort stores the client-requested thinking level for request event logs.
 	ReasoningEffort string
-	RequestedAt     time.Time
-	Latency         time.Duration
-	Failed          bool
+	// MessageCount stores a safe count of inbound message/input items.
+	MessageCount int
+	// ToolCount stores a safe count of inbound tool definitions or tool-call items.
+	ToolCount   int
+	RequestedAt time.Time
+	Latency     time.Duration
+	Failed      bool
 	// ProviderStatusCode stores the upstream HTTP status for failed requests.
 	ProviderStatusCode int
 	// ErrorCode stores a short provider error code only; raw messages and bodies are never stored here.
@@ -71,6 +75,12 @@ type RequestAttempt struct {
 	RetryReason string
 }
 
+// RequestShape stores safe inbound request shape counters.
+type RequestShape struct {
+	MessageCount int
+	ToolCount    int
+}
+
 // RequestFinal stores the final outcome for one client request.
 type RequestFinal struct {
 	RequestID    string
@@ -81,6 +91,7 @@ type RequestFinal struct {
 
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
+type requestShapeContextKey struct{}
 type requestAttemptContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
@@ -137,6 +148,52 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 	default:
 		return ""
 	}
+}
+
+// WithRequestShape stores safe inbound request shape counters for usage sinks.
+func WithRequestShape(ctx context.Context, shape RequestShape) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if shape.MessageCount < 0 {
+		shape.MessageCount = 0
+	}
+	if shape.ToolCount < 0 {
+		shape.ToolCount = 0
+	}
+	if shape.MessageCount == 0 && shape.ToolCount == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, requestShapeContextKey{}, shape)
+}
+
+// RequestShapeFromContext returns safe inbound request shape counters stored in ctx.
+func RequestShapeFromContext(ctx context.Context) RequestShape {
+	if ctx == nil {
+		return RequestShape{}
+	}
+	raw := ctx.Value(requestShapeContextKey{})
+	switch value := raw.(type) {
+	case RequestShape:
+		return normalizeRequestShape(value)
+	case *RequestShape:
+		if value == nil {
+			return RequestShape{}
+		}
+		return normalizeRequestShape(*value)
+	default:
+		return RequestShape{}
+	}
+}
+
+func normalizeRequestShape(shape RequestShape) RequestShape {
+	if shape.MessageCount < 0 {
+		shape.MessageCount = 0
+	}
+	if shape.ToolCount < 0 {
+		shape.ToolCount = 0
+	}
+	return shape
 }
 
 // WithRequestAttempt stores request-scoped retry attempt metadata.

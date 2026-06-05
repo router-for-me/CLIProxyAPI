@@ -33,6 +33,7 @@ type UsageReporter struct {
 	attemptNo   int
 	retryReason string
 	reasoning   string
+	shape       usage.RequestShape
 	requestedAt time.Time
 	once        sync.Once
 }
@@ -60,6 +61,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		attemptNo:   attempt.AttemptNo,
 		retryReason: attempt.RetryReason,
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
+		shape:       usage.RequestShapeFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -184,6 +186,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AttemptNo:          r.attemptNo,
 		RetryReason:        r.retryReason,
 		ReasoningEffort:    r.reasoning,
+		MessageCount:       r.shape.MessageCount,
+		ToolCount:          r.shape.ToolCount,
 		RequestedAt:        r.requestedAt,
 		Latency:            r.latency(),
 		Failed:             failed,

@@ -13,6 +13,8 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 		Metadata: map[string]any{
 			cliproxyexecutor.RequestedModelMetadataKey:  "client-model",
 			cliproxyexecutor.ReasoningEffortMetadataKey: "medium",
+			cliproxyexecutor.MessageCountMetadataKey:    127,
+			cliproxyexecutor.ToolCountMetadataKey:       "49",
 		},
 	}, "fallback-model")
 
@@ -21,5 +23,8 @@ func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 	}
 	if got := coreusage.ReasoningEffortFromContext(ctx); got != "medium" {
 		t.Fatalf("reasoning effort = %q, want %q", got, "medium")
+	}
+	if got := coreusage.RequestShapeFromContext(ctx); got.MessageCount != 127 || got.ToolCount != 49 {
+		t.Fatalf("request shape = %+v, want message_count=127 tool_count=49", got)
 	}
 }

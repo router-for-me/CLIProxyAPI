@@ -20,6 +20,12 @@ const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 // ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
 const ReasoningEffortMetadataKey = "reasoning_effort"
 
+// MessageCountMetadataKey stores the inbound request message item count for safe failure logs.
+const MessageCountMetadataKey = "message_count"
+
+// ToolCountMetadataKey stores the inbound request tool/tool-call item count for safe failure logs.
+const ToolCountMetadataKey = "tool_count"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

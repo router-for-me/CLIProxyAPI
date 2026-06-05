@@ -2734,6 +2734,7 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 	if effort := reasoningEffortFromOptions(opts); effort != "" {
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
 	}
+	ctx = coreusage.WithRequestShape(ctx, requestShapeFromOptions(opts))
 	return ctx
 }
 
@@ -2778,6 +2779,52 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
 	default:
 		return ""
 	}
+}
+
+func requestShapeFromOptions(opts cliproxyexecutor.Options) coreusage.RequestShape {
+	if len(opts.Metadata) == 0 {
+		return coreusage.RequestShape{}
+	}
+	return coreusage.RequestShape{
+		MessageCount: intMetadataValue(opts.Metadata[cliproxyexecutor.MessageCountMetadataKey]),
+		ToolCount:    intMetadataValue(opts.Metadata[cliproxyexecutor.ToolCountMetadataKey]),
+	}
+}
+
+func intMetadataValue(raw any) int {
+	switch value := raw.(type) {
+	case int:
+		if value > 0 {
+			return value
+		}
+	case int32:
+		if value > 0 {
+			return int(value)
+		}
+	case int64:
+		if value > 0 {
+			return int(value)
+		}
+	case float32:
+		if value > 0 {
+			return int(value)
+		}
+	case float64:
+		if value > 0 {
+			return int(value)
+		}
+	case string:
+		parsed, errParse := strconv.Atoi(strings.TrimSpace(value))
+		if errParse == nil && parsed > 0 {
+			return parsed
+		}
+	case []byte:
+		parsed, errParse := strconv.Atoi(strings.TrimSpace(string(value)))
+		if errParse == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func pinnedAuthIDFromMetadata(meta map[string]any) string {

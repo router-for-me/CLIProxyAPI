@@ -242,6 +242,101 @@ func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, 
 	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
 }
 
+func setRequestShapeMetadata(meta map[string]any, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	messageCount, toolCount := requestShapeCounts(rawJSON)
+	meta[coreexecutor.MessageCountMetadataKey] = messageCount
+	meta[coreexecutor.ToolCountMetadataKey] = toolCount
+}
+
+func requestShapeCounts(rawJSON []byte) (int, int) {
+	if len(rawJSON) == 0 {
+		return 0, 0
+	}
+	messageCount := requestMessageCount(rawJSON)
+	toolInteractions := requestToolInteractionCount(rawJSON)
+	if toolInteractions > 0 {
+		return messageCount, toolInteractions
+	}
+	return messageCount, requestDeclaredToolCount(rawJSON)
+}
+
+func requestMessageCount(rawJSON []byte) int {
+	if messages := gjson.GetBytes(rawJSON, "messages"); messages.IsArray() {
+		return len(messages.Array())
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if input.IsArray() {
+		return len(input.Array())
+	}
+	if input.Exists() && strings.TrimSpace(input.Raw) != "" {
+		return 1
+	}
+	return 0
+}
+
+func requestDeclaredToolCount(rawJSON []byte) int {
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.IsArray() {
+		return 0
+	}
+	return len(tools.Array())
+}
+
+func requestToolInteractionCount(rawJSON []byte) int {
+	count := 0
+	if messages := gjson.GetBytes(rawJSON, "messages"); messages.IsArray() {
+		for _, message := range messages.Array() {
+			count += toolInteractionsInObject(message)
+			role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
+			if role == "tool" || role == "function" {
+				count++
+			}
+		}
+	}
+	if input := gjson.GetBytes(rawJSON, "input"); input.IsArray() {
+		for _, item := range input.Array() {
+			count += toolInteractionsInObject(item)
+			if isResponsesToolItemType(item.Get("type").String()) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func toolInteractionsInObject(value gjson.Result) int {
+	count := 0
+	if toolCalls := value.Get("tool_calls"); toolCalls.IsArray() {
+		count += len(toolCalls.Array())
+	}
+	if functionCall := value.Get("function_call"); functionCall.Exists() && functionCall.Raw != "null" {
+		count++
+	}
+	content := value.Get("content")
+	if content.IsArray() {
+		for _, item := range content.Array() {
+			if isResponsesToolItemType(item.Get("type").String()) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func isResponsesToolItemType(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "function_call", "function_call_output", "tool_call", "tool_result",
+		"computer_call", "computer_call_output", "local_shell_call",
+		"local_shell_call_output", "mcp_call", "mcp_call_output":
+		return true
+	default:
+		return false
+	}
+}
+
 // headersFromContext extracts the original HTTP request headers from the gin context
 // embedded in the provided context. This allows session affinity selectors to read
 // client headers like X-Amp-Thread-Id.
@@ -566,6 +661,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setRequestShapeMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -619,6 +715,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setRequestShapeMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -688,6 +785,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setRequestShapeMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
