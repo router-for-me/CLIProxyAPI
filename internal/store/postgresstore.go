@@ -144,17 +144,18 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 }
 
 // Bootstrap synchronizes configuration and auth records between PostgreSQL and the local workspace.
-func (s *PostgresStore) Bootstrap(ctx context.Context, exampleConfigPath string) error {
+func (s *PostgresStore) Bootstrap(ctx context.Context, exampleConfigPath string) (string, error) {
 	if err := s.EnsureSchema(ctx); err != nil {
-		return err
+		return "", err
 	}
-	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
-		return err
+	generatedKey, err := s.syncConfigFromDatabase(ctx, exampleConfigPath)
+	if err != nil {
+		return "", err
 	}
 	if err := s.syncAuthFromDatabase(ctx); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return generatedKey, nil
 }
 
 // ConfigPath returns the managed configuration file path inside the spool directory.
@@ -405,7 +406,8 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 }
 
 // syncConfigFromDatabase writes the database-stored config to disk or seeds the database from template.
-func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfigPath string) error {
+func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfigPath string) (string, error) {
+	generatedKey := ""
 	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
 	var content string
 	err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&content)
@@ -413,37 +415,39 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 	case errors.Is(err, sql.ErrNoRows):
 		if _, errStat := os.Stat(s.configPath); errors.Is(errStat, fs.ErrNotExist) {
 			if exampleConfigPath != "" {
-				if errCopy := misc.CopyConfigTemplate(exampleConfigPath, s.configPath); errCopy != nil {
-					return fmt.Errorf("postgres store: copy example config: %w", errCopy)
+				copiedKey, errCopy := misc.CopyConfigTemplate(exampleConfigPath, s.configPath)
+				if errCopy != nil {
+					return "", fmt.Errorf("postgres store: copy example config: %w", errCopy)
 				}
+				generatedKey = copiedKey
 			} else {
 				if errCreate := os.MkdirAll(filepath.Dir(s.configPath), 0o700); errCreate != nil {
-					return fmt.Errorf("postgres store: prepare config directory: %w", errCreate)
+					return "", fmt.Errorf("postgres store: prepare config directory: %w", errCreate)
 				}
 				if errWrite := os.WriteFile(s.configPath, []byte{}, 0o600); errWrite != nil {
-					return fmt.Errorf("postgres store: create empty config: %w", errWrite)
+					return "", fmt.Errorf("postgres store: create empty config: %w", errWrite)
 				}
 			}
 		}
 		data, errRead := os.ReadFile(s.configPath)
 		if errRead != nil {
-			return fmt.Errorf("postgres store: read local config: %w", errRead)
+			return "", fmt.Errorf("postgres store: read local config: %w", errRead)
 		}
 		if errPersist := s.persistConfig(ctx, data); errPersist != nil {
-			return errPersist
+			return "", errPersist
 		}
 	case err != nil:
-		return fmt.Errorf("postgres store: load config from database: %w", err)
+		return "", fmt.Errorf("postgres store: load config from database: %w", err)
 	default:
 		if err = os.MkdirAll(filepath.Dir(s.configPath), 0o700); err != nil {
-			return fmt.Errorf("postgres store: prepare config directory: %w", err)
+			return "", fmt.Errorf("postgres store: prepare config directory: %w", err)
 		}
 		normalized := normalizeLineEndings(content)
 		if err = os.WriteFile(s.configPath, []byte(normalized), 0o600); err != nil {
-			return fmt.Errorf("postgres store: write config to spool: %w", err)
+			return "", fmt.Errorf("postgres store: write config to spool: %w", err)
 		}
 	}
-	return nil
+	return generatedKey, nil
 }
 
 // syncAuthFromDatabase populates the local auth directory from PostgreSQL data.

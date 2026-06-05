@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/samplekeys"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Register ensures the config-access provider is available to the access manager.
@@ -17,6 +19,9 @@ func Register(cfg *sdkconfig.SDKConfig) {
 	}
 
 	keys := normalizeKeys(cfg.APIKeys)
+	if samplekeys.ContainsClientAPIKey(keys) {
+		log.Warn("configured API keys include rejected sample values; replace them with private keys before exposing the server")
+	}
 	if len(keys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
@@ -86,7 +91,11 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	}
 
 	for _, candidate := range candidates {
+		candidate.value = strings.TrimSpace(candidate.value)
 		if candidate.value == "" {
+			continue
+		}
+		if samplekeys.IsClientAPIKey(candidate.value) {
 			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
