@@ -341,7 +341,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "sequence_number", nextSeq())
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.id", st.ReasoningID)
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "output_index", st.ReasoningIndex)
-		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.summary.text", text)
+		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.summary.0.text", text)
 		out = append(out, emitRespEvent("response.output_item.done", outputItemDone))
 
 		st.Reasonings = append(st.Reasonings, oaiToResponsesStateReasoning{ReasoningID: st.ReasoningID, ReasoningData: text, OutputIndex: st.ReasoningIndex})
