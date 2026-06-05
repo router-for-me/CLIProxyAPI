@@ -57,6 +57,22 @@ func TestNewOpenAICompatStatusErr_ParsesRetryAfter(t *testing.T) {
 	}
 }
 
+func TestNewOpenAICompatStatusErr_EmptyBodyHasErrorCode(t *testing.T) {
+	t.Parallel()
+
+	err := newOpenAICompatStatusErr(openAICompatProfileForKind("codex"), nil, "gpt-5.5", http.StatusInternalServerError, nil, "application/json", nil)
+
+	if err.StatusCode() != http.StatusInternalServerError {
+		t.Fatalf("StatusCode() = %d, want %d", err.StatusCode(), http.StatusInternalServerError)
+	}
+	if err.ErrorCode() != openAICompatEmptyUpstreamResponseCode {
+		t.Fatalf("ErrorCode() = %q, want %q", err.ErrorCode(), openAICompatEmptyUpstreamResponseCode)
+	}
+	if err.Error() != "empty upstream response" {
+		t.Fatalf("Error() = %q, want empty upstream response", err.Error())
+	}
+}
+
 func TestNewOpenAICompatStatusErr_KimiBillingCycleUsageLimitHasRetryAfter(t *testing.T) {
 	t.Parallel()
 

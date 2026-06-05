@@ -147,6 +147,9 @@ func retryReasonFromError(err error) string {
 			return "retryable_error"
 		}
 	}
+	if code := strings.TrimSpace(errorCodeFromError(err)); code != "" {
+		return code
+	}
 	if status := statusCodeFromError(err); status > 0 {
 		return "status_" + strconv.Itoa(status)
 	}
@@ -196,6 +199,7 @@ const (
 	halfOpenProbeStateLimit          = 4096
 	transientNetworkRetryAttempts    = 3
 	transientNetworkRetryMaxDelay    = 5 * time.Second
+	emptyUpstreamResponseErrorCode   = "empty_upstream_response"
 	slowRequestSoftThreshold         = 30 * time.Second
 	slowRequestHardThreshold         = time.Minute
 	slowRequestSoftPenalty           = 10
@@ -2327,6 +2331,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if authErr != nil {
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, authErr)
 			transientNetworkFallback := isTransientRoutingError(authErr)
+			emptyUpstreamFallback := isRetryableEmptyUpstreamResponseError(authErr)
 			if isRequestInvalidError(authErr) {
 				if !routeFallback {
 					return cliproxyexecutor.Response{}, authErr
@@ -2339,7 +2344,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			nextRetryReason = retryReasonFromError(authErr)
 			if homeMode {
 				homeAuthCount++
-			} else if !routeFallback && !transientNetworkFallback {
+			} else if !routeFallback && !transientNetworkFallback && !emptyUpstreamFallback {
 				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
 					return cliproxyexecutor.Response{}, errWait
 				}
@@ -2467,6 +2472,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if authErr != nil {
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, authErr)
 			transientNetworkFallback := isTransientRoutingError(authErr)
+			emptyUpstreamFallback := isRetryableEmptyUpstreamResponseError(authErr)
 			if isRequestInvalidError(authErr) {
 				if !routeFallback {
 					return cliproxyexecutor.Response{}, authErr
@@ -2479,7 +2485,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			nextRetryReason = retryReasonFromError(authErr)
 			if homeMode {
 				homeAuthCount++
-			} else if !routeFallback && !transientNetworkFallback {
+			} else if !routeFallback && !transientNetworkFallback && !emptyUpstreamFallback {
 				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
 					return cliproxyexecutor.Response{}, errWait
 				}
@@ -2571,6 +2577,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			routeFallback := shouldFallbackRequestScopedRouteErrorForRequest(routeModel, opts, errStream)
 			transientNetworkFallback := isTransientRoutingError(errStream)
+			emptyUpstreamFallback := isRetryableEmptyUpstreamResponseError(errStream)
 			if isRequestInvalidError(errStream) {
 				if !routeFallback {
 					return nil, errStream
@@ -2581,7 +2588,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			nextRetryReason = retryReasonFromError(errStream)
 			if homeMode {
 				homeAuthCount++
-			} else if !routeFallback && !transientNetworkFallback {
+			} else if !routeFallback && !transientNetworkFallback && !emptyUpstreamFallback {
 				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
 					return nil, errWait
 				}
@@ -3393,6 +3400,12 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		return 0, false
 	}
 	if isTransientRoutingError(err) {
+		return transientNetworkRetryDelay(attempt, maxWait)
+	}
+	if isRetryableEmptyUpstreamResponseError(err) {
+		if !m.retryAllowed(attempt, providers) {
+			return 0, false
+		}
 		return transientNetworkRetryDelay(attempt, maxWait)
 	}
 	if maxWait <= 0 {
@@ -5240,6 +5253,20 @@ func isTransientRoutingResultError(err *Error) bool {
 
 func isTransientRoutingError(err error) bool {
 	return isTransientNetworkError(err) || isMiniMaxTransientUpstreamError(err)
+}
+
+func isRetryableEmptyUpstreamResponseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(errorCodeFromError(err)), emptyUpstreamResponseErrorCode) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == 0 {
+		return true
+	}
+	return status == http.StatusRequestTimeout || isTransientUpstreamStatus(status)
 }
 
 func isRequestScopedRouteFallbackError(err error) bool {

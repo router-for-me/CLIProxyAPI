@@ -19,6 +19,7 @@ import (
 )
 
 const openAICompatAccountQuotaRetryWait = 24 * time.Hour
+const openAICompatEmptyUpstreamResponseCode = "empty_upstream_response"
 const deepSeekThinkingBudgetMin = 100
 const deepSeekThinkingBudgetMax = 32768
 
@@ -1436,11 +1437,11 @@ func deleteMessageReasoningContent(payload []byte) []byte {
 }
 
 func summarizeOpenAICompatError(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
 	trimmed := strings.TrimSpace(string(body))
-	if trimmed == "" || !gjson.ValidBytes(body) {
+	if trimmed == "" {
+		return "empty upstream response"
+	}
+	if !gjson.ValidBytes(body) {
 		return trimmed
 	}
 	message := firstNonEmptyJSONValue(body,
@@ -1754,18 +1755,26 @@ func logOpenAICompatUpstreamError(profile openAICompatProfile, auth *cliproxyaut
 	if retryAfter != nil {
 		entry = entry.WithField("retry_after", retryAfter.String())
 	}
-	entry.Warnf("openai compat upstream error: %s", helps.SummarizeErrorBody(contentType, body))
+	summary := helps.SummarizeErrorBody(contentType, body)
+	if strings.TrimSpace(summary) == "" && strings.TrimSpace(string(body)) == "" {
+		summary = "empty upstream response"
+	}
+	entry.Warnf("openai compat upstream error: %s", summary)
 }
 
 func newOpenAICompatStatusErr(profile openAICompatProfile, auth *cliproxyauth.Auth, routeModel string, statusCode int, headers http.Header, contentType string, body []byte) statusErr {
 	retryAfter := openAICompatRetryAfter(headers, body)
 	logOpenAICompatUpstreamError(profile, auth, routeModel, statusCode, retryAfter, contentType, body)
 	message := summarizeOpenAICompatError(body)
+	errorCode := firstNonEmptyJSONValue(body, "error.code", "code", "error.type", "type", "error.err_code")
+	if errorCode == "" && strings.TrimSpace(string(body)) == "" {
+		errorCode = openAICompatEmptyUpstreamResponseCode
+	}
 	return statusErr{
 		code:               normalizeOpenAICompatStatus(statusCode, message),
 		providerStatusCode: statusCode,
 		msg:                message,
-		errorCode:          firstNonEmptyJSONValue(body, "error.code", "code", "error.type", "type", "error.err_code"),
+		errorCode:          errorCode,
 		retryAfter:         retryAfter,
 	}
 }

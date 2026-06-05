@@ -74,6 +74,49 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 	}
 }
 
+func TestManager_ShouldRetryAfterError_EmptyUpstreamResponseUsesConfiguredRetry(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "gpt-5.5"
+	auth := &Auth{
+		ID:       "empty-upstream-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"request_retry": float64(0),
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	errEmpty := codedStatusError{
+		status: http.StatusInternalServerError,
+		code:   emptyUpstreamResponseErrorCode,
+		msg:    "empty upstream response",
+	}
+	_, _, maxWait := m.retrySettings()
+	if wait, shouldRetry := m.shouldRetryAfterError(errEmpty, 0, []string{"codex"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false for request_retry=0, got true (wait=%v)", wait)
+	}
+
+	auth.Metadata["request_retry"] = float64(1)
+	if _, errUpdate := m.Update(context.Background(), auth); errUpdate != nil {
+		t.Fatalf("update auth: %v", errUpdate)
+	}
+
+	wait, shouldRetry := m.shouldRetryAfterError(errEmpty, 0, []string{"codex"}, model, maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for request_retry=1")
+	}
+	if wait != time.Second {
+		t.Fatalf("wait = %v, want %v", wait, time.Second)
+	}
+	if _, shouldRetry = m.shouldRetryAfterError(errEmpty, 1, []string{"codex"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false on attempt=1 for request_retry=1")
+	}
+}
+
 func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(3, 30*time.Second, 0)
@@ -1226,6 +1269,24 @@ func (e *retryAfterStatusError) RetryAfter() *time.Duration {
 	}
 	d := e.retryAfter
 	return &d
+}
+
+type codedStatusError struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (e codedStatusError) Error() string {
+	return e.msg
+}
+
+func (e codedStatusError) StatusCode() int {
+	return e.status
+}
+
+func (e codedStatusError) ErrorCode() string {
+	return e.code
 }
 
 type emptyStreamRetryExecutor struct {
