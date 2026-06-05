@@ -522,6 +522,51 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 }
 
+func TestManager_MarkResult_TransientErrorCooldownCanBeDisabled(t *testing.T) {
+	prevCooling := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownNanos.Load()
+	SetTransientErrorCooldown(0)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevCooling)
+		transientErrorCooldownNanos.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-transient",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-transient"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "upstream unavailable"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected model state to record the transient failure")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected transient NextRetryAfter to be zero, got %v", state.NextRetryAfter)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
