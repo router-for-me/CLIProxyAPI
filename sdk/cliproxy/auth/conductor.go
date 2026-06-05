@@ -2369,9 +2369,6 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if err == nil {
 		return 0, false
 	}
-	if maxWait <= 0 {
-		return 0, false
-	}
 	status := statusCodeFromError(err)
 	if status == http.StatusOK {
 		return 0, false
@@ -2389,11 +2386,20 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	// rather than force an immediate retry that selection would reject with a
 	// model-cooldown error. eofRetryAllowed also honors the failed credential's
 	// auth-file scoped request_retry override.
+	//
+	// This is intentionally checked before the maxWait gate below: an EOF retry
+	// is immediate (wait=0) and needs no cooldown budget, so it must remain
+	// gated by the retry count alone and stay available even when
+	// max-retry-interval is 0 (which only caps how long we wait on cooled-down
+	// credentials).
 	if status == 0 && isUnexpectedEOFError(err) {
 		if !m.eofRetryAllowed(attempt, providers, failedAuthID) {
 			return 0, false
 		}
 		return 0, true
+	}
+	if maxWait <= 0 {
+		return 0, false
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
