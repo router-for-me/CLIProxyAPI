@@ -132,3 +132,73 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 		t.Fatal("expected chat model to keep default thinking support")
 	}
 }
+
+func TestBuildOpenAICompatibilityConfigModels_InheritsStaticThinking(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "gpt-5.5", Alias: "static-gpt-5.5"},
+			{
+				Name:  "gpt-5.5",
+				Alias: "explicit-gpt-5.5",
+				Thinking: &internalregistry.ThinkingSupport{
+					Levels: []string{"low"},
+				},
+			},
+			{Name: "custom-upstream", Alias: "gpt-5.5"},
+		},
+	})
+	if len(models) != 3 {
+		t.Fatalf("models len = %d, want 3", len(models))
+	}
+
+	if models[0].Thinking == nil {
+		t.Fatal("expected static-gpt-5.5 to inherit static thinking support")
+	}
+	hasXHigh := false
+	for _, level := range models[0].Thinking.Levels {
+		if level == "xhigh" {
+			hasXHigh = true
+			break
+		}
+	}
+	if !hasXHigh {
+		t.Fatalf("static-gpt-5.5 thinking levels = %v, want xhigh", models[0].Thinking.Levels)
+	}
+
+	if got := models[1].Thinking.Levels; len(got) != 1 || got[0] != "low" {
+		t.Fatalf("explicit thinking levels = %v, want [low]", got)
+	}
+
+	if models[2].Thinking == nil {
+		t.Fatal("expected custom-upstream alias to keep default thinking support")
+	}
+	for _, level := range models[2].Thinking.Levels {
+		if level == "xhigh" {
+			t.Fatalf("custom-upstream alias thinking levels = %v, want no inherited xhigh", models[2].Thinking.Levels)
+		}
+	}
+}
+
+func TestShouldRefreshAuthForModelCatalogChange(t *testing.T) {
+	changedProviders := map[string]bool{"codex": true}
+
+	if !shouldRefreshAuthForModelCatalogChange(&coreauth.Auth{Provider: "codex"}, changedProviders) {
+		t.Fatal("expected direct codex auth to refresh")
+	}
+	if !shouldRefreshAuthForModelCatalogChange(&coreauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}, changedProviders) {
+		t.Fatal("expected openai-compatible auth to refresh after static catalog change")
+	}
+	if shouldRefreshAuthForModelCatalogChange(&coreauth.Auth{Provider: "gemini"}, changedProviders) {
+		t.Fatal("did not expect unrelated provider auth to refresh")
+	}
+	if shouldRefreshAuthForModelCatalogChange(&coreauth.Auth{Provider: "openai-compatibility"}, nil) {
+		t.Fatal("did not expect refresh without changed providers")
+	}
+}

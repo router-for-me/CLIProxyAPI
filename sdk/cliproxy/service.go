@@ -379,6 +379,21 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 	return "", "", false
 }
 
+// shouldRefreshAuthForModelCatalogChange reports whether an auth's model
+// registration depends on refreshed static catalog data. OpenAI-compatible
+// configured models may inherit thinking metadata from any static provider.
+func shouldRefreshAuthForModelCatalogChange(auth *coreauth.Auth, changedProviders map[string]bool) bool {
+	if auth == nil || len(changedProviders) == 0 {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if changedProviders[provider] {
+		return true
+	}
+	_, _, isCompat := openAICompatInfoFromAuth(auth)
+	return isCompat
+}
+
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	s.ensureExecutorsForAuthWithMode(a, false)
 }
@@ -878,8 +893,7 @@ func (s *Service) Run(ctx context.Context) error {
 			if !ok || auth == nil || auth.Disabled {
 				continue
 			}
-			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-			if !providerSet[provider] {
+			if !shouldRefreshAuthForModelCatalogChange(auth, providerSet) {
 				continue
 			}
 			if s.refreshModelRegistrationForAuth(auth) {
@@ -1585,7 +1599,20 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		thinking := model.Thinking
 		if thinking == nil && !model.Image {
-			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			name := strings.TrimSpace(model.Name)
+			if name != "" {
+				if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
+					thinking = upstream.Thinking
+				}
+			}
+			if thinking == nil && name == "" {
+				if upstream := registry.LookupStaticModelInfo(modelID); upstream != nil && upstream.Thinking != nil {
+					thinking = upstream.Thinking
+				}
+			}
+			if thinking == nil {
+				thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			}
 		}
 		models = append(models, &ModelInfo{
 			ID:          modelID,

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -33,6 +34,23 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 	if textModel == imageModel {
 		t.Fatal("hash should change when image flag changes")
+	}
+}
+
+func TestComputeOpenAICompatModelsHash_IncludesThinking(t *testing.T) {
+	low := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{
+		Name:     "gpt-5.5",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low"}},
+	}})
+	xhigh := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{
+		Name:     "gpt-5.5",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "xhigh"}},
+	}})
+	if low == "" || xhigh == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if low == xhigh {
+		t.Fatal("hash should change when thinking support changes")
 	}
 }
 
