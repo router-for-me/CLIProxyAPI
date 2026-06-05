@@ -1426,9 +1426,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
-		if failedAuthID != nil {
-			*failedAuthID = auth.ID
-		}
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1451,6 +1448,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			if failedAuthID != nil {
+				*failedAuthID = auth.ID
+			}
 			lastErr = errPrepare
 			continue
 		}
@@ -1485,6 +1485,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
+			}
+			if failedAuthID != nil {
+				*failedAuthID = auth.ID
 			}
 			lastErr = authErr
 			if homeMode {
@@ -1528,9 +1531,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
-		if failedAuthID != nil {
-			*failedAuthID = auth.ID
-		}
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1553,6 +1553,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			if failedAuthID != nil {
+				*failedAuthID = auth.ID
+			}
 			lastErr = errPrepare
 			continue
 		}
@@ -1587,6 +1590,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
+			}
+			if failedAuthID != nil {
+				*failedAuthID = auth.ID
 			}
 			lastErr = authErr
 			if homeMode {
@@ -1630,9 +1636,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
-		if failedAuthID != nil {
-			*failedAuthID = auth.ID
-		}
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1653,6 +1656,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			if failedAuthID != nil {
+				*failedAuthID = auth.ID
+			}
 			lastErr = errPrepare
 			continue
 		}
@@ -1664,6 +1670,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
+			}
+			if failedAuthID != nil {
+				*failedAuthID = auth.ID
 			}
 			lastErr = errStream
 			if homeMode {

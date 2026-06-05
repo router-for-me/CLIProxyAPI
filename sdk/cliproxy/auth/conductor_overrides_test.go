@@ -230,6 +230,112 @@ func TestManager_ShouldRetryAfterError_UnexpectedEOFRespectsAuthRequestRetryOver
 	}
 }
 
+// TestManager_Execute_UnexpectedEOFHonorsFailingAuthRequestRetryOverride drives
+// the full Execute/ExecuteStream retry loop to verify that the credential which
+// actually produced the statusless "unexpected EOF" is the one whose
+// request_retry override gates the retry. The failing credential disables
+// retries (request_retry=0) while a sibling that still allows retries is parked
+// on cooldown so it is never selected; the sibling's presence makes the
+// provider-wide retry check return true, so an immediate EOF retry here would
+// only be suppressed if the loop tracks the failing credential correctly.
+func TestManager_Execute_UnexpectedEOFHonorsFailingAuthRequestRetryOverride(t *testing.T) {
+	model := "test-model"
+	eofErr := &Error{Message: "unexpected EOF"}
+
+	testCases := []struct {
+		name  string
+		calls func(*authFallbackExecutor) []string
+		run   func(*Manager) error
+	}{
+		{
+			name:  "execute",
+			calls: (*authFallbackExecutor).ExecuteCalls,
+			run: func(m *Manager) error {
+				_, err := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				return err
+			},
+		},
+		{
+			name:  "execute_stream",
+			calls: (*authFallbackExecutor).StreamCalls,
+			run: func(m *Manager) error {
+				// A statusless bootstrap EOF is surfaced through the stream's
+				// chunks (returned error is nil), so drain and report it.
+				result, err := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+				if err != nil {
+					return err
+				}
+				if result == nil {
+					return nil
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						return chunk.Err
+					}
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			// Provider-wide retries are enabled; only the failing credential's
+			// request_retry=0 override must stop the EOF from being retried.
+			m.SetRetryConfig(3, 30*time.Second, 0)
+
+			baseID := uuid.NewString()
+			failing := &Auth{
+				ID:       baseID + "-failing",
+				Provider: "claude",
+				Metadata: map[string]any{"request_retry": float64(0)},
+			}
+			sibling := &Auth{
+				ID:       baseID + "-sibling",
+				Provider: "claude",
+				ModelStates: map[string]*ModelState{
+					model: {Unavailable: true, Status: StatusError, NextRetryAfter: time.Now().Add(time.Hour)},
+				},
+			}
+
+			executor := &authFallbackExecutor{
+				id:                "claude",
+				executeErrors:     map[string]error{failing.ID: eofErr},
+				streamFirstErrors: map[string]error{failing.ID: eofErr},
+			}
+			m.RegisterExecutor(executor)
+
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(failing.ID, "claude", []*registry.ModelInfo{{ID: model}})
+			reg.RegisterClient(sibling.ID, "claude", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() {
+				reg.UnregisterClient(failing.ID)
+				reg.UnregisterClient(sibling.ID)
+			})
+
+			for _, a := range []*Auth{failing, sibling} {
+				if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+					t.Fatalf("register %s: %v", a.ID, errRegister)
+				}
+			}
+
+			if errRun := tc.run(m); errRun == nil {
+				t.Fatalf("expected error from unexpected EOF, got nil")
+			}
+
+			calls := tc.calls(executor)
+			if len(calls) != 1 {
+				t.Fatalf("expected the failing credential to be tried exactly once (no EOF retry under request_retry=0), got %d calls: %v", len(calls), calls)
+			}
+			if calls[0] != failing.ID {
+				t.Fatalf("expected only the failing credential %q to be tried, got %v", failing.ID, calls)
+			}
+		})
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
