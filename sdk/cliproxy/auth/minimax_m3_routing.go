@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	miniMaxM2SafeTotalTokens     int64 = 180000
-	miniMaxM3RequiredMetadataKey       = "__cliproxy_minimax_m3_required"
-	miniMaxM3StandardModel             = "MiniMax-M3"
+	miniMaxM2SafeTotalTokens        int64 = 180000
+	miniMaxM3RequiredMetadataKey          = "__cliproxy_minimax_m3_required"
+	miniMaxM3StandardModel                = "MiniMax-M3"
+	miniMaxLargeToolHistoryMessages       = 100
+	miniMaxLargeToolHistoryTools          = 40
 )
 
 var (
@@ -25,6 +27,7 @@ var (
 func filterMiniMaxM3RequiredExecutionModels(routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []string) []string {
 	candidates = rewriteMiniMaxM3HighspeedRouteToStandard(routeModel, opts, candidates)
 	candidates = filterClaudeSonnetMiniMaxM3Highspeed(routeModel, opts, candidates)
+	candidates = filterMiniMaxLargeToolHistoryM3Highspeed(req, opts, candidates)
 	if len(candidates) == 0 || !miniMaxCandidateSetCanRouteToM3(routeModel, opts, candidates) {
 		return candidates
 	}
@@ -109,6 +112,26 @@ func filterClaudeSonnetMiniMaxM3Highspeed(routeModel string, opts cliproxyexecut
 	return filtered
 }
 
+func filterMiniMaxLargeToolHistoryM3Highspeed(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []string) []string {
+	if len(candidates) < 2 || !miniMaxRequestHasLargeToolHistory(req, opts) {
+		return candidates
+	}
+
+	filtered := make([]string, 0, len(candidates))
+	removed := false
+	for _, candidate := range candidates {
+		if isMiniMaxM3HighspeedModel(candidate) {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	if !removed || len(filtered) == 0 {
+		return candidates
+	}
+	return filtered
+}
+
 func miniMaxCandidateSetCanRouteToM3(routeModel string, opts cliproxyexecutor.Options, candidates []string) bool {
 	routeIsSonnetAlias := isClaudeSonnet46FallbackModel(routeModel) ||
 		isClaudeSonnet46FallbackModel(requestedModelAliasFromOptions(opts, routeModel))
@@ -152,6 +175,84 @@ func miniMaxRoutingPayload(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		return opts.OriginalRequest
 	}
 	return req.Payload
+}
+
+func miniMaxRequestHasLargeToolHistory(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	messageCount := intMetadataValue(opts.Metadata[cliproxyexecutor.MessageCountMetadataKey])
+	toolCount := intMetadataValue(opts.Metadata[cliproxyexecutor.ToolCountMetadataKey])
+	if messageCount >= miniMaxLargeToolHistoryMessages || toolCount >= miniMaxLargeToolHistoryTools {
+		return true
+	}
+
+	payload := miniMaxRoutingPayload(req, opts)
+	if messageCount <= 0 {
+		messageCount = miniMaxRoutingMessageCount(payload)
+	}
+	if toolCount <= 0 {
+		toolCount = miniMaxRoutingToolHistoryCount(payload)
+	}
+	return messageCount >= miniMaxLargeToolHistoryMessages || toolCount >= miniMaxLargeToolHistoryTools
+}
+
+func miniMaxRoutingMessageCount(payload []byte) int {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return 0
+	}
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		return len(messages.Array())
+	}
+	input := gjson.GetBytes(payload, "input")
+	if input.IsArray() {
+		return len(input.Array())
+	}
+	if input.Exists() && strings.TrimSpace(input.Raw) != "" {
+		return 1
+	}
+	return 0
+}
+
+func miniMaxRoutingToolHistoryCount(payload []byte) int {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return 0
+	}
+	interactionCount := 0
+	var walk func(gjson.Result)
+	walk = func(node gjson.Result) {
+		if !node.IsObject() && !node.IsArray() {
+			return
+		}
+		if node.IsObject() {
+			switch strings.ToLower(strings.TrimSpace(node.Get("type").String())) {
+			case "tool_use", "tool_result", "function_call", "function_call_output", "mcp_tool_use", "mcp_tool_result":
+				interactionCount++
+			}
+			if toolCalls := node.Get("tool_calls"); toolCalls.IsArray() {
+				interactionCount += len(toolCalls.Array())
+			}
+		}
+		node.ForEach(func(_, child gjson.Result) bool {
+			walk(child)
+			return true
+		})
+	}
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		walk(messages)
+	}
+	if input := gjson.GetBytes(payload, "input"); input.IsArray() {
+		walk(input)
+	}
+	if interactionCount > 0 {
+		return interactionCount
+	}
+	return miniMaxRoutingDeclaredToolCount(payload)
+}
+
+func miniMaxRoutingDeclaredToolCount(payload []byte) int {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return 0
+	}
+	return len(tools.Array())
 }
 
 func miniMaxRequestHasImageInput(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {

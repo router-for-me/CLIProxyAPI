@@ -278,6 +278,33 @@ func TestManagerExecute_OpenAICompatMiniMaxM3HighspeedRouteUsesStandardM3(t *tes
 	}
 }
 
+func TestManagerExecute_OpenAICompatLargeToolHistorySkipsMiniMaxM3Highspeed(t *testing.T) {
+	alias := "agent-large-history"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "MiniMax-M3-highspeed", Alias: alias},
+		{Name: "mimo-v2.5-pro", Alias: alias},
+	}, executor)
+
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{
+		Model:   alias,
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":1024}`),
+	}, cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.MessageCountMetadataKey: "127",
+		cliproxyexecutor.ToolCountMetadataKey:    "49",
+	}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != "mimo-v2.5-pro" {
+		t.Fatalf("payload = %q, want mimo-v2.5-pro", string(resp.Payload))
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 1 || got[0] != "mimo-v2.5-pro" {
+		t.Fatalf("execute models = %v, want only mimo-v2.5-pro", got)
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}

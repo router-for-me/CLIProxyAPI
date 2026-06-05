@@ -54,3 +54,44 @@ func TestLogFormatterIncludesFailureMetadataFields(t *testing.T) {
 		}
 	}
 }
+
+func TestLogFormatterIncludesToolHistoryRepairFields(t *testing.T) {
+	entry := &log.Entry{
+		Time:    time.Date(2026, 6, 5, 18, 30, 0, 0, time.UTC),
+		Level:   log.WarnLevel,
+		Message: "repaired Claude tool_use history",
+		Data: log.Fields{
+			"request_id":                  "req-tool",
+			"executor":                    "claude",
+			"compat_kind":                 "minimax",
+			"repairs":                     2,
+			"merged_tool_result_messages": 1,
+			"deduped_tool_results":        1,
+			"reordered_tool_results":      1,
+			"removed_tool_uses":           2,
+			"removed_tool_results":        3,
+		},
+	}
+
+	raw, err := (&LogFormatter{}).Format(entry)
+	if err != nil {
+		t.Fatalf("format log entry: %v", err)
+	}
+	line := string(raw)
+	for _, want := range []string{
+		"[req-tool]",
+		"repaired Claude tool_use history",
+		"executor=claude",
+		"compat_kind=minimax",
+		"repairs=2",
+		"merged_tool_result_messages=1",
+		"deduped_tool_results=1",
+		"reordered_tool_results=1",
+		"removed_tool_uses=2",
+		"removed_tool_results=3",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("formatted log missing %q: %s", want, line)
+		}
+	}
+}

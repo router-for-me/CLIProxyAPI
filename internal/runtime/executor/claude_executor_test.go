@@ -518,6 +518,58 @@ func TestRepairMiniMaxToolResultAdjacencyMovesAssistantToolUseLast(t *testing.T)
 	}
 }
 
+func TestRepairClaudeHistoryThenMiniMaxAdjacencyHandlesMixedToolResults(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type":"tool_use","id":"call_1","name":"read","input":{}},
+					{"type":"tool_use","id":"call_2","name":"grep","input":{}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"text","text":"continue with this instruction"},
+					{"type":"tool_result","tool_use_id":"call_2","content":"grep ok"},
+					{"type":"tool_result","tool_use_id":"call_1","content":"read ok"}
+				]
+			}
+		]
+	}`)
+
+	repaired, err := repairClaudeToolUseHistory(body, "test")
+	if err != nil {
+		t.Fatalf("repairClaudeToolUseHistory() error = %v", err)
+	}
+	out, repairs, err := repairMiniMaxToolResultAdjacency(repaired)
+	if err != nil {
+		t.Fatalf("repairMiniMaxToolResultAdjacency() error = %v", err)
+	}
+	if repairs != 1 {
+		t.Fatalf("repairs = %d, want 1", repairs)
+	}
+	if err := validateMiniMaxToolResultAdjacency(out); err != nil {
+		t.Fatalf("expected repaired sequence to pass, got %v\nbody: %s", err, out)
+	}
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("messages length = %d, want 3: %s", len(msgs), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := msgs[1].Get("content.0.tool_use_id").String(); got != "call_1" {
+		t.Fatalf("first split tool_result = %q, want call_1: %s", got, msgs[1].Raw)
+	}
+	if got := msgs[1].Get("content.1.tool_use_id").String(); got != "call_2" {
+		t.Fatalf("second split tool_result = %q, want call_2: %s", got, msgs[1].Raw)
+	}
+	if got := msgs[2].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("following user content type = %q, want text: %s", got, msgs[2].Raw)
+	}
+}
+
 func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true

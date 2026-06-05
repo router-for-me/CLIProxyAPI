@@ -479,6 +479,72 @@ func TestRepairClaudeToolUseHistory_DropsDelayedToolResults(t *testing.T) {
 	}
 }
 
+func TestRepairClaudeToolUseHistory_DeduplicatesToolResultsKeepingLatest(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read_file","input":{}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"old"},
+				{"type":"tool_result","tool_use_id":"call_1","content":"latest"}
+			]}
+		]
+	}`)
+
+	out, stats, err := repairClaudeToolUseHistoryWithStats(body)
+	if err != nil {
+		t.Fatalf("repairClaudeToolUseHistoryWithStats() error = %v", err)
+	}
+	if stats.dedupedToolResults != 1 {
+		t.Fatalf("dedupedToolResults = %d, want 1", stats.dedupedToolResults)
+	}
+
+	results := gjson.GetBytes(out, "messages.1.content").Array()
+	if len(results) != 1 {
+		t.Fatalf("tool_result count = %d, want 1: %s", len(results), gjson.GetBytes(out, "messages.1.content").Raw)
+	}
+	if got := results[0].Get("content").String(); got != "latest" {
+		t.Fatalf("kept tool_result content = %q, want latest: %s", got, out)
+	}
+}
+
+func TestRepairClaudeToolUseHistory_ReordersToolResultsBeforeUserText(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"read_file","input":{}},
+				{"type":"tool_use","id":"call_2","name":"grep","input":{}}
+			]},
+			{"role":"user","content":[
+				{"type":"text","text":"new instruction"},
+				{"type":"tool_result","tool_use_id":"call_2","content":"grep ok"},
+				{"type":"tool_result","tool_use_id":"call_1","content":"read ok"}
+			]}
+		]
+	}`)
+
+	out, stats, err := repairClaudeToolUseHistoryWithStats(body)
+	if err != nil {
+		t.Fatalf("repairClaudeToolUseHistoryWithStats() error = %v", err)
+	}
+	if stats.reorderedToolResults != 1 {
+		t.Fatalf("reorderedToolResults = %d, want 1", stats.reorderedToolResults)
+	}
+
+	content := gjson.GetBytes(out, "messages.1.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("content length = %d, want 3: %s", len(content), gjson.GetBytes(out, "messages.1.content").Raw)
+	}
+	if got := content[0].Get("tool_use_id").String(); got != "call_1" {
+		t.Fatalf("first tool_use_id = %q, want call_1: %s", got, out)
+	}
+	if got := content[1].Get("tool_use_id").String(); got != "call_2" {
+		t.Fatalf("second tool_use_id = %q, want call_2: %s", got, out)
+	}
+	if got := content[2].Get("type").String(); got != "text" {
+		t.Fatalf("third part type = %q, want text: %s", got, out)
+	}
+}
+
 func TestRepairKimiClaudeToolUseRequest_RepairsPayloadAndOriginal(t *testing.T) {
 	body := []byte(`{
 		"messages":[

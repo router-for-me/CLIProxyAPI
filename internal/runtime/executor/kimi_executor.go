@@ -377,7 +377,7 @@ func repairKimiClaudeToolUseRequest(req cliproxyexecutor.Request, opts cliproxye
 	req.Payload = repaired
 
 	if len(opts.OriginalRequest) > 0 {
-		original, _, errOriginal := dropUnansweredClaudeToolUses(opts.OriginalRequest)
+		original, _, errOriginal := repairClaudeToolUseHistoryWithStats(opts.OriginalRequest)
 		if errOriginal != nil {
 			return req, opts, errOriginal
 		}
@@ -387,28 +387,74 @@ func repairKimiClaudeToolUseRequest(req cliproxyexecutor.Request, opts cliproxye
 	return req, opts, nil
 }
 
+type claudeToolHistoryRepairStats struct {
+	mergedToolResultMessages int
+	dedupedToolResults       int
+	reorderedToolResults     int
+	removedToolUses          int
+	removedToolResults       int
+}
+
+func (s claudeToolHistoryRepairStats) changed() bool {
+	return s.mergedToolResultMessages > 0 ||
+		s.dedupedToolResults > 0 ||
+		s.reorderedToolResults > 0 ||
+		s.removedToolUses > 0 ||
+		s.removedToolResults > 0
+}
+
 func repairClaudeToolUseHistory(body []byte, executorName string) ([]byte, error) {
-	repaired, merged, err := coalesceAdjacentClaudeToolResultMessages(body)
+	repaired, stats, err := repairClaudeToolUseHistoryWithStats(body)
 	if err != nil {
 		return body, err
 	}
-	repaired, removedToolUses, err := dropUnansweredClaudeToolUses(repaired)
-	if err != nil {
-		return body, err
-	}
-	repaired, removedToolResults, err := dropOrphanClaudeToolResults(repaired)
-	if err != nil {
-		return body, err
-	}
-	if merged > 0 || removedToolUses > 0 || removedToolResults > 0 {
+	if stats.changed() {
 		log.WithFields(log.Fields{
-			"executor":             executorName,
-			"merged_tool_results":  merged,
-			"removed_tool_uses":    removedToolUses,
-			"removed_tool_results": removedToolResults,
-		}).Warn("dropped unanswered Claude tool_use history")
+			"executor":                    executorName,
+			"merged_tool_result_messages": stats.mergedToolResultMessages,
+			"deduped_tool_results":        stats.dedupedToolResults,
+			"reordered_tool_results":      stats.reorderedToolResults,
+			"removed_tool_uses":           stats.removedToolUses,
+			"removed_tool_results":        stats.removedToolResults,
+		}).Warn("repaired Claude tool_use history")
 	}
 	return repaired, nil
+}
+
+func repairClaudeToolUseHistoryWithStats(body []byte) ([]byte, claudeToolHistoryRepairStats, error) {
+	var stats claudeToolHistoryRepairStats
+
+	repaired, merged, err := coalesceAdjacentClaudeToolResultMessages(body)
+	if err != nil {
+		return body, stats, err
+	}
+	stats.mergedToolResultMessages = merged
+
+	repaired, dedupedToolResults, err := helps.DedupeClaudeToolResultParts(repaired)
+	if err != nil {
+		return body, stats, err
+	}
+	stats.dedupedToolResults = dedupedToolResults
+
+	repaired, reorderedToolResults, err := helps.MoveClaudeToolResultsBeforeUserContent(repaired)
+	if err != nil {
+		return body, stats, err
+	}
+	stats.reorderedToolResults = reorderedToolResults
+
+	repaired, removedToolUses, err := dropUnansweredClaudeToolUses(repaired)
+	if err != nil {
+		return body, stats, err
+	}
+	stats.removedToolUses = removedToolUses
+
+	repaired, removedToolResults, err := dropOrphanClaudeToolResults(repaired)
+	if err != nil {
+		return body, stats, err
+	}
+	stats.removedToolResults = removedToolResults
+
+	return repaired, stats, nil
 }
 
 func coalesceAdjacentClaudeToolResultMessages(body []byte) ([]byte, int, error) {
@@ -662,6 +708,15 @@ func dropOrphanClaudeToolResults(body []byte) ([]byte, int, error) {
 
 func claudeToolUseIDsInMessage(msg gjson.Result) map[string]bool {
 	ids := make(map[string]bool)
+	for _, toolUseID := range claudeToolUseIDOrderInMessage(msg) {
+		ids[toolUseID] = true
+	}
+	return ids
+}
+
+func claudeToolUseIDOrderInMessage(msg gjson.Result) []string {
+	ids := make([]string, 0)
+	seen := make(map[string]bool)
 	content := msg.Get("content")
 	if !content.IsArray() {
 		return ids
@@ -671,8 +726,9 @@ func claudeToolUseIDsInMessage(msg gjson.Result) map[string]bool {
 			continue
 		}
 		toolUseID := strings.TrimSpace(part.Get("id").String())
-		if toolUseID != "" {
-			ids[toolUseID] = true
+		if toolUseID != "" && !seen[toolUseID] {
+			ids = append(ids, toolUseID)
+			seen[toolUseID] = true
 		}
 	}
 	return ids
