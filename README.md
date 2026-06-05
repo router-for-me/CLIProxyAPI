@@ -2,7 +2,7 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
+A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok/DeepSeek compatible API interfaces for CLI.
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
@@ -48,6 +48,7 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
+- DeepSeek Web support via `deepseek-api-key` token configuration
 - Grok Build support via OAuth login
 - Amp CLI and IDE extensions support with provider routing
 - Streaming, non-streaming, and WebSocket responses where supported
@@ -61,8 +62,25 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
+- DeepSeek Web token load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
+
+## DeepSeek Web Provider
+
+DeepSeek Web can be configured as a first-class provider with `deepseek-api-key`:
+
+```yaml
+deepseek-api-key:
+  - api-key: "YOUR_DEEPSEEK_WEB_TOKEN"
+    models:
+      - name: deepseek-v4-flash
+        alias: deepseek-v4-flash
+      - name: deepseek-v4-pro
+        alias: deepseek-v4-pro
+```
+
+Built-in model IDs include `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-v4-flash-search`, `deepseek-v4-pro-search`, `deepseek-v4-flash-nothinking`, and `deepseek-v4-pro-nothinking`.
 
 ## Getting Started
 

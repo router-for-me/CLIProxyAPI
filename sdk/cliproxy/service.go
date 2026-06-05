@@ -432,6 +432,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+	case "deepseek":
+		s.coreManager.RegisterExecutor(executor.NewDeepSeekExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
@@ -1139,6 +1141,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "deepseek":
+		models = registry.GetDeepSeekModels()
+		if entry := s.resolveConfigDeepSeekKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildDeepSeekConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "codex":
 		codexPlanType := ""
 		if a.Attributes != nil {
@@ -1331,6 +1344,45 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	if attrKey != "" {
 		for i := range s.cfg.ClaudeKey {
 			entry := &s.cfg.ClaudeKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigDeepSeekKey(auth *coreauth.Auth) *config.DeepSeekKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.DeepSeekKey {
+		entry := &s.cfg.DeepSeekKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range s.cfg.DeepSeekKey {
+			entry := &s.cfg.DeepSeekKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
@@ -1665,6 +1717,13 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildDeepSeekConfigModels(entry *config.DeepSeekKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "deepseek", "deepseek")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
