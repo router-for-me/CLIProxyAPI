@@ -2319,11 +2319,16 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
-	// Treat transient upstream stream interruptions (e.g. "unexpected EOF")
-	// like a normal retryable API error instead of surfacing them to the
-	// client. These carry no HTTP status, so they would otherwise fall through
-	// the 429-only retry path below and abort the request.
-	if isUnexpectedEOFError(err) {
+	// Treat transient, statusless upstream stream interruptions (e.g.
+	// "unexpected EOF") like a normal retryable API error instead of surfacing
+	// them to the client. These carry no HTTP status, so they would otherwise
+	// fall through the 429-only retry path below and abort the request. The
+	// status==0 guard is important: a status-bearing error (e.g. a 5xx whose
+	// body merely contains "unexpected EOF") has already had a cooldown applied
+	// by MarkResult, so it must fall through to the cooldown-aware path below
+	// rather than force an immediate retry that selection would reject with a
+	// model-cooldown error.
+	if status == 0 && isUnexpectedEOFError(err) {
 		if !m.retryAllowed(attempt, providers) {
 			return 0, false
 		}
