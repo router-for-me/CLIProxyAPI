@@ -112,6 +112,18 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Mode = ModeNone
 		config.Level = ""
 	}
+	if toFormat == "codex" && config.Mode == ModeLevel {
+		originalLevel := config.Level
+		config.Level = NormalizeCodexEffortLevel(config.Level, modelInfo)
+		if config.Level != originalLevel {
+			log.WithFields(log.Fields{
+				"provider":       toFormat,
+				"model":          model,
+				"original_value": string(originalLevel),
+				"clamped_to":     string(config.Level),
+			}).Debug("thinking: codex level normalized |")
+		}
+	}
 
 	if len(support.Levels) > 0 && config.Mode == ModeLevel {
 		if !isLevelSupported(string(config.Level), support.Levels) {

@@ -43,7 +43,7 @@ func init() {
 //	}
 func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
-		return applyCompatibleCodex(body, config)
+		return applyCompatibleCodex(body, config, modelInfo)
 	}
 	if modelInfo.Thinking == nil {
 		return body, nil
@@ -59,7 +59,8 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 
 	if config.Mode == thinking.ModeLevel {
-		result, _ := sjson.SetBytes(body, "reasoning.effort", string(config.Level))
+		level := thinking.NormalizeCodexEffortLevel(config.Level, modelInfo)
+		result, _ := sjson.SetBytes(body, "reasoning.effort", string(level))
 		return result, nil
 	}
 
@@ -71,7 +72,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		}
 	}
 	if effort == "" && config.Level != "" {
-		effort = string(config.Level)
+		effort = string(thinking.NormalizeCodexEffortLevel(config.Level, modelInfo))
 	}
 	if effort == "" && len(support.Levels) > 0 {
 		effort = support.Levels[0]
@@ -84,7 +85,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	return result, nil
 }
 
-func applyCompatibleCodex(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
+func applyCompatibleCodex(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
@@ -95,11 +96,11 @@ func applyCompatibleCodex(body []byte, config thinking.ThinkingConfig) ([]byte, 
 		if config.Level == "" {
 			return body, nil
 		}
-		effort = string(config.Level)
+		effort = string(thinking.NormalizeCodexEffortLevel(config.Level, modelInfo))
 	case thinking.ModeNone:
 		effort = string(thinking.LevelNone)
 		if config.Level != "" {
-			effort = string(config.Level)
+			effort = string(thinking.NormalizeCodexEffortLevel(config.Level, modelInfo))
 		}
 	case thinking.ModeAuto:
 		// Auto mode for user-defined models: pass through as "auto"
@@ -110,7 +111,7 @@ func applyCompatibleCodex(body []byte, config thinking.ThinkingConfig) ([]byte, 
 		if !ok {
 			return body, nil
 		}
-		effort = level
+		effort = string(thinking.NormalizeCodexEffortLevel(thinking.ThinkingLevel(level), modelInfo))
 	default:
 		return body, nil
 	}
