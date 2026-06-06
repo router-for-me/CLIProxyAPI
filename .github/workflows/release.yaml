@@ -127,7 +127,7 @@ jobs:
 
   build-freebsd:
     name: build freebsd-${{ matrix.goarch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     env:
       TARGET: freebsd-${{ matrix.goarch }}
       GOARCH: ${{ matrix.goarch }}
@@ -137,11 +137,9 @@ jobs:
       matrix:
         include:
           - goarch: amd64
-            runner: ubuntu-latest
             vm_arch: x86-64
             asset_arch: amd64
           - goarch: arm64
-            runner: ubuntu-24.04-arm
             vm_arch: arm64
             asset_arch: aarch64
     steps:
@@ -196,12 +194,20 @@ jobs:
           fi
           export GOCACHE="$PWD/${cache_root}/gocache"
           export GOMODCACHE="$PWD/${cache_root}/gomodcache"
-          export PATH="$PWD/${go_root}/bin:$PATH"
+          export PATH="/usr/local/bin:$PWD/${go_root}/bin:$PATH"
           go version
           go env GOOS GOARCH GOCACHE GOMODCACHE
 
           echo "Downloading Go modules"
           go mod download
+
+          if [ "$GOARCH" = "arm64" ] && ! command -v ld.bfd >/dev/null 2>&1; then
+            echo "Installing binutils for FreeBSD arm64 external linking"
+            sudo env IGNORE_OSVERSION=yes ASSUME_ALWAYS_YES=yes pkg install -y binutils
+          fi
+          if [ "$GOARCH" = "arm64" ]; then
+            ld.bfd --version | head -n 1
+          fi
 
           archive_dir="dist/${TARGET}/archive"
           archive_name="CLIProxyAPI_${RELEASE_VERSION}_freebsd_${ASSET_ARCH}.tar.gz"
