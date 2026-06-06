@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 		registry.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	models := registry.GetAvailableModelsByProvider("gemini-cli")
 	if len(models) == 0 {
@@ -97,7 +98,7 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 		modelRegistry.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	models := modelRegistry.GetModelsForClient(auth.ID)
 	var imageModel *internalregistry.ModelInfo
