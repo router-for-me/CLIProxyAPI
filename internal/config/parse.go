@@ -73,6 +73,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.NormalizePluginsConfig()
+
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeVertexCompatKeys()
