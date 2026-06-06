@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -52,6 +53,18 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	err = service.Run(runCtx)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Errorf("proxy service exited with error: %v", err)
+	}
+}
+
+// StartExampleAPIKeyWarningServer starts a warning-only server for unsafe template API keys.
+func StartExampleAPIKeyWarningServer(cfg *config.Config, configPath string, keys []string) {
+	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	log.Errorf("normal API server disabled: example API key values are configured in %s", configPath)
+	log.Errorf("example API key warning page listening on: %s", safemode.WarningServerURL(cfg))
+	if err := safemode.StartExampleAPIKeyWarningServer(ctxSignal, cfg, configPath, keys); err != nil && !errors.Is(err, context.Canceled) {
+		log.Errorf("example API key warning server exited with error: %v", err)
 	}
 }
 
