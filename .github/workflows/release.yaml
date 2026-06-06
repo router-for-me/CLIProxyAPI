@@ -119,6 +119,10 @@ jobs:
   build-freebsd:
     name: build freebsd-${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    env:
+      TARGET: freebsd-${{ matrix.goarch }}
+      GOARCH: ${{ matrix.goarch }}
+      ASSET_ARCH: ${{ matrix.asset_arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -153,13 +157,9 @@ jobs:
           shell: sh
           memory: 5G
           cpu_count: 4
-          environment_variables: GO_VERSION RELEASE_VERSION COMMIT BUILD_DATE
+          environment_variables: GO_VERSION RELEASE_VERSION COMMIT BUILD_DATE TARGET GOARCH ASSET_ARCH
       - name: Build FreeBSD archive
         shell: cpa.sh {0}
-        env:
-          TARGET: freebsd-${{ matrix.goarch }}
-          GOARCH: ${{ matrix.goarch }}
-          ASSET_ARCH: ${{ matrix.asset_arch }}
         run: |
           set -eu
           fetch -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.freebsd-${GOARCH}.tar.gz"
