@@ -175,6 +175,7 @@ type Manager struct {
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
+	named     map[string]int
 }
 
 // NewManager constructs a manager with a buffered queue.
@@ -221,6 +222,30 @@ func (m *Manager) Register(plugin Plugin) {
 		return
 	}
 	m.pluginsMu.Lock()
+	m.plugins = append(m.plugins, plugin)
+	m.pluginsMu.Unlock()
+}
+
+// RegisterNamed registers or replaces a plugin by name.
+func (m *Manager) RegisterNamed(name string, plugin Plugin) {
+	if m == nil || plugin == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+
+	m.pluginsMu.Lock()
+	if m.named == nil {
+		m.named = make(map[string]int)
+	}
+	if index, exists := m.named[name]; exists && index >= 0 && index < len(m.plugins) {
+		m.plugins[index] = plugin
+		m.pluginsMu.Unlock()
+		return
+	}
+	m.named[name] = len(m.plugins)
 	m.plugins = append(m.plugins, plugin)
 	m.pluginsMu.Unlock()
 }
@@ -292,6 +317,9 @@ func DefaultManager() *Manager { return defaultManager }
 
 // RegisterPlugin registers a plugin on the default manager.
 func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
+
+// RegisterNamedPlugin registers or replaces a named plugin on the default manager.
+func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }
