@@ -3600,12 +3600,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var modelQuotaRecoverAt time.Time
+	registryModel := ""
 	var authSnapshot *Auth
 	var schedulerSnapshots []*Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		requestedModelAlias := coreusage.RequestedModelAliasFromContext(ctx)
+		aliasAvailabilityModel := openAICompatAvailabilityAliasForResult(auth, requestedModelAlias, result)
+		managedModel := strings.TrimSpace(result.Model)
+		if aliasAvailabilityModel != "" {
+			managedModel = aliasAvailabilityModel
+		}
+		registryModel = managedModel
+		if result.Success && aliasAvailabilityModel == "" {
+			registryModel = strings.TrimSpace(result.Model)
+		}
 		codexAPIKeyHealthOnly := isCodexAPIKeyAuth(auth)
 		codexBypassCooling := isCodexAuth(auth) && !codexAPIKeyHealthOnly
 		slowPenalty := 0
@@ -3652,6 +3663,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				applyHealthSuccess(&state.Health, now)
 				applySlowRequestHealthPenalty(&state.Health, now, slowPenalty)
 				updateAggregatedAvailability(auth, now)
+				if aliasAvailabilityModel != "" && aliasAvailabilityModel != strings.TrimSpace(result.Model) {
+					aliasState := ensureModelState(auth, aliasAvailabilityModel)
+					resetModelState(aliasState, now)
+					applyHealthSuccess(&aliasState.Health, now)
+					aliasState.UpdatedAt = now
+					clearAggregatedAvailability(auth)
+				}
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
 					auth.StatusMessage = ""
@@ -3686,14 +3704,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else if codexAPIKeyHealthOnly {
 				applyCodexAPIKeyFailureState(auth, result, now)
-			} else if result.Model != "" {
+			} else if managedModel != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) &&
 					!isRequestScopedFeatureUnsupportedResultError(result.Error) &&
 					!isRequestScopedContentSafetyResultError(result.Error) &&
 					!isRequestScopedContextLimitResultError(result.Error) &&
 					!isTransientRoutingResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
-					state := ensureModelState(auth, result.Model)
+					state := ensureModelState(auth, managedModel)
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
@@ -3796,13 +3814,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.UpdatedAt = now
 					if !accountQuotaFailure {
 						updateAggregatedAvailability(auth, now)
+						if aliasAvailabilityModel != "" {
+							clearAggregatedAvailability(auth)
+						}
 					}
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
 		}
-		schedulerSnapshots = append(schedulerSnapshots, m.applyChannelBreakerResultLocked(auth, result, now)...)
+		schedulerSnapshots = append(schedulerSnapshots, m.applyChannelBreakerResultLocked(auth, result, requestedModelAlias, now)...)
 		if slowPenalty > 0 {
 			schedulerSnapshots = append(schedulerSnapshots, m.applySlowRequestGroupPenaltyLocked(auth, result, now, slowPenalty)...)
 		}
@@ -3831,16 +3852,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if shouldUnregisterAuth {
 		registry.GetGlobalRegistry().UnregisterClient(result.AuthID)
 	}
-	if clearModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
+	if registryModel == "" {
+		registryModel = strings.TrimSpace(result.Model)
 	}
-	if setModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model, modelQuotaRecoverAt)
+	if registryModel == "" {
+		registryModel = coreusage.RequestedModelAliasFromContext(ctx)
 	}
-	if shouldResumeModel {
-		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
-	} else if shouldSuspendModel {
-		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	if clearModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, registryModel)
+	}
+	if setModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, registryModel, modelQuotaRecoverAt)
+	}
+	if shouldResumeModel && registryModel != "" {
+		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, registryModel)
+	} else if shouldSuspendModel && registryModel != "" {
+		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, registryModel, suspendReason)
 	}
 
 	if authSnapshot != nil {
@@ -3943,14 +3970,76 @@ func applyCodexAPIKeyHealthFailure(health *HealthState, now time.Time, statusCod
 	health.HalfOpenSuccesses = 0
 }
 
-func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, now time.Time) []*Auth {
+func openAICompatAvailabilityAliasForResult(auth *Auth, requestedModelAlias string, result Result) string {
+	if authProviderFamilyKey(auth) != "openai-compatibility" {
+		return ""
+	}
+	requestedModelAlias = strings.TrimSpace(requestedModelAlias)
+	if requestedModelAlias == "" {
+		return ""
+	}
+	if canonicalModelKey(requestedModelAlias) == canonicalModelKey(result.Model) {
+		return ""
+	}
+	if result.Success {
+		if auth == nil || len(auth.ModelStates) == 0 {
+			return ""
+		}
+		if state := auth.ModelStates[requestedModelAlias]; state != nil {
+			return requestedModelAlias
+		}
+		aliasKey := canonicalModelKey(requestedModelAlias)
+		if aliasKey != "" && aliasKey != requestedModelAlias {
+			if state := auth.ModelStates[aliasKey]; state != nil {
+				return requestedModelAlias
+			}
+		}
+		return ""
+	}
+	if result.Error == nil {
+		return ""
+	}
+	if isRequestScopedNotFoundResultError(result.Error) ||
+		isRequestScopedFeatureUnsupportedResultError(result.Error) ||
+		isRequestScopedContentSafetyResultError(result.Error) ||
+		isRequestScopedContextLimitResultError(result.Error) ||
+		isTransientRoutingResultError(result.Error) ||
+		isModelSupportResultError(result.Error) ||
+		isAccountQuotaExhaustedResultError(result.Error) ||
+		isBalanceExhaustedResultError(result.Error) {
+		return ""
+	}
+	statusCode := statusCodeFromResult(result.Error)
+	if statusCode == http.StatusTooManyRequests || isTransientUpstreamStatus(statusCode) {
+		return requestedModelAlias
+	}
+	if statusCode == 0 && isTransientNetworkResultError(result.Error) {
+		return requestedModelAlias
+	}
+	if isRetryableAvailabilityErrorMessage(result.Error.Code + " " + result.Error.Message) {
+		return requestedModelAlias
+	}
+	return ""
+}
+
+func channelBreakerModelKeyForResult(auth *Auth, result Result, requestedModelAlias string) string {
+	modelKey := strings.TrimSpace(result.Model)
+	if aliasModel := openAICompatAvailabilityAliasForResult(auth, requestedModelAlias, result); aliasModel != "" {
+		return aliasModel
+	}
+	return modelKey
+}
+
+func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, requestedModelAlias string, now time.Time) []*Auth {
 	if m == nil || auth == nil || quotaCooldownDisabledForAuth(auth) {
 		return nil
 	}
 	if isCodexAPIKeyAuth(auth) {
 		return m.applyCodexAPIKeyChannelHealthResultLocked(auth, result, now)
 	}
-	key := channelBreakerKey(auth, result.Model)
+	aliasScoped := openAICompatAvailabilityAliasForResult(auth, requestedModelAlias, result) != ""
+	breakerModel := channelBreakerModelKeyForResult(auth, result, requestedModelAlias)
+	key := channelBreakerKey(auth, breakerModel)
 	if key == "" {
 		return nil
 	}
@@ -3991,7 +4080,7 @@ func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, now
 	if health.BreakerState != HealthBreakerOpen || health.OpenUntil.IsZero() || !health.OpenUntil.After(now) {
 		return nil
 	}
-	return m.applyChannelBreakerCooldownLocked(auth, result, health, now)
+	return m.applyChannelBreakerCooldownLocked(auth, result, breakerModel, aliasScoped, health, now)
 }
 
 func (m *Manager) recordChannelBreakerSuccessLocked(key string, now time.Time) {
@@ -4010,9 +4099,9 @@ func (m *Manager) recordChannelBreakerSuccessLocked(key string, now time.Time) {
 	m.channelBreakers[key] = health
 }
 
-func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, health HealthState, now time.Time) []*Auth {
+func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, breakerModel string, aliasScoped bool, health HealthState, now time.Time) []*Auth {
 	baseKey := channelBreakerBaseKey(auth)
-	if m == nil || baseKey == "" || result.Model == "" {
+	if m == nil || baseKey == "" || strings.TrimSpace(breakerModel) == "" {
 		return nil
 	}
 	statusCode := statusCodeFromResult(result.Error)
@@ -4028,7 +4117,7 @@ func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, h
 		if channelBreakerBaseKey(peer) != baseKey {
 			continue
 		}
-		state := ensureModelState(peer, result.Model)
+		state := ensureModelState(peer, breakerModel)
 		if state == nil || state.Status == StatusDisabled {
 			continue
 		}
@@ -4051,6 +4140,9 @@ func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, h
 		peer.LastError = cloneError(state.LastError)
 		peer.UpdatedAt = now
 		updateAggregatedAvailability(peer, now)
+		if aliasScoped {
+			clearAggregatedAvailability(peer)
+		}
 		snapshots = append(snapshots, peer.Clone())
 	}
 	return snapshots
@@ -5141,19 +5233,33 @@ func isMiniMaxNewSensitiveMessage(message string) bool {
 	return isMiniMaxNewSensitiveSignal("", message)
 }
 
-func isMiniMaxNewSensitiveSignal(code, message string) bool {
+func isMiniMaxInputNewSensitiveSignal(code, message string) bool {
 	normalizedCode := strings.Trim(strings.ToLower(strings.TrimSpace(code)), `"'(),:;[]{}<>`)
-	if normalizedCode == "1026" || normalizedCode == "1027" {
+	if normalizedCode == "1026" {
 		return true
 	}
 	lower := strings.ToLower(strings.TrimSpace(message))
-	if strings.Contains(lower, "new_sensitive") {
+	if strings.Contains(lower, "input new_sensitive") {
 		return true
 	}
-	if lower == "" || (!strings.Contains(lower, "sensitive") && !strings.Contains(lower, "涉敏")) {
-		return false
+	return strings.Contains(lower, "new_sensitive") && strings.Contains(lower, "1026")
+}
+
+func isMiniMaxOutputNewSensitiveSignal(code, message string) bool {
+	normalizedCode := strings.Trim(strings.ToLower(strings.TrimSpace(code)), `"'(),:;[]{}<>`)
+	if normalizedCode == "1027" {
+		return true
 	}
-	return strings.Contains(lower, "1026") || strings.Contains(lower, "1027")
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(lower, "output new_sensitive") {
+		return true
+	}
+	return strings.Contains(lower, "new_sensitive") && strings.Contains(lower, "1027")
+}
+
+func isMiniMaxNewSensitiveSignal(code, message string) bool {
+	return isMiniMaxInputNewSensitiveSignal(code, message) ||
+		isMiniMaxOutputNewSensitiveSignal(code, message)
 }
 
 func isMiniMaxUnknown1000Message(message string) bool {
@@ -5372,13 +5478,13 @@ func isRetryableEmptyUpstreamResponseError(err error) bool {
 
 func isRequestScopedRouteFallbackError(err error) bool {
 	if isRequestScopedContentSafetyError(err) {
-		return !isMiniMaxNewSensitiveSignal(errorCodeFromError(err), err.Error())
+		return true
 	}
 	return isRequestScopedContextLimitError(err)
 }
 
 func shouldFallbackRequestScopedContentSafetyError(routeModel string, err error) bool {
-	if !isClaudeSonnet46FallbackModel(routeModel) {
+	if !isRequestScopedFallbackModel(routeModel) {
 		return false
 	}
 	return isRequestScopedContentSafetyError(err) && isRequestScopedRouteFallbackError(err)
@@ -5395,22 +5501,39 @@ func shouldFallbackRequestScopedRouteErrorForRequest(routeModel string, opts cli
 	if !isRequestScopedRouteFallbackError(err) {
 		return false
 	}
-	if isClaudeSonnet46FallbackModel(routeModel) {
+	if isMiniMaxNewSensitiveSignal(errorCodeFromError(err), err.Error()) &&
+		!isMiniMaxInputNewSensitiveSignal(errorCodeFromError(err), err.Error()) {
+		return false
+	}
+	if isRequestScopedFallbackModel(routeModel) {
 		return true
 	}
-	return isClaudeSonnet46FallbackModel(requestedModelAliasFromOptions(opts, routeModel))
+	return isRequestScopedFallbackModel(requestedModelAliasFromOptions(opts, routeModel))
+}
+
+func isRequestScopedFallbackModel(model string) bool {
+	return isClaudeSonnet46FallbackModel(model) || isGLM47FallbackModel(model)
 }
 
 func isClaudeSonnet46FallbackModel(model string) bool {
+	return isSpecificFallbackModel(model, "claude-sonnet-4-6")
+}
+
+func isGLM47FallbackModel(model string) bool {
+	return isSpecificFallbackModel(model, "glm-4.7")
+}
+
+func isSpecificFallbackModel(model string, target string) bool {
 	model = strings.TrimSpace(model)
-	if model == "" {
+	target = strings.TrimSpace(target)
+	if model == "" || target == "" {
 		return false
 	}
 	base := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
 	if base == "" {
 		base = model
 	}
-	return strings.EqualFold(base, "claude-sonnet-4-6")
+	return strings.EqualFold(base, target)
 }
 
 // isRequestInvalidError returns true if the error represents a client request
@@ -5723,6 +5846,97 @@ func (m *Manager) List() []*Auth {
 		list = append(list, auth.Clone())
 	}
 	return list
+}
+
+// ResolveConfiguredProviders infers provider keys for a route model directly from
+// the current auth set and runtime config. It is a safety net for moments when
+// the shared model registry temporarily lacks a model registration even though
+// the active config still contains matching credentials.
+func (m *Manager) ResolveConfiguredProviders(routeModel string) []string {
+	if m == nil {
+		return nil
+	}
+	routeModel = strings.TrimSpace(routeModel)
+	if routeModel == "" {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]string, 0, len(m.auths))
+	seen := make(map[string]struct{}, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if providerKey == "" {
+			continue
+		}
+		if _, exists := seen[providerKey]; exists {
+			continue
+		}
+		if _, hasExecutor := m.executors[providerKey]; !hasExecutor {
+			continue
+		}
+		if !m.authMatchesConfiguredRouteModel(auth, routeModel) {
+			continue
+		}
+		seen[providerKey] = struct{}{}
+		out = append(out, providerKey)
+	}
+	return out
+}
+
+func (m *Manager) authMatchesConfiguredRouteModel(auth *Auth, routeModel string) bool {
+	if m == nil || auth == nil {
+		return false
+	}
+
+	requestedModel := rewriteModelForAuth(routeModel, auth)
+	if strings.TrimSpace(requestedModel) == "" {
+		requestedModel = strings.TrimSpace(routeModel)
+	}
+	if requestedModel == "" {
+		return false
+	}
+
+	if pool := m.resolveOAuthUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		return true
+	}
+	if pool := m.resolveAPIKeyUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		return true
+	}
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		return true
+	}
+	if auth.Attributes != nil {
+		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" &&
+			canonicalModelKey(homeModel) == canonicalModelKey(requestedModel) {
+			return true
+		}
+	}
+	if authSupportsDirectProviderRouteModel(auth, requestedModel) {
+		return true
+	}
+	return false
+}
+
+func authSupportsDirectProviderRouteModel(auth *Auth, routeModel string) bool {
+	if auth == nil || authRequiresRegisteredModels(auth) {
+		return false
+	}
+	modelKey := canonicalModelKey(routeModel)
+	if modelKey == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "claude":
+		return strings.HasPrefix(modelKey, "claude-")
+	default:
+		return false
+	}
 }
 
 // GetByID retrieves an auth entry by its ID.

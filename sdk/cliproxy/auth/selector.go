@@ -139,6 +139,17 @@ func (e *modelCooldownError) Headers() http.Header {
 	return headers
 }
 
+func (e *modelCooldownError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	wait := e.resetIn
+	if wait < 0 {
+		wait = 0
+	}
+	return &wait
+}
+
 func authPriority(auth *Auth) int {
 	if auth == nil || auth.Attributes == nil {
 		return 0

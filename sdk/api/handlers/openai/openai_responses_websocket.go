@@ -688,7 +688,7 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 		return nil, ""
 	}
 	resolvedModelName := responsesWebsocketResolvedModelName(modelName)
-	providerSet, modelKey := responsesWebsocketProviderSetForModel(resolvedModelName)
+	providerSet, modelKey := responsesWebsocketProviderSetForModel(resolvedModelName, h.AuthManager)
 	if len(providerSet) == 0 {
 		return nil, modelKey
 	}
@@ -718,12 +718,12 @@ func responsesWebsocketResolvedModelName(modelName string) string {
 	return util.ResolveAutoModel(modelName)
 }
 
-func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {
+func responsesWebsocketProviderSetForModel(resolvedModelName string, authManager *coreauth.Manager) (map[string]struct{}, string) {
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
-	providers := util.GetProviderName(baseModel)
+	providers := handlers.ResolveProvidersForModel(baseModel, authManager)
 	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+		providers = handlers.ResolveProvidersForModel(resolvedModelName, authManager)
 	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {

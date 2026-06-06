@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -22,6 +24,7 @@ const requestScopedContentSafetyMessage = "The request was rejected because it w
 const requestScopedContentBlockedMessage = "The content you provided or machine outputted is blocked."
 const requestScopedContextLimitMessage = "invalid params, context window exceeds limit (2013)"
 const miniMaxNewSensitiveMessage = "server_error: input new_sensitive, messages[2]'s content[1] image is sensitive, please check your input (1026)"
+const miniMaxOutputNewSensitiveMessage = "server_error: output new_sensitive, generated content is sensitive, please check your input (1027)"
 const miniMaxUnknown1000Message = "server_error: unknown error, 999 (1000)"
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
@@ -114,6 +117,40 @@ func TestManager_ShouldRetryAfterError_EmptyUpstreamResponseUsesConfiguredRetry(
 	}
 	if _, shouldRetry = m.shouldRetryAfterError(errEmpty, 1, []string{"codex"}, model, maxWait); shouldRetry {
 		t.Fatalf("expected shouldRetry=false on attempt=1 for request_retry=1")
+	}
+}
+
+func TestManager_ShouldRetryAfterError_CodexModelCooldownUsesRetryAfter(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "gpt-5.5"
+	auth := &Auth{
+		ID:       "codex-model-cooldown-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"request_retry": float64(1),
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(newModelCooldownError(model, "codex", 5*time.Second), 0, []string{"codex"}, model, maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for codex model cooldown")
+	}
+	if wait != 5*time.Second {
+		t.Fatalf("wait = %v, want %v", wait, 5*time.Second)
+	}
+
+	if _, shouldRetry = m.shouldRetryAfterError(newModelCooldownError(model, "codex", 5*time.Second), 1, []string{"codex"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false on attempt=1 for request_retry=1")
+	}
+
+	if wait, shouldRetry = m.shouldRetryAfterError(newModelCooldownError(model, "codex", 31*time.Second), 0, []string{"codex"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false when retry-after exceeds max wait, got wait=%v", wait)
 	}
 }
 
@@ -712,6 +749,85 @@ func TestManager_Execute_OpenAICompatChannelBreakerBypassesHigherPriorityChannel
 		blocked, reason, next := isAuthBlockedForModel(updated, model, time.Now())
 		if !blocked || reason != blockReasonCooldown || next.IsZero() {
 			t.Fatalf("auth %s blocked=%v reason=%v next=%v, want channel cooldown", authID, blocked, reason, next)
+		}
+	}
+}
+
+func TestManager_MarkResult_OpenAICompatChannelBreakerScopesToRequestedAlias(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auths := []*Auth{
+		openAICompatChannelBreakerAuth("minimax-1", "minimax", "https://api.minimax.io/v1", 10),
+		openAICompatChannelBreakerAuth("minimax-2", "minimax", "https://api.minimax.io/v1", 10),
+	}
+	routeModel := "claude-sonnet-4-6"
+	otherAlias := "other-claude-alias"
+	upstreamModel := "MiniMax-M2.5"
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+			{ID: routeModel},
+			{ID: otherAlias},
+		})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	ctx := coreusage.WithRequestedModelAlias(context.Background(), routeModel)
+	for i := 0; i < channelBreakerOpenFailures; i++ {
+		manager.MarkResult(ctx, Result{
+			AuthID:   auths[0].ID,
+			Provider: auths[0].Provider,
+			Model:    upstreamModel,
+			Success:  false,
+			Error: &Error{
+				HTTPStatus: http.StatusTooManyRequests,
+				Message:    "no available channel",
+			},
+		})
+	}
+
+	currentAuths := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		updated, ok := manager.GetByID(auth.ID)
+		if !ok || updated == nil {
+			t.Fatalf("auth %s not found", auth.ID)
+		}
+		currentAuths = append(currentAuths, updated)
+	}
+
+	availableRoute, errRoute := manager.availableAuthsForRouteModel(currentAuths, "mixed", routeModel, time.Now())
+	if errRoute != nil {
+		var cooldownErr *modelCooldownError
+		if !errors.As(errRoute, &cooldownErr) {
+			t.Fatalf("route model error = %T, want nil or *modelCooldownError", errRoute)
+		}
+	}
+	if len(availableRoute) > 1 {
+		t.Fatalf("availableAuthsForRouteModel(routeModel) len = %d, want at most one half-open probe candidate", len(availableRoute))
+	}
+
+	availableOther, errOther := manager.availableAuthsForRouteModel(currentAuths, "mixed", otherAlias, time.Now())
+	if errOther != nil {
+		t.Fatalf("availableAuthsForRouteModel(otherAlias) error = %v", errOther)
+	}
+	if len(availableOther) != len(currentAuths) {
+		t.Fatalf("availableAuthsForRouteModel(otherAlias) len = %d, want %d", len(availableOther), len(currentAuths))
+	}
+
+	for _, updated := range currentAuths {
+		if state := updated.ModelStates[upstreamModel]; state != nil {
+			t.Fatalf("auth %s upstream state = %#v, want breaker to avoid upstream-model contamination", updated.ID, state)
+		}
+		state := updated.ModelStates[routeModel]
+		if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+			t.Fatalf("auth %s route alias state = %#v, want unavailable alias-scoped cooldown", updated.ID, state)
 		}
 	}
 }
@@ -2537,7 +2653,7 @@ func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
 	}
 }
 
-func TestMiniMaxNewSensitiveDoesNotFallbackClaudeSonnetAlias(t *testing.T) {
+func TestMiniMaxNewSensitiveFallsBackForConfiguredRouteModels(t *testing.T) {
 	err := &Error{
 		Code:       "1026",
 		HTTPStatus: http.StatusInternalServerError,
@@ -2546,8 +2662,26 @@ func TestMiniMaxNewSensitiveDoesNotFallbackClaudeSonnetAlias(t *testing.T) {
 	if !isRequestInvalidError(err) {
 		t.Fatal("expected MiniMax new_sensitive to be request invalid")
 	}
-	if shouldFallbackRequestScopedRouteErrorForRequest("claude-sonnet-4-6", cliproxyexecutor.Options{}, err) {
-		t.Fatal("expected MiniMax new_sensitive to stop without Claude Sonnet fallback")
+	for _, model := range []string{"claude-sonnet-4-6", "glm-4.7"} {
+		if !shouldFallbackRequestScopedRouteErrorForRequest(model, cliproxyexecutor.Options{}, err) {
+			t.Fatalf("expected MiniMax new_sensitive to fallback for %s", model)
+		}
+	}
+}
+
+func TestMiniMaxOutputNewSensitiveDoesNotFallbackForConfiguredRouteModels(t *testing.T) {
+	err := &Error{
+		Code:       "1027",
+		HTTPStatus: http.StatusInternalServerError,
+		Message:    miniMaxOutputNewSensitiveMessage,
+	}
+	if !isRequestInvalidError(err) {
+		t.Fatal("expected MiniMax output new_sensitive to be request invalid")
+	}
+	for _, model := range []string{"claude-sonnet-4-6", "glm-4.7"} {
+		if shouldFallbackRequestScopedRouteErrorForRequest(model, cliproxyexecutor.Options{}, err) {
+			t.Fatalf("expected MiniMax output new_sensitive to stop fallback for %s", model)
+		}
 	}
 }
 
@@ -2945,6 +3079,118 @@ func TestManager_Execute_ClaudeSonnetAliasMetadataContextLimitFallsBack(t *testi
 	}
 	got := executor.ExecuteCalls()
 	want := []string{minimaxAuth.ID, stepAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_GLMAliasMetadataMiniMaxNewSensitiveFallsBack(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-minimax-auth": &Error{
+				Code:       "1026",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxNewSensitiveMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	routeModel := "step-3.7-flash"
+	minimaxAuth := &Auth{ID: "aa-minimax-auth", Provider: "claude"}
+	stepAuth := &Auth{ID: "bb-step-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(minimaxAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(stepAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(minimaxAuth.ID)
+		reg.UnregisterClient(stepAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), minimaxAuth); errRegister != nil {
+		t.Fatalf("register minimax auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), stepAuth); errRegister != nil {
+		t.Fatalf("register step auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "glm-4.7",
+		},
+	})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != stepAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), stepAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{minimaxAuth.ID, stepAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_GLMAliasMetadataMiniMaxOutputNewSensitiveStops(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-minimax-auth": &Error{
+				Code:       "1027",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxOutputNewSensitiveMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	routeModel := "step-3.7-flash"
+	minimaxAuth := &Auth{ID: "aa-minimax-auth", Provider: "claude"}
+	stepAuth := &Auth{ID: "bb-step-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(minimaxAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(stepAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(minimaxAuth.ID)
+		reg.UnregisterClient(stepAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), minimaxAuth); errRegister != nil {
+		t.Fatalf("register minimax auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), stepAuth); errRegister != nil {
+		t.Fatalf("register step auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "glm-4.7",
+		},
+	})
+	if errExecute == nil {
+		t.Fatal("expected MiniMax output new_sensitive error")
+	}
+	if code := errorCodeFromError(errExecute); code != "1027" {
+		t.Fatalf("error code = %q, want 1027", code)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{minimaxAuth.ID}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
