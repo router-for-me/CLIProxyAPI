@@ -37,6 +37,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+	rawJSON = filterUnsupportedTools(rawJSON)
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
@@ -60,6 +61,34 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
 	return rawJSON
+}
+
+// filterUnsupportedTools removes Responses built-in tools that Codex does not accept.
+func filterUnsupportedTools(rawJSON []byte) []byte {
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.IsArray() {
+		return rawJSON
+	}
+
+	filtered := []byte("[]")
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if !isUnsupportedCodexResponsesTool(tool.Get("type").String()) {
+			filtered, _ = sjson.SetRawBytes(filtered, "-1", []byte(tool.Raw))
+		}
+		return true
+	})
+
+	if len(gjson.ParseBytes(filtered).Array()) == 0 {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "tools")
+		return rawJSON
+	}
+
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools", filtered)
+	return rawJSON
+}
+
+func isUnsupportedCodexResponsesTool(toolType string) bool {
+	return toolType == "image_generation"
 }
 
 // convertSystemRoleToDeveloper traverses the input array and converts any message items

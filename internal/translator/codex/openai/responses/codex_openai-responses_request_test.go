@@ -219,6 +219,69 @@ func TestConvertOpenAIResponsesRequestToCodex_OriginalIssue(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_RemovesImageGenerationTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "Hello"}]
+			}
+		],
+		"tools": [
+			{"type": "image_generation", "model": "gpt-image-2"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "tools").Exists() {
+		t.Fatalf("expected image_generation tools to be removed, got: %s", outputStr)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_PreservesFunctionTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "Hello"}]
+			}
+		],
+		"tools": [
+			{"type": "image_generation", "model": "gpt-image-2"},
+			{
+				"type": "function",
+				"name": "lookup_order",
+				"description": "Look up an order",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"order_id": {"type": "string"}
+					}
+				}
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "tools.#").Int(); got != 1 {
+		t.Fatalf("expected exactly one function tool, got %d: %s", got, outputStr)
+	}
+	if got := gjson.Get(outputStr, "tools.0.type").String(); got != "function" {
+		t.Fatalf("expected function tool to be preserved, got %q: %s", got, outputStr)
+	}
+	if got := gjson.Get(outputStr, "tools.0.name").String(); got != "lookup_order" {
+		t.Fatalf("expected function tool name to be preserved, got %q: %s", got, outputStr)
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_AssistantRole tests that assistant role is preserved
 func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	inputJSON := []byte(`{
