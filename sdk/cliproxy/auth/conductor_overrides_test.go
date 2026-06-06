@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -747,6 +749,85 @@ func TestManager_Execute_OpenAICompatChannelBreakerBypassesHigherPriorityChannel
 		blocked, reason, next := isAuthBlockedForModel(updated, model, time.Now())
 		if !blocked || reason != blockReasonCooldown || next.IsZero() {
 			t.Fatalf("auth %s blocked=%v reason=%v next=%v, want channel cooldown", authID, blocked, reason, next)
+		}
+	}
+}
+
+func TestManager_MarkResult_OpenAICompatChannelBreakerScopesToRequestedAlias(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auths := []*Auth{
+		openAICompatChannelBreakerAuth("minimax-1", "minimax", "https://api.minimax.io/v1", 10),
+		openAICompatChannelBreakerAuth("minimax-2", "minimax", "https://api.minimax.io/v1", 10),
+	}
+	routeModel := "claude-sonnet-4-6"
+	otherAlias := "other-claude-alias"
+	upstreamModel := "MiniMax-M2.5"
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+			{ID: routeModel},
+			{ID: otherAlias},
+		})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	ctx := coreusage.WithRequestedModelAlias(context.Background(), routeModel)
+	for i := 0; i < channelBreakerOpenFailures; i++ {
+		manager.MarkResult(ctx, Result{
+			AuthID:   auths[0].ID,
+			Provider: auths[0].Provider,
+			Model:    upstreamModel,
+			Success:  false,
+			Error: &Error{
+				HTTPStatus: http.StatusTooManyRequests,
+				Message:    "no available channel",
+			},
+		})
+	}
+
+	currentAuths := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		updated, ok := manager.GetByID(auth.ID)
+		if !ok || updated == nil {
+			t.Fatalf("auth %s not found", auth.ID)
+		}
+		currentAuths = append(currentAuths, updated)
+	}
+
+	availableRoute, errRoute := manager.availableAuthsForRouteModel(currentAuths, "mixed", routeModel, time.Now())
+	if errRoute != nil {
+		var cooldownErr *modelCooldownError
+		if !errors.As(errRoute, &cooldownErr) {
+			t.Fatalf("route model error = %T, want nil or *modelCooldownError", errRoute)
+		}
+	}
+	if len(availableRoute) > 1 {
+		t.Fatalf("availableAuthsForRouteModel(routeModel) len = %d, want at most one half-open probe candidate", len(availableRoute))
+	}
+
+	availableOther, errOther := manager.availableAuthsForRouteModel(currentAuths, "mixed", otherAlias, time.Now())
+	if errOther != nil {
+		t.Fatalf("availableAuthsForRouteModel(otherAlias) error = %v", errOther)
+	}
+	if len(availableOther) != len(currentAuths) {
+		t.Fatalf("availableAuthsForRouteModel(otherAlias) len = %d, want %d", len(availableOther), len(currentAuths))
+	}
+
+	for _, updated := range currentAuths {
+		if state := updated.ModelStates[upstreamModel]; state != nil {
+			t.Fatalf("auth %s upstream state = %#v, want breaker to avoid upstream-model contamination", updated.ID, state)
+		}
+		state := updated.ModelStates[routeModel]
+		if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+			t.Fatalf("auth %s route alias state = %#v, want unavailable alias-scoped cooldown", updated.ID, state)
 		}
 	}
 }

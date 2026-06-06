@@ -3567,12 +3567,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var modelQuotaRecoverAt time.Time
+	registryModel := ""
 	var authSnapshot *Auth
 	var schedulerSnapshots []*Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		requestedModelAlias := coreusage.RequestedModelAliasFromContext(ctx)
+		aliasAvailabilityModel := openAICompatAvailabilityAliasForResult(auth, requestedModelAlias, result)
+		managedModel := strings.TrimSpace(result.Model)
+		if aliasAvailabilityModel != "" {
+			managedModel = aliasAvailabilityModel
+		}
+		registryModel = managedModel
+		if result.Success && aliasAvailabilityModel == "" {
+			registryModel = strings.TrimSpace(result.Model)
+		}
 		codexAPIKeyHealthOnly := isCodexAPIKeyAuth(auth)
 		codexBypassCooling := isCodexAuth(auth) && !codexAPIKeyHealthOnly
 		slowPenalty := 0
@@ -3619,6 +3630,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				applyHealthSuccess(&state.Health, now)
 				applySlowRequestHealthPenalty(&state.Health, now, slowPenalty)
 				updateAggregatedAvailability(auth, now)
+				if aliasAvailabilityModel != "" && aliasAvailabilityModel != strings.TrimSpace(result.Model) {
+					aliasState := ensureModelState(auth, aliasAvailabilityModel)
+					resetModelState(aliasState, now)
+					applyHealthSuccess(&aliasState.Health, now)
+					aliasState.UpdatedAt = now
+					clearAggregatedAvailability(auth)
+				}
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
 					auth.StatusMessage = ""
@@ -3653,14 +3671,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else if codexAPIKeyHealthOnly {
 				applyCodexAPIKeyFailureState(auth, result, now)
-			} else if result.Model != "" {
+			} else if managedModel != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) &&
 					!isRequestScopedFeatureUnsupportedResultError(result.Error) &&
 					!isRequestScopedContentSafetyResultError(result.Error) &&
 					!isRequestScopedContextLimitResultError(result.Error) &&
 					!isTransientRoutingResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
-					state := ensureModelState(auth, result.Model)
+					state := ensureModelState(auth, managedModel)
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
@@ -3763,13 +3781,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.UpdatedAt = now
 					if !accountQuotaFailure {
 						updateAggregatedAvailability(auth, now)
+						if aliasAvailabilityModel != "" {
+							clearAggregatedAvailability(auth)
+						}
 					}
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
 		}
-		schedulerSnapshots = append(schedulerSnapshots, m.applyChannelBreakerResultLocked(auth, result, now)...)
+		schedulerSnapshots = append(schedulerSnapshots, m.applyChannelBreakerResultLocked(auth, result, requestedModelAlias, now)...)
 		if slowPenalty > 0 {
 			schedulerSnapshots = append(schedulerSnapshots, m.applySlowRequestGroupPenaltyLocked(auth, result, now, slowPenalty)...)
 		}
@@ -3798,16 +3819,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if shouldUnregisterAuth {
 		registry.GetGlobalRegistry().UnregisterClient(result.AuthID)
 	}
-	if clearModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
+	if registryModel == "" {
+		registryModel = strings.TrimSpace(result.Model)
 	}
-	if setModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model, modelQuotaRecoverAt)
+	if registryModel == "" {
+		registryModel = coreusage.RequestedModelAliasFromContext(ctx)
 	}
-	if shouldResumeModel {
-		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
-	} else if shouldSuspendModel {
-		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	if clearModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, registryModel)
+	}
+	if setModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, registryModel, modelQuotaRecoverAt)
+	}
+	if shouldResumeModel && registryModel != "" {
+		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, registryModel)
+	} else if shouldSuspendModel && registryModel != "" {
+		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, registryModel, suspendReason)
 	}
 
 	if authSnapshot != nil {
@@ -3910,14 +3937,76 @@ func applyCodexAPIKeyHealthFailure(health *HealthState, now time.Time, statusCod
 	health.HalfOpenSuccesses = 0
 }
 
-func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, now time.Time) []*Auth {
+func openAICompatAvailabilityAliasForResult(auth *Auth, requestedModelAlias string, result Result) string {
+	if authProviderFamilyKey(auth) != "openai-compatibility" {
+		return ""
+	}
+	requestedModelAlias = strings.TrimSpace(requestedModelAlias)
+	if requestedModelAlias == "" {
+		return ""
+	}
+	if canonicalModelKey(requestedModelAlias) == canonicalModelKey(result.Model) {
+		return ""
+	}
+	if result.Success {
+		if auth == nil || len(auth.ModelStates) == 0 {
+			return ""
+		}
+		if state := auth.ModelStates[requestedModelAlias]; state != nil {
+			return requestedModelAlias
+		}
+		aliasKey := canonicalModelKey(requestedModelAlias)
+		if aliasKey != "" && aliasKey != requestedModelAlias {
+			if state := auth.ModelStates[aliasKey]; state != nil {
+				return requestedModelAlias
+			}
+		}
+		return ""
+	}
+	if result.Error == nil {
+		return ""
+	}
+	if isRequestScopedNotFoundResultError(result.Error) ||
+		isRequestScopedFeatureUnsupportedResultError(result.Error) ||
+		isRequestScopedContentSafetyResultError(result.Error) ||
+		isRequestScopedContextLimitResultError(result.Error) ||
+		isTransientRoutingResultError(result.Error) ||
+		isModelSupportResultError(result.Error) ||
+		isAccountQuotaExhaustedResultError(result.Error) ||
+		isBalanceExhaustedResultError(result.Error) {
+		return ""
+	}
+	statusCode := statusCodeFromResult(result.Error)
+	if statusCode == http.StatusTooManyRequests || isTransientUpstreamStatus(statusCode) {
+		return requestedModelAlias
+	}
+	if statusCode == 0 && isTransientNetworkResultError(result.Error) {
+		return requestedModelAlias
+	}
+	if isRetryableAvailabilityErrorMessage(result.Error.Code + " " + result.Error.Message) {
+		return requestedModelAlias
+	}
+	return ""
+}
+
+func channelBreakerModelKeyForResult(auth *Auth, result Result, requestedModelAlias string) string {
+	modelKey := strings.TrimSpace(result.Model)
+	if aliasModel := openAICompatAvailabilityAliasForResult(auth, requestedModelAlias, result); aliasModel != "" {
+		return aliasModel
+	}
+	return modelKey
+}
+
+func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, requestedModelAlias string, now time.Time) []*Auth {
 	if m == nil || auth == nil || quotaCooldownDisabledForAuth(auth) {
 		return nil
 	}
 	if isCodexAPIKeyAuth(auth) {
 		return m.applyCodexAPIKeyChannelHealthResultLocked(auth, result, now)
 	}
-	key := channelBreakerKey(auth, result.Model)
+	aliasScoped := openAICompatAvailabilityAliasForResult(auth, requestedModelAlias, result) != ""
+	breakerModel := channelBreakerModelKeyForResult(auth, result, requestedModelAlias)
+	key := channelBreakerKey(auth, breakerModel)
 	if key == "" {
 		return nil
 	}
@@ -3958,7 +4047,7 @@ func (m *Manager) applyChannelBreakerResultLocked(auth *Auth, result Result, now
 	if health.BreakerState != HealthBreakerOpen || health.OpenUntil.IsZero() || !health.OpenUntil.After(now) {
 		return nil
 	}
-	return m.applyChannelBreakerCooldownLocked(auth, result, health, now)
+	return m.applyChannelBreakerCooldownLocked(auth, result, breakerModel, aliasScoped, health, now)
 }
 
 func (m *Manager) recordChannelBreakerSuccessLocked(key string, now time.Time) {
@@ -3977,9 +4066,9 @@ func (m *Manager) recordChannelBreakerSuccessLocked(key string, now time.Time) {
 	m.channelBreakers[key] = health
 }
 
-func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, health HealthState, now time.Time) []*Auth {
+func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, breakerModel string, aliasScoped bool, health HealthState, now time.Time) []*Auth {
 	baseKey := channelBreakerBaseKey(auth)
-	if m == nil || baseKey == "" || result.Model == "" {
+	if m == nil || baseKey == "" || strings.TrimSpace(breakerModel) == "" {
 		return nil
 	}
 	statusCode := statusCodeFromResult(result.Error)
@@ -3995,7 +4084,7 @@ func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, h
 		if channelBreakerBaseKey(peer) != baseKey {
 			continue
 		}
-		state := ensureModelState(peer, result.Model)
+		state := ensureModelState(peer, breakerModel)
 		if state == nil || state.Status == StatusDisabled {
 			continue
 		}
@@ -4018,6 +4107,9 @@ func (m *Manager) applyChannelBreakerCooldownLocked(auth *Auth, result Result, h
 		peer.LastError = cloneError(state.LastError)
 		peer.UpdatedAt = now
 		updateAggregatedAvailability(peer, now)
+		if aliasScoped {
+			clearAggregatedAvailability(peer)
+		}
 		snapshots = append(snapshots, peer.Clone())
 	}
 	return snapshots
