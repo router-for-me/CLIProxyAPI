@@ -89,6 +89,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	// Handle auth directory changes incrementally (.json only)
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		if w.shouldDebounceRemove(normalizedName, now) {
 			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
@@ -103,7 +106,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 				return
 			}
 			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-			w.addOrUpdateClient(event.Name)
+			w.addOrUpdateClientLocked(event.Name)
 			return
 		}
 		if !w.isKnownAuthFile(event.Name) {
@@ -111,7 +114,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.removeClient(event.Name)
+		w.removeClientLocked(event.Name)
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
@@ -120,7 +123,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.addOrUpdateClient(event.Name)
+		w.addOrUpdateClientLocked(event.Name)
 	}
 }
 
