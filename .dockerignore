@@ -11,6 +11,7 @@ Dockerfile
 
 # Documentation and license
 docs/*
+cloudflare/*
 README.md
 README_CN.md
 LICENSE
@@ -19,7 +20,8 @@ LICENSE
 auths/*
 logs/*
 conv/*
-config.yaml
+config.example.yaml
+
 
 # Development/editor
 bin/*

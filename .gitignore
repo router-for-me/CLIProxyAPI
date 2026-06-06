@@ -27,6 +27,8 @@ auths/*
 
 # Documentation
 docs/*
+cloudflare/*
+!cloudflare/readme.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -51,3 +53,7 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+
+# Cloudflare Workers
+node_modules/
+.wrangler/

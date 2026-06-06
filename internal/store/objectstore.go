@@ -335,12 +335,24 @@ func (s *ObjectTokenStore) PersistConfig(ctx context.Context) error {
 func (s *ObjectTokenStore) ensureBucket(ctx context.Context) error {
 	exists, err := s.client.BucketExists(ctx, s.cfg.Bucket)
 	if err != nil {
+		// Cloudflare R2 tokens with only "Item" permissions will return 403 Forbidden here.
+		// We assume the bucket exists and proceed.
+		resp := minio.ToErrorResponse(err)
+		if resp.StatusCode == http.StatusForbidden || resp.Code == "AccessDenied" {
+			log.Warnf("object store: BucketExists returned 403 Forbidden, assuming bucket %s exists", s.cfg.Bucket)
+			return nil
+		}
 		return fmt.Errorf("object store: check bucket: %w", err)
 	}
 	if exists {
 		return nil
 	}
 	if err = s.client.MakeBucket(ctx, s.cfg.Bucket, minio.MakeBucketOptions{Region: s.cfg.Region}); err != nil {
+		resp := minio.ToErrorResponse(err)
+		if resp.StatusCode == http.StatusForbidden || resp.Code == "AccessDenied" {
+			log.Warnf("object store: MakeBucket returned 403 Forbidden, assuming bucket %s exists", s.cfg.Bucket)
+			return nil
+		}
 		return fmt.Errorf("object store: create bucket: %w", err)
 	}
 	return nil
@@ -409,6 +421,11 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 	})
 	for object := range objectCh {
 		if object.Err != nil {
+			resp := minio.ToErrorResponse(object.Err)
+			if resp.StatusCode == http.StatusForbidden || resp.Code == "AccessDenied" {
+				log.Warnf("object store: list auth objects returned 403 Forbidden, skipping initial sync")
+				return nil
+			}
 			return fmt.Errorf("object store: list auth objects: %w", object.Err)
 		}
 		rel := strings.TrimPrefix(object.Key, prefix)
@@ -621,11 +638,11 @@ func isObjectNotFound(err error) bool {
 		return false
 	}
 	resp := minio.ToErrorResponse(err)
-	if resp.StatusCode == http.StatusNotFound {
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusForbidden {
 		return true
 	}
 	switch resp.Code {
-	case "NoSuchKey", "NotFound", "NoSuchBucket":
+	case "NoSuchKey", "NotFound", "NoSuchBucket", "AccessDenied":
 		return true
 	}
 	return false

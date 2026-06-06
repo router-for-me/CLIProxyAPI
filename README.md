@@ -62,11 +62,19 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- Cloudflare Workers Containers deployment support (with R2 configuration syncing)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
 
-CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+- **General Guides**: [https://help.router-for.me/](https://help.router-for.me/)
+- **Cloudflare Deployment**: See the [Cloudflare Deployment Guide](cloudflare/readme.md) for step-by-step instructions on deploying via Cloudflare Workers Containers with R2 storage.
+
+## Cloudflare Workers Deployment
+
+Native support for **Cloudflare Workers Containers**. This allows you to deploy the proxy to Cloudflare's edge network for high availability and a fully managed server.
+
+To get started, follow the **[Cloudflare Deployment Guide](cloudflare/readme.md)**.
 
 ## Management API
 
