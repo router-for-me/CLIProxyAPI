@@ -215,10 +215,8 @@ jobs:
       matrix:
         include:
           - goarch: amd64
-            vm_arch: x86-64
             asset_arch: amd64
           - goarch: arm64
-            vm_arch: arm64
             asset_arch: aarch64
     steps:
       - uses: actions/checkout@v6
@@ -230,74 +228,63 @@ jobs:
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
       - name: Fetch tags
         run: git fetch --force --tags
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
       - uses: actions/cache@v4
         with:
           path: |
-            .freebsd-cache/${{ matrix.goarch }}/go
-            .freebsd-cache/${{ matrix.goarch }}/gocache
-            .freebsd-cache/${{ matrix.goarch }}/gomodcache
-          key: freebsd-${{ matrix.goarch }}-go${{ env.GO_VERSION }}-${{ hashFiles('go.sum') }}
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-freebsd-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            freebsd-${{ matrix.goarch }}-go${{ env.GO_VERSION }}-
-            freebsd-${{ matrix.goarch }}-
+            go-freebsd-${{ matrix.goarch }}-
+            go-freebsd-
       - name: Generate Build Metadata
+        id: metadata
         run: |
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Start FreeBSD ${{ matrix.goarch }} VM
-        uses: cross-platform-actions/action@v1.2.0
-        with:
-          operating_system: freebsd
-          architecture: ${{ matrix.vm_arch }}
-          version: '13.5'
-          shell: sh
-          memory: 5G
-          cpu_count: 4
-          environment_variables: GO_VERSION RELEASE_VERSION COMMIT BUILD_DATE TARGET GOARCH ASSET_ARCH
-      - name: Build FreeBSD archive
+          set -euo pipefail
+          release_version="${GITHUB_REF_NAME#v}"
+          commit="$(git rev-parse --short HEAD)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
+          echo "COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$build_date" >> "$GITHUB_ENV"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
+      - name: Install FreeBSD cross-build dependencies
+        run: |
+          set -euo pipefail
+          rm -rf "dist/${TARGET}"
+          sudo apt-get update
+          sudo apt-get install -y clang lld wget
+      - name: Build FreeBSD binary
         timeout-minutes: 45
-        shell: cpa.sh {0}
+        uses: go-cross/cgo-actions@v1
+        with:
+          dir: .
+          packages: ./cmd/server/
+          targets: ${{ env.TARGET }}
+          out-dir: dist/${{ env.TARGET }}/bin
+          output: cli-proxy-api
+          flags: >-
+            -ldflags=-s -w
+            -X main.Version=${{ steps.metadata.outputs.release_version }}
+            -X main.Commit=${{ steps.metadata.outputs.commit }}
+            -X main.BuildDate=${{ steps.metadata.outputs.build_date }}
+      - name: Package FreeBSD archive
+        shell: bash
         run: |
-          set -eu
-          cache_root=".freebsd-cache/${GOARCH}"
-          go_root="${cache_root}/go"
-          mkdir -p "${cache_root}/gocache" "${cache_root}/gomodcache"
-          echo "Preparing Go ${GO_VERSION} for FreeBSD ${GOARCH}"
-          if [ ! -x "${go_root}/bin/go" ]; then
-            fetch -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.freebsd-${GOARCH}.tar.gz"
-            rm -rf "$go_root"
-            mkdir -p "$cache_root"
-            tar -C "$cache_root" -xzf /tmp/go.tar.gz
-          fi
-          export GOCACHE="$PWD/${cache_root}/gocache"
-          export GOMODCACHE="$PWD/${cache_root}/gomodcache"
-          export PATH="/usr/local/bin:$PWD/${go_root}/bin:$PATH"
-          go version
-          go env GOOS GOARCH GOCACHE GOMODCACHE
-
-          echo "Downloading Go modules"
-          go mod download
-
-          if [ "$GOARCH" = "arm64" ] && ! command -v ld.bfd >/dev/null 2>&1; then
-            echo "Installing binutils for FreeBSD arm64 external linking"
-            sudo env IGNORE_OSVERSION=yes ASSUME_ALWAYS_YES=yes pkg install -y binutils
-          fi
-          if [ "$GOARCH" = "arm64" ]; then
-            ld.bfd --version | head -n 1
-          fi
+          set -euo pipefail
 
           archive_dir="dist/${TARGET}/archive"
           archive_name="CLIProxyAPI_${RELEASE_VERSION}_freebsd_${ASSET_ARCH}.tar.gz"
-          rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
-          echo "Building ${TARGET}"
-          CGO_ENABLED=1 GOOS=freebsd GOARCH="$GOARCH" go build \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "$archive_dir/cli-proxy-api" ./cmd/server/
-
           echo "Packaging ${archive_name}"
+          cp "dist/${TARGET}/bin/cli-proxy-api" "$archive_dir/cli-proxy-api"
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
       - name: Create asset checksum
