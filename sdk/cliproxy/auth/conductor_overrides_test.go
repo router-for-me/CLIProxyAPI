@@ -118,6 +118,40 @@ func TestManager_ShouldRetryAfterError_EmptyUpstreamResponseUsesConfiguredRetry(
 	}
 }
 
+func TestManager_ShouldRetryAfterError_CodexModelCooldownUsesRetryAfter(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "gpt-5.5"
+	auth := &Auth{
+		ID:       "codex-model-cooldown-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"request_retry": float64(1),
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(newModelCooldownError(model, "codex", 5*time.Second), 0, []string{"codex"}, model, maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for codex model cooldown")
+	}
+	if wait != 5*time.Second {
+		t.Fatalf("wait = %v, want %v", wait, 5*time.Second)
+	}
+
+	if _, shouldRetry = m.shouldRetryAfterError(newModelCooldownError(model, "codex", 5*time.Second), 1, []string{"codex"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false on attempt=1 for request_retry=1")
+	}
+
+	if wait, shouldRetry = m.shouldRetryAfterError(newModelCooldownError(model, "codex", 31*time.Second), 0, []string{"codex"}, model, maxWait); shouldRetry {
+		t.Fatalf("expected shouldRetry=false when retry-after exceeds max wait, got wait=%v", wait)
+	}
+}
+
 func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(3, 30*time.Second, 0)
