@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
@@ -49,6 +50,16 @@ func init() {
 	buildinfo.Version = Version
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+}
+
+func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
+	if cfg == nil || commandMode || homeMode || cloudConfigMissing {
+		return false
+	}
+	if tuiMode && !standalone {
+		return false
+	}
+	return safemode.HasExampleAPIKeys(cfg.APIKeys)
 }
 
 // main is the entry point of the application.
@@ -510,6 +521,16 @@ func main() {
 	options := &cmd.LoginOptions{
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
+	}
+
+	commandMode := vertexImport != "" || login || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+	cloudConfigMissing := isCloudDeploy && !configFileExists
+	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
+	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode) {
+		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
+		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; starting warning-only server")
+		cmd.StartExampleAPIKeyWarningServer(cfg, configFilePath, matches)
+		return
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
