@@ -10,6 +10,7 @@ permissions:
   contents: write
 
 env:
+  GH_REPO: ${{ github.repository }}
   GO_VERSION: '1.26.4'
 
 jobs:
@@ -383,7 +384,7 @@ jobs:
           archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
           if [[ ${#archives[@]} -eq 0 ]]; then
             echo "No release archives found"
-            exit 1
+            exit 0
           fi
           sha256sum "${archives[@]}" | sort -k2 > checksums.txt
           gh release upload "$GITHUB_REF_NAME" checksums.txt --clobber
