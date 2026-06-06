@@ -127,7 +127,7 @@ jobs:
 
   build-freebsd:
     name: build freebsd-${{ matrix.goarch }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     env:
       TARGET: freebsd-${{ matrix.goarch }}
       GOARCH: ${{ matrix.goarch }}
@@ -137,9 +137,11 @@ jobs:
       matrix:
         include:
           - goarch: amd64
+            runner: ubuntu-latest
             vm_arch: x86-64
             asset_arch: amd64
           - goarch: arm64
+            runner: ubuntu-24.04-arm
             vm_arch: arm64
             asset_arch: aarch64
     steps:
@@ -178,12 +180,14 @@ jobs:
           cpu_count: 4
           environment_variables: GO_VERSION RELEASE_VERSION COMMIT BUILD_DATE TARGET GOARCH ASSET_ARCH
       - name: Build FreeBSD archive
+        timeout-minutes: 45
         shell: cpa.sh {0}
         run: |
           set -eu
           cache_root=".freebsd-cache/${GOARCH}"
           go_root="${cache_root}/go"
           mkdir -p "${cache_root}/gocache" "${cache_root}/gomodcache"
+          echo "Preparing Go ${GO_VERSION} for FreeBSD ${GOARCH}"
           if [ ! -x "${go_root}/bin/go" ]; then
             fetch -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.freebsd-${GOARCH}.tar.gz"
             rm -rf "$go_root"
@@ -194,16 +198,22 @@ jobs:
           export GOMODCACHE="$PWD/${cache_root}/gomodcache"
           export PATH="$PWD/${go_root}/bin:$PATH"
           go version
+          go env GOOS GOARCH GOCACHE GOMODCACHE
+
+          echo "Downloading Go modules"
+          go mod download
 
           archive_dir="dist/${TARGET}/archive"
           archive_name="CLIProxyAPI_${RELEASE_VERSION}_freebsd_${ASSET_ARCH}.tar.gz"
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
+          echo "Building ${TARGET}"
           CGO_ENABLED=1 GOOS=freebsd GOARCH="$GOARCH" go build \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "$archive_dir/cli-proxy-api" ./cmd/server/
 
+          echo "Packaging ${archive_name}"
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
       - uses: actions/upload-artifact@v4
