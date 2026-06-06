@@ -570,6 +570,60 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.
 	}
 }
 
+func TestManager_MarkResult_CloudflareChallenge_On403(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-cf-403",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-cf-403"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "cf-mitigated: challenge"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be non-zero for cloudflare challenge")
+	}
+	diff := time.Until(state.NextRetryAfter)
+	if diff < 5*time.Second || diff > 25*time.Second {
+		t.Fatalf("expected NextRetryAfter to be ~10 seconds, got %v", diff)
+	}
+	if state.StatusMessage != "cloudflare challenge" {
+		t.Fatalf("expected StatusMessage to be 'cloudflare challenge', got %s", state.StatusMessage)
+	}
+
+	// Because Cloudflare Challenge is treated as transient (no suspension),
+	// the model should NOT be suspended in the global registry, so count > 0.
+	if count := reg.GetModelCount(model); count <= 0 {
+		t.Fatalf("expected model count > 0 for cloudflare challenge transient cooldown, got %d", count)
+	}
+}
+
 func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter403(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

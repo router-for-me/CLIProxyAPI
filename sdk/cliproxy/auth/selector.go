@@ -471,11 +471,12 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority
 //  2. X-Session-ID header
-//  3. X-Amp-Thread-Id header (Amp CLI thread ID)
-//  4. X-Client-Request-Id header (PI)
-//  5. metadata.user_id (non-Claude Code format)
-//  6. conversation_id field in request body
-//  7. Stable hash from first few messages content (fallback)
+//  3. Session_id header (Codex)
+//  4. X-Amp-Thread-Id header (Amp CLI thread ID)
+//  5. X-Client-Request-Id header (PI)
+//  6. metadata.user_id (non-Claude Code format)
+//  7. conversation_id field in request body
+//  8. Stable hash from first few messages content (fallback)
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -572,11 +573,12 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
 //  2. X-Session-ID header
-//  3. X-Amp-Thread-Id header (Amp CLI thread ID)
-//  4. X-Client-Request-Id header (PI)
-//  5. metadata.user_id (non-Claude Code format)
-//  6. conversation_id field in request body
-//  7. Stable hash from first few messages content (fallback)
+//  3. Session_id header (Codex)
+//  4. X-Amp-Thread-Id header (Amp CLI thread ID)
+//  5. X-Client-Request-Id header (PI)
+//  6. metadata.user_id (non-Claude Code format)
+//  7. conversation_id field in request body
+//  8. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -612,14 +614,24 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 3. X-Amp-Thread-Id header (Amp CLI thread ID)
+	// 3. Session_id header (Codex)
+	if headers != nil {
+		if sid := headers.Get("Session-Id"); sid != "" {
+			return "codex:" + sid, ""
+		}
+		if sid := headers.Get("Session_id"); sid != "" {
+			return "codex:" + sid, ""
+		}
+	}
+
+	// 4. X-Amp-Thread-Id header (Amp CLI thread ID)
 	if headers != nil {
 		if tid := headers.Get("X-Amp-Thread-Id"); tid != "" {
 			return "amp:" + tid, ""
 		}
 	}
 
-	// 4. X-Client-Request-Id header (PI)
+	// 5. X-Client-Request-Id header (PI)
 	if headers != nil {
 		if rid := headers.Get("X-Client-Request-Id"); rid != "" {
 			return "clientreq:" + rid, ""
@@ -630,18 +642,18 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "", ""
 	}
 
-	// 5. metadata.user_id (non-Claude Code format)
+	// 6. metadata.user_id (non-Claude Code format)
 	userID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 6. conversation_id field
+	// 7. conversation_id field
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
 	}
 
-	// 7. Hash-based fallback from message content
+	// 8. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 

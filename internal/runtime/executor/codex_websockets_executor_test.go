@@ -197,7 +197,7 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 		"Version":               "0.115.0-alpha.27",
 		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
 		"X-Client-Request-Id":   "019d2233-e240-7162-992d-38df0a2a0e0d",
-		"session_id":            "legacy-session",
+		"session-id":            "legacy-session",
 	})
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
@@ -217,8 +217,32 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	if got := headers.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
 	}
-	if got := headerValueCaseInsensitive(headers, "session_id"); got != "" {
-		t.Fatalf("session_id = %q, want empty", got)
+	if got := headers["session_id"]; len(got) != 1 || got[0] != "legacy-session" {
+		t.Fatalf("session_id = %#v, want [legacy-session]", got)
+	}
+	if got := headers.Get("Session-Id"); got != "" {
+		t.Fatalf("Session-Id = %s, want empty", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersCanonicalizesLegacyUnderscoreSessionHeader(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"Originator": "Codex Desktop",
+		"User-Agent": "codex_cli_rs/0.1.0",
+		"Session_id": "legacy-underscore-session",
+	})
+
+	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
+
+	if got := headers["session_id"]; len(got) != 1 || got[0] != "legacy-underscore-session" {
+		t.Fatalf("session_id = %#v, want [legacy-underscore-session]", got)
+	}
+	if got := headers.Get("Session-Id"); got != "" {
+		t.Fatalf("Session-Id = %s, want empty", got)
 	}
 }
 
@@ -341,16 +365,93 @@ func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T
 	}
 }
 
-func TestApplyCodexPromptCacheHeadersDoesNotSetDeprecatedConversationHeader(t *testing.T) {
+func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
+
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
+	}
+	values, ok := headers["ChatGPT-Account-ID"]
+	if !ok {
+		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	}
+	if len(values) != 1 || values[0] != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersSetsSessionIDAndLegacyConversation(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
 
 	_, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
 
-	if got := headerValueCaseInsensitive(headers, "session_id"); got != "" {
-		t.Fatalf("session_id = %q, want empty", got)
+	if got := headers["session_id"]; len(got) != 1 || got[0] != "cache-1" {
+		t.Fatalf("session_id = %#v, want [cache-1]", got)
+	}
+	if got := headers.Get("Session-Id"); got != "" {
+		t.Fatalf("Session-Id = %s, want empty", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "cache-1" {
+		t.Fatalf("Conversation_id = %s, want cache-1", got)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersClaudeUsesClaudeCodeSessionID(t *testing.T) {
+	firstReq := cliproxyexecutor.Request{
+		Model: "gpt-5-codex-claude-ws-cache-session",
+		Payload: []byte(`{
+			"metadata":{"user_id":"{\"device_id\":\"device-a\",\"account_uuid\":\"\",\"session_id\":\"ws-cache-session-1\"}"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"first"}]}]
+		}`),
+	}
+	secondReq := cliproxyexecutor.Request{
+		Model: "gpt-5-codex-claude-ws-cache-session",
+		Payload: []byte(`{
+			"metadata":{"user_id":"{\"device_id\":\"device-b\",\"account_uuid\":\"\",\"session_id\":\"ws-cache-session-1\"}"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]
+		}`),
+	}
+
+	firstBody, firstHeaders := applyCodexPromptCacheHeaders("claude", firstReq, []byte(`{"model":"gpt-5-codex"}`))
+	secondBody, secondHeaders := applyCodexPromptCacheHeaders("claude", secondReq, []byte(`{"model":"gpt-5-codex"}`))
+
+	firstKey := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondKey := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	if firstKey == "" {
+		t.Fatalf("first prompt_cache_key is empty; body=%s", string(firstBody))
+	}
+	if secondKey != firstKey {
+		t.Fatalf("same Claude Code session_id produced different websocket prompt_cache_key: first=%q second=%q", firstKey, secondKey)
+	}
+	if got := firstHeaders["session_id"]; len(got) != 1 || got[0] != firstKey {
+		t.Fatalf("first session_id = %#v, want [%q]", got, firstKey)
+	}
+	if got := secondHeaders["session_id"]; len(got) != 1 || got[0] != firstKey {
+		t.Fatalf("second session_id = %#v, want [%q]", got, firstKey)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersClaudeRejectsBareUserID(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex-claude-ws-cache-bare-user",
+		Payload: []byte(`{"metadata":{"user_id":"same-user-across-chats"},"messages":[{"role":"user","content":[{"type":"text","text":"first"}]}]}`),
+	}
+
+	body, headers := applyCodexPromptCacheHeaders("claude", req, []byte(`{"model":"gpt-5-codex"}`))
+
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "" {
+		t.Fatalf("bare metadata.user_id must not create websocket prompt_cache_key, got %q; body=%s", got, string(body))
+	}
+	if got := headers["session_id"]; len(got) != 0 {
+		t.Fatalf("bare metadata.user_id must not create websocket session_id, got %#v", got)
+	}
+	if got := headers.Get("Session-Id"); got != "" {
+		t.Fatalf("bare metadata.user_id must not create websocket Session-Id, got %q", got)
 	}
 	if got := headers.Get("Conversation_id"); got != "" {
-		t.Fatalf("Conversation_id = %q, want empty", got)
+		t.Fatalf("bare metadata.user_id must not create websocket Conversation_id, got %q", got)
 	}
 }
 
@@ -379,8 +480,11 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != expectedPromptCacheKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedPromptCacheKey)
 	}
-	if gotSession := headerValueCaseInsensitive(headers, "session_id"); gotSession != "" {
-		t.Fatalf("session_id = %q, want empty", gotSession)
+	if gotSession := headers["session_id"]; len(gotSession) != 1 || gotSession[0] != expectedPromptCacheKey {
+		t.Fatalf("session_id = %#v, want [%q]", gotSession, expectedPromptCacheKey)
+	}
+	if gotCanonicalSession := headers.Get("Session-Id"); gotCanonicalSession != "" {
+		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
 	}
 	if gotRequestID := headers.Get("X-Client-Request-Id"); gotRequestID != expectedPromptCacheKey {
 		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, expectedPromptCacheKey)
@@ -388,8 +492,8 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 	if gotThreadID := headers.Get("Thread-Id"); gotThreadID != expectedPromptCacheKey {
 		t.Fatalf("Thread-Id = %q, want %q", gotThreadID, expectedPromptCacheKey)
 	}
-	if gotConversation := headers.Get("Conversation_id"); gotConversation != "" {
-		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
+	if gotConversation := headers.Get("Conversation_id"); gotConversation != expectedPromptCacheKey {
+		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedPromptCacheKey)
 	}
 	if gotWindowID := headers.Get("X-Codex-Window-Id"); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")

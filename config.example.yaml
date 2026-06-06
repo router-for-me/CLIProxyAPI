@@ -49,7 +49,7 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
-# When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
+# When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
 # When true, write application logs to rotating files instead of stdout
@@ -119,7 +119,7 @@ routing:
   strategy: "round-robin" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
-  # X-Session-ID, X-Amp-Thread-Id (Amp CLI),
+  # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
   # X-Client-Request-Id (PI), conversation_id, or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false

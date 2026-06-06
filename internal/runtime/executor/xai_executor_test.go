@@ -592,3 +592,57 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 		})
 	}
 }
+
+func TestNormalizeXAIToolChoiceForTools_DropsWhenToolsEmpty(t *testing.T) {
+	body := []byte(`{"model":"grok-4","tools":[],"tool_choice":"auto","parallel_tool_calls":true,"input":"hi"}`)
+	out := normalizeXAIToolChoiceForTools(body)
+
+	if gjson.GetBytes(out, "tools").Exists() {
+		t.Fatalf("empty tools should be removed: %s", string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice should be removed when tools empty: %s", string(out))
+	}
+	if gjson.GetBytes(out, "parallel_tool_calls").Exists() {
+		t.Fatalf("parallel_tool_calls should be removed when tools empty: %s", string(out))
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_DropsWhenToolsMissing(t *testing.T) {
+	body := []byte(`{"model":"grok-4","tool_choice":"auto","input":"hi"}`)
+	out := normalizeXAIToolChoiceForTools(body)
+
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice should be removed when tools missing: %s", string(out))
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_DropsOrphanedParallelToolCalls(t *testing.T) {
+	body := []byte(`{"model":"grok-4","parallel_tool_calls":true,"input":"hi"}`)
+	out := normalizeXAIToolChoiceForTools(body)
+
+	if gjson.GetBytes(out, "parallel_tool_calls").Exists() {
+		t.Fatalf("parallel_tool_calls should be removed when tools missing even without tool_choice: %s", string(out))
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_KeepsWhenToolsPresent(t *testing.T) {
+	body := []byte(`{"model":"grok-4","tools":[{"type":"function","name":"Bash"}],"tool_choice":"auto","input":"hi"}`)
+	out := normalizeXAIToolChoiceForTools(body)
+
+	if !gjson.GetBytes(out, "tools").Exists() {
+		t.Fatalf("tools should be kept: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto: %s", got, string(out))
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
+	body := []byte(`{"model":"grok-4","input":"hi"}`)
+	out := normalizeXAIToolChoiceForTools(body)
+
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice should not appear: %s", string(out))
+	}
+}

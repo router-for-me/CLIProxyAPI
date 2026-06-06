@@ -52,7 +52,7 @@ type Config struct {
 	// Pprof config controls the optional pprof HTTP debug server.
 	Pprof PprofConfig `yaml:"pprof" json:"pprof"`
 
-	// CommercialMode disables high-overhead HTTP middleware features to minimize per-request memory usage.
+	// CommercialMode disables high-overhead request logging and HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
 
 	// LoggingToFile controls whether application logs are written to rotating files or stdout.
@@ -237,7 +237,7 @@ type RoutingConfig struct {
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Session IDs are extracted from multiple sources:
-	// metadata.user_id (Claude Code session format), X-Session-ID,
+	// metadata.user_id (Claude Code session format), X-Session-ID, Session_id (Codex),
 	// X-Amp-Thread-Id (Amp CLI thread), X-Client-Request-Id (PI), metadata.user_id,
 	// conversation_id, or message hash.
 	// Automatic failover is always enabled when bound auth becomes unavailable.

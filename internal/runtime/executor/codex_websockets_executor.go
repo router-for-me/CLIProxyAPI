@@ -184,7 +184,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -404,7 +404,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -835,21 +835,11 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 	}
 
 	var cache helps.CodexCache
-	if from == "claude" {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			if cached, ok := helps.GetCodexCache(key); ok {
-				cache = cached
-			} else {
-				cache = helps.CodexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				helps.SetCodexCache(key, cache)
-			}
+	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		if cached, ok := codexClaudeCodePromptCache(req); ok {
+			cache = cached
 		}
-	} else if from == "openai-response" {
+	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
 		}
@@ -857,6 +847,8 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
+		setHeaderCasePreserved(headers, "session_id", cache.ID)
+		headers.Set("Conversation_id", cache.ID)
 	}
 
 	return rawJSON, headers
@@ -897,29 +889,59 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
+	sessionFallback := ""
+	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
+		sessionFallback = uuid.NewString()
+	}
+	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		headers.Set("Originator", originator)
 	} else if !isAPIKey {
 		headers.Set("Originator", codexOriginator)
 	}
-	// if !isAPIKey {
-	// 	if auth != nil && auth.Metadata != nil {
-	// 		if accountID, ok := auth.Metadata["account_id"].(string); ok {
-	// 			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-	// 				setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-	// 			}
-	// 		}
-	// 	}
-	// }
+	if !isAPIKey {
+		if auth != nil && auth.Metadata != nil {
+			if accountID, ok := auth.Metadata["account_id"].(string); ok {
+				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
+				}
+			}
+		}
+	}
 
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
-	deleteDeprecatedCodexConversationHeader(headers)
 
 	return headers
+}
+
+func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	sessionID := codexSessionHeaderValue(target)
+	if sessionID == "" {
+		sessionID = codexSessionHeaderValue(source)
+	}
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(fallbackValue)
+	}
+	if sessionID != "" {
+		setHeaderCasePreserved(target, "session_id", sessionID)
+	}
+	deleteHeaderCaseInsensitive(target, "Session-Id")
+}
+
+func codexSessionHeaderValue(headers http.Header) string {
+	for _, key := range []string{"Session-Id", "Session_id", "session_id"} {
+		if value := strings.TrimSpace(headerValueCaseInsensitive(headers, key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func codexAuthUsesAPIKey(auth *cliproxyauth.Auth) bool {
@@ -964,6 +986,47 @@ func setHeaderCasePreserved(headers http.Header, key string, value string) {
 	headers[key] = []string{value}
 }
 
+func setCodexSessionHeaderCasePreserved(headers http.Header, fallbackKey string, value string) {
+	if headers == nil {
+		return
+	}
+	fallbackKey = strings.TrimSpace(fallbackKey)
+	value = strings.TrimSpace(value)
+	if fallbackKey == "" || value == "" {
+		return
+	}
+
+	selectedKey := ""
+	if _, ok := headers[fallbackKey]; ok && codexSessionHeaderKeyUsesUnderscore(fallbackKey) {
+		selectedKey = fallbackKey
+	} else {
+		for existingKey := range headers {
+			if codexSessionHeaderKeyUsesUnderscore(existingKey) {
+				selectedKey = existingKey
+				break
+			}
+		}
+	}
+	if selectedKey == "" {
+		selectedKey = fallbackKey
+	}
+	for existingKey := range headers {
+		if codexSessionHeaderKey(existingKey) && existingKey != selectedKey {
+			delete(headers, existingKey)
+		}
+	}
+	headers[selectedKey] = []string{value}
+}
+
+func codexSessionHeaderKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	return normalized == "session_id" || normalized == "session-id"
+}
+
+func codexSessionHeaderKeyUsesUnderscore(key string) bool {
+	return strings.ToLower(strings.TrimSpace(key)) == "session_id"
+}
+
 func headerValueCaseInsensitive(headers http.Header, key string) string {
 	key = strings.TrimSpace(key)
 	if headers == nil || key == "" {
@@ -991,10 +1054,6 @@ func deleteHeaderCaseInsensitive(headers http.Header, key string) {
 			delete(headers, existingKey)
 		}
 	}
-}
-
-func deleteDeprecatedCodexConversationHeader(headers http.Header) {
-	deleteHeaderCaseInsensitive(headers, "Conversation_id")
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {

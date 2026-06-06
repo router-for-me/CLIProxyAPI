@@ -776,15 +776,16 @@ func TestExtractSessionID_Headers(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_IgnoresCodexSessionIDHeader(t *testing.T) {
+func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
 	t.Parallel()
 
 	headers := make(http.Header)
 	headers.Set("Session_id", "codex-session-123")
 
 	got := ExtractSessionID(headers, nil, nil)
-	if got != "" {
-		t.Errorf("ExtractSessionID() with deprecated Session_id = %q, want empty", got)
+	want := "codex:codex-session-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Session_id = %q, want %q", got, want)
 	}
 }
 
@@ -801,7 +802,7 @@ func TestExtractSessionID_ClientRequestIDHeader(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_ClientRequestIDIgnoresDeprecatedCodexSessionID(t *testing.T) {
+func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
 	t.Parallel()
 
 	headers := make(http.Header)
@@ -809,9 +810,9 @@ func TestExtractSessionID_ClientRequestIDIgnoresDeprecatedCodexSessionID(t *test
 	headers.Set("Session_id", "codex-session-456")
 
 	got := ExtractSessionID(headers, nil, nil)
-	want := "clientreq:pi-session-123"
+	want := "codex:codex-session-456"
 	if got != want {
-		t.Errorf("ExtractSessionID() = %q, want %q (deprecated Session_id should be ignored)", got, want)
+		t.Errorf("ExtractSessionID() = %q, want %q (Session_id should take priority over X-Client-Request-Id)", got, want)
 	}
 }
 
