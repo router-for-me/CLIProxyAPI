@@ -187,6 +187,11 @@ type Server struct {
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
+	// rootEndpoints caches the dynamic endpoint list for GET /.
+	// Computed once on first request; routes are static after startup.
+	rootEndpointsOnce sync.Once
+	rootEndpoints     []string
+
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -428,15 +433,28 @@ func (s *Server) setupRoutes() {
 		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 	}
 
-	// Root endpoint
+	// Root endpoint — dynamically lists all registered public API routes.
 	s.engine.GET("/", func(c *gin.Context) {
+		s.rootEndpointsOnce.Do(func() {
+			routes := s.engine.Routes()
+			s.rootEndpoints = make([]string, 0, len(routes))
+			for _, r := range routes {
+				path := r.Path
+				// Include only public API routes; exclude root, health, management,
+				// OAuth callbacks, internal, and any other non-API paths.
+				if path == "/" || path == "/healthz" || path == "/management.html" {
+					continue
+				}
+				if strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/") ||
+					strings.HasPrefix(path, "/backend-api/") {
+					s.rootEndpoints = append(s.rootEndpoints, r.Method+" "+path)
+				}
+			}
+			sort.Strings(s.rootEndpoints)
+		})
 		c.JSON(http.StatusOK, gin.H{
-			"message": "CLI Proxy API Server",
-			"endpoints": []string{
-				"POST /v1/chat/completions",
-				"POST /v1/completions",
-				"GET /v1/models",
-			},
+			"message":   "CLI Proxy API Server",
+			"endpoints": s.rootEndpoints,
 		})
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
