@@ -13,8 +13,23 @@ env:
   GO_VERSION: '1.26.4'
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+
   build-hosted:
     name: build ${{ matrix.target }}
+    needs: prepare-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -119,14 +134,76 @@ jobs:
           else
             tar -C "$archive_dir" -czf "dist/$archive_name" "$binary_name" LICENSE README.md README_CN.md config.example.yaml
           fi
+      - name: Create asset checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
+            printf '%s\n' "${archives[@]}" >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+          archive_name="$(basename "$archive")"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: dist/CLIProxyAPI_*
           if-no-files-found: error
+      - name: Upload release assets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip dist/CLIProxyAPI_*.tar.gz.sha256 dist/CLIProxyAPI_*.zip.sha256)
+          if [[ ${#assets[@]} -lt 2 ]]; then
+            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+            printf '%s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+      - name: Refresh release checksums
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern 'CLIProxyAPI_*.tar.gz' \
+            --pattern 'CLIProxyAPI_*.zip' \
+            --dir "$tmp_dir" \
+            --clobber
+          (
+            cd "$tmp_dir"
+            shopt -s nullglob
+            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            if [[ ${#archives[@]} -eq 0 ]]; then
+              echo "No release archives found"
+              exit 0
+            fi
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
+            else
+              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
+            fi
+          )
+          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
 
   build-freebsd:
     name: build freebsd-${{ matrix.goarch }}
+    needs: prepare-release
     runs-on: ubuntu-latest
     env:
       TARGET: freebsd-${{ matrix.goarch }}
@@ -222,14 +299,72 @@ jobs:
           echo "Packaging ${archive_name}"
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+      - name: Create asset checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/CLIProxyAPI_*.tar.gz)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
+            printf '%s\n' "${archives[@]}" >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+          archive_name="$(basename "$archive")"
+          sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: freebsd-${{ matrix.goarch }}
           path: dist/CLIProxyAPI_*
           if-no-files-found: error
+      - name: Upload release assets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.tar.gz.sha256)
+          if [[ ${#assets[@]} -lt 2 ]]; then
+            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+            printf '%s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+      - name: Refresh release checksums
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern 'CLIProxyAPI_*.tar.gz' \
+            --pattern 'CLIProxyAPI_*.zip' \
+            --dir "$tmp_dir" \
+            --clobber
+          (
+            cd "$tmp_dir"
+            shopt -s nullglob
+            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            if [[ ${#archives[@]} -eq 0 ]]; then
+              echo "No release archives found"
+              exit 0
+            fi
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
+            else
+              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
+            fi
+          )
+          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
 
-  publish-release:
+  publish-checksums:
     runs-on: ubuntu-latest
+    if: always()
     needs:
       - build-hosted
       - build-freebsd
@@ -238,18 +373,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create checksums
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum CLIProxyAPI_* | sort -k2 > checksums.txt
-      - name: Publish release
+      - name: Publish final checksums
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+          cd dist
+          shopt -s nullglob
+          archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+          if [[ ${#archives[@]} -eq 0 ]]; then
+            echo "No release archives found"
+            exit 1
           fi
+          sha256sum "${archives[@]}" | sort -k2 > checksums.txt
+          gh release upload "$GITHUB_REF_NAME" checksums.txt --clobber
