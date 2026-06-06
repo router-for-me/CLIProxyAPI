@@ -12,6 +12,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `protocol-format/`: minimal executor focused on input/output format declarations.
 - `request-translator/`: request translation capability only.
 - `request-normalizer/`: request normalization capability only.
+- `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.4` requests to the priority service tier when enabled.
 - `response-translator/`: response translation capability only.
 - `response-normalizer/`: response normalization capability only.
 - `thinking/`: thinking applier capability only.
@@ -20,7 +21,20 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `management-api/`: Management API capability only.
 - `host-callback/`: minimal Management API route that demonstrates host callbacks.
 
-Each example directory contains `go/`, `c/`, and `rust/` subdirectories.
+Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
+
+## Codex Service Tier
+
+`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.4`.
+
+```yaml
+plugins:
+  configs:
+    codex-service-tier:
+      enabled: true
+      priority: 1
+      fast: false
+```
 
 ## Build All Examples
 
