@@ -149,18 +149,18 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return f.fallback.RoundTrip(req)
 }
 
-// NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
-// Use this for Claude API requests to match real Claude Code's TLS behavior.
-// Falls back to standard transport for non-HTTPS requests.
-func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+// utlsClientCache reuses utls-backed *http.Client instances across requests,
+// keyed by proxyURL. A fresh client per request would force a new TLS handshake
+// and HTTP/2 connection setup every time; the underlying utlsRoundTripper is
+// already concurrency-safe and designed for connection reuse, so sharing the
+// client process-wide removes the per-request handshake cost. Only timeout==0
+// clients are cached (see NewUtlsHTTPClient).
+var utlsClientCache sync.Map
 
+// buildUtlsHTTPClient assembles a utls-backed HTTP client for the given proxyURL.
+// The dialer, fallback transport, and fallbackRoundTripper are wired here so that
+// both the cached and uncached paths share identical construction logic.
+func buildUtlsHTTPClient(proxyURL string) *http.Client {
 	utlsRT := newUtlsRoundTripper(proxyURL)
 
 	var standardTransport http.RoundTripper = &http.Transport{
@@ -175,14 +175,45 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		}
 	}
 
-	client := &http.Client{
+	return &http.Client{
 		Transport: &fallbackRoundTripper{
 			utls:     utlsRT,
 			fallback: standardTransport,
 		},
 	}
+}
+
+// NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
+// Use this for Claude API requests to match real Claude Code's TLS behavior.
+// Falls back to standard transport for non-HTTPS requests.
+//
+// When timeout == 0 the client is reused process-wide (keyed by proxyURL) to
+// avoid a fresh TLS handshake per request. When timeout > 0 a dedicated client
+// is built and not cached, preserving the per-request timeout semantics.
+func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	var proxyURL string
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+
 	if timeout > 0 {
+		client := buildUtlsHTTPClient(proxyURL)
 		client.Timeout = timeout
+		return client
+	}
+
+	if cached, ok := utlsClientCache.Load(proxyURL); ok {
+		if client, okCast := cached.(*http.Client); okCast && client != nil {
+			return client
+		}
+	}
+	client := buildUtlsHTTPClient(proxyURL)
+	actual, _ := utlsClientCache.LoadOrStore(proxyURL, client)
+	if cached, ok := actual.(*http.Client); ok && cached != nil {
+		return cached
 	}
 	return client
 }

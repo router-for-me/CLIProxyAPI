@@ -213,19 +213,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	body = downgradeClaudeToolSearchForCompatKind(compatKind, baseURL, body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
-
-	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
-	// Cloaking and ensureCacheControl may push the total over 4 when the client
-	// (e.g. Amp CLI) already sends multiple cache_control blocks.
-	body = enforceCacheControlLimit(body, 4)
-
-	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
-	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
-	body = normalizeCacheControlTTL(body)
+	// Apply cache_control phases sharing a single payload scan (byte-equivalent
+	// to the legacy inject → enforce → normalize sequence):
+	//   1. Auto-inject cache_control if missing (ClawdBot/clients without caching support).
+	//   2. Enforce Anthropic's max-4-breakpoint limit. Cloaking and injection may
+	//      push the total over 4 when the client (e.g. Amp CLI) already sends blocks.
+	//   3. Normalize TTL ordering under prompt-caching-scope-2026-01-05: a 1h block
+	//      must not appear after a 5m block in evaluation order (tools→system→messages).
+	body = applyCacheControlPipeline(body, 4, true)
 	body, err = repairMiniMaxClaudeToolAdjacencyForCompat(compatKind, body)
 	if err != nil {
 		return resp, err
@@ -434,16 +429,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	body = downgradeClaudeToolSearchForCompatKind(compatKind, baseURL, body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
-
-	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
-	body = enforceCacheControlLimit(body, 4)
-
-	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
-	body = normalizeCacheControlTTL(body)
+	// Apply cache_control phases sharing a single payload scan (byte-equivalent
+	// to the legacy inject → enforce → normalize sequence): auto-inject when
+	// missing, enforce the max-4-breakpoint limit, then normalize TTL ordering
+	// under prompt-caching-scope-2026-01-05.
+	body = applyCacheControlPipeline(body, 4, true)
 	body, err = repairMiniMaxClaudeToolAdjacencyForCompat(compatKind, body)
 	if err != nil {
 		return nil, err
@@ -713,8 +703,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = downgradeClaudeToolSearchForCompat(baseURL, body)
-	body = enforceCacheControlLimit(body, 4)
-	body = normalizeCacheControlTTL(body)
+	// count_tokens does NOT inject cache_control; only enforce the limit and
+	// normalize TTL ordering (shares a single payload scan, byte-equivalent to
+	// the legacy enforce → normalize sequence).
+	body = applyCacheControlPipeline(body, 4, false)
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
@@ -3622,6 +3614,141 @@ func countCacheControls(payload []byte) int {
 	}
 
 	return count
+}
+
+// applyCacheControlPipeline runs the three cache_control phases sharing a single
+// initial scan of the payload. It is byte-for-byte equivalent to the legacy
+// sequence used at the call sites:
+//
+//	if countCacheControls(body) == 0 { body = ensureCacheControl(body) } // when doInject
+//	body = enforceCacheControlLimit(body, maxBlocks)
+//	body = normalizeCacheControlTTL(body)
+//
+// Only the read side is merged: a one-pass model drives the common path
+// (payload already within the limit) so normalization runs without re-walking
+// the document. Writes stay pointwise via sjson. The rarer paths (injection
+// needed, or block count over the limit) defer to the legacy functions, which
+// reshape the body and are re-scanned freshly. When doInject is false the
+// injection phase is skipped entirely (CountTokens path).
+func applyCacheControlPipeline(payload []byte, maxBlocks int, doInject bool) []byte {
+	model := collectCacheControlModel(payload)
+
+	if doInject && model.total == 0 {
+		// Client sent no cache_control: inject breakpoints, then enforce and
+		// normalize on the mutated body (the model above is now stale).
+		payload = ensureCacheControl(payload)
+		payload = enforceCacheControlLimit(payload, maxBlocks)
+		return normalizeCacheControlTTL(payload)
+	}
+
+	if model.total > maxBlocks {
+		// Over the breakpoint limit: legacy enforce reshapes the body, then
+		// normalize runs on the fresh result.
+		payload = enforceCacheControlLimit(payload, maxBlocks)
+		return normalizeCacheControlTTL(payload)
+	}
+
+	// Common path: within the limit and no injection. enforce would be a no-op,
+	// so normalize directly from the model already built (single scan total).
+	return normalizeFromModel(payload, model)
+}
+
+// cacheControlBlock is a lightweight descriptor of one cache_control breakpoint,
+// captured in a single modelling pass so the normalize phase need not re-walk
+// the document. path is the gjson/sjson path to the OWNING element (e.g.
+// "tools.0", "system.1", "messages.2.content.0"); the ".cache_control" suffix is
+// appended by consumers.
+type cacheControlBlock struct {
+	path       string
+	ccIsObject bool
+	ttlIs1h    bool
+}
+
+// cacheControlModel holds every cache_control breakpoint in Anthropic evaluation
+// order (tools → system → messages). total mirrors countCacheControls(payload):
+// the block set is identical, so total == len(blocks).
+type cacheControlModel struct {
+	total  int
+	blocks []cacheControlBlock
+}
+
+// collectCacheControlModel walks tools, system, and messages once, recording each
+// cache_control breakpoint in evaluation order. The captured (ccIsObject, ttlIs1h)
+// flags carry exactly the information normalizeFromModel needs, replacing the
+// repeated independent walks of countCacheControls + normalizeCacheControlTTL.
+func collectCacheControlModel(payload []byte) cacheControlModel {
+	model := cacheControlModel{}
+	addBlock := func(path string, item gjson.Result) {
+		cc := item.Get("cache_control")
+		if !cc.Exists() {
+			return
+		}
+		ttl := cc.Get("ttl")
+		model.blocks = append(model.blocks, cacheControlBlock{
+			path:       path,
+			ccIsObject: cc.IsObject(),
+			ttlIs1h:    ttl.Type == gjson.String && ttl.String() == "1h",
+		})
+	}
+
+	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
+		tools.ForEach(func(idx, item gjson.Result) bool {
+			addBlock(fmt.Sprintf("tools.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+	if system := gjson.GetBytes(payload, "system"); system.IsArray() {
+		system.ForEach(func(idx, item gjson.Result) bool {
+			addBlock(fmt.Sprintf("system.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(itemIdx, item gjson.Result) bool {
+				addBlock(fmt.Sprintf("messages.%d.content.%d", int(msgIdx.Int()), int(itemIdx.Int())), item)
+				return true
+			})
+			return true
+		})
+	}
+
+	model.total = len(model.blocks)
+	return model
+}
+
+// normalizeFromModel applies the TTL ordering normalization using the prebuilt
+// model, equivalent to normalizeCacheControlTTL but without re-walking the
+// document. Anthropic evaluates blocks in order tools → system → messages; once
+// a 5m (default) block is seen, every later 1h block must drop its ttl. The
+// model's blocks are already in evaluation order, so a non-object cache_control
+// or a non-"1h" ttl marks a 5m block. Bytes are returned unchanged when no
+// deletion occurs, preserving the no-op identity guarantee.
+func normalizeFromModel(payload []byte, model cacheControlModel) []byte {
+	// Match the guard in normalizeCacheControlTTL/enforceCacheControlLimit so the
+	// common path stays byte-identical to the legacy sequence on empty or invalid
+	// JSON (both leave the payload untouched).
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	seen5m := false
+	for _, b := range model.blocks {
+		if !b.ccIsObject || !b.ttlIs1h {
+			seen5m = true
+			continue
+		}
+		if !seen5m {
+			continue
+		}
+		if updated, errDel := sjson.DeleteBytes(payload, b.path+".cache_control.ttl"); errDel == nil {
+			payload = updated
+		}
+	}
+	return payload
 }
 
 // normalizeCacheControlTTL ensures cache_control TTL values don't violate the

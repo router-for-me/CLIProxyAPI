@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
@@ -18,13 +19,39 @@ type SensitiveWordMatcher struct {
 	regex *regexp.Regexp
 }
 
+// sensitiveWordMatcherCache memoizes compiled matchers keyed by the raw word
+// list. The word list comes from config/auth and is static between hot reloads,
+// so recompiling the alternation regex on every request is pure waste. A
+// compiled *regexp.Regexp is safe for concurrent use, and the number of distinct
+// word-list configurations is tiny, so the cache stays bounded.
+var sensitiveWordMatcherCache sync.Map
+
 // BuildSensitiveWordMatcher compiles a regex from the word list.
 // Words are sorted by length (longest first) for proper matching.
+// Results are memoized by word list to avoid recompiling on every request.
 func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 	if len(words) == 0 {
 		return nil
 	}
 
+	cacheKey := strings.Join(words, "\x00")
+	if cached, ok := sensitiveWordMatcherCache.Load(cacheKey); ok {
+		matcher, _ := cached.(*SensitiveWordMatcher)
+		return matcher
+	}
+
+	matcher := compileSensitiveWordMatcher(words)
+	actual, _ := sensitiveWordMatcherCache.LoadOrStore(cacheKey, matcher)
+	if cached, ok := actual.(*SensitiveWordMatcher); ok {
+		return cached
+	}
+	return matcher
+}
+
+// compileSensitiveWordMatcher builds the matcher without consulting the cache.
+// A nil result (no valid words or a compile error) is cached too, so the empty
+// case is not recomputed per request.
+func compileSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 	// Filter and normalize words
 	var validWords []string
 	for _, w := range words {
