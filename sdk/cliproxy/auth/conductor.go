@@ -5723,6 +5723,72 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// ResolveConfiguredProviders infers provider keys for a route model directly from
+// the current auth set and runtime config. It is a safety net for moments when
+// the shared model registry temporarily lacks a model registration even though
+// the active config still contains matching credentials.
+func (m *Manager) ResolveConfiguredProviders(routeModel string) []string {
+	if m == nil {
+		return nil
+	}
+	routeModel = strings.TrimSpace(routeModel)
+	if routeModel == "" {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]string, 0, len(m.auths))
+	seen := make(map[string]struct{}, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if providerKey == "" {
+			continue
+		}
+		if _, exists := seen[providerKey]; exists {
+			continue
+		}
+		if _, hasExecutor := m.executors[providerKey]; !hasExecutor {
+			continue
+		}
+		if !m.authMatchesConfiguredRouteModel(auth, routeModel) {
+			continue
+		}
+		seen[providerKey] = struct{}{}
+		out = append(out, providerKey)
+	}
+	return out
+}
+
+func (m *Manager) authMatchesConfiguredRouteModel(auth *Auth, routeModel string) bool {
+	if m == nil || auth == nil {
+		return false
+	}
+
+	requestedModel := rewriteModelForAuth(routeModel, auth)
+	if strings.TrimSpace(requestedModel) == "" {
+		requestedModel = strings.TrimSpace(routeModel)
+	}
+	if requestedModel == "" {
+		return false
+	}
+
+	if pool := m.resolveOAuthUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		return true
+	}
+	if pool := m.resolveAPIKeyUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		return true
+	}
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		return true
+	}
+	return false
+}
+
 // GetByID retrieves an auth entry by its ID.
 
 func (m *Manager) GetByID(id string) (*Auth, bool) {
