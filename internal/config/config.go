@@ -43,6 +43,9 @@ type Config struct {
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
+	// Plugins configures dynamic plugin discovery and per-plugin settings.
+	Plugins PluginsConfig `yaml:"plugins" json:"plugins"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
@@ -150,6 +153,87 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// PluginsConfig holds dynamic plugin system settings.
+type PluginsConfig struct {
+	// Enabled toggles dynamic plugin loading.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Dir is the plugin discovery directory.
+	Dir string `yaml:"dir" json:"dir"`
+	// Configs stores per-plugin instance configuration by plugin ID.
+	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
+}
+
+// PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
+type PluginInstanceConfig struct {
+	// Enabled toggles this plugin instance. Nil is normalized to true during YAML parsing.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Priority controls plugin startup and routing order.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+	// Raw preserves the full original plugin configuration YAML subtree.
+	Raw yaml.Node `yaml:"-" json:"-"`
+}
+
+// UnmarshalYAML extracts host-owned fields while preserving the full original YAML node.
+func (c *PluginInstanceConfig) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil {
+		return nil
+	}
+
+	c.Priority = 0
+	defaultEnabled := true
+	c.Enabled = &defaultEnabled
+
+	if value == nil || value.Kind == 0 {
+		c.Raw = *defaultPluginInstanceConfigNode()
+		return nil
+	}
+
+	c.Raw = *deepCopyNode(value)
+	if value.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i]
+		node := value.Content[i+1]
+		if key == nil {
+			continue
+		}
+		switch key.Value {
+		case "enabled":
+			var enabled bool
+			if errDecodeEnabled := node.Decode(&enabled); errDecodeEnabled != nil {
+				return fmt.Errorf("parse plugin enabled: %w", errDecodeEnabled)
+			}
+			c.Enabled = &enabled
+		case "priority":
+			var priority int
+			if errDecodePriority := node.Decode(&priority); errDecodePriority != nil {
+				return fmt.Errorf("parse plugin priority: %w", errDecodePriority)
+			}
+			c.Priority = priority
+		}
+	}
+
+	return nil
+}
+
+// MarshalYAML returns the preserved raw plugin YAML subtree for lossless config output.
+func (c PluginInstanceConfig) MarshalYAML() (any, error) {
+	if c.Raw.Kind == 0 {
+		return defaultPluginInstanceConfigNode(), nil
+	}
+	return deepCopyNode(&c.Raw), nil
+}
+
+func defaultPluginInstanceConfigNode() *yaml.Node {
+	return &yaml.Node{
+		Kind:    yaml.MappingNode,
+		Tag:     "!!map",
+		Content: []*yaml.Node{},
+	}
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
@@ -628,7 +712,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
-				return &Config{}, nil
+				cfg := &Config{}
+				cfg.NormalizePluginsConfig()
+				return cfg, nil
 			}
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -636,7 +722,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(data) == 0 {
-		return &Config{}, nil
+		cfg := &Config{}
+		cfg.NormalizePluginsConfig()
+		return cfg, nil
 	}
 
 	// Unmarshal the YAML data into the Config struct.
@@ -657,7 +745,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			return &Config{}, nil
+			cfgOptional := &Config{}
+			cfgOptional.NormalizePluginsConfig()
+			return cfgOptional, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
@@ -721,6 +811,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.NormalizePluginsConfig()
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -768,6 +860,20 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// NormalizePluginsConfig applies default plugin configuration values.
+func (cfg *Config) NormalizePluginsConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.Plugins.Dir = strings.TrimSpace(cfg.Plugins.Dir)
+	if cfg.Plugins.Dir == "" {
+		cfg.Plugins.Dir = "plugins"
+	}
+	if cfg.Plugins.Configs == nil {
+		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
+	}
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
@@ -1390,6 +1496,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == DefaultPprofAddr
 		case "remote-management.panel-github-repository":
 			return node.Value == DefaultPanelGitHubRepository
+		case "plugins.dir":
+			return node.Value == "plugins"
 		case "routing.strategy":
 			return node.Value == "round-robin"
 		}

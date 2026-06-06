@@ -72,16 +72,19 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	}
 
 	if rescanAuth {
-		w.clientsMutex.Lock()
-
-		w.lastAuthHashes = make(map[string]string)
+		w.authRescanMu.Lock()
 		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
+		newAuthHashes := make(map[string]string)
+		var newAuthContents map[string]*coreauth.Auth
 		if cacheAuthContents {
-			w.lastAuthContents = make(map[string]*coreauth.Auth)
-		} else {
-			w.lastAuthContents = nil
+			newAuthContents = make(map[string]*coreauth.Auth)
 		}
-		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+		newFileAuthsByPath := make(map[string]map[string]*coreauth.Auth)
+
+		w.clientsMutex.RLock()
+		parser := w.pluginAuthParser
+		w.clientsMutex.RUnlock()
+
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
@@ -101,30 +104,36 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 					if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
 						normalizedPath := w.normalizeAuthPath(fullPath)
-						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+						newAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
 						// Parse and cache auth content for future diff comparisons (debug only).
 						if cacheAuthContents {
 							var auth coreauth.Auth
 							if errParse := json.Unmarshal(data, &auth); errParse == nil {
-								w.lastAuthContents[normalizedPath] = &auth
+								newAuthContents[normalizedPath] = &auth
 							}
 						}
 						ctx := &synthesizer.SynthesisContext{
-							Config:      cfg,
-							AuthDir:     resolvedAuthDir,
-							Now:         time.Now(),
-							IDGenerator: synthesizer.NewStableIDGenerator(),
+							Config:           cfg,
+							AuthDir:          resolvedAuthDir,
+							Now:              time.Now(),
+							IDGenerator:      synthesizer.NewStableIDGenerator(),
+							PluginAuthParser: parser,
 						}
 						if generated := synthesizer.SynthesizeAuthFile(ctx, fullPath, data); len(generated) > 0 {
 							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
-								w.fileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
+								newFileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
 							}
 						}
 					}
 				}
 			}
 		}
+		w.clientsMutex.Lock()
+		w.lastAuthHashes = newAuthHashes
+		w.lastAuthContents = newAuthContents
+		w.fileAuthsByPath = newFileAuthsByPath
 		w.clientsMutex.Unlock()
+		w.authRescanMu.Unlock()
 	}
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
@@ -149,6 +158,13 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+
+	w.addOrUpdateClientLocked(path)
+}
+
+func (w *Watcher) addOrUpdateClientLocked(path string) {
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
@@ -170,12 +186,16 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		return
 	}
 
+	cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
 	w.clientsMutex.Lock()
 	if w.config == nil {
 		log.Error("config is nil, cannot add or update client")
 		w.clientsMutex.Unlock()
 		return
 	}
+	cfg := w.config
+	authDir := w.authDir
+	parser := w.pluginAuthParser
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 	}
@@ -186,23 +206,17 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	// Get old auth for diff comparison
-	cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
 	var oldAuth *coreauth.Auth
 	if cacheAuthContents && w.lastAuthContents != nil {
-		oldAuth = w.lastAuthContents[normalized]
-	}
-
-	// Compute and log field changes
-	if cacheAuthContents {
-		if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
-			log.Debugf("auth field changes for %s:", filepath.Base(path))
-			for _, c := range changes {
-				log.Debugf("  %s", c)
-			}
+		if cached := w.lastAuthContents[normalized]; cached != nil {
+			oldAuth = cached.Clone()
 		}
 	}
 
 	// Update caches
+	if w.lastAuthHashes == nil {
+		w.lastAuthHashes = make(map[string]string)
+	}
 	w.lastAuthHashes[normalized] = curHash
 	if cacheAuthContents {
 		if w.lastAuthContents == nil {
@@ -215,16 +229,29 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	for id, a := range w.fileAuthsByPath[normalized] {
 		oldByID[id] = a
 	}
+	w.clientsMutex.Unlock()
+
+	// Compute and log field changes
+	if cacheAuthContents {
+		if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
+			log.Debugf("auth field changes for %s:", filepath.Base(path))
+			for _, c := range changes {
+				log.Debugf("  %s", c)
+			}
+		}
+	}
 
 	// Build synthesized auth entries for this single file only.
 	sctx := &synthesizer.SynthesisContext{
-		Config:      w.config,
-		AuthDir:     w.authDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
+		Config:           cfg,
+		AuthDir:          authDir,
+		Now:              time.Now(),
+		IDGenerator:      synthesizer.NewStableIDGenerator(),
+		PluginAuthParser: parser,
 	}
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)
+	w.clientsMutex.Lock()
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
@@ -239,6 +266,13 @@ func (w *Watcher) addOrUpdateClient(path string) {
 }
 
 func (w *Watcher) removeClient(path string) {
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+
+	w.removeClientLocked(path)
+}
+
+func (w *Watcher) removeClientLocked(path string) {
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))

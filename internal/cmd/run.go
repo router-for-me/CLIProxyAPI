@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,10 +26,18 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	StartServiceWithPluginHost(cfg, configPath, localPassword, nil)
+}
+
+// StartServiceWithPluginHost builds and runs the proxy service with a shared plugin host.
+func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+	if host != nil {
+		builder = builder.WithPluginHost(host)
+	}
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -58,10 +67,18 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 // StartServiceBackground starts the proxy service in a background goroutine
 // and returns a cancel function for shutdown and a done channel.
 func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
+	return StartServiceBackgroundWithPluginHost(cfg, configPath, localPassword, nil)
+}
+
+// StartServiceBackgroundWithPluginHost starts the proxy service with a shared plugin host.
+func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) (cancel func(), done <-chan struct{}) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+	if host != nil {
+		builder = builder.WithPluginHost(host)
+	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})

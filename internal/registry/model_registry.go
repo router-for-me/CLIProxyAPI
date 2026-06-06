@@ -439,7 +439,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	r.invalidateAvailableModelsCacheLocked()
 	r.triggerModelsRegistered(provider, clientID, models)
 	if len(added) == 0 && len(removed) == 0 && !providerChanged {
-		// Only metadata (e.g., display name) changed; skip separator when no log output.
+		// Only metadata (e.g., display name) changed; keep no-op re-registration quiet.
 		return
 	}
 
