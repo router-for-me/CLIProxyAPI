@@ -218,11 +218,22 @@ func writeManagementPluginFile(t *testing.T, id string) string {
 	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
 		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
 	}
-	path := filepath.Join(archDir, id+".so")
+	path := filepath.Join(archDir, id+managementPluginExtension(runtime.GOOS))
 	if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
 	}
 	return root
+}
+
+func managementPluginExtension(goos string) string {
+	switch goos {
+	case "darwin":
+		return ".dylib"
+	case "windows":
+		return ".dll"
+	default:
+		return ".so"
+	}
 }
 
 func pluginConfigFromYAML(t *testing.T, text string) config.PluginInstanceConfig {

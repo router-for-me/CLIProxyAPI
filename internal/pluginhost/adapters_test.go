@@ -1793,6 +1793,58 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	}
 }
 
+func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T) {
+	adapter := &executorAdapter{}
+	request := []byte(`{"model":"qmodel_latest","stream":true,"tool_choice":"auto","parallel_tool_calls":true}`)
+	prepared := preparedExecutorCall{
+		req: coreexecutor.Request{
+			Model:   "qmodel_latest",
+			Payload: request,
+		},
+		opts: coreexecutor.Options{
+			OriginalRequest: request,
+		},
+		requestedFormat: sdktranslator.FormatOpenAIResponse,
+		outputFormat:    sdktranslator.FormatOpenAI,
+	}
+	var param any
+
+	startPayload := []byte(`{"choices":[{"delta":{"content":"","tool_calls":[{"function":{"arguments":"","name":"get_weather"},"id":"call_69755759d70640e3b7a42805","index":0,"type":"function"}]},"index":0}],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
+	if got := adapter.translateExecutorStreamPayload(context.Background(), prepared, startPayload, &param); len(got) == 0 {
+		t.Fatal("tool call start payload was not translated")
+	}
+
+	emptyArgumentsPayload := []byte(`{"choices":[{"delta":{"content":"","tool_calls":[{"function":{"arguments":""},"id":"","index":0,"type":"function"}]},"index":0}],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
+	if got := adapter.translateExecutorStreamPayload(context.Background(), prepared, emptyArgumentsPayload, &param); len(got) != 0 {
+		t.Fatalf("empty arguments payload leaked through translation fallback: %q", got[0])
+	}
+
+	finishPayload := []byte(`{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk"}`)
+	if got := adapter.translateExecutorStreamPayload(context.Background(), prepared, finishPayload, &param); len(got) == 0 {
+		t.Fatal("finish payload was not translated")
+	}
+
+	usagePayload := []byte(`{"choices":[],"created":1780767281,"id":"chatcmpl-ba492ed2-2901-9d1f-80e7-b6dfe97fefaa","model":"auto","object":"chat.completion.chunk","usage":{"completion_tokens":179,"completion_tokens_details":{"reasoning_tokens":121},"prompt_tokens":331,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":510}}`)
+	if got := adapter.translateExecutorStreamPayload(context.Background(), prepared, usagePayload, &param); len(got) != 0 {
+		t.Fatalf("usage-only payload leaked through translation fallback: %q", got[0])
+	}
+
+	donePayload := []byte(`data: [DONE]`)
+	doneFrames := adapter.translateExecutorStreamPayload(context.Background(), prepared, donePayload, &param)
+	if len(doneFrames) != 1 {
+		t.Fatalf("done payload translated to %d frames, want 1", len(doneFrames))
+	}
+	if !bytes.Contains(doneFrames[0], []byte("response.completed")) {
+		t.Fatalf("done payload did not produce response.completed: %q", doneFrames[0])
+	}
+	if !bytes.Contains(doneFrames[0], []byte(`"input_tokens":331`)) ||
+		!bytes.Contains(doneFrames[0], []byte(`"output_tokens":179`)) ||
+		!bytes.Contains(doneFrames[0], []byte(`"reasoning_tokens":121`)) ||
+		!bytes.Contains(doneFrames[0], []byte(`"total_tokens":510`)) {
+		t.Fatalf("completed payload did not preserve usage: %q", doneFrames[0])
+	}
+}
+
 func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 	host := New()
 	calls := 0

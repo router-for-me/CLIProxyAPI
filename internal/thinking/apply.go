@@ -333,10 +333,26 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	var config ThinkingConfig
 	if suffixResult.HasSuffix {
 		config = parseSuffixToConfig(suffixResult.RawSuffix, toFormat, modelID)
+		log.WithFields(log.Fields{
+			"provider": toFormat,
+			"model":    modelID,
+			"mode":     config.Mode,
+			"budget":   config.Budget,
+			"level":    config.Level,
+		}).Debug("thinking: config from model suffix |")
 	} else {
 		config = extractThinkingConfig(body, fromFormat)
 		if !hasThinkingConfig(config) && fromFormat != toFormat {
 			config = extractThinkingConfig(body, toFormat)
+		}
+		if hasThinkingConfig(config) {
+			log.WithFields(log.Fields{
+				"provider": toFormat,
+				"model":    modelID,
+				"mode":     config.Mode,
+				"budget":   config.Budget,
+				"level":    config.Level,
+			}).Debug("thinking: original config from request |")
 		}
 	}
 
@@ -357,15 +373,14 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return body, nil
 	}
 
+	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
 	log.WithFields(log.Fields{
 		"provider": toFormat,
 		"model":    modelID,
 		"mode":     config.Mode,
 		"budget":   config.Budget,
 		"level":    config.Level,
-	}).Debug("thinking: applying config for user-defined model (skip validation)")
-
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	}).Debug("thinking: processed config to apply |")
 	return applier.Apply(body, config, modelInfo)
 }
 

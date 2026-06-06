@@ -178,7 +178,7 @@ func TestHostApplyConfig_InvalidMetadataOrNoCapabilitiesSkipped(t *testing.T) {
 		registerResult:    validTestPlugin("no-caps"),
 		reconfigureResult: validTestPlugin("no-caps"),
 	})
-	loader.lookups["no-caps"].symbols["Register"] = func([]byte) pluginapi.Plugin {
+	loader.lookups["no-caps"].registerOverride = func([]byte) pluginapi.Plugin {
 		return pluginapi.Plugin{Metadata: pluginapi.Metadata{
 			Name:             "no-caps",
 			Version:          "1.0.0",
