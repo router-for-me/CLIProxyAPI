@@ -171,6 +171,117 @@ func TestKimiExecutorHttpRequestSanitizesDirectChatBody(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorExecuteClaudeSourceUsesChatCompletionsEndpoint(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"object":"chat.completion",
+			"created":1,
+			"model":"kimi-k2.6",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}
+		}`))
+	}))
+	defer server.Close()
+
+	executor := NewKimiExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL + "/coding/v1",
+		},
+	}
+	body := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[{"role":"user","content":"hello"}]
+	}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.6",
+		Payload: body,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: body,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotPath != "/coding/v1/chat/completions" {
+		t.Fatalf("upstream path = %q, want %q", gotPath, "/coding/v1/chat/completions")
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer test-key")
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("expected translated response payload")
+	}
+}
+
+func TestKimiExecutorExecuteStreamClaudeSourceUsesChatCompletionsEndpoint(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		lines := []string{
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"kimi-k2.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"kimi-k2.6","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"kimi-k2.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
+			`data: [DONE]`,
+		}
+		for _, line := range lines {
+			_, _ = io.WriteString(w, line+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer server.Close()
+
+	executor := NewKimiExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL + "/coding/v1",
+		},
+	}
+	body := []byte(`{
+		"model":"kimi-k2.6",
+		"messages":[{"role":"user","content":"hello"}]
+	}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.6",
+		Payload: body,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: body,
+		Stream:          true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var combined strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		combined.Write(chunk.Payload)
+	}
+	if gotPath != "/coding/v1/chat/completions" {
+		t.Fatalf("upstream path = %q, want %q", gotPath, "/coding/v1/chat/completions")
+	}
+	if !strings.Contains(combined.String(), `"type":"message"`) && !strings.Contains(combined.String(), "message_stop") {
+		t.Fatalf("expected translated stream output, got %q", combined.String())
+	}
+	if strings.Contains(combined.String(), "missing message_start") {
+		t.Fatalf("unexpected missing_message_start failure in translated output: %q", combined.String())
+	}
+}
+
 func TestNormalizeKimiToolMessageLinks_AmbiguousMissingIDIsNotInferred(t *testing.T) {
 	body := []byte(`{
 		"messages":[

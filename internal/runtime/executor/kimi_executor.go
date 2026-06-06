@@ -100,6 +100,23 @@ func sanitizeKimiHTTPRequestBody(req *http.Request) error {
 	return nil
 }
 
+func resolveKimiBaseURL(auth *cliproxyauth.Auth) string {
+	baseURL := kimiauth.KimiAPIBaseURL
+	if auth != nil && auth.Attributes != nil {
+		if configured := strings.TrimSpace(auth.Attributes["base_url"]); configured != "" {
+			baseURL = configured
+		}
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if strings.HasSuffix(strings.ToLower(baseURL), "/v1") {
+		baseURL = baseURL[:len(baseURL)-3]
+	}
+	if baseURL == "" {
+		return kimiauth.KimiAPIBaseURL
+	}
+	return baseURL
+}
+
 // Execute performs a non-streaming chat completion request to Kimi.
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
@@ -108,12 +125,11 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		if err != nil {
 			return resp, err
 		}
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	profile := openAICompatProfileForKind("kimi")
+	baseURL := resolveKimiBaseURL(auth)
 
 	token := kimiCreds(auth)
 
@@ -124,6 +140,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
+	}
+	if from.String() == "claude" {
+		originalPayloadSource = downgradeClaudeToolSearchForCompat(baseURL, originalPayloadSource)
+		req.Payload = downgradeClaudeToolSearchForCompat(baseURL, req.Payload)
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
@@ -149,7 +169,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 
-	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + "/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
@@ -220,12 +240,11 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		if err != nil {
 			return nil, err
 		}
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	profile := openAICompatProfileForKind("kimi")
+	baseURL := resolveKimiBaseURL(auth)
 	token := kimiCreds(auth)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -237,6 +256,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
+	if from.String() == "claude" {
+		originalPayload = downgradeClaudeToolSearchForCompat(baseURL, originalPayload)
+		req.Payload = downgradeClaudeToolSearchForCompat(baseURL, req.Payload)
+	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
 
@@ -264,7 +287,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, err
 	}
 
-	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + "/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -365,8 +388,15 @@ func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 			return cliproxyexecutor.Response{}, err
 		}
 	}
-	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
+	authForCount := auth
+	if auth != nil {
+		authForCount = auth.Clone()
+		if authForCount.Attributes == nil {
+			authForCount.Attributes = make(map[string]string)
+		}
+		authForCount.Attributes["base_url"] = resolveKimiBaseURL(auth)
+	}
+	return e.ClaudeExecutor.CountTokens(ctx, authForCount, req, opts)
 }
 
 func repairKimiClaudeToolUseRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
