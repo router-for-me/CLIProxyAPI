@@ -265,3 +265,29 @@ func TestGetRequestDetails_FallsBackToConfiguredProviderWhenRegistryMissesGLM47(
 		t.Fatalf("getRequestDetails() model = %q, want %q", model, "glm-4.7")
 	}
 }
+
+func TestGetRequestDetails_FallsBackToClaudeProviderForDirectOAuthModel(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&requestDetailsProviderExecutor{id: "claude"})
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "claude-oauth-auth",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	providers, model, errMsg := handler.getRequestDetails("claude-sonnet-4-6")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() unexpected error: %v", errMsg.Error)
+	}
+	if want := []string{"claude"}; !reflect.DeepEqual(providers, want) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", providers, want)
+	}
+	if model != "claude-sonnet-4-6" {
+		t.Fatalf("getRequestDetails() model = %q, want %q", model, "claude-sonnet-4-6")
+	}
+}

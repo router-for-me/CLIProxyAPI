@@ -207,6 +207,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	body, _, err = normalizeClaudeEmptyToolResults(body)
+	if err != nil {
+		return resp, err
+	}
 	body = downgradeClaudeToolSearchForCompatKind(compatKind, baseURL, body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
@@ -421,6 +425,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	body, err = repairClaudeToolUseHistory(body, "claude")
+	if err != nil {
+		return nil, err
+	}
+	body, _, err = normalizeClaudeEmptyToolResults(body)
 	if err != nil {
 		return nil, err
 	}
@@ -1917,6 +1925,46 @@ func validateClaudeUpstreamPayloadForCompat(compatKind string, body []byte) erro
 		return err
 	}
 	return validateMiniMaxToolResultAdjacency(body)
+}
+
+func normalizeClaudeEmptyToolResults(body []byte) ([]byte, int, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, 0, nil
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, 0, nil
+	}
+
+	placeholder := []byte(`[{"type":"text","text":" "}]`)
+	out := body
+	repairs := 0
+	for msgIdx, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+		for partIdx, part := range content.Array() {
+			if strings.TrimSpace(part.Get("type").String()) != "tool_result" {
+				continue
+			}
+			toolContent := part.Get("content")
+			needsRepair := !toolContent.Exists() ||
+				toolContent.Type == gjson.Null ||
+				(toolContent.Type == gjson.String && toolContent.String() == "") ||
+				(toolContent.IsArray() && len(toolContent.Array()) == 0)
+			if !needsRepair {
+				continue
+			}
+			var err error
+			out, err = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.%d.content", msgIdx, partIdx), placeholder)
+			if err != nil {
+				return body, repairs, fmt.Errorf("failed to normalize empty Claude tool_result content: %w", err)
+			}
+			repairs++
+		}
+	}
+	return out, repairs, nil
 }
 
 func repairMiniMaxClaudeToolAdjacency(baseURL string, body []byte) ([]byte, error) {

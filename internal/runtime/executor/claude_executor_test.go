@@ -480,6 +480,53 @@ func TestRepairClaudeToolAdjacencyForDeepSeekCompat(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeEmptyToolResults(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "missing content",
+			content: `{"type":"tool_result","tool_use_id":"call_1"}`,
+		},
+		{
+			name:    "null content",
+			content: `{"type":"tool_result","tool_use_id":"call_1","content":null}`,
+		},
+		{
+			name:    "empty string content",
+			content: `{"type":"tool_result","tool_use_id":"call_1","content":""}`,
+		},
+		{
+			name:    "empty array content",
+			content: `{"type":"tool_result","tool_use_id":"call_1","content":[]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"user","content":[` + tt.content + `]}]}`)
+			out, repairs, err := normalizeClaudeEmptyToolResults(input)
+			if err != nil {
+				t.Fatalf("normalizeClaudeEmptyToolResults() error = %v", err)
+			}
+			if repairs != 1 {
+				t.Fatalf("normalizeClaudeEmptyToolResults() repairs = %d, want 1", repairs)
+			}
+			got := gjson.GetBytes(out, "messages.0.content.0.content")
+			if !got.IsArray() {
+				t.Fatalf("tool_result content should be an array, got %s", got.Raw)
+			}
+			if got.Get("0.type").String() != "text" {
+				t.Fatalf("tool_result content[0].type = %q, want %q", got.Get("0.type").String(), "text")
+			}
+			if got.Get("0.text").String() != " " {
+				t.Fatalf("tool_result content[0].text = %q, want single space", got.Get("0.text").String())
+			}
+		})
+	}
+}
+
 func TestRepairMiniMaxToolResultAdjacencyMovesAssistantToolUseLast(t *testing.T) {
 	t.Parallel()
 

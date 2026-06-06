@@ -5786,7 +5786,32 @@ func (m *Manager) authMatchesConfiguredRouteModel(auth *Auth, routeModel string)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		return true
 	}
+	if auth.Attributes != nil {
+		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" &&
+			canonicalModelKey(homeModel) == canonicalModelKey(requestedModel) {
+			return true
+		}
+	}
+	if authSupportsDirectProviderRouteModel(auth, requestedModel) {
+		return true
+	}
 	return false
+}
+
+func authSupportsDirectProviderRouteModel(auth *Auth, routeModel string) bool {
+	if auth == nil || authRequiresRegisteredModels(auth) {
+		return false
+	}
+	modelKey := canonicalModelKey(routeModel)
+	if modelKey == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "claude":
+		return strings.HasPrefix(modelKey, "claude-")
+	default:
+		return false
+	}
 }
 
 // GetByID retrieves an auth entry by its ID.
