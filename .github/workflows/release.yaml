@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,6 +25,9 @@ jobs:
         with:
           go-version: '>=1.26.0'
           cache: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - name: Generate Build Metadata
         run: |
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV

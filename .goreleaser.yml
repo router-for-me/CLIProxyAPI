@@ -4,6 +4,32 @@ builds:
   - id: "cli-proxy-api"
     env:
       - CGO_ENABLED=1
+      - >-
+        {{- if eq .Os "linux" }}
+          {{- if eq .Arch "amd64" }}CC=zig cc -target x86_64-linux-gnu{{- end }}
+          {{- if eq .Arch "arm64" }}CC=zig cc -target aarch64-linux-gnu{{- end }}
+        {{- end }}
+        {{- if eq .Os "freebsd" }}
+          {{- if eq .Arch "amd64" }}CC=zig cc -target x86_64-freebsd{{- end }}
+        {{- end }}
+        {{- if eq .Os "windows" }}
+          {{- if eq .Arch "amd64" }}CC=zig cc -target x86_64-windows-gnu{{- end }}
+          {{- if eq .Arch "arm64" }}CC=zig cc -target aarch64-windows-gnu{{- end }}
+        {{- end }}
+        {{- if eq .Os "darwin" }}CC=clang{{- end }}
+      - >-
+        {{- if eq .Os "linux" }}
+          {{- if eq .Arch "amd64" }}CXX=zig c++ -target x86_64-linux-gnu{{- end }}
+          {{- if eq .Arch "arm64" }}CXX=zig c++ -target aarch64-linux-gnu{{- end }}
+        {{- end }}
+        {{- if eq .Os "freebsd" }}
+          {{- if eq .Arch "amd64" }}CXX=zig c++ -target x86_64-freebsd{{- end }}
+        {{- end }}
+        {{- if eq .Os "windows" }}
+          {{- if eq .Arch "amd64" }}CXX=zig c++ -target x86_64-windows-gnu{{- end }}
+          {{- if eq .Arch "arm64" }}CXX=zig c++ -target aarch64-windows-gnu{{- end }}
+        {{- end }}
+        {{- if eq .Os "darwin" }}CXX=clang++{{- end }}
     goos:
       - linux
       - windows
@@ -12,18 +38,23 @@ builds:
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
     main: ./cmd/server/
     binary: cli-proxy-api
     ldflags:
       - -s -w -X 'main.Version={{.Version}}' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
 archives:
   - id: "cli-proxy-api"
-    format: tar.gz
+    formats:
+      - tar.gz
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{- if eq .Arch "arm64" -}}aarch64{{- else -}}{{ .Arch }}{{- end -}}
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
     files:
       - LICENSE
       - README.md
@@ -34,7 +65,7 @@ checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
