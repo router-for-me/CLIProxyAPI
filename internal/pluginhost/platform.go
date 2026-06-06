@@ -35,10 +35,24 @@ func validPluginID(id string) bool {
 
 func pluginIDFromPath(path string) string {
 	base := filepath.Base(path)
-	if strings.HasSuffix(strings.ToLower(base), ".so") {
-		return base[:len(base)-len(".so")]
+	lowerBase := strings.ToLower(base)
+	for _, extension := range []string{".so", ".dylib", ".dll"} {
+		if strings.HasSuffix(lowerBase, extension) {
+			return base[:len(base)-len(extension)]
+		}
 	}
 	return base
+}
+
+func pluginExtension(goos string) string {
+	switch goos {
+	case "darwin":
+		return ".dylib"
+	case "windows":
+		return ".dll"
+	default:
+		return ".so"
+	}
 }
 
 func selectPluginFiles(root string) ([]pluginFile, error) {
@@ -48,6 +62,7 @@ func selectPluginFiles(root string) ([]pluginFile, error) {
 	}
 
 	candidates := candidateDirs(root, runtime.GOOS, runtime.GOARCH, cpuVariant())
+	extension := pluginExtension(runtime.GOOS)
 	selected := make([]pluginFile, 0)
 	seen := make(map[string]struct{})
 	for _, dir := range candidates {
@@ -63,7 +78,7 @@ func selectPluginFiles(root string) ([]pluginFile, error) {
 			if entry == nil || !entry.Type().IsRegular() {
 				continue
 			}
-			if strings.HasSuffix(strings.ToLower(entry.Name()), ".so") {
+			if strings.HasSuffix(strings.ToLower(entry.Name()), extension) {
 				files = append(files, filepath.Join(dir, entry.Name()))
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +41,39 @@ func TestCandidateDirsOmitsEmptyVariant(t *testing.T) {
 	}
 }
 
+func TestPluginExtensionForPlatform(t *testing.T) {
+	cases := []struct {
+		goos string
+		want string
+	}{
+		{goos: "linux", want: ".so"},
+		{goos: "freebsd", want: ".so"},
+		{goos: "darwin", want: ".dylib"},
+		{goos: "windows", want: ".dll"},
+	}
+
+	for _, tc := range cases {
+		if got := pluginExtension(tc.goos); got != tc.want {
+			t.Fatalf("pluginExtension(%q) = %q, want %q", tc.goos, got, tc.want)
+		}
+	}
+}
+
+func TestPluginIDFromDynamicLibraryPath(t *testing.T) {
+	cases := map[string]string{
+		"plugins/example.so":     "example",
+		"plugins/example.dylib":  "example",
+		"plugins/example.dll":    "example",
+		"plugins/example.custom": "example.custom",
+	}
+
+	for path, want := range cases {
+		if got := pluginIDFromPath(path); got != want {
+			t.Fatalf("pluginIDFromPath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
 func TestSelectPluginFilesFiltersInvalidIDAndDeduplicatesByID(t *testing.T) {
 	root := t.TempDir()
 	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
@@ -47,12 +81,13 @@ func TestSelectPluginFilesFiltersInvalidIDAndDeduplicatesByID(t *testing.T) {
 		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
 	}
 
+	extension := pluginExtension(runtime.GOOS)
 	paths := []string{
-		filepath.Join(root, "sample.so"),
-		filepath.Join(archDir, "sample.so"),
-		filepath.Join(archDir, "bad name.so"),
-		filepath.Join(archDir, "-bad.so"),
-		filepath.Join(archDir, "another.SO"),
+		filepath.Join(root, "sample"+extension),
+		filepath.Join(archDir, "sample"+extension),
+		filepath.Join(archDir, "bad name"+extension),
+		filepath.Join(archDir, "-bad"+extension),
+		filepath.Join(archDir, "another"+strings.ToUpper(extension)),
 		filepath.Join(archDir, "ignored.txt"),
 	}
 	for _, path := range paths {
@@ -60,7 +95,7 @@ func TestSelectPluginFilesFiltersInvalidIDAndDeduplicatesByID(t *testing.T) {
 			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
 		}
 	}
-	if errMkdir := os.Mkdir(filepath.Join(archDir, "dir.so"), 0o755); errMkdir != nil {
+	if errMkdir := os.Mkdir(filepath.Join(archDir, "dir"+extension), 0o755); errMkdir != nil {
 		t.Fatalf("Mkdir() error = %v", errMkdir)
 	}
 
@@ -70,8 +105,8 @@ func TestSelectPluginFilesFiltersInvalidIDAndDeduplicatesByID(t *testing.T) {
 	}
 
 	want := []pluginFile{
-		{ID: "another", Path: filepath.Join(archDir, "another.SO")},
-		{ID: "sample", Path: filepath.Join(archDir, "sample.so")},
+		{ID: "another", Path: filepath.Join(archDir, "another"+strings.ToUpper(extension))},
+		{ID: "sample", Path: filepath.Join(archDir, "sample"+extension)},
 	}
 	if len(files) != len(want) {
 		t.Fatalf("selectPluginFiles() = %v, want %v", files, want)
@@ -90,8 +125,9 @@ func TestSelectPluginFilesPrefersPlatformDirOverRootFallback(t *testing.T) {
 		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
 	}
 
-	platformPath := filepath.Join(archDir, "alpha.so")
-	rootPath := filepath.Join(root, "alpha.so")
+	extension := pluginExtension(runtime.GOOS)
+	platformPath := filepath.Join(archDir, "alpha"+extension)
+	rootPath := filepath.Join(root, "alpha"+extension)
 	for _, path := range []string{rootPath, platformPath} {
 		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
 			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
@@ -137,8 +173,9 @@ func TestSelectPluginFilesPrefersCPUVariantOverGenericArchDir(t *testing.T) {
 		}
 	}
 
-	genericPath := filepath.Join(archDir, "alpha.so")
-	variantPath := filepath.Join(variantDir, "alpha.so")
+	extension := pluginExtension(runtime.GOOS)
+	genericPath := filepath.Join(archDir, "alpha"+extension)
+	variantPath := filepath.Join(variantDir, "alpha"+extension)
 	for _, path := range []string{genericPath, variantPath} {
 		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
 			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)

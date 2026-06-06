@@ -1,23 +1,15 @@
-//go:build !(linux || darwin || freebsd)
+//go:build !cgo && !windows
 
 package pluginhost
 
 import "fmt"
 
-type symbolLoader interface {
-	Open(path string) (symbolLookup, error)
-}
-
-type symbolLookup interface {
-	Lookup(name string) (any, error)
-}
-
 type unsupportedLoader struct{}
 
-func (unsupportedLoader) Open(path string) (symbolLookup, error) {
-	return nil, fmt.Errorf("go plugin loading is not supported on this platform")
+func (unsupportedLoader) Open(path string, host *Host) (pluginClient, error) {
+	return nil, fmt.Errorf("standard dynamic library plugin loading requires cgo on this platform: %s", path)
 }
 
-func defaultSymbolLoader() symbolLoader {
+func defaultPluginLoader() pluginLoader {
 	return unsupportedLoader{}
 }
