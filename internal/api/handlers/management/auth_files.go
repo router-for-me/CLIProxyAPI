@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -57,10 +58,16 @@ type callbackForwarder struct {
 }
 
 var (
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
+	callbackForwardersMu               sync.Mutex
+	callbackForwarders                 = make(map[int]*callbackForwarder)
+	errAuthFileMustBeJSON              = errors.New("auth file must be .json")
+	errAuthFileNotFound                = errors.New("auth file not found")
+	webUIExternalCallbackProviderPaths = map[string]string{
+		"codex":       "/codex/callback",
+		"claude":      "/anthropic/callback",
+		"gemini":      "/google/callback",
+		"antigravity": "/antigravity/callback",
+	}
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -234,6 +241,49 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+}
+
+func replaceURLQueryValue(rawURL, key, value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", fmt.Errorf("parse url: %w", err)
+	}
+	query := parsed.Query()
+	query.Set(key, value)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func (h *Handler) webUIExternalCallbackURL(provider string) (string, bool, error) {
+	if h == nil || h.cfg == nil {
+		return "", false, nil
+	}
+
+	baseURL := strings.TrimSpace(h.cfg.RemoteManagement.ExternalBaseURL)
+	if baseURL == "" {
+		return "", false, nil
+	}
+
+	providerPath, ok := webUIExternalCallbackProviderPaths[provider]
+	if !ok {
+		return "", false, fmt.Errorf("unsupported external callback provider %q", provider)
+	}
+
+	parsedBaseURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", false, fmt.Errorf("parse external base url: %w", err)
+	}
+	if !parsedBaseURL.IsAbs() || strings.TrimSpace(parsedBaseURL.Host) == "" {
+		return "", false, fmt.Errorf("external base url must be an absolute url with host")
+	}
+
+	basePath := strings.TrimRight(parsedBaseURL.Path, "/")
+	parsedBaseURL.Path = basePath + providerPath
+	parsedBaseURL.RawPath = ""
+	parsedBaseURL.RawQuery = ""
+	parsedBaseURL.Fragment = ""
+
+	return parsedBaseURL.String(), true, nil
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -1645,9 +1695,22 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	// Initialize Claude auth service
 	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	redirectURI := claude.RedirectURI
+	isWebUI := isWebUIRequest(c)
+	useLocalForwarder := isWebUI
+	if isWebUI {
+		if externalCallbackURL, ok, errExternal := h.webUIExternalCallbackURL("claude"); errExternal != nil {
+			log.WithError(errExternal).Error("failed to compute claude external callback url")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		} else if ok {
+			redirectURI = externalCallbackURL
+			useLocalForwarder = false
+		}
+	}
 
-	// Generate authorization URL (then override redirect_uri to reuse server port)
-	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
+	// Generate authorization URL
+	authURL, state, err := anthropicAuth.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -1656,9 +1719,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "anthropic")
 
-	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
-	if isWebUI {
+	if useLocalForwarder {
 		targetURL, errTarget := h.managementCallbackURL("/anthropic/callback")
 		if errTarget != nil {
 			log.WithError(errTarget).Error("failed to compute anthropic callback target")
@@ -1674,7 +1736,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	go func() {
-		if isWebUI {
+		if useLocalForwarder {
 			defer stopCallbackForwarderInstance(anthropicCallbackPort, forwarder)
 		}
 
@@ -1730,7 +1792,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		code := strings.Split(rawCode, "#")[0]
 
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
+		bundle, errExchange := anthropicAuth.ExchangeCodeForTokensWithRedirect(ctx, code, state, redirectURI, pkceCodes)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
@@ -1776,12 +1838,25 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	projectID := c.Query("project_id")
 
 	fmt.Println("Initializing Google authentication...")
+	redirectURI := fmt.Sprintf("http://localhost:%d/oauth2callback", geminiAuth.DefaultCallbackPort)
+	isWebUI := isWebUIRequest(c)
+	useLocalForwarder := isWebUI
+	if isWebUI {
+		if externalCallbackURL, ok, errExternal := h.webUIExternalCallbackURL("gemini"); errExternal != nil {
+			log.WithError(errExternal).Error("failed to compute gemini external callback url")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		} else if ok {
+			redirectURI = externalCallbackURL
+			useLocalForwarder = false
+		}
+	}
 
 	// OAuth2 configuration using exported constants from internal/auth/gemini
 	conf := &oauth2.Config{
 		ClientID:     geminiAuth.ClientID,
 		ClientSecret: geminiAuth.ClientSecret,
-		RedirectURL:  fmt.Sprintf("http://localhost:%d/oauth2callback", geminiAuth.DefaultCallbackPort),
+		RedirectURL:  redirectURI,
 		Scopes:       geminiAuth.Scopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -1792,9 +1867,8 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "gemini")
 
-	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
-	if isWebUI {
+	if useLocalForwarder {
 		targetURL, errTarget := h.managementCallbackURL("/google/callback")
 		if errTarget != nil {
 			log.WithError(errTarget).Error("failed to compute gemini callback target")
@@ -1810,7 +1884,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	}
 
 	go func() {
-		if isWebUI {
+		if useLocalForwarder {
 			defer stopCallbackForwarderInstance(geminiCallbackPort, forwarder)
 		}
 
@@ -2062,23 +2136,41 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
+	redirectURI := codex.RedirectURI
+	useLocalForwarder := isWebUI
 	if isWebUI {
-		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
-		if errTarget != nil {
-			log.WithError(errTarget).Error("failed to compute codex callback target")
+		if externalCallbackURL, ok, errExternal := h.webUIExternalCallbackURL("codex"); errExternal != nil {
+			log.WithError(errExternal).Error("failed to compute codex external callback url")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
-		}
-		var errStart error
-		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
-			log.WithError(errStart).Error("failed to start codex callback forwarder")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-			return
+		} else if ok {
+			redirectURI = externalCallbackURL
+			useLocalForwarder = false
+			updatedURL, errReplace := replaceURLQueryValue(authURL, "redirect_uri", redirectURI)
+			if errReplace != nil {
+				log.WithError(errReplace).Error("failed to rewrite codex redirect uri")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+				return
+			}
+			authURL = updatedURL
+		} else {
+			targetURL, errTarget := h.managementCallbackURL("/codex/callback")
+			if errTarget != nil {
+				log.WithError(errTarget).Error("failed to compute codex callback target")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+				return
+			}
+			var errStart error
+			if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
+				log.WithError(errStart).Error("failed to start codex callback forwarder")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+				return
+			}
 		}
 	}
 
 	go func() {
-		if isWebUI {
+		if useLocalForwarder {
 			defer stopCallbackForwarderInstance(codexCallbackPort, forwarder)
 		}
 
@@ -2120,7 +2212,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
+		bundle, errExchange := openaiAuth.ExchangeCodeForTokensWithRedirect(ctx, code, redirectURI, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
 			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
@@ -2187,13 +2279,24 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	}
 
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	isWebUI := isWebUIRequest(c)
+	useLocalForwarder := isWebUI
+	if isWebUI {
+		if externalCallbackURL, ok, errExternal := h.webUIExternalCallbackURL("antigravity"); errExternal != nil {
+			log.WithError(errExternal).Error("failed to compute antigravity external callback url")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		} else if ok {
+			redirectURI = externalCallbackURL
+			useLocalForwarder = false
+		}
+	}
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")
 
-	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
-	if isWebUI {
+	if useLocalForwarder {
 		targetURL, errTarget := h.managementCallbackURL("/antigravity/callback")
 		if errTarget != nil {
 			log.WithError(errTarget).Error("failed to compute antigravity callback target")
@@ -2209,7 +2312,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	}
 
 	go func() {
-		if isWebUI {
+		if useLocalForwarder {
 			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
 		}
 
