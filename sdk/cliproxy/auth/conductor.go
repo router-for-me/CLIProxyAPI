@@ -5108,19 +5108,33 @@ func isMiniMaxNewSensitiveMessage(message string) bool {
 	return isMiniMaxNewSensitiveSignal("", message)
 }
 
-func isMiniMaxNewSensitiveSignal(code, message string) bool {
+func isMiniMaxInputNewSensitiveSignal(code, message string) bool {
 	normalizedCode := strings.Trim(strings.ToLower(strings.TrimSpace(code)), `"'(),:;[]{}<>`)
-	if normalizedCode == "1026" || normalizedCode == "1027" {
+	if normalizedCode == "1026" {
 		return true
 	}
 	lower := strings.ToLower(strings.TrimSpace(message))
-	if strings.Contains(lower, "new_sensitive") {
+	if strings.Contains(lower, "input new_sensitive") {
 		return true
 	}
-	if lower == "" || (!strings.Contains(lower, "sensitive") && !strings.Contains(lower, "涉敏")) {
-		return false
+	return strings.Contains(lower, "new_sensitive") && strings.Contains(lower, "1026")
+}
+
+func isMiniMaxOutputNewSensitiveSignal(code, message string) bool {
+	normalizedCode := strings.Trim(strings.ToLower(strings.TrimSpace(code)), `"'(),:;[]{}<>`)
+	if normalizedCode == "1027" {
+		return true
 	}
-	return strings.Contains(lower, "1026") || strings.Contains(lower, "1027")
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(lower, "output new_sensitive") {
+		return true
+	}
+	return strings.Contains(lower, "new_sensitive") && strings.Contains(lower, "1027")
+}
+
+func isMiniMaxNewSensitiveSignal(code, message string) bool {
+	return isMiniMaxInputNewSensitiveSignal(code, message) ||
+		isMiniMaxOutputNewSensitiveSignal(code, message)
 }
 
 func isMiniMaxUnknown1000Message(message string) bool {
@@ -5339,13 +5353,13 @@ func isRetryableEmptyUpstreamResponseError(err error) bool {
 
 func isRequestScopedRouteFallbackError(err error) bool {
 	if isRequestScopedContentSafetyError(err) {
-		return !isMiniMaxNewSensitiveSignal(errorCodeFromError(err), err.Error())
+		return true
 	}
 	return isRequestScopedContextLimitError(err)
 }
 
 func shouldFallbackRequestScopedContentSafetyError(routeModel string, err error) bool {
-	if !isClaudeSonnet46FallbackModel(routeModel) {
+	if !isRequestScopedFallbackModel(routeModel) {
 		return false
 	}
 	return isRequestScopedContentSafetyError(err) && isRequestScopedRouteFallbackError(err)
@@ -5362,22 +5376,39 @@ func shouldFallbackRequestScopedRouteErrorForRequest(routeModel string, opts cli
 	if !isRequestScopedRouteFallbackError(err) {
 		return false
 	}
-	if isClaudeSonnet46FallbackModel(routeModel) {
+	if isMiniMaxNewSensitiveSignal(errorCodeFromError(err), err.Error()) &&
+		!isMiniMaxInputNewSensitiveSignal(errorCodeFromError(err), err.Error()) {
+		return false
+	}
+	if isRequestScopedFallbackModel(routeModel) {
 		return true
 	}
-	return isClaudeSonnet46FallbackModel(requestedModelAliasFromOptions(opts, routeModel))
+	return isRequestScopedFallbackModel(requestedModelAliasFromOptions(opts, routeModel))
+}
+
+func isRequestScopedFallbackModel(model string) bool {
+	return isClaudeSonnet46FallbackModel(model) || isGLM47FallbackModel(model)
 }
 
 func isClaudeSonnet46FallbackModel(model string) bool {
+	return isSpecificFallbackModel(model, "claude-sonnet-4-6")
+}
+
+func isGLM47FallbackModel(model string) bool {
+	return isSpecificFallbackModel(model, "glm-4.7")
+}
+
+func isSpecificFallbackModel(model string, target string) bool {
 	model = strings.TrimSpace(model)
-	if model == "" {
+	target = strings.TrimSpace(target)
+	if model == "" || target == "" {
 		return false
 	}
 	base := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
 	if base == "" {
 		base = model
 	}
-	return strings.EqualFold(base, "claude-sonnet-4-6")
+	return strings.EqualFold(base, target)
 }
 
 // isRequestInvalidError returns true if the error represents a client request

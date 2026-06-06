@@ -22,6 +22,7 @@ const requestScopedContentSafetyMessage = "The request was rejected because it w
 const requestScopedContentBlockedMessage = "The content you provided or machine outputted is blocked."
 const requestScopedContextLimitMessage = "invalid params, context window exceeds limit (2013)"
 const miniMaxNewSensitiveMessage = "server_error: input new_sensitive, messages[2]'s content[1] image is sensitive, please check your input (1026)"
+const miniMaxOutputNewSensitiveMessage = "server_error: output new_sensitive, generated content is sensitive, please check your input (1027)"
 const miniMaxUnknown1000Message = "server_error: unknown error, 999 (1000)"
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
@@ -2537,7 +2538,7 @@ func TestRequestScopedContentSafetyStopsRetry(t *testing.T) {
 	}
 }
 
-func TestMiniMaxNewSensitiveDoesNotFallbackClaudeSonnetAlias(t *testing.T) {
+func TestMiniMaxNewSensitiveFallsBackForConfiguredRouteModels(t *testing.T) {
 	err := &Error{
 		Code:       "1026",
 		HTTPStatus: http.StatusInternalServerError,
@@ -2546,8 +2547,26 @@ func TestMiniMaxNewSensitiveDoesNotFallbackClaudeSonnetAlias(t *testing.T) {
 	if !isRequestInvalidError(err) {
 		t.Fatal("expected MiniMax new_sensitive to be request invalid")
 	}
-	if shouldFallbackRequestScopedRouteErrorForRequest("claude-sonnet-4-6", cliproxyexecutor.Options{}, err) {
-		t.Fatal("expected MiniMax new_sensitive to stop without Claude Sonnet fallback")
+	for _, model := range []string{"claude-sonnet-4-6", "glm-4.7"} {
+		if !shouldFallbackRequestScopedRouteErrorForRequest(model, cliproxyexecutor.Options{}, err) {
+			t.Fatalf("expected MiniMax new_sensitive to fallback for %s", model)
+		}
+	}
+}
+
+func TestMiniMaxOutputNewSensitiveDoesNotFallbackForConfiguredRouteModels(t *testing.T) {
+	err := &Error{
+		Code:       "1027",
+		HTTPStatus: http.StatusInternalServerError,
+		Message:    miniMaxOutputNewSensitiveMessage,
+	}
+	if !isRequestInvalidError(err) {
+		t.Fatal("expected MiniMax output new_sensitive to be request invalid")
+	}
+	for _, model := range []string{"claude-sonnet-4-6", "glm-4.7"} {
+		if shouldFallbackRequestScopedRouteErrorForRequest(model, cliproxyexecutor.Options{}, err) {
+			t.Fatalf("expected MiniMax output new_sensitive to stop fallback for %s", model)
+		}
 	}
 }
 
@@ -2945,6 +2964,118 @@ func TestManager_Execute_ClaudeSonnetAliasMetadataContextLimitFallsBack(t *testi
 	}
 	got := executor.ExecuteCalls()
 	want := []string{minimaxAuth.ID, stepAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_GLMAliasMetadataMiniMaxNewSensitiveFallsBack(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-minimax-auth": &Error{
+				Code:       "1026",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxNewSensitiveMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	routeModel := "step-3.7-flash"
+	minimaxAuth := &Auth{ID: "aa-minimax-auth", Provider: "claude"}
+	stepAuth := &Auth{ID: "bb-step-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(minimaxAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(stepAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(minimaxAuth.ID)
+		reg.UnregisterClient(stepAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), minimaxAuth); errRegister != nil {
+		t.Fatalf("register minimax auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), stepAuth); errRegister != nil {
+		t.Fatalf("register step auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "glm-4.7",
+		},
+	})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != stepAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), stepAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{minimaxAuth.ID, stepAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_Execute_GLMAliasMetadataMiniMaxOutputNewSensitiveStops(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-minimax-auth": &Error{
+				Code:       "1027",
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    miniMaxOutputNewSensitiveMessage,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	routeModel := "step-3.7-flash"
+	minimaxAuth := &Auth{ID: "aa-minimax-auth", Provider: "claude"}
+	stepAuth := &Auth{ID: "bb-step-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(minimaxAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	reg.RegisterClient(stepAuth.ID, "claude", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(minimaxAuth.ID)
+		reg.UnregisterClient(stepAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), minimaxAuth); errRegister != nil {
+		t.Fatalf("register minimax auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), stepAuth); errRegister != nil {
+		t.Fatalf("register step auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "glm-4.7",
+		},
+	})
+	if errExecute == nil {
+		t.Fatal("expected MiniMax output new_sensitive error")
+	}
+	if code := errorCodeFromError(errExecute); code != "1027" {
+		t.Fatalf("error code = %q, want 1027", code)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{minimaxAuth.ID}
 	if len(got) != len(want) {
 		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
