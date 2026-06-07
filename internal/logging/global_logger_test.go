@@ -95,3 +95,79 @@ func TestLogFormatterIncludesToolHistoryRepairFields(t *testing.T) {
 		}
 	}
 }
+
+func TestLogFormatterIncludesCompatAndStreamObservabilityFields(t *testing.T) {
+	entry := &log.Entry{
+		Time:    time.Date(2026, 6, 8, 7, 24, 45, 0, time.UTC),
+		Level:   log.InfoLevel,
+		Message: "stream execution summary",
+		Data: log.Fields{
+			"request_id":             "req-observe",
+			"event":                  "stream_execution_summary",
+			"provider":               "claude",
+			"executor":               "ClaudeExecutor",
+			"requested_model":        "MiniMax-M3",
+			"upstream_model":         "MiniMax-M3",
+			"request_path":           "/v1/chat/completions",
+			"time_to_first_chunk_ms": 3512,
+			"stream_duration_ms":     183000,
+			"total_duration_ms":      186512,
+			"chunks_count":           1884,
+			"bytes_out":              928331,
+			"client_gone":            false,
+			"finish_reason":          "done",
+			"fallback_count":         1,
+			"max_attempts":           4,
+			"final_status":           200,
+			"final_provider":         "claude",
+			"final_model":            "MiniMax-M3",
+			"final_executor":         "ClaudeExecutor",
+			"repair_type":            "claude_tool_result_adjacency",
+			"repairs_count":          2,
+			"payload_bytes_before":   1024,
+			"payload_bytes_after":    1104,
+			"repair_duration_ms":     7,
+			"tool_type":              "image_generation",
+			"tool_source":            "client_requested",
+			"policy":                 "allowed",
+			"reason":                 "explicit_request",
+		},
+	}
+
+	raw, err := (&LogFormatter{}).Format(entry)
+	if err != nil {
+		t.Fatalf("format log entry: %v", err)
+	}
+	line := string(raw)
+	for _, want := range []string{
+		"requested_model=MiniMax-M3",
+		"upstream_model=MiniMax-M3",
+		"request_path=/v1/chat/completions",
+		"time_to_first_chunk_ms=3512",
+		"stream_duration_ms=183000",
+		"total_duration_ms=186512",
+		"chunks_count=1884",
+		"bytes_out=928331",
+		"client_gone=false",
+		"finish_reason=done",
+		"fallback_count=1",
+		"max_attempts=4",
+		"final_status=200",
+		"final_provider=claude",
+		"final_model=MiniMax-M3",
+		"final_executor=ClaudeExecutor",
+		"repair_type=claude_tool_result_adjacency",
+		"repairs_count=2",
+		"payload_bytes_before=1024",
+		"payload_bytes_after=1104",
+		"repair_duration_ms=7",
+		"tool_type=image_generation",
+		"tool_source=client_requested",
+		"policy=allowed",
+		"reason=explicit_request",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("formatted log missing %q: %s", want, line)
+		}
+	}
+}
