@@ -20,6 +20,7 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -69,6 +70,54 @@ func executorScopeAllowsOAuthModels(caps pluginapi.Capabilities) bool {
 	}
 	scope := normalizedExecutorModelScope(caps)
 	return scope == pluginapi.ExecutorModelScopeOAuth || scope == pluginapi.ExecutorModelScopeBoth
+}
+
+func normalizeExecutorFormats(raw []string) []sdktranslator.Format {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]sdktranslator.Format, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		format := normalizeExecutorFormatName(item)
+		if format == "" {
+			continue
+		}
+		key := format.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, format)
+	}
+	return out
+}
+
+func normalizeExecutorFormatName(raw string) sdktranslator.Format {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "none":
+		return ""
+	case "chat-completions", "chat_completions", "openai-chat-completions", "openai_chat_completions":
+		return sdktranslator.FormatOpenAI
+	case "responses", "openai-responses", "openai_responses":
+		return sdktranslator.FormatOpenAIResponse
+	case "anthropic":
+		return sdktranslator.FormatClaude
+	default:
+		return sdktranslator.FromString(strings.TrimSpace(raw))
+	}
+}
+
+func executorFormatContains(formats []sdktranslator.Format, target sdktranslator.Format) bool {
+	if target == "" {
+		return false
+	}
+	for _, format := range formats {
+		if format == target {
+			return true
+		}
+	}
+	return false
 }
 
 type AuthModelResult struct {
@@ -665,10 +714,12 @@ func newExecutorAdapterRegistration(h *Host, record capabilityRecord, provider s
 	return executorRegistration{
 		provider: provider,
 		adapter: &executorAdapter{
-			host:     h,
-			pluginID: record.id,
-			provider: provider,
-			executor: executor,
+			host:          h,
+			pluginID:      record.id,
+			provider:      provider,
+			executor:      executor,
+			inputFormats:  normalizeExecutorFormats(record.plugin.Capabilities.ExecutorInputFormats),
+			outputFormats: normalizeExecutorFormats(record.plugin.Capabilities.ExecutorOutputFormats),
 		},
 	}
 }
@@ -1030,10 +1081,12 @@ func (a *accessAdapter) Authenticate(ctx context.Context, r *http.Request) (resu
 }
 
 type executorAdapter struct {
-	host     *Host
-	pluginID string
-	provider string
-	executor pluginapi.ProviderExecutor
+	host          *Host
+	pluginID      string
+	provider      string
+	executor      pluginapi.ProviderExecutor
+	inputFormats  []sdktranslator.Format
+	outputFormats []sdktranslator.Format
 }
 
 func (a *executorAdapter) Identifier() string {
@@ -1041,6 +1094,208 @@ func (a *executorAdapter) Identifier() string {
 		return ""
 	}
 	return a.provider
+}
+
+type preparedExecutorCall struct {
+	req             coreexecutor.Request
+	opts            coreexecutor.Options
+	requestedFormat sdktranslator.Format
+	inputFormat     sdktranslator.Format
+	outputFormat    sdktranslator.Format
+}
+
+func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
+	requestedFormat := executorRequestedFormat(req, opts)
+	inputFormat, errInput := a.selectExecutorInputFormat(requestedFormat)
+	if errInput != nil {
+		return preparedExecutorCall{}, errInput
+	}
+	outputFormat, errOutput := a.selectExecutorOutputFormat(requestedFormat, inputFormat)
+	if errOutput != nil {
+		return preparedExecutorCall{}, errOutput
+	}
+
+	nativeReq := req
+	nativeOpts := opts
+	if requestedFormat != "" && requestedFormat != inputFormat {
+		nativeReq.Payload = sdktranslator.TranslateRequest(requestedFormat, inputFormat, req.Model, req.Payload, opts.Stream)
+	}
+	nativeReq.Format = outputFormat
+	nativeOpts.SourceFormat = inputFormat
+
+	return preparedExecutorCall{
+		req:             nativeReq,
+		opts:            nativeOpts,
+		requestedFormat: requestedFormat,
+		inputFormat:     inputFormat,
+		outputFormat:    outputFormat,
+	}, nil
+}
+
+func executorRequestedFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
+	if opts.SourceFormat != "" {
+		return normalizeExecutorFormatName(opts.SourceFormat.String())
+	}
+	if req.Format != "" {
+		return normalizeExecutorFormatName(req.Format.String())
+	}
+	return sdktranslator.FormatOpenAI
+}
+
+func (a *executorAdapter) selectExecutorInputFormat(requested sdktranslator.Format) (sdktranslator.Format, error) {
+	if len(a.inputFormats) == 0 {
+		return "", fmt.Errorf("plugin executor %s declares no input formats", a.Identifier())
+	}
+	if executorFormatContains(a.inputFormats, requested) {
+		return requested, nil
+	}
+	for _, format := range a.inputFormats {
+		if requested == "" || sdktranslator.HasRequestTransformer(requested, format) {
+			return format, nil
+		}
+	}
+	return "", fmt.Errorf("plugin executor %s does not support input format %q", a.Identifier(), requested)
+}
+
+func (a *executorAdapter) selectExecutorOutputFormat(requested, inputFormat sdktranslator.Format) (sdktranslator.Format, error) {
+	if len(a.outputFormats) == 0 {
+		return "", fmt.Errorf("plugin executor %s declares no output formats", a.Identifier())
+	}
+	if executorFormatContains(a.outputFormats, requested) {
+		return requested, nil
+	}
+	if executorFormatContains(a.outputFormats, inputFormat) && executorResponseTranslatorExists(inputFormat, requested) {
+		return inputFormat, nil
+	}
+	for _, format := range a.outputFormats {
+		if requested == "" || executorResponseTranslatorExists(format, requested) {
+			return format, nil
+		}
+	}
+	return "", fmt.Errorf("plugin executor %s does not support output format %q", a.Identifier(), requested)
+}
+
+func executorResponseTranslatorExists(from, to sdktranslator.Format) bool {
+	if from == "" || to == "" || from == to {
+		return true
+	}
+	return sdktranslator.HasResponseTransformer(to, from)
+}
+
+func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepared preparedExecutorCall, payload []byte, stream bool, param *any) []byte {
+	if prepared.requestedFormat == "" || prepared.outputFormat == prepared.requestedFormat {
+		return bytes.Clone(payload)
+	}
+	originalRequest := prepared.opts.OriginalRequest
+	if len(originalRequest) == 0 {
+		originalRequest = prepared.req.Payload
+	}
+	if stream {
+		frames := a.translateExecutorStreamPayload(ctx, prepared, payload, param)
+		if len(frames) == 0 {
+			return nil
+		}
+		if len(frames) == 1 {
+			return bytes.Clone(frames[0])
+		}
+		return bytes.Join(frames, nil)
+	}
+	return sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
+}
+
+func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, prepared preparedExecutorCall, in <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
+	if prepared.requestedFormat == "" || prepared.outputFormat == prepared.requestedFormat {
+		return in
+	}
+	if in == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	out := make(chan pluginapi.ExecutorStreamChunk)
+	go func() {
+		defer close(out)
+		var param any
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-in:
+				if !ok {
+					a.emitTranslatedExecutorStreamTail(ctx, prepared, out, &param)
+					return
+				}
+				if chunk.Err != nil {
+					_ = sendExecutorPluginStreamChunk(ctx, out, chunk)
+					continue
+				}
+				frames := a.translateExecutorStreamPayload(ctx, prepared, chunk.Payload, &param)
+				for _, frame := range frames {
+					if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+						return
+					}
+				}
+			}
+		}
+	}()
+	return out
+}
+
+func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, prepared preparedExecutorCall, payload []byte, param *any) [][]byte {
+	originalRequest := prepared.opts.OriginalRequest
+	if len(originalRequest) == 0 {
+		originalRequest = prepared.req.Payload
+	}
+	frames := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
+	if executorStreamTranslationFellBack(prepared, payload, frames) {
+		return nil
+	}
+	return frames
+}
+
+func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []byte, frames [][]byte) bool {
+	if prepared.requestedFormat == "" || prepared.outputFormat == "" || prepared.outputFormat == prepared.requestedFormat {
+		return false
+	}
+	if len(frames) != 1 || !bytes.Equal(frames[0], payload) {
+		return false
+	}
+	// A plugin executor only reaches this path after host-side response translation
+	// has been selected. An unchanged single frame is the SDK registry fallback,
+	// not a valid translated frame to send to the client.
+	return executorResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat)
+}
+
+func (a *executorAdapter) emitTranslatedExecutorStreamTail(ctx context.Context, prepared preparedExecutorCall, out chan<- pluginapi.ExecutorStreamChunk, param *any) {
+	tail := executorStreamDonePayload(prepared.outputFormat)
+	if len(tail) == 0 {
+		return
+	}
+	frames := a.translateExecutorStreamPayload(ctx, prepared, tail, param)
+	for _, frame := range frames {
+		if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+			return
+		}
+	}
+}
+
+func executorStreamDonePayload(format sdktranslator.Format) []byte {
+	switch format {
+	case sdktranslator.FormatOpenAI:
+		return []byte("data: [DONE]")
+	default:
+		return nil
+	}
+}
+
+func sendExecutorPluginStreamChunk(ctx context.Context, out chan<- pluginapi.ExecutorStreamChunk, chunk pluginapi.ExecutorStreamChunk) bool {
+	select {
+	case out <- pluginapi.ExecutorStreamChunk{Payload: bytes.Clone(chunk.Payload), Err: chunk.Err}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, err error) {
@@ -1055,12 +1310,16 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 		}
 	}()
 
-	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, req, opts))
+	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	if errPrepare != nil {
+		return coreexecutor.Response{}, errPrepare
+	}
+	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
 	return coreexecutor.Response{
-		Payload:  bytes.Clone(pluginResp.Payload),
+		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
 		Metadata: cloneAnyMap(pluginResp.Metadata),
 		Headers:  cloneHeader(pluginResp.Headers),
 	}, nil
@@ -1078,13 +1337,17 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 		}
 	}()
 
-	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, req, opts))
+	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	if errPrepare != nil {
+		return nil, errPrepare
+	}
+	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecuteStream != nil {
 		return nil, errExecuteStream
 	}
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
-		Chunks:  mapExecutorStreamChunks(ctx, pluginResp.Chunks),
+		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Chunks)),
 	}, nil
 }
 
@@ -1173,12 +1436,16 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 		}
 	}()
 
-	pluginResp, errCountTokens := a.executor.CountTokens(ctx, buildExecutorRequest(a.host, a.provider, auth, req, opts))
+	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	if errPrepare != nil {
+		return coreexecutor.Response{}, errPrepare
+	}
+	pluginResp, errCountTokens := a.executor.CountTokens(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errCountTokens != nil {
 		return coreexecutor.Response{}, errCountTokens
 	}
 	return coreexecutor.Response{
-		Payload:  bytes.Clone(pluginResp.Payload),
+		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
 		Metadata: cloneAnyMap(pluginResp.Metadata),
 		Headers:  cloneHeader(pluginResp.Headers),
 	}, nil
