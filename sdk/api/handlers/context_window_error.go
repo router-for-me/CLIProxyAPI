@@ -25,7 +25,7 @@ const (
 
 // UserFacingContextWindowMessage returns the normalized client-facing message for context-limit failures.
 func UserFacingContextWindowMessage() string {
-	return "当前对话上下文已超过模型限制。请清理或压缩历史消息，或新建对话后重试。Context window exceeded. Please clear or summarize prior messages, or start a new conversation."
+	return "当前对话上下文已超过模型限制。请清理或压缩历史消息，或新建对话后重试。"
 }
 
 // IsContextWindowExceededError reports whether the upstream error matches a context-limit rejection.
