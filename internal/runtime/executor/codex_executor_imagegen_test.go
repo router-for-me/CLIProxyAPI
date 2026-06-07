@@ -1,118 +1,75 @@
 package executor
 
 import (
+	"context"
+	"net/http"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
-func TestEnsureImageGenerationTool_NoTools(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
+func TestCodexImageGenerationPolicy_DoesNotAutoInjectForPlainResponses(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
 
-	tools := gjson.GetBytes(result, "tools")
-	if !tools.IsArray() {
-		t.Fatalf("expected tools array, got %v", tools.Type)
+	result, err := applyCodexImageGenerationToolPolicy(context.Background(), "CodexExecutor", body, "gpt-5.5", "gpt-5.5", "/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("applyCodexImageGenerationToolPolicy() error = %v", err)
 	}
-	arr := tools.Array()
-	if len(arr) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(arr))
-	}
-	if arr[0].Get("type").String() != "image_generation" {
-		t.Fatalf("expected type=image_generation, got %s", arr[0].Get("type").String())
-	}
-	if arr[0].Get("output_format").String() != "png" {
-		t.Fatalf("expected output_format=png, got %s", arr[0].Get("output_format").String())
-	}
-}
-
-func TestEnsureImageGenerationTool_ExistingToolsWithoutImageGen(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"get_weather","parameters":{}}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
-
-	tools := gjson.GetBytes(result, "tools")
-	arr := tools.Array()
-	if len(arr) != 2 {
-		t.Fatalf("expected 2 tools, got %d", len(arr))
-	}
-	if arr[0].Get("type").String() != "function" {
-		t.Fatalf("expected first tool type=function, got %s", arr[0].Get("type").String())
-	}
-	if arr[1].Get("type").String() != "image_generation" {
-		t.Fatalf("expected second tool type=image_generation, got %s", arr[1].Get("type").String())
-	}
-}
-
-func TestEnsureImageGenerationTool_AlreadyPresent(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation","output_format":"webp"},{"type":"function","name":"f1"}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
-
-	tools := gjson.GetBytes(result, "tools")
-	arr := tools.Array()
-	if len(arr) != 2 {
-		t.Fatalf("expected 2 tools (no duplicate), got %d", len(arr))
-	}
-	if arr[0].Get("output_format").String() != "webp" {
-		t.Fatalf("expected original output_format=webp preserved, got %s", arr[0].Get("output_format").String())
-	}
-}
-
-func TestEnsureImageGenerationTool_EmptyToolsArray(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
-
-	tools := gjson.GetBytes(result, "tools")
-	arr := tools.Array()
-	if len(arr) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(arr))
-	}
-	if arr[0].Get("type").String() != "image_generation" {
-		t.Fatalf("expected type=image_generation, got %s", arr[0].Get("type").String())
-	}
-}
-
-func TestEnsureImageGenerationTool_WebSearchAndImageGen(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"web_search"}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
-
-	tools := gjson.GetBytes(result, "tools")
-	arr := tools.Array()
-	if len(arr) != 2 {
-		t.Fatalf("expected 2 tools, got %d", len(arr))
-	}
-	if arr[0].Get("type").String() != "web_search" {
-		t.Fatalf("expected first tool type=web_search, got %s", arr[0].Get("type").String())
-	}
-	if arr[1].Get("type").String() != "image_generation" {
-		t.Fatalf("expected second tool type=image_generation, got %s", arr[1].Get("type").String())
-	}
-}
-
-func TestEnsureImageGenerationTool_GPT53CodexSparkDoesNotInjectTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.3-codex-spark","input":"draw a cat"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.3-codex-spark", nil)
-
 	if string(result) != string(body) {
-		t.Fatalf("expected body to be unchanged, got %s", string(result))
+		t.Fatalf("body changed unexpectedly: got %s want %s", result, body)
 	}
 	if gjson.GetBytes(result, "tools").Exists() {
-		t.Fatalf("expected no tools for gpt-5.3-codex-spark, got %s", gjson.GetBytes(result, "tools").Raw)
+		t.Fatalf("expected no injected tools, got %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
 
-func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
+func TestCodexImageGenerationPolicy_PreservesExplicitImageGenerationTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","tools":[{"type":"image_generation","output_format":"webp"},{"type":"function","name":"lookup"}]}`)
+
+	result, err := applyCodexImageGenerationToolPolicy(context.Background(), "CodexExecutor", body, "gpt-5.5", "gpt-5.5", "/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("applyCodexImageGenerationToolPolicy() error = %v", err)
+	}
+	if got := gjson.GetBytes(result, "tools.0.output_format").String(); got != "webp" {
+		t.Fatalf("output_format = %q, want webp", got)
+	}
+	if got := len(gjson.GetBytes(result, "tools").Array()); got != 2 {
+		t.Fatalf("tools len = %d, want 2", got)
+	}
+}
+
+func TestCodexImageGenerationPolicy_RejectsSparkModelExplicitTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.3-codex-spark","tools":[{"type":"image_generation","output_format":"png"}]}`)
+
+	_, err := applyCodexImageGenerationToolPolicy(context.Background(), "CodexExecutor", body, "gpt-5.3-codex-spark", "gpt-5.3-codex-spark", "/v1/responses", nil)
+	if err == nil {
+		t.Fatal("expected unsupported image_generation error")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error does not expose StatusCode(): %T", err)
+	}
+	if got := status.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", got, http.StatusBadRequest)
+	}
+	if got := gjson.Get(err.Error(), "error.code").String(); got != "unsupported_builtin_tool" {
+		t.Fatalf("error.code = %q, want unsupported_builtin_tool", got)
+	}
+}
+
+func TestCodexImageGenerationPolicy_RejectsFreePlanExplicitTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","tools":[{"type":"image_generation","output_format":"png"}]}`)
 	freeAuth := &cliproxyauth.Auth{
 		Provider:   "codex",
 		Attributes: map[string]string{"plan_type": "free"},
 	}
-	result := ensureImageGenerationTool(body, "gpt-5.4", freeAuth)
 
-	if string(result) != string(body) {
-		t.Fatalf("expected body to be unchanged, got %s", string(result))
+	_, err := applyCodexImageGenerationToolPolicy(context.Background(), "CodexExecutor", body, "gpt-5.5", "gpt-5.5", "/v1/responses", freeAuth)
+	if err == nil {
+		t.Fatal("expected unsupported image_generation error")
 	}
-	if gjson.GetBytes(result, "tools").Exists() {
-		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
+	if got := gjson.Get(err.Error(), "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error", got)
 	}
 }

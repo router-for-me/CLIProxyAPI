@@ -344,7 +344,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = repairCodexResponsesToolHistory(body)
 	body = normalizeCodexToolSchemas(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body, err = applyCodexImageGenerationToolPolicy(ctx, "CodexExecutor", body, requestedModel, baseModel, requestPath, auth)
+		if err != nil {
+			return resp, err
+		}
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -495,7 +498,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = repairCodexResponsesToolHistory(body)
 	body = normalizeCodexToolSchemas(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body, err = applyCodexImageGenerationToolPolicy(ctx, "CodexExecutor", body, requestedModel, baseModel, requestPath, auth)
+		if err != nil {
+			return resp, err
+		}
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -591,7 +597,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = repairCodexResponsesToolHistory(body)
 	body = normalizeCodexToolSchemas(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body, err = applyCodexImageGenerationToolPolicy(ctx, "CodexExecutor", body, requestedModel, baseModel, requestPath, auth)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -1129,9 +1138,6 @@ func normalizeCodexStatelessPayload(body []byte) []byte {
 	return body
 }
 
-var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
-var imageGenToolArrayJSON = []byte(`[{"type":"image_generation","output_format":"png"}]`)
-
 func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
@@ -1142,26 +1148,98 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
 }
 
-func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
-	if strings.HasSuffix(baseModel, "spark") {
-		return body
-	}
-	if isCodexFreePlanAuth(auth) {
-		return body
+type codexImageGenerationPolicyDecision struct {
+	toolPresent bool
+	toolSource  string
+	policy      string
+	reason      string
+}
+
+func applyCodexImageGenerationToolPolicy(ctx context.Context, executorName string, body []byte, requestedModel, baseModel, requestPath string, auth *cliproxyauth.Auth) ([]byte, error) {
+	decision := codexImageGenerationPolicy(body, baseModel, requestPath, auth)
+	if !decision.toolPresent {
+		return body, nil
 	}
 
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
-		body, _ = sjson.SetRawBytes(body, "tools", imageGenToolArrayJSON)
-		return body
+	fields := log.Fields{
+		"event":           "builtin_tool_policy",
+		"request_path":    requestPath,
+		"requested_model": requestedModel,
+		"upstream_model":  baseModel,
+		"provider":        "codex",
+		"executor":        executorName,
+		"tool_type":       "image_generation",
+		"tool_source":     decision.toolSource,
+		"policy":          decision.policy,
+		"reason":          decision.reason,
 	}
-	for _, t := range tools.Array() {
-		if t.Get("type").String() == "image_generation" {
-			return body
+	entry := helps.LogWithRequestID(ctx).WithFields(fields)
+	if decision.policy == "rejected" {
+		entry.Warn("codex builtin tool policy rejected image_generation")
+		return body, codexUnsupportedImageGenerationToolError()
+	}
+	entry.Info("codex builtin tool policy kept image_generation")
+	return body, nil
+}
+
+func codexImageGenerationPolicy(body []byte, baseModel, requestPath string, auth *cliproxyauth.Auth) codexImageGenerationPolicyDecision {
+	if !codexHasImageGenerationTool(body) {
+		return codexImageGenerationPolicyDecision{}
+	}
+
+	decision := codexImageGenerationPolicyDecision{
+		toolPresent: true,
+		toolSource:  codexImageGenerationToolSource(requestPath),
+	}
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(baseModel)), "spark") || isCodexFreePlanAuth(auth) {
+		decision.policy = "rejected"
+		decision.reason = "unsupported_builtin_tool"
+		return decision
+	}
+	decision.policy = "allowed"
+	decision.reason = "explicit_request"
+	return decision
+}
+
+func codexHasImageGenerationTool(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
+			return true
 		}
 	}
-	body, _ = sjson.SetRawBytes(body, "tools.-1", imageGenToolJSON)
-	return body
+	return false
+}
+
+func codexImageGenerationToolSource(requestPath string) string {
+	switch normalizeRequestPath(requestPath) {
+	case codexImagesGenerationsPath, codexImagesEditsPath:
+		return "auto_injected"
+	default:
+		return "client_requested"
+	}
+}
+
+func normalizeRequestPath(requestPath string) string {
+	path := strings.TrimSpace(requestPath)
+	if idx := strings.Index(path, " "); idx >= 0 {
+		path = strings.TrimSpace(path[idx+1:])
+	}
+	if idx := strings.Index(path, "?"); idx >= 0 {
+		path = strings.TrimSpace(path[:idx])
+	}
+	return path
+}
+
+func codexUnsupportedImageGenerationToolError() statusErr {
+	return statusErr{
+		code:      http.StatusBadRequest,
+		errorCode: "unsupported_builtin_tool",
+		msg:       `{"error":{"message":"The current model or channel does not support the image_generation tool. Remove the tool or switch to an image endpoint/model that supports image generation.","type":"invalid_request_error","code":"unsupported_builtin_tool"}}`,
+	}
 }
 
 func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte) {

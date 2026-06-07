@@ -112,8 +112,9 @@ disable-cooling: false
 delete-unauthorized-auth: false
 
 # disable-image-generation supports: false (default), true, or "chat".
+# - false: keep explicit image_generation requests enabled, but do not auto-inject image_generation into plain chat/responses requests.
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
-# - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
+# - "chat": disable image_generation on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
 disable-image-generation: false
 
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).

@@ -191,6 +191,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	repairMeta := newCompatRepairLogMeta(opts, requestedModel, baseModel, e.Identifier(), "ClaudeExecutor", requestPath, compatKind)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = scrubDeepSeekThinkingBudgetForCompat(body, baseModel, baseURL, compatKind)
 	body = ensureModelMaxTokens(body, baseModel)
@@ -203,7 +204,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	body, err = repairClaudeToolUseHistory(body, "claude")
+	body, err = repairClaudeToolUseHistoryWithCompatLog(ctx, body, repairMeta)
 	if err != nil {
 		return resp, err
 	}
@@ -221,7 +222,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	//   3. Normalize TTL ordering under prompt-caching-scope-2026-01-05: a 1h block
 	//      must not appear after a 5m block in evaluation order (tools→system→messages).
 	body = applyCacheControlPipeline(body, 4, true)
-	body, err = repairMiniMaxClaudeToolAdjacencyForCompat(compatKind, body)
+	body, err = repairMiniMaxClaudeToolAdjacencyForCompatWithLog(ctx, body, repairMeta)
 	if err != nil {
 		return resp, err
 	}
@@ -406,6 +407,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
+	repairMeta := newCompatRepairLogMeta(opts, requestedModel, baseModel, e.Identifier(), "ClaudeExecutor", requestPath, compatKind)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = scrubDeepSeekThinkingBudgetForCompat(body, baseModel, baseURL, compatKind)
 	body = ensureModelMaxTokens(body, baseModel)
@@ -419,7 +421,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	body, err = repairClaudeToolUseHistory(body, "claude")
+	body, err = repairClaudeToolUseHistoryWithCompatLog(ctx, body, repairMeta)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +436,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// missing, enforce the max-4-breakpoint limit, then normalize TTL ordering
 	// under prompt-caching-scope-2026-01-05.
 	body = applyCacheControlPipeline(body, 4, true)
-	body, err = repairMiniMaxClaudeToolAdjacencyForCompat(compatKind, body)
+	body, err = repairMiniMaxClaudeToolAdjacencyForCompatWithLog(ctx, body, repairMeta)
 	if err != nil {
 		return nil, err
 	}
@@ -1961,6 +1963,135 @@ func normalizeClaudeEmptyToolResults(body []byte) ([]byte, int, error) {
 
 func repairMiniMaxClaudeToolAdjacency(baseURL string, body []byte) ([]byte, error) {
 	return repairMiniMaxClaudeToolAdjacencyForCompat(config.InferCompatKindFromBaseURL(baseURL), body)
+}
+
+type compatRepairLogMeta struct {
+	requestedModel string
+	upstreamModel  string
+	provider       string
+	executor       string
+	requestPath    string
+	compatKind     string
+	messageCount   int
+	toolCount      int
+}
+
+func newCompatRepairLogMeta(opts cliproxyexecutor.Options, requestedModel, upstreamModel, provider, executor, requestPath, compatKind string) compatRepairLogMeta {
+	return compatRepairLogMeta{
+		requestedModel: requestedModel,
+		upstreamModel:  upstreamModel,
+		provider:       provider,
+		executor:       executor,
+		requestPath:    requestPath,
+		compatKind:     compatKind,
+		messageCount:   executorIntMetadataValue(opts.Metadata[cliproxyexecutor.MessageCountMetadataKey]),
+		toolCount:      executorIntMetadataValue(opts.Metadata[cliproxyexecutor.ToolCountMetadataKey]),
+	}
+}
+
+func repairMiniMaxClaudeToolAdjacencyForCompatWithLog(ctx context.Context, body []byte, meta compatRepairLogMeta) ([]byte, error) {
+	if !requiresClaudeToolAdjacencyRepair(meta.compatKind) {
+		return body, nil
+	}
+	started := time.Now()
+	beforeBytes := len(body)
+	repaired, count, err := repairMiniMaxToolResultAdjacency(body)
+	if err != nil {
+		return body, err
+	}
+	if count > 0 {
+		compatRepairLogEntry(ctx, meta, "claude_tool_result_adjacency", count, beforeBytes, len(repaired), time.Since(started), nil).
+			Warn("compat repair applied")
+	}
+	return repaired, nil
+}
+
+func repairClaudeToolUseHistoryWithCompatLog(ctx context.Context, body []byte, meta compatRepairLogMeta) ([]byte, error) {
+	started := time.Now()
+	beforeBytes := len(body)
+	repaired, stats, err := repairClaudeToolUseHistoryWithStats(body)
+	if err != nil {
+		return body, err
+	}
+	if stats.changed() {
+		extra := log.Fields{
+			"merged_tool_result_messages": stats.mergedToolResultMessages,
+			"deduped_tool_results":        stats.dedupedToolResults,
+			"reordered_tool_results":      stats.reorderedToolResults,
+			"removed_tool_uses":           stats.removedToolUses,
+			"removed_tool_results":        stats.removedToolResults,
+		}
+		compatRepairLogEntry(ctx, meta, "claude_tool_use_history", compatRepairStatsTotal(stats), beforeBytes, len(repaired), time.Since(started), extra).
+			Warn("compat repair applied")
+	}
+	return repaired, nil
+}
+
+func compatRepairStatsTotal(stats claudeToolHistoryRepairStats) int {
+	return stats.mergedToolResultMessages +
+		stats.dedupedToolResults +
+		stats.reorderedToolResults +
+		stats.removedToolUses +
+		stats.removedToolResults
+}
+
+func compatRepairLogEntry(ctx context.Context, meta compatRepairLogMeta, repairType string, repairsCount, beforeBytes, afterBytes int, duration time.Duration, extra log.Fields) *log.Entry {
+	fields := log.Fields{
+		"event":                "compat_repair",
+		"requested_model":      meta.requestedModel,
+		"upstream_model":       meta.upstreamModel,
+		"provider":             meta.provider,
+		"executor":             meta.executor,
+		"request_path":         meta.requestPath,
+		"compat_kind":          meta.compatKind,
+		"repair_type":          repairType,
+		"repairs_count":        repairsCount,
+		"message_count":        meta.messageCount,
+		"tool_count":           meta.toolCount,
+		"payload_bytes_before": beforeBytes,
+		"payload_bytes_after":  afterBytes,
+		"repair_duration_ms":   duration.Milliseconds(),
+	}
+	for key, value := range extra {
+		fields[key] = value
+	}
+	return helps.LogWithRequestID(ctx).WithFields(fields)
+}
+
+func executorIntMetadataValue(raw any) int {
+	switch value := raw.(type) {
+	case int:
+		if value > 0 {
+			return value
+		}
+	case int32:
+		if value > 0 {
+			return int(value)
+		}
+	case int64:
+		if value > 0 {
+			return int(value)
+		}
+	case float32:
+		if value > 0 {
+			return int(value)
+		}
+	case float64:
+		if value > 0 {
+			return int(value)
+		}
+	case string:
+		parsed, errParse := strconv.Atoi(strings.TrimSpace(value))
+		if errParse == nil && parsed > 0 {
+			return parsed
+		}
+	case []byte:
+		parsed, errParse := strconv.Atoi(strings.TrimSpace(string(value)))
+		if errParse == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func repairMiniMaxClaudeToolAdjacencyForCompat(compatKind string, body []byte) ([]byte, error) {

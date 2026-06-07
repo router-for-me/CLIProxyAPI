@@ -2002,6 +2002,7 @@ func (h *Handler) GetMonitorServiceHealth(c *gin.Context) {
 				totalFailure += hb.Failure
 			}
 			total := totalSuccess + totalFailure
+			activeStreams := h.currentActiveStreamSnapshot()
 			c.JSON(http.StatusOK, gin.H{
 				"rows":              rows,
 				"cols":              cols,
@@ -2010,6 +2011,7 @@ func (h *Handler) GetMonitorServiceHealth(c *gin.Context) {
 				"total_success":     totalSuccess,
 				"total_failure":     totalFailure,
 				"success_rate":      calcRate(totalSuccess, total),
+				"active_streams":    activeStreams,
 			})
 			return
 		}
@@ -2036,6 +2038,7 @@ func (h *Handler) GetMonitorServiceHealth(c *gin.Context) {
 	})
 
 	total := totalSuccess + totalFailure
+	activeStreams := h.currentActiveStreamSnapshot()
 	c.JSON(http.StatusOK, gin.H{
 		"rows":              rows,
 		"cols":              cols,
@@ -2044,7 +2047,23 @@ func (h *Handler) GetMonitorServiceHealth(c *gin.Context) {
 		"total_success":     totalSuccess,
 		"total_failure":     totalFailure,
 		"success_rate":      calcRate(totalSuccess, total),
+		"active_streams":    activeStreams,
 	})
+}
+
+func (h *Handler) currentActiveStreamSnapshot() any {
+	if h == nil || h.authManager == nil {
+		return gin.H{
+			"active_streams_total":       0,
+			"active_streams_by_model":    map[string]int{},
+			"active_streams_by_provider": map[string]int{},
+			"active_streams_by_endpoint": map[string]int{},
+			"stream_age_p50_ms":          0,
+			"stream_age_p95_ms":          0,
+			"stream_age_max_ms":          0,
+		}
+	}
+	return h.authManager.ActiveStreamSnapshot()
 }
 
 // GetMonitorKeyStats returns per-source and per-auth-index success/failure stats
