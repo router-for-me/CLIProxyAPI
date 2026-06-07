@@ -233,7 +233,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
 	shouldRefresh := manager.shouldRefresh(auth, now)
-	exec := manager.executors[auth.Provider]
+	exec := manager.executors[executorProviderKey(auth.Provider)]
 	manager.mu.RUnlock()
 
 	if !shouldSchedule {
