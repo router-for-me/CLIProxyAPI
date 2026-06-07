@@ -1612,7 +1612,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, cancelUpstream func(), startedAt time.Time, releaseSlot func()) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, responseModelAlias string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, cancelUpstream func(), startedAt time.Time, releaseSlot func()) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	var cancelOnce sync.Once
 	cancel := func() {
@@ -1642,6 +1642,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 			if !forward {
 				return false
+			}
+			if len(chunk.Payload) > 0 && responseModelAlias != "" {
+				chunk.Payload = rewriteResponsePayloadModelAlias(chunk.Payload, responseModelAlias)
 			}
 			if ctx == nil {
 				out <- chunk
@@ -1800,7 +1803,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, streamResult.Close, startedAt, releaseSlot), nil
+		responseModelAlias := m.requestedResponseModelAlias(auth, opts, routeModel, execModel)
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, responseModelAlias, streamResult.Headers, buffered, remaining, streamResult.Close, startedAt, releaseSlot), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -2366,6 +2370,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			if responseModelAlias := m.requestedResponseModelAlias(auth, opts, routeModel, upstreamModel); responseModelAlias != "" {
+				resp.Payload = rewriteResponsePayloadModelAlias(resp.Payload, responseModelAlias)
+			}
 			return resp, nil
 		}
 		if authErr != nil {
@@ -2514,6 +2521,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			if responseModelAlias := m.requestedResponseModelAlias(auth, opts, routeModel, upstreamModel); responseModelAlias != "" {
+				resp.Payload = rewriteResponsePayloadModelAlias(resp.Payload, responseModelAlias)
+			}
 			return resp, nil
 		}
 		if authErr != nil {
