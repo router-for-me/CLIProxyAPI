@@ -20,19 +20,8 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # ============================================
-  # 阶段1: 并行构建各平台镜像
-  # ============================================
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -40,7 +29,7 @@ jobs:
     steps:
       - name: Prepare
         run: |
-          platform=${{ matrix.platform }}
+          platform=linux/amd64
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
           echo "IMAGE_NAME_LC=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
@@ -109,7 +98,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
@@ -134,9 +123,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ============================================
-  # 阶段2: 合并多架构 manifest
-  # ============================================
   manifest:
     runs-on: ubuntu-latest
     needs: build

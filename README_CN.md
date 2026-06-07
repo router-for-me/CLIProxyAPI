@@ -74,7 +74,7 @@ usage-persistence-enabled: true
 ### CI/CD 优化
 
 - Docker 工作流采用矩阵策略和层缓存，加速构建
-- 多架构支持（amd64/arm64）并创建 manifest
+- 当前发布流程默认仅构建面向 amd64 生产环境的镜像
 - Docker 镜像仓库从 DockerHub 迁移至 GitHub Container Registry (ghcr.io)
 - 交叉编译 Dockerfile，加速多平台构建
 - 自动清理临时 Docker 标签

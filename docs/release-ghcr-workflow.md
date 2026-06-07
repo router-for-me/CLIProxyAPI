@@ -4,7 +4,7 @@ This fork is intended to use a pull-based production deployment flow:
 
 1. Merge validated code into `main`
 2. Create and push a Git tag like `fork/v7.10.43`
-3. GitHub Actions builds release binaries and multi-arch Docker images
+3. GitHub Actions builds release binaries and an amd64 Docker image
 4. Production servers pull the published GHCR image
 5. Restart the service without building on the production host
 
@@ -12,7 +12,7 @@ This fork is intended to use a pull-based production deployment flow:
 
 - `.github/workflows/docker-image.yml`
   - Triggered by pushing `fork/v*` tags
-  - Publishes multi-arch images to `ghcr.io/quqi1599/cliproxyapi`
+  - Publishes `linux/amd64` images to `ghcr.io/quqi1599/cliproxyapi`
   - Also supports manual reruns through `workflow_dispatch`
   - Manual reruns can optionally refresh the `latest` image tag
 - `.github/workflows/release.yaml`
@@ -39,6 +39,9 @@ docker compose up -d --remove-orphans --no-build
 ```
 
 ## Production Deployment
+
+The current production host is `x86_64`, so the release workflow only builds `linux/amd64`.
+If you later add ARM servers, you can reintroduce `linux/arm64` to the Docker workflow.
 
 Use the exact release image on the server instead of building from source:
 

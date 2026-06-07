@@ -75,7 +75,7 @@ Automatically cleans up old usage statistics data:
 ### CI/CD Optimizations
 
 - Docker workflow with matrix strategy and layer caching for faster builds
-- Multi-architecture support (amd64/arm64) with manifest creation
+- Release workflow currently targets amd64 production deployments by default
 - Migrated Docker registry from DockerHub to GitHub Container Registry (ghcr.io)
 - Cross-compilation Dockerfile for faster multi-platform builds
 - Automatic cleanup of temporary Docker tags
