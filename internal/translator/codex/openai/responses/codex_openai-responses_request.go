@@ -95,17 +95,45 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	}
 
 	inputArray := inputResult.Array()
-	result := rawJSON
+	if len(inputArray) == 0 {
+		return rawJSON
+	}
 
-	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
+	changed := false
+	for _, item := range inputArray {
+		if item.Get("role").String() == "system" {
+			changed = true
+			break
 		}
 	}
 
-	return result
+	if !changed {
+		return rawJSON
+	}
+
+	rebuiltInput := make([]byte, 0, len(inputResult.Raw)+len(inputArray)*3)
+	rebuiltInput = append(rebuiltInput, '[')
+	for _, item := range inputArray {
+		itemRaw := []byte(item.Raw)
+		if item.Get("role").String() == "system" {
+			updatedItem, err := sjson.SetBytes(itemRaw, "role", "developer")
+			if err != nil {
+				return rawJSON
+			}
+			itemRaw = updatedItem
+		}
+		if len(rebuiltInput) > 1 {
+			rebuiltInput = append(rebuiltInput, ',')
+		}
+		rebuiltInput = append(rebuiltInput, itemRaw...)
+	}
+	rebuiltInput = append(rebuiltInput, ']')
+
+	updated, err := sjson.SetRawBytes(rawJSON, "input", rebuiltInput)
+	if err != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 // normalizeCodexBuiltinTools rewrites legacy/preview built-in tool variants to the
