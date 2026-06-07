@@ -6,6 +6,38 @@
 # Stop script execution on any error
 $ErrorActionPreference = "Stop"
 
+function Resolve-RepositoryUrl {
+    $remoteUrl = ""
+    try {
+        $remoteUrl = (git remote get-url origin).Trim()
+    } catch {
+        $remoteUrl = ""
+    }
+    if ([string]::IsNullOrWhiteSpace($remoteUrl)) {
+        try {
+            $remoteUrl = (git config --get remote.origin.url).Trim()
+        } catch {
+            $remoteUrl = ""
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($remoteUrl)) {
+        return "unknown"
+    }
+
+    if ($remoteUrl -like "git@github.com:*") {
+        $remoteUrl = "https://github.com/" + $remoteUrl.Substring("git@github.com:".Length)
+    } elseif ($remoteUrl -like "ssh://git@github.com/*") {
+        $remoteUrl = "https://github.com/" + $remoteUrl.Substring("ssh://git@github.com/".Length)
+    } elseif ($remoteUrl -like "http://github.com/*") {
+        $remoteUrl = "https://" + $remoteUrl.Substring("http://".Length)
+    }
+
+    if ($remoteUrl.EndsWith(".git")) {
+        $remoteUrl = $remoteUrl.Substring(0, $remoteUrl.Length - 4)
+    }
+    return $remoteUrl
+}
+
 # --- Step 1: Choose Environment ---
 Write-Host "Please select an option:"
 Write-Host "1) Run using Pre-built Image (Recommended)"
@@ -27,18 +59,20 @@ switch ($choice) {
         $VERSION = (git describe --tags --always --dirty)
         $COMMIT  = (git rev-parse --short HEAD)
         $BUILD_DATE = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $REPOSITORY_URL = Resolve-RepositoryUrl
 
         Write-Host "Building with the following info:"
         Write-Host "  Version: $VERSION"
         Write-Host "  Commit: $COMMIT"
         Write-Host "  Build Date: $BUILD_DATE"
+        Write-Host "  Repository URL: $REPOSITORY_URL"
         Write-Host "----------------------------------------"
 
         # Build and start the services with a local-only image tag
         $env:CLI_PROXY_IMAGE = "cli-proxy-api:local"
         
         Write-Host "Building the Docker image..."
-        docker compose build --build-arg VERSION=$VERSION --build-arg COMMIT=$COMMIT --build-arg BUILD_DATE=$BUILD_DATE
+        docker compose build --build-arg VERSION=$VERSION --build-arg COMMIT=$COMMIT --build-arg BUILD_DATE=$BUILD_DATE --build-arg REPOSITORY_URL=$REPOSITORY_URL
 
         Write-Host "Starting the services..."
         docker compose up -d --remove-orphans --pull never

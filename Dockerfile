@@ -1,41 +1,41 @@
-# CLIProxyAPI Docker镜像构建文件
-# 多平台构建：使用 tonistiigi/xx + 交叉编译，避免 QEMU 模拟
+# CLIProxyAPI Docker image build file
+# Multi-platform build using tonistiigi/xx cross-compilation to avoid QEMU emulation
 # syntax=docker/dockerfile:1.4
 
-# 构建阶段 - 使用 BUILDPLATFORM 在原生架构执行
+# Build stage running on BUILDPLATFORM for native-speed compilation
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
-# 版本号参数
+# Version metadata
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
 
-# 安装交叉编译工具链
-# tonistiigi/xx 提供跨架构编译辅助工具
+# Install the cross-compilation toolchain.
+# tonistiigi/xx provides the cross-platform build helpers.
 COPY --from=tonistiigi/xx:1.6.1 / /
 RUN apk add --no-cache git ca-certificates tzdata clang lld
 
 WORKDIR /app
 
-# 配置目标平台的交叉编译工具链
+# Configure the cross-compilation toolchain for TARGETPLATFORM
 ARG TARGETPLATFORM
 RUN xx-apk add musl-dev gcc
 
-# 设置Go模块代理
+# Configure the Go module proxy
 ENV GOPROXY=https://proxy.golang.org,direct
 
-# 复制go mod文件
+# Copy the Go module files
 COPY go.mod go.sum ./
 
-# 下载依赖（在原生平台执行，速度快）
+# Download dependencies on the native platform for faster builds
 RUN --mount=type=cache,target=/root/.cache/go-mod \
     go mod download
 
-# 复制源代码
+# Copy the source tree
 COPY . .
 
-# 静态编译（CGO_ENABLED=0）
-# -trimpath 移除构建路径信息，增强安全性和可复现性
+# Static build with CGO disabled.
+# -trimpath removes build-path details for better reproducibility.
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/root/.cache/go-mod \
@@ -49,8 +49,18 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -o ./CLIProxyAPI ./cmd/server/ && \
     xx-verify CLIProxyAPI
 
-# 运行阶段
+# Runtime stage
 FROM alpine:3.23
+
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+ARG REPOSITORY_URL=unknown
+
+LABEL org.opencontainers.image.source="${REPOSITORY_URL}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 RUN apk add --no-cache tzdata ca-certificates
 

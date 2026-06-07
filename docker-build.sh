@@ -13,6 +13,36 @@ if [[ "${1:-}" != "" ]]; then
   exit 1
 fi
 
+resolve_repository_url() {
+  local remote_url normalized
+  remote_url="$(git remote get-url origin 2>/dev/null || true)"
+  if [[ -z "$remote_url" ]]; then
+    remote_url="$(git config --get remote.origin.url 2>/dev/null || true)"
+  fi
+  if [[ -z "$remote_url" ]]; then
+    echo "unknown"
+    return
+  fi
+
+  case "$remote_url" in
+    git@github.com:*)
+      normalized="https://github.com/${remote_url#git@github.com:}"
+      ;;
+    ssh://git@github.com/*)
+      normalized="https://github.com/${remote_url#ssh://git@github.com/}"
+      ;;
+    http://github.com/*)
+      normalized="https://${remote_url#http://}"
+      ;;
+    *)
+      normalized="$remote_url"
+      ;;
+  esac
+
+  normalized="${normalized%.git}"
+  echo "$normalized"
+}
+
 # --- Step 1: Choose Environment ---
 echo "Please select an option:"
 echo "1) Run using Pre-built Image (Recommended)"
@@ -34,11 +64,13 @@ case "$choice" in
     VERSION="$(git describe --tags --always --dirty)"
     COMMIT="$(git rev-parse --short HEAD)"
     BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    REPOSITORY_URL="$(resolve_repository_url)"
 
     echo "Building with the following info:"
     echo "  Version: ${VERSION}"
     echo "  Commit: ${COMMIT}"
     echo "  Build Date: ${BUILD_DATE}"
+    echo "  Repository URL: ${REPOSITORY_URL}"
     echo "----------------------------------------"
 
     # Build and start the services with a local-only image tag
@@ -48,7 +80,8 @@ case "$choice" in
     docker compose build \
       --build-arg VERSION="${VERSION}" \
       --build-arg COMMIT="${COMMIT}" \
-      --build-arg BUILD_DATE="${BUILD_DATE}"
+      --build-arg BUILD_DATE="${BUILD_DATE}" \
+      --build-arg REPOSITORY_URL="${REPOSITORY_URL}"
 
     echo "Starting the services..."
     docker compose up -d --remove-orphans --pull never
