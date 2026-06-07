@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -284,6 +285,31 @@ func TestManagerExecute_ClaudeSonnetMiniMaxLongContextRoutesToM3(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_ClaudeSonnetMiniMaxLargeTextRoutesToM3ByCheapBound(t *testing.T) {
+	alias := "claude-sonnet-4-6"
+	executor := &apiKeyPoolExecutor{id: "claude"}
+	m := newClaudeAPIKeyPoolTestManager(t, alias, []internalconfig.ClaudeModel{
+		{Name: "MiniMax-M2.7-highspeed", Alias: alias},
+		{Name: "MiniMax-M3", Alias: alias},
+	}, executor)
+	text := strings.Repeat("a", int(miniMaxM2SafeTotalTokens))
+
+	resp, err := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   alias,
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"` + text + `"}]}],"max_tokens":1}`),
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != "MiniMax-M3" {
+		t.Fatalf("payload = %q, want MiniMax-M3", string(resp.Payload))
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 1 || got[0] != "MiniMax-M3" {
+		t.Fatalf("execute models = %v, want only MiniMax-M3", got)
+	}
+}
+
 func TestManagerExecute_ClaudeSonnetMiniMaxMultimodalRoutesToM3(t *testing.T) {
 	alias := "claude-sonnet-4-6"
 	executor := &apiKeyPoolExecutor{id: "claude"}
@@ -364,6 +390,40 @@ func TestManagerExecute_MiniMaxM3HighspeedRouteUsesStandardM3(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_ClaudeSonnetMiniMaxContextLimitFallsBackToM3(t *testing.T) {
+	alias := "claude-sonnet-4-6"
+	contextLimitErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "context length exceeded"}
+	executor := &apiKeyPoolExecutor{
+		id:            "claude",
+		executeErrors: map[string]error{"MiniMax-M2.7-highspeed": contextLimitErr},
+	}
+	m := newClaudeAPIKeyPoolTestManager(t, alias, []internalconfig.ClaudeModel{
+		{Name: "MiniMax-M2.7-highspeed", Alias: alias},
+		{Name: "MiniMax-M3", Alias: alias},
+	}, executor)
+
+	resp, err := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   alias,
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"near the context edge"}]}],"max_tokens":1024}`),
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != "MiniMax-M3" {
+		t.Fatalf("payload = %q, want MiniMax-M3", string(resp.Payload))
+	}
+	got := executor.ExecuteModels()
+	want := []string{"MiniMax-M2.7-highspeed", "MiniMax-M3"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManagerExecuteStream_ClaudeSonnetMiniMaxLongContextRoutesToM3(t *testing.T) {
 	alias := "claude-sonnet-4-6"
 	executor := &apiKeyPoolExecutor{id: "claude"}
@@ -392,6 +452,47 @@ func TestManagerExecuteStream_ClaudeSonnetMiniMaxLongContextRoutesToM3(t *testin
 	got := executor.StreamModels()
 	if len(got) != 1 || got[0] != "MiniMax-M3" {
 		t.Fatalf("stream models = %v, want only MiniMax-M3", got)
+	}
+}
+
+func TestManagerExecuteStream_ClaudeSonnetMiniMaxContextLimitFallsBackToM3(t *testing.T) {
+	alias := "claude-sonnet-4-6"
+	contextLimitErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "context length exceeded"}
+	executor := &apiKeyPoolExecutor{
+		id:                "claude",
+		streamFirstErrors: map[string]error{"MiniMax-M2.7-highspeed": contextLimitErr},
+	}
+	m := newClaudeAPIKeyPoolTestManager(t, alias, []internalconfig.ClaudeModel{
+		{Name: "MiniMax-M2.7-highspeed", Alias: alias},
+		{Name: "MiniMax-M3", Alias: alias},
+	}, executor)
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   alias,
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"near the context edge"}]}],"max_tokens":1024}`),
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute stream: %v", err)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != "MiniMax-M3" {
+		t.Fatalf("payload = %q, want MiniMax-M3", string(payload))
+	}
+	got := executor.StreamModels()
+	want := []string{"MiniMax-M2.7-highspeed", "MiniMax-M3"}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d model = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

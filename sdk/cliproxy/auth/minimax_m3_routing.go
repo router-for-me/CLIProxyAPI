@@ -2,12 +2,10 @@ package auth
 
 import (
 	"strings"
-	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
-	"github.com/tiktoken-go/tokenizer"
 )
 
 const (
@@ -18,17 +16,14 @@ const (
 	miniMaxLargeToolHistoryTools          = 40
 )
 
-var (
-	miniMaxRoutingTokenizerOnce sync.Once
-	miniMaxRoutingTokenizer     tokenizer.Codec
-	miniMaxRoutingTokenizerErr  error
-)
-
 func filterMiniMaxM3RequiredExecutionModels(routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, candidates []string) []string {
 	candidates = rewriteMiniMaxM3HighspeedRouteToStandard(routeModel, opts, candidates)
 	candidates = filterClaudeSonnetMiniMaxM3Highspeed(routeModel, opts, candidates)
 	candidates = filterMiniMaxLargeToolHistoryM3Highspeed(req, opts, candidates)
 	if len(candidates) == 0 || !miniMaxCandidateSetCanRouteToM3(routeModel, opts, candidates) {
+		return candidates
+	}
+	if !miniMaxCandidateSetNeedsM3RequestCheck(candidates) {
 		return candidates
 	}
 	if !miniMaxRequestRequiresM3(req, opts) {
@@ -52,6 +47,18 @@ func filterMiniMaxM3RequiredExecutionModels(routeModel string, req cliproxyexecu
 		return candidates
 	}
 	return filtered
+}
+
+func miniMaxCandidateSetNeedsM3RequestCheck(candidates []string) bool {
+	for _, candidate := range candidates {
+		if !isMiniMaxModel(candidate) {
+			continue
+		}
+		if !isMiniMaxM3SeriesModel(candidate) || isMiniMaxM3HighspeedModel(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteMiniMaxM3HighspeedRouteToStandard(routeModel string, opts cliproxyexecutor.Options, candidates []string) []string {
@@ -163,11 +170,20 @@ func miniMaxRequestRequiresM3(req cliproxyexecutor.Request, opts cliproxyexecuto
 	}
 
 	payload := miniMaxRoutingPayload(req, opts)
-	required := requestHasMiniMaxM3MultimodalInput(payload) || miniMaxRequestExceedsM2SafeContext(payload)
+	required := miniMaxPayloadRequiresM3(payload)
 	if opts.Metadata != nil {
 		opts.Metadata[miniMaxM3RequiredMetadataKey] = required
 	}
 	return required
+}
+
+func miniMaxPayloadRequiresM3(payload []byte) bool {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	root := gjson.ParseBytes(payload)
+	return parsedRequestHasMiniMaxM3PartType(root, isMiniMaxM3MultimodalPartType) ||
+		miniMaxParsedRequestExceedsM2SafeContext(payload, root)
 }
 
 func miniMaxRoutingPayload(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {
@@ -271,6 +287,10 @@ func requestHasMiniMaxM3PartType(payload []byte, match func(string) bool) bool {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return false
 	}
+	return parsedRequestHasMiniMaxM3PartType(gjson.ParseBytes(payload), match)
+}
+
+func parsedRequestHasMiniMaxM3PartType(root gjson.Result, match func(string) bool) bool {
 	found := false
 	var walk func(gjson.Result) bool
 	walk = func(node gjson.Result) bool {
@@ -288,7 +308,7 @@ func requestHasMiniMaxM3PartType(payload []byte, match func(string) bool) bool {
 		}
 		return !found
 	}
-	walk(gjson.ParseBytes(payload))
+	walk(root)
 	return found
 }
 
@@ -314,47 +334,46 @@ func miniMaxRequestExceedsM2SafeContext(payload []byte) bool {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return false
 	}
-	inputTokens := estimateMiniMaxRoutingInputTokens(payload)
-	if inputTokens <= 0 {
-		return false
-	}
-	totalBudget := inputTokens + requestedOutputTokenBudget(payload)
-	return totalBudget >= miniMaxM2SafeTotalTokens
+	return miniMaxParsedRequestExceedsM2SafeContext(payload, gjson.ParseBytes(payload))
 }
 
-func estimateMiniMaxRoutingInputTokens(payload []byte) int64 {
-	root := gjson.ParseBytes(payload)
-	segments := make([]string, 0, 64)
-	collectMiniMaxRoutingStrings(root, &segments)
-	joined := strings.TrimSpace(strings.Join(segments, "\n"))
-	if joined == "" {
-		return 0
+func miniMaxParsedRequestExceedsM2SafeContext(payload []byte, root gjson.Result) bool {
+	outputBudget := requestedOutputTokenBudget(payload)
+	if outputBudget >= miniMaxM2SafeTotalTokens {
+		return true
 	}
-	miniMaxRoutingTokenizerOnce.Do(func() {
-		miniMaxRoutingTokenizer, miniMaxRoutingTokenizerErr = tokenizer.Get(tokenizer.O200kBase)
-	})
-	if miniMaxRoutingTokenizerErr != nil || miniMaxRoutingTokenizer == nil {
-		return roughTokenEstimate(joined)
+	remaining := miniMaxM2SafeTotalTokens - outputBudget
+	if remaining <= 0 {
+		return true
 	}
-	count, err := miniMaxRoutingTokenizer.Count(joined)
-	if err != nil {
-		return roughTokenEstimate(joined)
-	}
-	return int64(count)
+	return miniMaxRoutingStringBytesAtLeast(root, remaining)
 }
 
-func collectMiniMaxRoutingStrings(node gjson.Result, segments *[]string) {
-	switch node.Type {
-	case gjson.String:
-		if text := strings.TrimSpace(node.String()); text != "" {
-			*segments = append(*segments, text)
+func miniMaxRoutingStringBytesAtLeast(root gjson.Result, threshold int64) bool {
+	if threshold <= 0 {
+		return true
+	}
+	var total int64
+	var walk func(gjson.Result) bool
+	walk = func(node gjson.Result) bool {
+		switch node.Type {
+		case gjson.String:
+			rawLen := int64(len(node.Raw))
+			if rawLen > 2 {
+				total += rawLen - 2
+				if total >= threshold {
+					return false
+				}
+			}
+		case gjson.JSON:
+			node.ForEach(func(_, child gjson.Result) bool {
+				return walk(child)
+			})
 		}
-	case gjson.JSON:
-		node.ForEach(func(_, child gjson.Result) bool {
-			collectMiniMaxRoutingStrings(child, segments)
-			return true
-		})
+		return true
 	}
+	walk(root)
+	return total >= threshold
 }
 
 func requestedOutputTokenBudget(payload []byte) int64 {
@@ -371,14 +390,6 @@ func requestedOutputTokenBudget(payload []byte) int64 {
 		}
 	}
 	return 0
-}
-
-func roughTokenEstimate(text string) int64 {
-	runes := int64(len([]rune(text)))
-	if runes == 0 {
-		return 0
-	}
-	return (runes + 2) / 3
 }
 
 func isMiniMaxModel(model string) bool {
