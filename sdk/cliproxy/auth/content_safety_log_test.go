@@ -25,7 +25,7 @@ func TestManager_RecordContentSafetyRequest_WritesSanitizedPromptLog(t *testing.
 		executeErrors: map[string]error{
 			"aa-blocked-auth": &Error{
 				HTTPStatus: http.StatusUnavailableForLegalReasons,
-				Message:    requestScopedContentBlockedMessage,
+				Message:    miniMaxNewSensitiveMessage,
 			},
 		},
 	}
@@ -50,13 +50,14 @@ func TestManager_RecordContentSafetyRequest_WritesSanitizedPromptLog(t *testing.
 		t.Fatalf("register good auth: %v", errRegister)
 	}
 
+	largePrompt := strings.Repeat("please inspect these files carefully. ", 300)
 	payload := mustMarshalContentSafetyTestPayload(t, map[string]any{
 		"model":         model,
 		"api_key":       "sk-test-secret",
 		"authorization": "Bearer hidden-token",
 		"messages": []map[string]string{
 			{"role": "system", "content": "system prompt for file search"},
-			{"role": "user", "content": "please inspect these files"},
+			{"role": "user", "content": largePrompt},
 		},
 		"image": "data:image/png;base64," + strings.Repeat("A", contentSafetyLogMaxStringLen+32),
 	})
@@ -64,13 +65,14 @@ func TestManager_RecordContentSafetyRequest_WritesSanitizedPromptLog(t *testing.
 		"model":        model,
 		"access_token": "original-secret-token",
 		"messages": []map[string]string{
-			{"role": "user", "content": "original client prompt"},
+			{"role": "user", "content": strings.Repeat("original client prompt ", 120)},
 		},
 	})
 
 	ctx := logging.WithRequestID(context.Background(), "req-451")
 	resp, errExecute := m.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{
 		OriginalRequest: originalRequest,
+		Metadata:        map[string]any{cliproxyexecutor.RequestPathMetadataKey: "/v1/chat/completions"},
 	})
 	if errExecute != nil {
 		t.Fatalf("execute error = %v, want success after content safety fallback", errExecute)
@@ -90,12 +92,15 @@ func TestManager_RecordContentSafetyRequest_WritesSanitizedPromptLog(t *testing.
 	if errRead != nil {
 		t.Fatalf("read content safety log: %v", errRead)
 	}
+	if got := len(bytes.TrimSpace(rawLog)); got > contentSafetyLogMaxRecordBytes {
+		t.Fatalf("content safety log line = %d bytes, want <= %d: %s", got, contentSafetyLogMaxRecordBytes, string(rawLog))
+	}
 	for _, forbidden := range []string{"sk-test-secret", "Bearer hidden-token", "original-secret-token", "data:image/png;base64"} {
 		if bytes.Contains(rawLog, []byte(forbidden)) {
 			t.Fatalf("content safety log leaked %q: %s", forbidden, string(rawLog))
 		}
 	}
-	for _, required := range []string{"system prompt for file search", "please inspect these files", "original client prompt", "[redacted]"} {
+	for _, required := range []string{"system prompt for file search", "please inspect these files carefully.", "original client prompt", "[redacted]"} {
 		if !bytes.Contains(rawLog, []byte(required)) {
 			t.Fatalf("content safety log missing %q: %s", required, string(rawLog))
 		}
@@ -117,8 +122,38 @@ func TestManager_RecordContentSafetyRequest_WritesSanitizedPromptLog(t *testing.
 	if record.UpstreamModel != model {
 		t.Fatalf("upstream_model = %q, want %q", record.UpstreamModel, model)
 	}
+	if record.RequestPath != "/v1/chat/completions" {
+		t.Fatalf("request_path = %q, want %q", record.RequestPath, "/v1/chat/completions")
+	}
+	if record.SafetyCode != "1026" {
+		t.Fatalf("safety_code = %q, want %q", record.SafetyCode, "1026")
+	}
+	if record.SafetyDirection != "input" {
+		t.Fatalf("safety_direction = %q, want %q", record.SafetyDirection, "input")
+	}
+	if record.PayloadBytes != len(payload) {
+		t.Fatalf("payload_bytes = %d, want %d", record.PayloadBytes, len(payload))
+	}
+	if record.PayloadSHA256 != contentSafetySHA256Hex(payload) {
+		t.Fatalf("payload_sha256 = %q, want %q", record.PayloadSHA256, contentSafetySHA256Hex(payload))
+	}
+	if record.PayloadPreview == "" {
+		t.Fatal("payload_preview should be recorded")
+	}
+	if !record.PayloadTruncated {
+		t.Fatal("payload_truncated should be true for oversized payload preview")
+	}
 	if !record.OriginalRequestPresent {
 		t.Fatal("original request should be recorded when it differs from submitted payload")
+	}
+	if record.OriginalRequestBytes != len(originalRequest) {
+		t.Fatalf("original_request_bytes = %d, want %d", record.OriginalRequestBytes, len(originalRequest))
+	}
+	if record.OriginalRequestSHA256 != contentSafetySHA256Hex(originalRequest) {
+		t.Fatalf("original_request_sha256 = %q, want %q", record.OriginalRequestSHA256, contentSafetySHA256Hex(originalRequest))
+	}
+	if record.OriginalRequestPreview == "" {
+		t.Fatal("original_request_preview should be recorded")
 	}
 }
 

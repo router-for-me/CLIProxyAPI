@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,35 +21,51 @@ import (
 )
 
 const (
-	contentSafetyLogDirEnv       = "CLIPROXY_CONTENT_SAFETY_LOG_DIR"
-	contentSafetyLogSubdir       = "content-safety-451"
-	contentSafetyLogMaxBodyBytes = 256 * 1024
-	contentSafetyLogMaxStringLen = 8192
-	contentSafetyLogMaxErrorLen  = 4096
+	contentSafetyLogDirEnv               = "CLIPROXY_CONTENT_SAFETY_LOG_DIR"
+	contentSafetyLogSubdir               = "content-safety-451"
+	contentSafetyLogMaxBodyBytes         = 256 * 1024
+	contentSafetyLogMaxPreviewBytes      = 1024
+	contentSafetyLogFallbackPreviewBytes = 256
+	contentSafetyLogMaxStringLen         = 1024
+	contentSafetyLogMaxMetadataLen       = 256
+	contentSafetyLogMaxErrorLen          = 1024
+	contentSafetyLogFallbackErrorLen     = 256
+	contentSafetyLogMaxRecordBytes       = 16 * 1024
+	contentSafetyLogOmittedPreview       = "[omitted to cap log line]"
 )
 
 type contentSafetyLogRecord struct {
-	Timestamp              string         `json:"timestamp"`
-	RequestID              string         `json:"request_id,omitempty"`
-	Provider               string         `json:"provider,omitempty"`
-	AuthID                 string         `json:"auth_id,omitempty"`
-	AuthIndex              string         `json:"auth_index,omitempty"`
-	AuthLabel              string         `json:"auth_label,omitempty"`
-	AuthPrefix             string         `json:"auth_prefix,omitempty"`
-	RouteModel             string         `json:"route_model,omitempty"`
-	RequestedModel         string         `json:"requested_model,omitempty"`
-	UpstreamModel          string         `json:"upstream_model,omitempty"`
-	StatusCode             int            `json:"status_code,omitempty"`
-	Error                  string         `json:"error,omitempty"`
-	RequestBody            map[string]any `json:"request_body,omitempty"`
-	RequestBodyText        string         `json:"request_body_text,omitempty"`
-	RequestBodyTruncated   bool           `json:"request_body_truncated,omitempty"`
-	RequestBodyBytes       int            `json:"request_body_bytes,omitempty"`
-	OriginalRequest        map[string]any `json:"original_request,omitempty"`
-	OriginalRequestText    string         `json:"original_request_text,omitempty"`
-	OriginalRequestTrunc   bool           `json:"original_request_truncated,omitempty"`
-	OriginalRequestBytes   int            `json:"original_request_bytes,omitempty"`
-	OriginalRequestPresent bool           `json:"original_request_present,omitempty"`
+	Timestamp                string `json:"timestamp"`
+	RequestID                string `json:"request_id,omitempty"`
+	Provider                 string `json:"provider,omitempty"`
+	AuthID                   string `json:"auth_id,omitempty"`
+	AuthIndex                string `json:"auth_index,omitempty"`
+	AuthLabel                string `json:"auth_label,omitempty"`
+	AuthPrefix               string `json:"auth_prefix,omitempty"`
+	RouteModel               string `json:"route_model,omitempty"`
+	RequestedModel           string `json:"requested_model,omitempty"`
+	UpstreamModel            string `json:"upstream_model,omitempty"`
+	RequestPath              string `json:"request_path,omitempty"`
+	StatusCode               int    `json:"status_code,omitempty"`
+	SafetyCode               string `json:"safety_code,omitempty"`
+	SafetyDirection          string `json:"safety_direction,omitempty"`
+	Error                    string `json:"error,omitempty"`
+	PayloadPreview           string `json:"payload_preview,omitempty"`
+	PayloadTruncated         bool   `json:"payload_truncated,omitempty"`
+	PayloadBytes             int    `json:"payload_bytes,omitempty"`
+	PayloadSHA256            string `json:"payload_sha256,omitempty"`
+	OriginalRequestPresent   bool   `json:"original_request_present,omitempty"`
+	OriginalRequestPreview   string `json:"original_request_preview,omitempty"`
+	OriginalRequestTruncated bool   `json:"original_request_truncated,omitempty"`
+	OriginalRequestBytes     int    `json:"original_request_bytes,omitempty"`
+	OriginalRequestSHA256    string `json:"original_request_sha256,omitempty"`
+}
+
+type contentSafetyPayloadSummary struct {
+	Preview   string
+	Truncated bool
+	Bytes     int
+	SHA256    string
 }
 
 func (m *Manager) recordContentSafetyRequest(ctx context.Context, auth *Auth, provider, routeModel, upstreamModel string, opts cliproxyexecutor.Options, payload []byte, err error) {
@@ -58,48 +76,51 @@ func (m *Manager) recordContentSafetyRequest(ctx context.Context, auth *Auth, pr
 	if path == "" {
 		return
 	}
+	safetyCode, safetyDirection := contentSafetyErrorDetails(err)
 
 	record := contentSafetyLogRecord{
-		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
-		RequestID:        logging.GetRequestID(ctx),
-		Provider:         strings.TrimSpace(provider),
-		RouteModel:       strings.TrimSpace(routeModel),
-		RequestedModel:   requestedModelAliasFromOptions(opts, routeModel),
-		UpstreamModel:    strings.TrimSpace(upstreamModel),
-		StatusCode:       statusCodeFromError(err),
-		Error:            truncateContentSafetyString(err.Error(), contentSafetyLogMaxErrorLen),
-		RequestBodyBytes: len(payload),
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		RequestID:       truncateContentSafetyString(logging.GetRequestID(ctx), contentSafetyLogMaxMetadataLen),
+		Provider:        truncateContentSafetyString(strings.TrimSpace(provider), contentSafetyLogMaxMetadataLen),
+		RouteModel:      truncateContentSafetyString(strings.TrimSpace(routeModel), contentSafetyLogMaxMetadataLen),
+		RequestedModel:  truncateContentSafetyString(requestedModelAliasFromOptions(opts, routeModel), contentSafetyLogMaxMetadataLen),
+		UpstreamModel:   truncateContentSafetyString(strings.TrimSpace(upstreamModel), contentSafetyLogMaxMetadataLen),
+		RequestPath:     truncateContentSafetyString(contentSafetyMetadataString(opts.Metadata, cliproxyexecutor.RequestPathMetadataKey), contentSafetyLogMaxMetadataLen),
+		StatusCode:      statusCodeFromError(err),
+		SafetyCode:      truncateContentSafetyString(safetyCode, contentSafetyLogMaxMetadataLen),
+		SafetyDirection: truncateContentSafetyString(safetyDirection, contentSafetyLogMaxMetadataLen),
+		Error:           truncateContentSafetyString(err.Error(), contentSafetyLogMaxErrorLen),
 	}
 	if record.StatusCode == 0 {
 		record.StatusCode = http.StatusUnavailableForLegalReasons
 	}
 	if auth != nil {
-		record.AuthID = strings.TrimSpace(auth.ID)
+		record.AuthID = truncateContentSafetyString(strings.TrimSpace(auth.ID), contentSafetyLogMaxMetadataLen)
 		record.AuthIndex = authMetricIndex(auth)
-		record.AuthLabel = strings.TrimSpace(auth.Label)
-		record.AuthPrefix = strings.TrimSpace(auth.Prefix)
+		record.AuthLabel = truncateContentSafetyString(strings.TrimSpace(auth.Label), contentSafetyLogMaxMetadataLen)
+		record.AuthPrefix = truncateContentSafetyString(strings.TrimSpace(auth.Prefix), contentSafetyLogMaxMetadataLen)
 	}
 
-	body, bodyText, truncated := sanitizeContentSafetyPayload(payload)
-	record.RequestBody = body
-	record.RequestBodyText = bodyText
-	record.RequestBodyTruncated = truncated
+	payloadSummary := summarizeContentSafetyPayload(payload)
+	record.PayloadPreview = payloadSummary.Preview
+	record.PayloadTruncated = payloadSummary.Truncated
+	record.PayloadBytes = payloadSummary.Bytes
+	record.PayloadSHA256 = payloadSummary.SHA256
 
 	if len(opts.OriginalRequest) > 0 && !bytes.Equal(opts.OriginalRequest, payload) {
-		original, originalText, originalTruncated := sanitizeContentSafetyPayload(opts.OriginalRequest)
-		record.OriginalRequest = original
-		record.OriginalRequestText = originalText
-		record.OriginalRequestTrunc = originalTruncated
-		record.OriginalRequestBytes = len(opts.OriginalRequest)
+		originalSummary := summarizeContentSafetyPayload(opts.OriginalRequest)
 		record.OriginalRequestPresent = true
+		record.OriginalRequestPreview = originalSummary.Preview
+		record.OriginalRequestTruncated = originalSummary.Truncated
+		record.OriginalRequestBytes = originalSummary.Bytes
+		record.OriginalRequestSHA256 = originalSummary.SHA256
 	}
 
-	line, errMarshal := json.Marshal(record)
+	line, errMarshal := marshalContentSafetyLogRecord(record)
 	if errMarshal != nil {
 		logEntryWithRequestID(ctx).WithError(errMarshal).Warn("marshal content safety log failed")
 		return
 	}
-	line = append(line, '\n')
 
 	if errWrite := appendContentSafetyLogLine(path, line); errWrite != nil {
 		logEntryWithRequestID(ctx).WithError(errWrite).Warn("write content safety log failed")
@@ -145,9 +166,62 @@ func appendContentSafetyLogLine(path string, line []byte) error {
 	return nil
 }
 
-func sanitizeContentSafetyPayload(payload []byte) (map[string]any, string, bool) {
+func contentSafetyMetadataString(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch typed := raw.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func contentSafetyErrorDetails(err error) (string, string) {
+	code := normalizeContentSafetyCode(errorCodeFromError(err))
+	message := errorString(err)
+	switch {
+	case isMiniMaxInputNewSensitiveSignal(code, message):
+		return fallbackContentSafetyCode(code, "1026"), "input"
+	case isMiniMaxOutputNewSensitiveSignal(code, message):
+		return fallbackContentSafetyCode(code, "1027"), "output"
+	default:
+		return code, ""
+	}
+}
+
+func normalizeContentSafetyCode(code string) string {
+	return strings.Trim(strings.ToLower(strings.TrimSpace(code)), `"'(),:;[]{}<>`)
+}
+
+func fallbackContentSafetyCode(code string, fallback string) string {
+	if strings.TrimSpace(code) != "" {
+		return code
+	}
+	return fallback
+}
+
+func summarizeContentSafetyPayload(payload []byte) contentSafetyPayloadSummary {
 	if len(payload) == 0 {
-		return nil, "", false
+		return contentSafetyPayloadSummary{}
+	}
+	preview, truncated := sanitizeContentSafetyPayloadPreview(payload)
+	return contentSafetyPayloadSummary{
+		Preview:   preview,
+		Truncated: truncated,
+		Bytes:     len(payload),
+		SHA256:    contentSafetySHA256Hex(payload),
+	}
+}
+
+func sanitizeContentSafetyPayloadPreview(payload []byte) (string, bool) {
+	if len(payload) == 0 {
+		return "", false
 	}
 	truncated := len(payload) > contentSafetyLogMaxBodyBytes
 
@@ -155,12 +229,10 @@ func sanitizeContentSafetyPayload(payload []byte) (map[string]any, string, bool)
 	decoder.UseNumber()
 	var decoded any
 	if errDecode := decoder.Decode(&decoded); errDecode == nil {
-		if obj, ok := redactContentSafetyValue(decoded).(map[string]any); ok {
-			return obj, "", truncated
-		}
 		encoded, errMarshal := json.Marshal(redactContentSafetyValue(decoded))
 		if errMarshal == nil {
-			return nil, string(encoded), truncated
+			preview, previewTruncated := truncateContentSafetyStringWithFlag(string(encoded), contentSafetyLogMaxPreviewBytes)
+			return preview, truncated || previewTruncated
 		}
 	}
 
@@ -168,8 +240,100 @@ func sanitizeContentSafetyPayload(payload []byte) (map[string]any, string, bool)
 	if len(raw) > contentSafetyLogMaxBodyBytes {
 		raw = raw[:contentSafetyLogMaxBodyBytes]
 	}
-	text := truncateContentSafetyString(string(raw), contentSafetyLogMaxBodyBytes)
-	return nil, text, truncated
+	text := sanitizeContentSafetyString(string(raw))
+	preview, previewTruncated := truncateContentSafetyStringWithFlag(text, contentSafetyLogMaxPreviewBytes)
+	return preview, truncated || previewTruncated
+}
+
+func contentSafetySHA256Hex(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func marshalContentSafetyLogRecord(record contentSafetyLogRecord) ([]byte, error) {
+	line, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+	if len(line) <= contentSafetyLogMaxRecordBytes {
+		return append(line, '\n'), nil
+	}
+
+	compact := record
+	compact.Error, _ = truncateContentSafetyStringWithFlag(compact.Error, contentSafetyLogFallbackErrorLen)
+	if compact.PayloadPreview != "" {
+		compact.PayloadPreview, _ = truncateContentSafetyStringWithFlag(compact.PayloadPreview, contentSafetyLogFallbackPreviewBytes)
+		compact.PayloadTruncated = true
+	}
+	if compact.OriginalRequestPreview != "" {
+		compact.OriginalRequestPreview, _ = truncateContentSafetyStringWithFlag(compact.OriginalRequestPreview, contentSafetyLogFallbackPreviewBytes)
+		compact.OriginalRequestTruncated = true
+	}
+	line, errMarshal = json.Marshal(compact)
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+	if len(line) <= contentSafetyLogMaxRecordBytes {
+		return append(line, '\n'), nil
+	}
+
+	minimal := compact
+	minimal.AuthID = ""
+	minimal.AuthLabel = ""
+	minimal.AuthPrefix = ""
+	minimal.Error, _ = truncateContentSafetyStringWithFlag(minimal.Error, 128)
+	if minimal.PayloadPreview != "" {
+		minimal.PayloadPreview = contentSafetyLogOmittedPreview
+		minimal.PayloadTruncated = true
+	}
+	if minimal.OriginalRequestPreview != "" {
+		minimal.OriginalRequestPreview = contentSafetyLogOmittedPreview
+		minimal.OriginalRequestTruncated = true
+	}
+	line, errMarshal = json.Marshal(minimal)
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+	if len(line) <= contentSafetyLogMaxRecordBytes {
+		return append(line, '\n'), nil
+	}
+
+	fallback := contentSafetyLogRecord{
+		Timestamp:              record.Timestamp,
+		RequestID:              record.RequestID,
+		Provider:               record.Provider,
+		AuthIndex:              record.AuthIndex,
+		RouteModel:             record.RouteModel,
+		RequestedModel:         record.RequestedModel,
+		UpstreamModel:          record.UpstreamModel,
+		RequestPath:            record.RequestPath,
+		StatusCode:             record.StatusCode,
+		SafetyCode:             record.SafetyCode,
+		SafetyDirection:        record.SafetyDirection,
+		Error:                  truncateContentSafetyString(record.Error, 128),
+		PayloadBytes:           record.PayloadBytes,
+		PayloadSHA256:          record.PayloadSHA256,
+		PayloadPreview:         contentSafetyLogOmittedPreview,
+		PayloadTruncated:       true,
+		OriginalRequestPresent: record.OriginalRequestPresent,
+	}
+	if record.OriginalRequestPresent {
+		fallback.OriginalRequestBytes = record.OriginalRequestBytes
+		fallback.OriginalRequestSHA256 = record.OriginalRequestSHA256
+		fallback.OriginalRequestPreview = contentSafetyLogOmittedPreview
+		fallback.OriginalRequestTruncated = true
+	}
+	line, errMarshal = json.Marshal(fallback)
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+	if len(line) > contentSafetyLogMaxRecordBytes {
+		return nil, fmt.Errorf("content safety log line exceeds %d bytes after compaction", contentSafetyLogMaxRecordBytes)
+	}
+	return append(line, '\n'), nil
 }
 
 func redactContentSafetyValue(value any) any {
@@ -267,4 +431,11 @@ func truncateContentSafetyString(value string, maxLen int) string {
 		return value
 	}
 	return value[:maxLen] + fmt.Sprintf("...[truncated %d bytes]", len(value)-maxLen)
+}
+
+func truncateContentSafetyStringWithFlag(value string, maxLen int) (string, bool) {
+	if maxLen <= 0 || len(value) <= maxLen {
+		return value, false
+	}
+	return truncateContentSafetyString(value, maxLen), true
 }
