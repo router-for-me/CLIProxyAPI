@@ -1584,6 +1584,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		key := strings.ToLower(modelID)
 		if _, exists := seen[key]; exists {
+			log.Debugf("skipping duplicate openai-compat alias %q", modelID)
 			continue
 		}
 		seen[key] = struct{}{}

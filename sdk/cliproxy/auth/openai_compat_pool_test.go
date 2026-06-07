@@ -249,6 +249,35 @@ func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_OpenAICompatAliasPoolAlwaysSelectsFirstModel(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "deepseek-v3.1", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	for i := 0; i < 3; i++ {
+		resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("execute %d: %v", i, err)
+		}
+		if len(resp.Payload) == 0 {
+			t.Fatalf("execute %d returned empty payload", i)
+		}
+	}
+
+	got := executor.ExecuteModels()
+	if len(got) != 3 {
+		t.Fatalf("execute calls = %d, want 3", len(got))
+	}
+	for i, model := range got {
+		if model != "deepseek-v3.1" {
+			t.Fatalf("execute call %d model = %q, want %q (first-alias-wins violated)", i, model, "deepseek-v3.1")
+		}
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_request_error: malformed payload"}
