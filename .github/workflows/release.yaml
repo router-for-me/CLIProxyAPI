@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '手动指定版本标签(例如: fork/v6.60.0)'
+        description: '要发布的 Git tag（例如: fork/v7.10.43）'
         required: true
 
 jobs:
@@ -44,6 +44,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
       - run: git fetch --force --tags
 
@@ -61,6 +62,12 @@ jobs:
           else
             VERSION="${GITHUB_REF#refs/tags/}"
           fi
+
+          if [[ ! "$VERSION" =~ ^fork/v ]]; then
+            echo "expected fork/v* tag, got: $VERSION" >&2
+            exit 1
+          fi
+
           COMMIT=$(git rev-parse --short HEAD)
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -102,6 +109,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -119,10 +127,17 @@ jobs:
         id: version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ github.event.inputs.tag }}"
           else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            TAG="${GITHUB_REF#refs/tags/}"
           fi
+
+          if [[ ! "$TAG" =~ ^fork/v ]]; then
+            echo "expected fork/v* tag, got: $TAG" >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
         id: notes

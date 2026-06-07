@@ -7,9 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '手动指定镜像标签'
+        description: '要构建并发布的 Git tag（例如: fork/v7.10.43）'
+        required: true
+      publish_latest:
+        description: '手动补跑时是否同步刷新 latest 标签'
         required: false
-        default: 'manual'
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -42,6 +46,9 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -53,19 +60,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Generate release metadata
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RELEASE_TAG="${{ github.event.inputs.tag }}"
+          else
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$RELEASE_TAG" =~ ^fork/v ]]; then
+            echo "expected fork/v* tag, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          VERSION="${RELEASE_TAG#fork/}"
+          VERSION_SEMVER="${VERSION#v}"
+          DOCKER_TAG="${RELEASE_TAG//\//-}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          REPOSITORY_URL="https://github.com/${{ github.repository }}"
+
+          {
+            echo "release_tag=$RELEASE_TAG"
+            echo "version=$VERSION"
+            echo "version_semver=$VERSION_SEMVER"
+            echo "docker_tag=$DOCKER_TAG"
+            echo "commit=$COMMIT"
+            echo "build_date=$BUILD_DATE"
+            echo "repository_url=$REPOSITORY_URL"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
-
-      - name: Generate build args
-        id: buildargs
-        run: |
-          VERSION=$(git describe --tags --always --dirty | sed 's|^fork/||')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          tags: |
+            type=raw,value=${{ steps.version.outputs.docker_tag }}
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version_semver }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version_semver }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.version_semver }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' || github.event.inputs.publish_latest == 'true' }}
 
       - name: Build and push by digest
         id: build
@@ -78,9 +115,10 @@ jobs:
           cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=build-${{ env.PLATFORM_PAIR }},mode=max
           build-args: |
-            VERSION=${{ steps.buildargs.outputs.VERSION }}
-            COMMIT=${{ steps.buildargs.outputs.COMMIT }}
-            BUILD_DATE=${{ steps.buildargs.outputs.BUILD_DATE }}
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ steps.version.outputs.commit }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            REPOSITORY_URL=${{ steps.version.outputs.repository_url }}
 
       - name: Export digest
         run: |
@@ -109,17 +147,38 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
       - name: Prepare
         run: |
           echo "IMAGE_NAME_LC=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
-      - name: Generate version
+      - name: Generate release metadata
         id: version
         run: |
-          # Remove fork/ prefix and v prefix for semver compatibility
-          VERSION=$(git describe --tags --always --dirty | sed 's|^fork/||' | sed 's|^v||')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RELEASE_TAG="${{ github.event.inputs.tag }}"
+          else
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$RELEASE_TAG" =~ ^fork/v ]]; then
+            echo "expected fork/v* tag, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          VERSION="${RELEASE_TAG#fork/}"
+          VERSION_SEMVER="${VERSION#v}"
+          DOCKER_TAG="${RELEASE_TAG//\//-}"
+
+          {
+            echo "release_tag=$RELEASE_TAG"
+            echo "version=$VERSION"
+            echo "version_semver=$VERSION_SEMVER"
+            echo "docker_tag=$DOCKER_TAG"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -144,11 +203,12 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.VERSION }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.VERSION }}
-            type=semver,pattern={{major}},value=${{ steps.version.outputs.VERSION }}
-            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
+            type=raw,value=${{ steps.version.outputs.docker_tag }}
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version_semver }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version_semver }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.version_semver }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' || github.event.inputs.publish_latest == 'true' }}
 
       - name: Create manifest list
         working-directory: /tmp/digests
@@ -159,4 +219,4 @@ jobs:
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ steps.version.outputs.VERSION }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ steps.version.outputs.docker_tag }}

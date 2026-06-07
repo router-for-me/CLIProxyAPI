@@ -78,6 +78,7 @@ usage-persistence-enabled: true
 - Docker 镜像仓库从 DockerHub 迁移至 GitHub Container Registry (ghcr.io)
 - 交叉编译 Dockerfile，加速多平台构建
 - 自动清理临时 Docker 标签
+- 面向生产环境的拉取式发布流程说明见：[docs/release-ghcr-workflow.md](docs/release-ghcr-workflow.md)
 
 ### 管理面板
 

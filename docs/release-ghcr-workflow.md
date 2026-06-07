@@ -1,0 +1,80 @@
+# Release and GHCR Deployment Workflow
+
+This fork is intended to use a pull-based production deployment flow:
+
+1. Merge validated code into `main`
+2. Create and push a Git tag like `fork/v7.10.43`
+3. GitHub Actions builds release binaries and multi-arch Docker images
+4. Production servers pull the published GHCR image
+5. Restart the service without building on the production host
+
+## Workflows
+
+- `.github/workflows/docker-image.yml`
+  - Triggered by pushing `fork/v*` tags
+  - Publishes multi-arch images to `ghcr.io/quqi1599/cliproxyapi`
+  - Also supports manual reruns through `workflow_dispatch`
+  - Manual reruns can optionally refresh the `latest` image tag
+- `.github/workflows/release.yaml`
+  - Triggered by the same `fork/v*` tags
+  - Publishes GitHub Release artifacts for all supported platforms
+
+## Published Image Tags
+
+For a release tag like `fork/v7.10.43`, the Docker workflow publishes:
+
+- `ghcr.io/quqi1599/cliproxyapi:fork-v7.10.43`
+- `ghcr.io/quqi1599/cliproxyapi:v7.10.43`
+- `ghcr.io/quqi1599/cliproxyapi:7.10.43`
+- `ghcr.io/quqi1599/cliproxyapi:7.10`
+- `ghcr.io/quqi1599/cliproxyapi:7`
+- `ghcr.io/quqi1599/cliproxyapi:latest` on tag push
+
+The safest production deployment uses the exact tag form:
+
+```bash
+export CLI_PROXY_IMAGE=ghcr.io/quqi1599/cliproxyapi:fork-v7.10.43
+docker compose pull
+docker compose up -d --remove-orphans --no-build
+```
+
+## Production Deployment
+
+Use the exact release image on the server instead of building from source:
+
+```bash
+cd /opt/cliproxy
+export CLI_PROXY_IMAGE=ghcr.io/quqi1599/cliproxyapi:fork-v7.10.43
+docker compose pull
+docker compose up -d --remove-orphans --no-build
+docker compose ps
+docker compose logs --tail 20 cli-proxy-api
+curl http://127.0.0.1:8317/healthz
+```
+
+## Rollback
+
+Rollback is the same process with an older image tag:
+
+```bash
+export CLI_PROXY_IMAGE=ghcr.io/quqi1599/cliproxyapi:fork-v7.10.42
+docker compose pull
+docker compose up -d --remove-orphans --no-build
+```
+
+## Local Developer Builds
+
+Use local builds only for development verification:
+
+```bash
+./docker-build.sh
+```
+
+Then choose `2) Build from Source and Run (For Developers)`.
+
+If you want to run a published release locally, keep the default option and set:
+
+```bash
+export CLI_PROXY_IMAGE=ghcr.io/quqi1599/cliproxyapi:fork-v7.10.43
+./docker-build.sh
+```

@@ -43,6 +43,9 @@ resolve_repository_url() {
   echo "$normalized"
 }
 
+default_remote_image="ghcr.io/quqi1599/cliproxyapi:latest"
+selected_remote_image="${CLI_PROXY_IMAGE:-$default_remote_image}"
+
 # --- Step 1: Choose Environment ---
 echo "Please select an option:"
 echo "1) Run using Pre-built Image (Recommended)"
@@ -53,6 +56,9 @@ read -r -p "Enter choice [1-2]: " choice
 case "$choice" in
   1)
     echo "--- Running with Pre-built Image ---"
+    echo "Using remote image: ${selected_remote_image}"
+    echo "Tip: set CLI_PROXY_IMAGE=ghcr.io/quqi1599/cliproxyapi:fork-v7.10.43 to pin a release."
+    docker compose pull
     docker compose up -d --remove-orphans --no-build
     echo "Services are starting from remote image."
     echo "Run 'docker compose logs -f' to see the logs."

@@ -79,6 +79,7 @@ Automatically cleans up old usage statistics data:
 - Migrated Docker registry from DockerHub to GitHub Container Registry (ghcr.io)
 - Cross-compilation Dockerfile for faster multi-platform builds
 - Automatic cleanup of temporary Docker tags
+- Pull-based release workflow for production deployments: [docs/release-ghcr-workflow.md](docs/release-ghcr-workflow.md)
 
 ### Management Center
 
