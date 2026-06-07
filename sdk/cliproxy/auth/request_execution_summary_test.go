@@ -21,6 +21,7 @@ func TestManager_Execute_LogsRequestExecutionSummary(t *testing.T) {
 	defer log.SetLevel(previousLevel)
 
 	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 0, 1)
 	executor := &authFallbackExecutor{
 		id: "claude",
 		executeErrors: map[string]error{
@@ -74,6 +75,12 @@ func TestManager_Execute_LogsRequestExecutionSummary(t *testing.T) {
 	}
 	if got := entry.Data["fallback_count"]; got != 1 {
 		t.Fatalf("fallback_count = %#v, want 1", got)
+	}
+	if got := entry.Data["max_attempts"]; got != 4 {
+		t.Fatalf("max_attempts = %#v, want 4", got)
+	}
+	if got := entry.Data["max_fallbacks"]; got != 1 {
+		t.Fatalf("max_fallbacks = %#v, want 1", got)
 	}
 	if got := entry.Data["translator_run_count"]; got != 2 {
 		t.Fatalf("translator_run_count = %#v, want 2", got)

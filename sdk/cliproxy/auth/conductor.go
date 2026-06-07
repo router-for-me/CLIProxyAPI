@@ -73,6 +73,8 @@ type requestAttemptTrace struct {
 	requestID      string
 	attempts       int
 	fallbacks      int
+	maxAttempts    int
+	maxFallbacks   int
 	translatorRuns int
 	finalProvider  string
 	finalModel     string
@@ -84,6 +86,8 @@ type requestExecutionSummary struct {
 	RequestID      string
 	AttemptCount   int
 	FallbackCount  int
+	MaxAttempts    int
+	MaxFallbacks   int
 	TranslatorRuns int
 	FinalProvider  string
 	FinalModel     string
@@ -157,6 +161,22 @@ func (t *requestAttemptTrace) recordFallback() {
 	t.mu.Unlock()
 }
 
+func (t *requestAttemptTrace) configureBudget(maxAttempts, maxFallbacks int) {
+	if t == nil {
+		return
+	}
+	if maxAttempts < 0 {
+		maxAttempts = 0
+	}
+	if maxFallbacks < 0 {
+		maxFallbacks = 0
+	}
+	t.mu.Lock()
+	t.maxAttempts = maxAttempts
+	t.maxFallbacks = maxFallbacks
+	t.mu.Unlock()
+}
+
 func (t *requestAttemptTrace) recordExecution(provider, model, executor string) {
 	if t == nil {
 		return
@@ -194,6 +214,8 @@ func (t *requestAttemptTrace) summary() requestExecutionSummary {
 		RequestID:      t.requestID,
 		AttemptCount:   t.attempts,
 		FallbackCount:  t.fallbacks,
+		MaxAttempts:    t.maxAttempts,
+		MaxFallbacks:   t.maxFallbacks,
 		TranslatorRuns: t.translatorRuns,
 		FinalProvider:  t.finalProvider,
 		FinalModel:     t.finalModel,
@@ -285,6 +307,8 @@ func logRequestExecutionSummary(ctx context.Context, trace *requestAttemptTrace,
 		"final_success":        finalSuccess,
 		"attempt_count":        summary.AttemptCount,
 		"fallback_count":       summary.FallbackCount,
+		"max_attempts":         summary.MaxAttempts,
+		"max_fallbacks":        summary.MaxFallbacks,
 		"translator_run_count": summary.TranslatorRuns,
 	}
 	if summary.RequestID != "" {
@@ -2292,7 +2316,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, finalErr
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	requestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	trace.configureBudget(requestRetry+1, maxRetryCredentials)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -2349,7 +2374,8 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return cliproxyexecutor.Response{}, finalErr
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	requestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	trace.configureBudget(requestRetry+1, maxRetryCredentials)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -2400,7 +2426,8 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, finalErr
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	requestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	trace.configureBudget(requestRetry+1, maxRetryCredentials)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
