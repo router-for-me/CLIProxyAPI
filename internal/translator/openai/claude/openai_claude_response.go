@@ -8,6 +8,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -31,6 +32,11 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	// been emitted on the wire. Using raw upstream tool_calls presence here
 	// can produce stop_reason=tool_use with zero announced tool blocks.
 	SawToolCall bool
+	// PendingToolCall is true when the upstream has sent at least one tool_call
+	// delta but content_block_start has not yet been emitted (e.g. name or id
+	// still pending). Used to preserve finish_reason=tool_calls for providers
+	// that send empty names in initial deltas.
+	PendingToolCall bool
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
 	// Tool calls accumulator for streaming
@@ -67,6 +73,9 @@ type ToolCallAccumulator struct {
 	// StartEmitted tracks whether content_block_start has already been sent
 	// for this tool index.
 	StartEmitted bool
+	// SeenName tracks whether a non-empty function.name was ever observed
+	// for this tool index, even if content_block_start has not been emitted yet.
+	SeenName bool
 }
 
 // ConvertOpenAIResponseToClaude converts OpenAI streaming response format to Anthropic API format.
@@ -129,7 +138,7 @@ func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) 
 	if param == nil {
 		return ""
 	}
-	if param.SawToolCall {
+	if param.SawToolCall || param.PendingToolCall {
 		return "tool_calls"
 	}
 	return param.FinishReason
@@ -234,6 +243,12 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				accumulator := param.ToolCallsAccumulator[index]
 
+				// Track that the upstream is attempting a tool call, even if
+				// name or id are still empty. This preserves
+				// finish_reason=tool_calls for providers that send empty names
+				// in the initial streaming delta.
+				param.PendingToolCall = true
+
 				// Handle tool call ID. Only accept JSON-string, non-empty
 				// values so malformed upstream fields do not overwrite a
 				// valid ID or coerce into a content_block.id.
@@ -250,8 +265,11 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					// field across chunks; reassigning after start could drift
 					// from what was already announced.
 					if !accumulator.StartEmitted {
-						if name := function.Get("name"); name.Exists() && name.Type == gjson.String && name.String() != "" {
-							accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
+						if name := function.Get("name"); name.Exists() && name.Type == gjson.String {
+							if nameStr := name.String(); nameStr != "" {
+								accumulator.Name = util.MapToolName(param.ToolNameMap, nameStr)
+								accumulator.SeenName = true
+							}
 						}
 					}
 
@@ -267,7 +285,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				// Re-check on every chunk, not only chunks with a function
 				// object. Some upstreams split function.name and id across
 				// separate deltas.
-				if !accumulator.StartEmitted && accumulator.Name != "" && accumulator.ID != "" && !param.ContentBlocksStopped {
+				if !accumulator.StartEmitted && accumulator.SeenName && accumulator.ID != "" && !param.ContentBlocksStopped {
 					emitToolUseStart(param, index, accumulator, &results)
 				}
 
@@ -280,7 +298,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
 		switch {
-		case param.SawToolCall:
+		case param.SawToolCall || param.PendingToolCall:
 			param.FinishReason = "tool_calls"
 		case reason == "tool_calls":
 			param.FinishReason = "stop"
@@ -308,8 +326,14 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					// Belated emit for streams that supplied a valid name but
 					// never sent an id. SanitizeClaudeToolID("") produces the
 					// expected stable synthetic toolu_<nanos>_<n> ID shape.
+					// If the name is empty (some providers send empty names in
+					// initial deltas), generate a synthetic name so the tool
+					// call is not silently dropped.
 					if accumulator.Name == "" {
-						continue
+						if accumulator.Arguments.Len() == 0 {
+							continue
+						}
+						accumulator.Name = fmt.Sprintf("tool_%d", index)
 					}
 					emitToolUseStart(param, index, accumulator, &results)
 				}
@@ -380,8 +404,13 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 			if !accumulator.StartEmitted {
 				// Belated emit at [DONE]; same behavior as the finish_reason
 				// path for name-but-no-id streams.
+				// If the name is empty but we have arguments, generate a
+				// synthetic name so the tool call is not silently dropped.
 				if accumulator.Name == "" {
-					continue
+					if accumulator.Arguments.Len() == 0 {
+						continue
+					}
+					accumulator.Name = fmt.Sprintf("tool_%d", index)
 				}
 				emitToolUseStart(param, index, accumulator, &results)
 			}

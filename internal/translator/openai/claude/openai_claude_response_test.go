@@ -144,17 +144,23 @@ func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("expected zero tool_use content_block_start, got %d (events=%+v)", got, events)
+	// When name is empty throughout but arguments exist, a synthetic name is
+	// generated so the tool call is not silently dropped.
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one tool_use content_block_start with synthetic name, got %d (events=%+v)", len(starts), events)
 	}
-	if got := countByType(events, "content_block_delta"); got != 0 {
-		t.Fatalf("expected zero content_block_delta when start was suppressed, got %d", got)
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("expected synthetic name tool_0, got %q", name)
 	}
-	if got := countByType(events, "content_block_stop"); got != 0 {
-		t.Fatalf("expected zero content_block_stop when start was suppressed, got %d", got)
+	if got := countByType(events, "content_block_delta"); got != 1 {
+		t.Fatalf("expected one content_block_delta, got %d", got)
 	}
-	if got := lastStopReason(events); got == "tool_use" {
-		t.Fatalf("stop_reason must not be tool_use when zero tool_use blocks were emitted; got %q", got)
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected one content_block_stop, got %d", got)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", got)
 	}
 }
 
