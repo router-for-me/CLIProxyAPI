@@ -27,4 +27,11 @@ services:
 
         exec ./CLIProxyAPI -home-jwt "$$HOME_JWT"
       '
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8317/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    stop_grace_period: 30s
     restart: unless-stopped

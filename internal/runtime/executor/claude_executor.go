@@ -1922,7 +1922,7 @@ func validateClaudeUpstreamPayloadForCompat(compatKind string, body []byte) erro
 }
 
 func normalizeClaudeEmptyToolResults(body []byte) ([]byte, int, error) {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !helps.HasClaudeToolResultMarker(body) || !gjson.ValidBytes(body) {
 		return body, 0, nil
 	}
 	messages := gjson.GetBytes(body, "messages")
@@ -2170,7 +2170,7 @@ func validateMiniMaxServerToolCompatibility(body []byte) error {
 }
 
 func repairMiniMaxToolResultAdjacency(body []byte) ([]byte, int, error) {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !helps.HasClaudeToolUseOrResultMarkers(body) || !gjson.ValidBytes(body) {
 		return body, 0, nil
 	}
 	messages := gjson.GetBytes(body, "messages")

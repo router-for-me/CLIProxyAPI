@@ -9,6 +9,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
+ARG STRIP_BINARY=true
 
 # Install the cross-compilation toolchain.
 # tonistiigi/xx provides the cross-platform build helpers.
@@ -39,13 +40,15 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/root/.cache/go-mod \
+    set -eu; \
+    ldflags="-X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}"; \
+    if [ "${STRIP_BINARY}" = "true" ]; then \
+      ldflags="-s -w ${ldflags}"; \
+    fi; \
     xx-go build \
     -buildvcs=false \
     -trimpath \
-    -ldflags="-s -w \
-      -X 'main.Version=${VERSION}' \
-      -X 'main.Commit=${COMMIT}' \
-      -X 'main.BuildDate=${BUILD_DATE}'" \
+    -ldflags="${ldflags}" \
     -o ./CLIProxyAPI ./cmd/server/ && \
     xx-verify CLIProxyAPI
 

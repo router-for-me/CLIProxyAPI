@@ -38,6 +38,23 @@ docker compose pull
 docker compose up -d --remove-orphans --no-build
 ```
 
+For repeatable deployments with readiness timestamps, use:
+
+```bash
+./scripts/deploy-ghcr-release.sh fork/v7.10.43
+```
+
+The script prints:
+
+- `old_container_stop_at`
+- `new_container_start_event_at`
+- `port_8317_listen_at`
+- `healthz_ok_at`
+- `first_success_request_at`
+- `first_failed_request_at`
+- `last_failed_request_at`
+- `connection_refused_request_count`
+
 ## Production Deployment
 
 The current production host is `x86_64`, so the release workflow only builds `linux/amd64`.
@@ -55,6 +72,12 @@ docker compose logs --tail 20 cli-proxy-api
 curl http://127.0.0.1:8317/healthz
 ```
 
+If the compose file already uses `${CLI_PROXY_IMAGE}`, you can replace the manual sequence with:
+
+```bash
+./scripts/deploy-ghcr-release.sh fork/v7.10.43
+```
+
 ## Rollback
 
 Rollback is the same process with an older image tag:
@@ -63,6 +86,37 @@ Rollback is the same process with an older image tag:
 export CLI_PROXY_IMAGE=ghcr.io/quqi1599/cliproxyapi:fork-v7.10.42
 docker compose pull
 docker compose up -d --remove-orphans --no-build
+```
+
+The same deploy script accepts older tags:
+
+```bash
+./scripts/deploy-ghcr-release.sh fork/v7.10.42
+```
+
+## Debug Image And pprof
+
+The regular release image stays stripped for normal production use. When you need
+symbolized CPU or heap profiles, trigger the manual workflow:
+
+- Workflow: `.github/workflows/docker-image-debug.yml`
+- Input tag: `fork/v7.10.43`
+- Published tag: `ghcr.io/quqi1599/cliproxyapi:fork-v7.10.43-debug`
+
+Enable `pprof` in `config.yaml` and keep it bound to localhost:
+
+```yaml
+pprof:
+  enable: true
+  addr: 127.0.0.1:8316
+```
+
+Typical collection commands:
+
+```bash
+curl -fsS http://127.0.0.1:8316/debug/pprof/heap >/dev/null
+go tool pprof http://127.0.0.1:8316/debug/pprof/profile?seconds=30
+go tool pprof http://127.0.0.1:8316/debug/pprof/heap
 ```
 
 ## Local Developer Builds

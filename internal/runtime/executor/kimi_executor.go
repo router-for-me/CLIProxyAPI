@@ -453,6 +453,9 @@ func repairClaudeToolUseHistory(body []byte, executorName string) ([]byte, error
 
 func repairClaudeToolUseHistoryWithStats(body []byte) ([]byte, claudeToolHistoryRepairStats, error) {
 	var stats claudeToolHistoryRepairStats
+	if len(body) == 0 || !helps.HasClaudeToolUseOrResultMarkers(body) {
+		return body, stats, nil
+	}
 
 	repaired, merged, err := coalesceAdjacentClaudeToolResultMessages(body)
 	if err != nil {

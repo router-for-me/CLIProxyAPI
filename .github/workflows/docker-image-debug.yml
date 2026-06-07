@@ -1,0 +1,84 @@
+name: docker-image-debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建 debug 镜像的 Git tag（例如: fork/v7.10.48）'
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-debug:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Prepare
+        run: |
+          echo "IMAGE_NAME_LC=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate debug image metadata
+        id: version
+        run: |
+          RELEASE_TAG="${{ github.event.inputs.tag }}"
+          if [[ ! "$RELEASE_TAG" =~ ^fork/v ]]; then
+            echo "expected fork/v* tag, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          VERSION="${RELEASE_TAG#fork/}"
+          DOCKER_TAG="${RELEASE_TAG//\//-}-debug"
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          REPOSITORY_URL="https://github.com/${{ github.repository }}"
+
+          {
+            echo "release_tag=$RELEASE_TAG"
+            echo "version=$VERSION"
+            echo "docker_tag=$DOCKER_TAG"
+            echo "commit=$COMMIT"
+            echo "build_date=$BUILD_DATE"
+            echo "repository_url=$REPOSITORY_URL"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push debug image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ steps.version.outputs.docker_tag }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ steps.version.outputs.commit }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            REPOSITORY_URL=${{ steps.version.outputs.repository_url }}
+            STRIP_BINARY=false
+
+      - name: Inspect debug image
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ steps.version.outputs.docker_tag }}
