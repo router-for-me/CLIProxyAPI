@@ -26,6 +26,18 @@ const MessageCountMetadataKey = "message_count"
 // ToolCountMetadataKey stores the inbound request tool/tool-call item count for safe failure logs.
 const ToolCountMetadataKey = "tool_count"
 
+// ClientProfileMetadataKey stores a lightweight inferred client profile such as claude_code.
+const ClientProfileMetadataKey = "client_profile"
+
+// ReasoningEffortSourceMetadataKey stores which request field carried the original effort.
+const ReasoningEffortSourceMetadataKey = "reasoning_effort_source"
+
+// ReasoningEffortOriginalMetadataKey stores the original effort value before any provider normalization.
+const ReasoningEffortOriginalMetadataKey = "reasoning_effort_original"
+
+// ModelContextHintMetadataKey stores a lightweight public model hint such as [1m].
+const ModelContextHintMetadataKey = "model_context_hint"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

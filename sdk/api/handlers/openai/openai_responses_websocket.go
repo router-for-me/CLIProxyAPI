@@ -180,7 +180,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 			markAPIResponseTimestamp(c)
-			errorPayload, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, errMsg)
+			errorPayload, errWrite := writeResponsesWebsocketError(c, h.AuthManager, conn, &wsTimelineLog, errMsg)
 			log.Infof(
 				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 				passthroughSessionID,
@@ -725,6 +725,16 @@ func responsesWebsocketProviderSetForModel(resolvedModelName string, authManager
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = handlers.ResolveProvidersForModel(resolvedModelName, authManager)
 	}
+	if len(providers) == 0 {
+		if hintedBase, _ := handlers.NormalizePublicModelHint(baseModel); hintedBase != "" && hintedBase != baseModel {
+			providers = handlers.ResolveProvidersForModel(hintedBase, authManager)
+		}
+	}
+	if len(providers) == 0 {
+		if hintedBase, _ := handlers.NormalizePublicModelHint(resolvedModelName); hintedBase != "" && hintedBase != resolvedModelName {
+			providers = handlers.ResolveProvidersForModel(hintedBase, authManager)
+		}
+	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
 		providerKey := strings.TrimSpace(strings.ToLower(provider))
@@ -981,7 +991,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			if errMsg != nil {
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
-				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
+				errorPayload, errWrite := writeResponsesWebsocketError(c, h.AuthManager, conn, wsTimelineLog, errMsg)
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 					sessionID,
@@ -1015,7 +1025,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
-					errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
+					errorPayload, errWrite := writeResponsesWebsocketError(c, h.AuthManager, conn, wsTimelineLog, errMsg)
 					log.Infof(
 						"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 						sessionID,
@@ -1130,7 +1140,7 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	return payloads
 }
 
-func writeResponsesWebsocketError(conn *websocket.Conn, wsTimelineLog *strings.Builder, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+func writeResponsesWebsocketError(c *gin.Context, authManager *coreauth.Manager, conn *websocket.Conn, wsTimelineLog *strings.Builder, errMsg *interfaces.ErrorMessage) ([]byte, error) {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
@@ -1143,6 +1153,7 @@ func writeResponsesWebsocketError(conn *websocket.Conn, wsTimelineLog *strings.B
 		}
 	}
 
+	handlers.LogContextWindowExceededEvent(c, status, errText, authManager)
 	body := handlers.BuildErrorResponseBody(status, errText)
 	payload := []byte(`{}`)
 	var errSet error

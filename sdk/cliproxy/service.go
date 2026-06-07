@@ -14,6 +14,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -1691,10 +1692,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if model.Image {
 			modelType = registry.OpenAIImageModelType
 		}
-		thinking := model.Thinking
-		if thinking == nil && !model.Image {
-			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
-		}
+		thinking := openAICompatibilityThinkingSupport(compat, model)
 		models = append(models, &ModelInfo{
 			ID:          modelID,
 			Object:      "model",
@@ -1707,6 +1705,44 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		})
 	}
 	return models
+}
+
+func openAICompatibilityThinkingSupport(compat *config.OpenAICompatibility, model config.OpenAICompatibilityModel) *registry.ThinkingSupport {
+	if model.Image {
+		return nil
+	}
+
+	support := model.Thinking
+	if support == nil {
+		support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+	}
+
+	if !isDeepSeekOfficialOpenAICompatibility(compat, model) {
+		return support
+	}
+
+	clone := *support
+	clone.Levels = []string{"low", "medium", "high", "xhigh", "max"}
+	return &clone
+}
+
+func isDeepSeekOfficialOpenAICompatibility(compat *config.OpenAICompatibility, model config.OpenAICompatibilityModel) bool {
+	if compat == nil {
+		return false
+	}
+	kind := internalconfig.NormalizeOpenAICompatibilityKind(compat.Kind)
+	if kind == "" {
+		kind = internalconfig.InferCompatKindFromBaseURL(compat.BaseURL)
+	}
+	if kind != "deepseek" {
+		return false
+	}
+
+	baseModel := strings.ToLower(strings.TrimSpace(model.Name))
+	if baseModel == "" {
+		baseModel = strings.ToLower(strings.TrimSpace(model.Alias))
+	}
+	return strings.HasPrefix(baseModel, "deepseek-v4-pro") || strings.HasPrefix(baseModel, "deepseek-v4-flash")
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {

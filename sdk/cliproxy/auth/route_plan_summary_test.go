@@ -169,6 +169,54 @@ func TestRoutePlanHelperMappings(t *testing.T) {
 	}
 }
 
+func TestRoutePlanNormalizedReasoningEffort_OfficialDeepSeekUsesOfficialSemantics(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("route-plan-deepseek-official", "deepseek", []*registry.ModelInfo{{
+		ID:       "deepseek-v4-pro",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("route-plan-deepseek-official")
+	})
+
+	auth := &Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     "https://api.deepseek.com/v1",
+			"provider_key": "deepseek",
+			"compat_kind":  "deepseek",
+		},
+	}
+
+	got := routePlanNormalizedReasoningEffort(auth, "openai-compatibility", "deepseek-v4-pro[1m]", "claude_code", "deepseek-v4-pro", "low")
+	if got != "high" {
+		t.Fatalf("routePlanNormalizedReasoningEffort() = %q, want high", got)
+	}
+}
+
+func TestRoutePlanNormalizedReasoningEffort_RemappedDeepSeekIntentUsesFinalSupport(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("route-plan-remap", "openai-compatibility", []*registry.ModelInfo{{
+		ID:       "generic-openai-model",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("route-plan-remap")
+	})
+
+	auth := &Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url": "https://example.com/v1",
+		},
+	}
+
+	got := routePlanNormalizedReasoningEffort(auth, "openai-compatibility", "deepseek-v4-pro[1m]", "claude_code", "generic-openai-model", "max")
+	if got != "high" {
+		t.Fatalf("routePlanNormalizedReasoningEffort() = %q, want high", got)
+	}
+}
+
 func findRoutePlanEntries(entries []*log.Entry) []routePlanSummary {
 	out := make([]routePlanSummary, 0)
 	for _, entry := range entries {

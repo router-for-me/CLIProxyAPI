@@ -679,6 +679,7 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
 			}
+			handlers.LogContextWindowExceededEvent(c, status, errText, h.AuthManager)
 			body := handlers.BuildErrorResponseBody(status, errText)
 			writeOpenAIChatSSEChunk(c.Writer, body)
 		},

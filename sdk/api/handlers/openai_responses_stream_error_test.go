@@ -46,3 +46,28 @@ func TestBuildOpenAIResponsesStreamErrorChunkExtractsHTTPErrorBody(t *testing.T)
 		t.Fatalf("message = %v, want %q", payload["message"], "oops")
 	}
 }
+
+func TestBuildOpenAIResponsesStreamErrorChunkNormalizesContextWindowJSON(t *testing.T) {
+	chunk := BuildOpenAIResponsesStreamErrorChunk(
+		http.StatusBadRequest,
+		`{"error":{"message":"invalid params, context window exceeds limit (2013)","type":"bad_request_error"},"sequence_number":7}`,
+		0,
+	)
+
+	var payload map[string]any
+	if err := json.Unmarshal(chunk, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload["type"] != "error" {
+		t.Fatalf("type = %v, want %q", payload["type"], "error")
+	}
+	if payload["code"] != contextWindowExceededErrorCode {
+		t.Fatalf("code = %v, want %q", payload["code"], contextWindowExceededErrorCode)
+	}
+	if payload["message"] != UserFacingContextWindowMessage() {
+		t.Fatalf("message = %v, want %q", payload["message"], UserFacingContextWindowMessage())
+	}
+	if payload["sequence_number"] != float64(7) {
+		t.Fatalf("sequence_number = %v, want %v", payload["sequence_number"], 7)
+	}
+}

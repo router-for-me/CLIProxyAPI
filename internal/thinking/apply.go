@@ -516,6 +516,15 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 		}
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
+	// Some OpenAI-compatible providers also accept a nested thinking.reasoning_effort
+	// field before the payload is normalized to reasoning_effort.
+	if effort := gjson.GetBytes(body, "thinking.reasoning_effort"); effort.Exists() {
+		value := effort.String()
+		if value == "none" {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	}
 
 	return ThinkingConfig{}
 }

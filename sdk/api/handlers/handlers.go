@@ -102,13 +102,16 @@ func WithDisallowFreeAuth(ctx context.Context) context.Context {
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
-// If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
+// Known user-facing error families may be normalized before raw upstream JSON is passed through.
 func BuildErrorResponseBody(status int, errText string) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
 	if strings.TrimSpace(errText) == "" {
 		errText = http.StatusText(status)
+	}
+	if body, ok := BuildContextWindowExceededErrorBody(status, errText); ok {
+		return body
 	}
 
 	trimmed := strings.TrimSpace(errText)
@@ -252,6 +255,68 @@ func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, 
 		return
 	}
 	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
+}
+
+func setReasoningTraceMetadata(meta map[string]any, modelName string, rawJSON []byte, headers http.Header) {
+	if meta == nil {
+		return
+	}
+	if source, original := requestReasoningEffortTrace(rawJSON); source != "" && original != "" {
+		meta[coreexecutor.ReasoningEffortSourceMetadataKey] = source
+		meta[coreexecutor.ReasoningEffortOriginalMetadataKey] = original
+	}
+	if profile := requestClientProfile(modelName, rawJSON, headers); profile != "" {
+		meta[coreexecutor.ClientProfileMetadataKey] = profile
+	}
+	if _, hint := NormalizePublicModelHint(modelName); hint != "" {
+		meta[coreexecutor.ModelContextHintMetadataKey] = hint
+	}
+}
+
+func requestReasoningEffortTrace(rawJSON []byte) (source string, original string) {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return "", ""
+	}
+	for _, candidate := range []struct {
+		path   string
+		source string
+	}{
+		{path: "output_config.effort", source: "output_config.effort"},
+		{path: "reasoning_effort", source: "reasoning_effort"},
+		{path: "reasoning.effort", source: "reasoning.effort"},
+		{path: "thinking.reasoning_effort", source: "thinking.reasoning_effort"},
+	} {
+		value := strings.ToLower(strings.TrimSpace(gjson.GetBytes(rawJSON, candidate.path).String()))
+		if value != "" {
+			return candidate.source, value
+		}
+	}
+	return "", ""
+}
+
+func requestClientProfile(modelName string, rawJSON []byte, headers http.Header) string {
+	userAgent := ""
+	if headers != nil {
+		userAgent = strings.ToLower(strings.TrimSpace(headers.Get("User-Agent")))
+		if strings.Contains(userAgent, "claude-code") || strings.Contains(userAgent, "claude code") {
+			return "claude_code"
+		}
+		if strings.TrimSpace(headers.Get("anthropic-version")) != "" {
+			return "claude_code"
+		}
+	}
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return ""
+	}
+	if gjson.GetBytes(rawJSON, "output_config.effort").Exists() && gjson.GetBytes(rawJSON, "thinking").Exists() {
+		return "claude_code"
+	}
+	modelLower := strings.ToLower(strings.TrimSpace(modelName))
+	if strings.Contains(modelLower, "[1m]") &&
+		(strings.Contains(modelLower, "deepseek-v4-pro") || strings.Contains(modelLower, "claude-opus") || strings.Contains(modelLower, "claude-sonnet")) {
+		return "claude_code"
+	}
+	return ""
 }
 
 func setRequestShapeMetadata(meta map[string]any, rawJSON []byte) {
@@ -671,8 +736,11 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("mixed search and non-search tools are not supported by available providers for model %s", modelName)}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	recordRequestedModelContext(ctx, modelName)
+	attachSelectedAuthTrackingCallback(ctx, reqMeta)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setReasoningTraceMetadata(reqMeta, modelName, rawJSON, headersFromContext(ctx))
 	setRequestShapeMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -725,8 +793,11 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("mixed search and non-search tools are not supported by available providers for model %s", modelName)}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	recordRequestedModelContext(ctx, modelName)
+	attachSelectedAuthTrackingCallback(ctx, reqMeta)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setReasoningTraceMetadata(reqMeta, modelName, rawJSON, headersFromContext(ctx))
 	setRequestShapeMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -795,8 +866,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	recordRequestedModelContext(ctx, modelName)
+	attachSelectedAuthTrackingCallback(ctx, reqMeta)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setReasoningTraceMetadata(reqMeta, modelName, rawJSON, headersFromContext(ctx))
 	setRequestShapeMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -1021,6 +1095,26 @@ func ResolveProvidersForModel(modelName string, authManager *coreauth.Manager) [
 	return authManager.ResolveConfiguredProviders(modelName)
 }
 
+func NormalizePublicModelHint(modelName string) (baseModel string, hint string) {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" || !strings.HasSuffix(modelName, "]") {
+		return modelName, ""
+	}
+	open := strings.LastIndex(modelName, "[")
+	if open <= 0 || open >= len(modelName)-1 {
+		return modelName, ""
+	}
+	hint = strings.TrimSpace(modelName[open+1 : len(modelName)-1])
+	if hint == "" {
+		return modelName, ""
+	}
+	baseModel = strings.TrimSpace(modelName[:open])
+	if baseModel == "" {
+		return modelName, ""
+	}
+	return baseModel, hint
+}
+
 func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
@@ -1065,6 +1159,16 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	// custom model registrations that include thinking suffixes.
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = ResolveProvidersForModel(resolvedModelName, h.AuthManager)
+	}
+	if len(providers) == 0 {
+		if hintedBase, _ := NormalizePublicModelHint(baseModel); hintedBase != "" && hintedBase != baseModel {
+			providers = ResolveProvidersForModel(hintedBase, h.AuthManager)
+		}
+	}
+	if len(providers) == 0 {
+		if hintedBase, _ := NormalizePublicModelHint(resolvedModelName); hintedBase != "" && hintedBase != resolvedModelName {
+			providers = ResolveProvidersForModel(hintedBase, h.AuthManager)
+		}
 	}
 
 	if len(providers) == 0 {
@@ -1210,6 +1314,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		}
 	}
 
+	LogContextWindowExceededEvent(c, status, errText, h.AuthManager)
 	body := BuildErrorResponseBody(status, errText)
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
 	var previous []byte

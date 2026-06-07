@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -361,15 +362,14 @@ func scrubDeepSeekThinkingBudgetForCompat(payload []byte, model string, baseURL 
 	}
 
 	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()))
-	switch effort {
+	normalizedEffort := thinking.NormalizeDeepSeekOfficialReasoningEffort(effort)
+	switch normalizedEffort {
 	case "none", "disabled", "off":
 		payload, _ = sjson.SetBytes(payload, "thinking.type", "disabled")
 		payload, _ = sjson.DeleteBytes(payload, "reasoning_effort")
 		payload = deleteDeepSeekThinkingBudgetPaths(payload)
-	case "minimal", "low", "medium":
-		payload, _ = sjson.SetBytes(payload, "reasoning_effort", "high")
-	case "xhigh":
-		payload, _ = sjson.SetBytes(payload, "reasoning_effort", "max")
+	case "high", "max":
+		payload, _ = sjson.SetBytes(payload, "reasoning_effort", normalizedEffort)
 	}
 
 	return payload

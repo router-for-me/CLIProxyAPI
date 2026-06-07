@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -102,5 +103,47 @@ func TestEnrichAuthSelectionError_IgnoresOtherErrors(t *testing.T) {
 	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
 	if out != in {
 		t.Fatalf("expected original error to be returned unchanged")
+	}
+}
+
+func TestBuildErrorResponseBody_NormalizesContextWindowPlainText(t *testing.T) {
+	body := BuildErrorResponseBody(http.StatusBadRequest, "bad_request_error: invalid params, context window exceeds limit (2013)")
+
+	var payload ErrorResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Error.Message != UserFacingContextWindowMessage() {
+		t.Fatalf("message = %q, want %q", payload.Error.Message, UserFacingContextWindowMessage())
+	}
+	if payload.Error.Type != contextWindowExceededErrorType {
+		t.Fatalf("type = %q, want %q", payload.Error.Type, contextWindowExceededErrorType)
+	}
+	if payload.Error.Code != contextWindowExceededErrorCode {
+		t.Fatalf("code = %q, want %q", payload.Error.Code, contextWindowExceededErrorCode)
+	}
+}
+
+func TestBuildErrorResponseBody_NormalizesContextWindowJSON(t *testing.T) {
+	body := BuildErrorResponseBody(http.StatusBadRequest, `{"error":{"message":"invalid params, context window exceeds limit (2013)","type":"bad_request_error"}}`)
+
+	var payload ErrorResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Error.Message != UserFacingContextWindowMessage() {
+		t.Fatalf("message = %q, want %q", payload.Error.Message, UserFacingContextWindowMessage())
+	}
+	if payload.Error.Type != contextWindowExceededErrorType {
+		t.Fatalf("type = %q, want %q", payload.Error.Type, contextWindowExceededErrorType)
+	}
+	if payload.Error.Code != contextWindowExceededErrorCode {
+		t.Fatalf("code = %q, want %q", payload.Error.Code, contextWindowExceededErrorCode)
+	}
+}
+
+func TestIsContextWindowExceededError_DoesNotMatchBare2013(t *testing.T) {
+	if IsContextWindowExceededError(http.StatusBadRequest, "provider error (2013)") {
+		t.Fatal("bare 2013 should not match context-window classification")
 	}
 }

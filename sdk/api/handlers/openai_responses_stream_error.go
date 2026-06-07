@@ -56,35 +56,48 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	}
 
 	code := openAIResponsesStreamErrorCode(status)
+	_, isContextWindowExceeded := contextWindowExceededErrorDetail(status, errText)
+	if isContextWindowExceeded {
+		message = UserFacingContextWindowMessage()
+		code = contextWindowExceededErrorCode
+	}
 
 	trimmed := strings.TrimSpace(errText)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
 		var payload map[string]any
 		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
+			if v, ok := payload["sequence_number"].(float64); ok && sequenceNumber == 0 {
+				sequenceNumber = int(v)
+			}
 			if t, ok := payload["type"].(string); ok && strings.TrimSpace(t) == "error" {
-				if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
-				}
-				if v, ok := payload["code"]; ok && v != nil {
-					if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
-						code = strings.TrimSpace(c)
-					} else {
-						code = strings.TrimSpace(fmt.Sprint(v))
+				if !isContextWindowExceeded {
+					if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {
+						message = strings.TrimSpace(m)
 					}
 				}
-				if v, ok := payload["sequence_number"].(float64); ok && sequenceNumber == 0 {
-					sequenceNumber = int(v)
+				if !isContextWindowExceeded {
+					if v, ok := payload["code"]; ok && v != nil {
+						if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
+							code = strings.TrimSpace(c)
+						} else {
+							code = strings.TrimSpace(fmt.Sprint(v))
+						}
+					}
 				}
 			}
 			if e, ok := payload["error"].(map[string]any); ok {
-				if m, ok := e["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
+				if !isContextWindowExceeded {
+					if m, ok := e["message"].(string); ok && strings.TrimSpace(m) != "" {
+						message = strings.TrimSpace(m)
+					}
 				}
-				if v, ok := e["code"]; ok && v != nil {
-					if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
-						code = strings.TrimSpace(c)
-					} else {
-						code = strings.TrimSpace(fmt.Sprint(v))
+				if !isContextWindowExceeded {
+					if v, ok := e["code"]; ok && v != nil {
+						if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
+							code = strings.TrimSpace(c)
+						} else {
+							code = strings.TrimSpace(fmt.Sprint(v))
+						}
 					}
 				}
 			}

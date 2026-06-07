@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -154,6 +155,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	profile := e.resolveProfile(auth)
+	thinkingProviderKey := profile.KindOrFallback(auth)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -192,8 +194,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, payloadSource, opts.Stream)
+	translated = normalizeOpenAICompatRouteReasoningEffort(translated, opts, baseModel, thinkingProviderKey, baseURL, profile.Kind)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), thinkingProviderKey)
 	if err != nil {
 		return resp, err
 	}
@@ -383,6 +386,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	profile := e.resolveProfile(auth)
+	thinkingProviderKey := profile.KindOrFallback(auth)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -413,8 +417,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, payloadSource, true)
+	translated = normalizeOpenAICompatRouteReasoningEffort(translated, opts, baseModel, thinkingProviderKey, baseURL, profile.Kind)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), thinkingProviderKey)
 	if err != nil {
 		return nil, err
 	}
@@ -704,7 +709,9 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	modelForCounting := baseModel
 
-	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	thinkingProviderKey := profile.KindOrFallback(auth)
+	translated = normalizeOpenAICompatRouteReasoningEffort(translated, opts, modelForCounting, thinkingProviderKey, baseURL, profile.Kind)
+	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), thinkingProviderKey)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -747,6 +754,73 @@ func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
 		return openAICompatImagesGenerationsPath
 	}
 	return openAICompatDefaultImageEndpoint
+}
+
+func normalizeOpenAICompatRouteReasoningEffort(payload []byte, opts cliproxyexecutor.Options, finalModel string, providerKey string, baseURL string, compatKind string) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	original := openAICompatMetadataString(opts.Metadata, cliproxyexecutor.ReasoningEffortOriginalMetadataKey)
+	if original == "" {
+		return payload
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, finalModel)
+	clientProfile := openAICompatMetadataString(opts.Metadata, cliproxyexecutor.ClientProfileMetadataKey)
+	deepSeekOfficial := requiresDeepSeekThinkingBudgetCompatibility(finalModel, baseURL, compatKind)
+	if !deepSeekOfficial && !thinking.ShouldNormalizeStrongestReasoningIntent(requestedModel, clientProfile, original) {
+		return payload
+	}
+
+	modelInfo := registry.LookupModelInfo(strings.TrimSpace(finalModel), strings.TrimSpace(providerKey))
+	var support *registry.ThinkingSupport
+	if modelInfo != nil {
+		support = modelInfo.Thinking
+	}
+	normalized := thinking.NormalizeReasoningEffortForTarget(original, support, deepSeekOfficial)
+	if normalized.Stripped {
+		return stripOpenAICompatReasoningEffort(payload)
+	}
+	if normalized.Normalized == "" {
+		return payload
+	}
+
+	updated, err := sjson.SetBytes(payload, "reasoning_effort", normalized.Normalized)
+	if err != nil {
+		return payload
+	}
+	if cleaned, errDelete := sjson.DeleteBytes(updated, "thinking.reasoning_effort"); errDelete == nil {
+		updated = cleaned
+	}
+	return updated
+}
+
+func stripOpenAICompatReasoningEffort(payload []byte) []byte {
+	for _, path := range []string{"reasoning_effort", "thinking.reasoning_effort"} {
+		if updated, err := sjson.DeleteBytes(payload, path); err == nil {
+			payload = updated
+		}
+	}
+	return payload
+}
+
+func openAICompatMetadataString(meta map[string]any, key string) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }
 
 func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool) ([]byte, string, error) {

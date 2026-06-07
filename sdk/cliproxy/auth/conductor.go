@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -96,17 +97,23 @@ type requestExecutionSummary struct {
 }
 
 type routePlanSummary struct {
-	RequestedModel string `json:"requested_model,omitempty"`
-	ResolvedModel  string `json:"resolved_model,omitempty"`
-	AuthIndex      string `json:"auth_index,omitempty"`
-	Provider       string `json:"provider,omitempty"`
-	Protocol       string `json:"protocol,omitempty"`
-	Executor       string `json:"executor,omitempty"`
-	UpstreamPath   string `json:"upstream_path,omitempty"`
-	Translator     string `json:"translator,omitempty"`
-	RoutingGroup   string `json:"routing_group,omitempty"`
-	FallbackFrom   string `json:"fallback_from,omitempty"`
-	FallbackReason string `json:"fallback_reason,omitempty"`
+	RequestedModel   string `json:"requested_model,omitempty"`
+	ResolvedModel    string `json:"resolved_model,omitempty"`
+	AuthIndex        string `json:"auth_index,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Protocol         string `json:"protocol,omitempty"`
+	Executor         string `json:"executor,omitempty"`
+	UpstreamPath     string `json:"upstream_path,omitempty"`
+	Translator       string `json:"translator,omitempty"`
+	RoutingGroup     string `json:"routing_group,omitempty"`
+	FallbackFrom     string `json:"fallback_from,omitempty"`
+	FallbackReason   string `json:"fallback_reason,omitempty"`
+	CompatBaseHost   string `json:"compat_base_host,omitempty"`
+	ClientProfile    string `json:"client_profile,omitempty"`
+	ContextHint      string `json:"model_context_hint,omitempty"`
+	EffortSource     string `json:"reasoning_effort_source,omitempty"`
+	EffortOriginal   string `json:"reasoning_effort_original,omitempty"`
+	EffortNormalized string `json:"reasoning_effort_normalized,omitempty"`
 }
 
 func ensureRequestAttemptTrace(ctx context.Context) (context.Context, *requestAttemptTrace) {
@@ -366,19 +373,97 @@ func buildRoutePlanSummary(previous requestExecutionSummary, auth *Auth, provide
 	if auth != nil {
 		routingGroup = explicitAuthRoutingGroup(auth)
 	}
+	effortOriginal := metadataString(opts.Metadata, cliproxyexecutor.ReasoningEffortOriginalMetadataKey)
+	requestedModel := routePlanRequestedModel(opts, routeModel)
+	clientProfile := metadataString(opts.Metadata, cliproxyexecutor.ClientProfileMetadataKey)
 	return routePlanSummary{
-		RequestedModel: routePlanRequestedModel(opts, routeModel),
-		ResolvedModel:  strings.TrimSpace(resolvedModel),
-		AuthIndex:      authMetricIndex(auth),
-		Provider:       strings.TrimSpace(provider),
-		Protocol:       protocol,
-		Executor:       executorName,
-		UpstreamPath:   routePlanUpstreamPath(protocol, requestPath, executorName, operation),
-		Translator:     routePlanTranslator(protocol, requestPath, executorName),
-		RoutingGroup:   routingGroup,
-		FallbackFrom:   routePlanFallbackFrom(previous),
-		FallbackReason: strings.TrimSpace(attempt.RetryReason),
+		RequestedModel:   requestedModel,
+		ResolvedModel:    strings.TrimSpace(resolvedModel),
+		AuthIndex:        authMetricIndex(auth),
+		Provider:         strings.TrimSpace(provider),
+		Protocol:         protocol,
+		Executor:         executorName,
+		UpstreamPath:     routePlanUpstreamPath(protocol, requestPath, executorName, operation),
+		Translator:       routePlanTranslator(protocol, requestPath, executorName),
+		RoutingGroup:     routingGroup,
+		FallbackFrom:     routePlanFallbackFrom(previous),
+		FallbackReason:   strings.TrimSpace(attempt.RetryReason),
+		CompatBaseHost:   routePlanCompatBaseHost(auth),
+		ClientProfile:    clientProfile,
+		ContextHint:      metadataString(opts.Metadata, cliproxyexecutor.ModelContextHintMetadataKey),
+		EffortSource:     metadataString(opts.Metadata, cliproxyexecutor.ReasoningEffortSourceMetadataKey),
+		EffortOriginal:   effortOriginal,
+		EffortNormalized: routePlanNormalizedReasoningEffort(auth, provider, requestedModel, clientProfile, resolvedModel, effortOriginal),
 	}
+}
+
+func routePlanCompatBaseHost(auth *Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+}
+
+func routePlanNormalizedReasoningEffort(auth *Auth, provider string, requestedModel string, clientProfile string, resolvedModel string, effortOriginal string) string {
+	effortOriginal = strings.TrimSpace(effortOriginal)
+	if effortOriginal == "" {
+		return ""
+	}
+
+	deepSeekOfficial := isDeepSeekOfficialRoute(auth, resolvedModel)
+	if !deepSeekOfficial && !thinking.ShouldNormalizeStrongestReasoningIntent(requestedModel, clientProfile, effortOriginal) {
+		return ""
+	}
+
+	providerKey := routePlanThinkingProviderKey(auth, provider)
+	modelInfo := registry.LookupModelInfo(strings.TrimSpace(thinking.ParseSuffix(resolvedModel).ModelName), providerKey)
+	var support *registry.ThinkingSupport
+	if modelInfo != nil {
+		support = modelInfo.Thinking
+	}
+	normalized := thinking.NormalizeReasoningEffortForTarget(effortOriginal, support, deepSeekOfficial)
+	return normalized.Normalized
+}
+
+func isDeepSeekOfficialRoute(auth *Auth, resolvedModel string) bool {
+	if auth == nil {
+		return false
+	}
+	modelKey := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(resolvedModel).ModelName))
+	if !strings.HasPrefix(modelKey, "deepseek-v4-pro") && !strings.HasPrefix(modelKey, "deepseek-v4-flash") {
+		return false
+	}
+	if auth.Attributes != nil {
+		for _, key := range []string{"provider_key", "compat_name", "compat_kind"} {
+			if strings.EqualFold(strings.TrimSpace(auth.Attributes[key]), "deepseek") {
+				return true
+			}
+		}
+	}
+	return strings.EqualFold(routePlanCompatBaseHost(auth), "api.deepseek.com")
+}
+
+func routePlanThinkingProviderKey(auth *Auth, provider string) string {
+	if auth != nil && auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes["provider_key"]); value != "" {
+			return strings.ToLower(value)
+		}
+		if kind := internalconfig.NormalizeOpenAICompatibilityKind(auth.Attributes["compat_kind"]); kind != "" {
+			return kind
+		}
+		if kind := internalconfig.InferCompatKindFromBaseURL(auth.Attributes["base_url"]); kind != "" {
+			return kind
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(provider))
 }
 
 func routePlanRequestedModel(opts cliproxyexecutor.Options, routeModel string) string {

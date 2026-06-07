@@ -132,3 +132,48 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 		t.Fatal("expected chat model to keep default thinking support")
 	}
 }
+
+func TestBuildOpenAICompatibilityConfigModels_DeepSeekOfficialThinkingOverride(t *testing.T) {
+	compat := &config.OpenAICompatibility{
+		Name:    "deepseek-official",
+		Kind:    "deepseek",
+		BaseURL: "https://api.deepseek.com/v1",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "deepseek-v4-pro", Alias: "deepseek-v4-pro"},
+			{Name: "deepseek-v4-flash", Alias: "claude-sonnet-4-5"},
+			{Name: "other-openai-model", Alias: "other-openai-model"},
+		},
+	}
+
+	models := buildOpenAICompatibilityConfigModels(compat)
+	if len(models) != 3 {
+		t.Fatalf("model count = %d, want 3", len(models))
+	}
+
+	byID := make(map[string]*internalregistry.ModelInfo, len(models))
+	for _, model := range models {
+		if model != nil {
+			byID[model.ID] = model
+		}
+	}
+
+	for _, modelID := range []string{"deepseek-v4-pro", "claude-sonnet-4-5"} {
+		model := byID[modelID]
+		if model == nil || model.Thinking == nil {
+			t.Fatalf("expected thinking support for %q", modelID)
+		}
+		want := []string{"low", "medium", "high", "xhigh", "max"}
+		if strings.Join(model.Thinking.Levels, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s thinking levels = %v, want %v", modelID, model.Thinking.Levels, want)
+		}
+	}
+
+	other := byID["other-openai-model"]
+	if other == nil || other.Thinking == nil {
+		t.Fatal("expected default thinking support for other-openai-model")
+	}
+	wantDefault := []string{"low", "medium", "high"}
+	if strings.Join(other.Thinking.Levels, ",") != strings.Join(wantDefault, ",") {
+		t.Fatalf("other-openai-model thinking levels = %v, want %v", other.Thinking.Levels, wantDefault)
+	}
+}

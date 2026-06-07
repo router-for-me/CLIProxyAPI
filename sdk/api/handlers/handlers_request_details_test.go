@@ -56,12 +56,16 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-5", Created: now + 5},
 	})
+	modelRegistry.RegisterClient("test-request-details-deepseek", "deepseek", []*registry.ModelInfo{
+		{ID: "deepseek-v4-pro", Created: now + 1},
+	})
 
 	// Ensure cleanup of all test registrations.
 	clientIDs := []string{
 		"test-request-details-gemini",
 		"test-request-details-openai",
 		"test-request-details-claude",
+		"test-request-details-deepseek",
 	}
 	for _, clientID := range clientIDs {
 		id := clientID
@@ -126,6 +130,13 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			inputModel:    "claude-sonnet-4-5(auto)",
 			wantProviders: []string{"claude"},
 			wantModel:     "claude-sonnet-4-5(auto)",
+			wantErr:       false,
+		},
+		{
+			name:          "public model hint preserved while provider lookup falls back to base model",
+			inputModel:    "deepseek-v4-pro[1m]",
+			wantProviders: []string{"deepseek"},
+			wantModel:     "deepseek-v4-pro[1m]",
 			wantErr:       false,
 		},
 	}

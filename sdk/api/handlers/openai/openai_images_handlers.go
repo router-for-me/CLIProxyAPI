@@ -1233,6 +1233,7 @@ func (h *OpenAIAPIHandler) forwardRawImageStream(ctx context.Context, c *gin.Con
 		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 			errText = errMsg.Error.Error()
 		}
+		handlers.LogContextWindowExceededEvent(c, status, errText, h.AuthManager)
 		body := handlers.BuildErrorResponseBody(status, errText)
 		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
 		if flusher, ok := c.Writer.(http.Flusher); ok {
@@ -1337,6 +1338,7 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 					if errMsg.Error != nil && errMsg.Error.Error() != "" {
 						errText = errMsg.Error.Error()
 					}
+					handlers.LogContextWindowExceededEvent(c, status, errText, h.AuthManager)
 					body := handlers.BuildErrorResponseBody(status, errText)
 					_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
 				},
@@ -1803,6 +1805,7 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 			errText = errMsg.Error.Error()
 		}
+		handlers.LogContextWindowExceededEvent(c, status, errText, h.AuthManager)
 		body := handlers.BuildErrorResponseBody(status, errText)
 		writeEvent("error", body)
 	}
