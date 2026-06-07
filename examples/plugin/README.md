@@ -1,0 +1,52 @@
+# Standard Dynamic Library Plugin Examples
+
+This directory contains standard dynamic library plugin examples for the CLIProxyAPI C ABI.
+
+## Layout
+
+- `simple/`: full provider-native skeleton that declares every supported capability.
+- `model/`: model capability only.
+- `auth/`: auth provider capability only.
+- `frontend-auth/`: frontend auth provider capability only.
+- `executor/`: executor capability only.
+- `protocol-format/`: minimal executor focused on input/output format declarations.
+- `request-translator/`: request translation capability only.
+- `request-normalizer/`: request normalization capability only.
+- `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.4` requests to the priority service tier when enabled.
+- `response-translator/`: response translation capability only.
+- `response-normalizer/`: response normalization capability only.
+- `thinking/`: thinking applier capability only.
+- `usage/`: usage observer capability only.
+- `cli/`: command-line capability only.
+- `management-api/`: Management API capability only.
+- `host-callback/`: minimal Management API route that demonstrates host callbacks.
+
+Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
+
+## Codex Service Tier
+
+`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.4`.
+
+```yaml
+plugins:
+  configs:
+    codex-service-tier:
+      enabled: true
+      priority: 1
+      fast: false
+```
+
+## Build All Examples
+
+```bash
+make -C examples/plugin list
+make -C examples/plugin build
+```
+
+Artifacts are written to `examples/plugin/bin`.
+
+## Notes
+
+`protocol-format` uses a minimal executor because format declarations belong to executor capabilities.
+
+`host-callback` uses a minimal Management API route because host callbacks are invoked from plugin methods and are not standalone capabilities.

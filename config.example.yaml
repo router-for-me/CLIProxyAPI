@@ -49,7 +49,28 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
-# When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
+# Standard dynamic library plugins are trusted in-process code. They are disabled by default.
+# Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
+# Other languages can implement the same C ABI and JSON method protocol.
+# Plugin executors require a matching auth record with the same provider key.
+# If the same provider is configured as OpenAI-compatible, the native executor wins.
+# Plugin command-line flags and Management API routes are optional capabilities.
+# Existing native flags/routes and higher-priority plugin flags/routes cannot be replaced.
+# 插件列表 Management API 会读取插件 Metadata 中的 Logo 和 ConfigFields，用于管理端展示。
+# 单插件 enabled 只控制 plugins.configs.<pluginID>.enabled，不会隐式修改全局 plugins.enabled。
+plugins:
+  enabled: false
+  dir: "plugins"
+  configs:
+    example:
+      enabled: true
+      priority: 1
+      config1: true
+      config2: "string"
+      config3: 3
+      mode: "safe" # enum example: safe, fast
+
+# When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
 # When true, write application logs to rotating files instead of stdout
@@ -125,6 +146,14 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+
+# Codex provider behavior.
+codex:
+  # When true, and routing.strategy is fill-first or routing.session-affinity is true,
+  # remap Codex prompt_cache_key and installation identity per selected auth.
+  # Some superstitious users believe request tracking identifiers can be used
+  # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
+  identity-confuse: false
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
@@ -359,6 +388,9 @@ nonstream-keepalive-interval: 0
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
+#   qoder:                            # plugin provider keys are supported for OAuth plugins
+#     - name: "qmodel_latest"
+#       alias: "qlatest"
 
 # OAuth provider excluded models
 # oauth-excluded-models:

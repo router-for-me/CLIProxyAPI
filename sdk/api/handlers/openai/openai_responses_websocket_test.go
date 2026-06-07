@@ -1845,6 +1845,29 @@ func TestDedupeResponsesWebsocketInputItemsByIDAfterRepair(t *testing.T) {
 	}
 }
 
+func TestDedupeResponsesWebsocketInputItemsByIDKeepsReferencedToolCall(t *testing.T) {
+	// Two function_call items share the same id but carry different call_ids
+	// (e.g. the upstream reused the item id across a re-sent/repaired call).
+	// Only the first call_id has a matching function_call_output. Deduping by
+	// id must keep the referenced call so the output is not orphaned, which
+	// previously triggered an upstream 400 "No tool call found for function
+	// call output with call_id ...".
+	payload := []byte(`{"input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"exec_command"},{"type":"function_call","id":"fc-1","call_id":"call-2","name":"exec_command"},{"type":"function_call_output","id":"fco-1","call_id":"call-1"}]}`)
+
+	deduped := dedupeResponsesWebsocketInputItemsByID(payload)
+
+	items := gjson.GetBytes(deduped, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("deduped input len = %d, want 2: %s", len(items), deduped)
+	}
+	if items[0].Get("id").String() != "fc-1" ||
+		items[0].Get("call_id").String() != "call-1" ||
+		items[1].Get("id").String() != "fco-1" ||
+		items[1].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected deduped input: %s", deduped)
+	}
+}
+
 func TestResponsesWebsocketCompactionResetsTurnStateOnCustomToolTranscriptReplacement(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
