@@ -9,6 +9,7 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
+        REPOSITORY_URL: ${REPOSITORY_URL:-unknown}
     container_name: cli-proxy-api
     # env_file:
     #   - .env
