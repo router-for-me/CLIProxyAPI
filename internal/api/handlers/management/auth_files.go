@@ -1214,8 +1214,11 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string `json:"name"`
-		Disabled *bool  `json:"disabled"`
+		Name     string         `json:"name"`
+		Disabled *bool          `json:"disabled"`
+		Metadata map[string]any `json:"metadata"`
+		Type     string         `json:"type"`
+		Provider string         `json:"provider"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1253,8 +1256,17 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	if err := h.mergeAuthFileStatusMetadata(targetAuth, req.Metadata, req.Type, req.Provider); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to merge auth metadata: %v", err)})
+		return
+	}
+
 	// Update disabled state
 	targetAuth.Disabled = *req.Disabled
+	if targetAuth.Metadata == nil {
+		targetAuth.Metadata = make(map[string]any)
+	}
+	targetAuth.Metadata["disabled"] = *req.Disabled
 	if *req.Disabled {
 		targetAuth.Status = coreauth.StatusDisabled
 		targetAuth.StatusMessage = "disabled via management API"
@@ -1270,6 +1282,84 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
+}
+
+func (h *Handler) mergeAuthFileStatusMetadata(auth *coreauth.Auth, requestMetadata map[string]any, requestType, requestProvider string) error {
+	if auth == nil {
+		return nil
+	}
+	merged := make(map[string]any)
+	diskFound := false
+	if diskMetadata, errRead := h.readAuthMetadataForStatusPatch(auth); errRead == nil {
+		for key, value := range diskMetadata {
+			merged[key] = value
+		}
+		diskFound = true
+	} else if !errors.Is(errRead, os.ErrNotExist) {
+		return errRead
+	}
+	if !diskFound {
+		for key, value := range auth.Metadata {
+			merged[key] = value
+		}
+	}
+	for key, value := range requestMetadata {
+		merged[key] = value
+	}
+
+	provider := strings.TrimSpace(requestType)
+	if provider == "" {
+		provider = strings.TrimSpace(requestProvider)
+	}
+	if provider == "" {
+		provider = strings.TrimSpace(valueAsString(merged["type"]))
+	}
+	if provider == "" {
+		provider = strings.TrimSpace(auth.Provider)
+	}
+	if provider != "" && !strings.EqualFold(provider, "unknown") {
+		merged["type"] = provider
+		auth.Provider = provider
+	}
+	auth.Metadata = merged
+	return nil
+}
+
+func (h *Handler) readAuthMetadataForStatusPatch(auth *coreauth.Auth) (map[string]any, error) {
+	path := strings.TrimSpace(authAttribute(auth, "path"))
+	if path == "" {
+		path = strings.TrimSpace(authAttribute(auth, "source"))
+	}
+	if path == "" {
+		fileName := strings.TrimSpace(auth.FileName)
+		if fileName == "" {
+			fileName = strings.TrimSpace(auth.ID)
+		}
+		if fileName != "" && h != nil && h.cfg != nil {
+			authDir := strings.TrimSpace(h.cfg.AuthDir)
+			if resolvedAuthDir, errResolve := util.ResolveAuthDir(authDir); errResolve == nil && resolvedAuthDir != "" {
+				authDir = resolvedAuthDir
+			}
+			if authDir != "" {
+				path = filepath.Join(authDir, fileName)
+			}
+		}
+	}
+	if path == "" {
+		return nil, os.ErrNotExist
+	}
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil, errRead
+	}
+	if len(raw) == 0 {
+		return nil, os.ErrNotExist
+	}
+	metadata := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(raw, &metadata); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return metadata, nil
 }
 
 // PatchAuthFileFields updates arbitrary metadata fields of an auth file.

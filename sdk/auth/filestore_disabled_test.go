@@ -62,3 +62,52 @@ func TestFileTokenStore_Save_DisabledPersistsFlagForTokenStorage(t *testing.T) {
 		t.Fatalf("disabled=%v, want true (raw=%s)", meta["disabled"], string(raw))
 	}
 }
+
+func TestFileTokenStore_Save_MergesPartialMetadataWithExistingAuthFile(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "codex.json")
+
+	seed := `{"type":"codex","access_token":"access","refresh_token":"refresh","email":"u@example.com","disabled":false}`
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex.json",
+		Provider: "codex",
+		FileName: "codex.json",
+		Disabled: true,
+		Metadata: map[string]any{"name": "codex.json"},
+	}
+
+	if _, err := store.Save(ctx, auth); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("unmarshal auth file: %v", err)
+	}
+	if got := meta["type"]; got != "codex" {
+		t.Fatalf("type=%#v, want codex (raw=%s)", got, string(raw))
+	}
+	if got := meta["access_token"]; got != "access" {
+		t.Fatalf("access_token=%#v, want preserved access (raw=%s)", got, string(raw))
+	}
+	if got := meta["refresh_token"]; got != "refresh" {
+		t.Fatalf("refresh_token=%#v, want preserved refresh (raw=%s)", got, string(raw))
+	}
+	if got := meta["disabled"]; got != true {
+		t.Fatalf("disabled=%#v, want true (raw=%s)", got, string(raw))
+	}
+	if got := meta["name"]; got != "codex.json" {
+		t.Fatalf("name=%#v, want codex.json (raw=%s)", got, string(raw))
+	}
+}

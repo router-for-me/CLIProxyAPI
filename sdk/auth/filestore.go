@@ -113,7 +113,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
+		auth.Metadata = mergeAuthMetadataForSave(path, auth.Metadata, auth.Provider, auth.Disabled)
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
@@ -154,6 +154,28 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	}
 
 	return path, nil
+}
+
+func mergeAuthMetadataForSave(path string, metadata map[string]any, provider string, disabled bool) map[string]any {
+	merged := make(map[string]any)
+	if existing, errRead := os.ReadFile(path); errRead == nil && len(existing) > 0 {
+		var diskMetadata map[string]any
+		if errUnmarshal := json.Unmarshal(existing, &diskMetadata); errUnmarshal == nil {
+			for key, value := range diskMetadata {
+				merged[key] = value
+			}
+		}
+	}
+	for key, value := range metadata {
+		merged[key] = value
+	}
+	if provider = strings.TrimSpace(provider); provider != "" && !strings.EqualFold(provider, "unknown") {
+		if rawType, _ := merged["type"].(string); strings.TrimSpace(rawType) == "" || strings.EqualFold(strings.TrimSpace(rawType), "unknown") {
+			merged["type"] = provider
+		}
+	}
+	merged["disabled"] = disabled
+	return merged
 }
 
 // List enumerates all auth JSON files under the configured directory.
