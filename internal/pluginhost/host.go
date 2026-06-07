@@ -3,30 +3,27 @@ package pluginhost
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
-type registerFunc func([]byte) pluginapi.Plugin
-
 type loadedPlugin struct {
-	id          string
-	path        string
-	registered  bool
-	register    registerFunc
-	reconfigure registerFunc
+	id         string
+	path       string
+	registered bool
+	client     pluginClient
 }
 
 type Host struct {
 	mu                     sync.Mutex
-	loader                 symbolLoader
+	loader                 pluginLoader
 	loaded                 map[string]*loadedPlugin
 	fused                  map[string]string
 	runtimeConfig          *config.Config
@@ -40,12 +37,15 @@ type Host struct {
 	commandLineFlags       map[string]commandLineFlagRecord
 	commandLineHits        map[string]struct{}
 	managementRoutes       map[string]managementRouteRecord
+	streams                *streamBridge
+	httpStreams            *hostHTTPStreamBridge
+	callbackContexts       *callbackContextRegistry
 	snapshot               atomic.Value
 }
 
 func New() *Host {
 	h := &Host{
-		loader:                 defaultSymbolLoader(),
+		loader:                 defaultPluginLoader(),
 		loaded:                 make(map[string]*loadedPlugin),
 		fused:                  make(map[string]string),
 		modelClientIDs:         make(map[string]struct{}),
@@ -58,12 +58,15 @@ func New() *Host {
 		commandLineFlags:       make(map[string]commandLineFlagRecord),
 		commandLineHits:        make(map[string]struct{}),
 		managementRoutes:       make(map[string]managementRouteRecord),
+		streams:                newStreamBridge(),
+		httpStreams:            newHostHTTPStreamBridge(),
+		callbackContexts:       newCallbackContextRegistry(),
 	}
 	h.snapshot.Store(emptySnapshot())
 	return h
 }
 
-func NewForTest(loader symbolLoader) *Host {
+func NewForTest(loader pluginLoader) *Host {
 	h := New()
 	h.loader = loader
 	return h
@@ -148,35 +151,50 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 }
 
 func (h *Host) loadLocked(file pluginFile) (*loadedPlugin, error) {
-	lookup, errOpen := h.loader.Open(file.Path)
+	client, errOpen := h.loader.Open(file.Path, h)
 	if errOpen != nil {
 		return nil, errOpen
 	}
 
-	rawRegister, errRegister := lookup.Lookup("Register")
-	if errRegister != nil {
-		return nil, errRegister
-	}
-	register, okRegister := rawRegister.(func([]byte) pluginapi.Plugin)
-	if !okRegister {
-		return nil, fmt.Errorf("Register has unsupported signature %s", typeName(rawRegister))
-	}
-
-	rawReconfigure, errLookup := lookup.Lookup("Reconfigure")
-	if errLookup != nil {
-		return nil, fmt.Errorf("Reconfigure lookup failed: %w", errLookup)
-	}
-	reconfigure, okReconfigure := rawReconfigure.(func([]byte) pluginapi.Plugin)
-	if !okReconfigure {
-		return nil, fmt.Errorf("Reconfigure has unsupported signature %s", typeName(rawReconfigure))
-	}
-
 	return &loadedPlugin{
-		id:          file.ID,
-		path:        file.Path,
-		register:    register,
-		reconfigure: reconfigure,
+		id:     file.ID,
+		path:   file.Path,
+		client: newGuardedPluginClient(client),
 	}, nil
+}
+
+// ShutdownAll removes active plugin capabilities and closes all loaded dynamic libraries.
+func (h *Host) ShutdownAll() {
+	if h == nil {
+		return
+	}
+
+	clients := make([]pluginClient, 0)
+	h.mu.Lock()
+	for _, lp := range h.loaded {
+		if lp == nil || lp.client == nil {
+			continue
+		}
+		clients = append(clients, lp.client)
+	}
+	h.loaded = make(map[string]*loadedPlugin)
+	h.modelClientIDs = make(map[string]struct{})
+	h.executorModelClientIDs = make(map[string]struct{})
+	h.modelProviders = make(map[string]string)
+	h.modelRegistrations = make(map[string]pluginModelRegistration)
+	h.providerModels = make(map[string][]*registryModelInfo)
+	h.executorProviders = make(map[string]struct{})
+	h.commandLineFlags = make(map[string]commandLineFlagRecord)
+	h.commandLineHits = make(map[string]struct{})
+	h.managementRoutes = make(map[string]managementRouteRecord)
+	h.snapshot.Store(emptySnapshot())
+	h.mu.Unlock()
+
+	h.refreshThinkingProviders(nil)
+	h.RegisterFrontendAuthProviders()
+	for _, client := range clients {
+		client.Shutdown()
+	}
 }
 
 func (h *Host) callRegisterLocked(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
@@ -184,15 +202,18 @@ func (h *Host) callRegisterLocked(ctx context.Context, lp *loadedPlugin, item ru
 		return pluginapi.Plugin{}, false
 	}
 
-	method := "Register"
-	fn := lp.register
+	method := pluginabi.MethodPluginRegister
 	if lp.registered {
-		method = "Reconfigure"
-		fn = lp.reconfigure
+		method = pluginabi.MethodPluginReconfigure
 	}
 
 	plugin, okCall := h.safePluginCallLocked(ctx, lp.id, method, func() pluginapi.Plugin {
-		return fn(item.ConfigYAML)
+		plugin, errRegister := registerRPCPlugin(ctx, h, lp.id, lp.client, method, item.ConfigYAML)
+		if errRegister != nil {
+			log.Warnf("pluginhost: plugin %s %s failed: %v", lp.id, method, errRegister)
+			return pluginapi.Plugin{}
+		}
+		return plugin
 	})
 	if !okCall {
 		return pluginapi.Plugin{}, false
@@ -256,8 +277,5 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 }
 
 func typeName(v any) string {
-	if v == nil {
-		return "<nil>"
-	}
-	return reflect.TypeOf(v).String()
+	return fmt.Sprintf("%T", v)
 }

@@ -13,6 +13,7 @@ conv/*
 temp/*
 refs/*
 plugins/*
+examples/plugin/bin/*
 
 # Storage backends
 pgstore/*

@@ -49,8 +49,9 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
-# Go dynamic plugins are trusted in-process code. They are disabled by default.
-# Build plugins with go build -buildmode=plugin for the target GOOS/GOARCH.
+# Standard dynamic library plugins are trusted in-process code. They are disabled by default.
+# Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
+# Other languages can implement the same C ABI and JSON method protocol.
 # Plugin executors require a matching auth record with the same provider key.
 # If the same provider is configured as OpenAI-compatible, the native executor wins.
 # Plugin command-line flags and Management API routes are optional capabilities.

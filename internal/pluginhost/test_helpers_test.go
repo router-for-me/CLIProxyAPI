@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -21,7 +22,7 @@ func newTestSymbolLoader() *testSymbolLoader {
 	return &testSymbolLoader{lookups: make(map[string]*testSymbolLookup)}
 }
 
-func (l *testSymbolLoader) Open(path string) (symbolLookup, error) {
+func (l *testSymbolLoader) Open(path string, host *Host) (pluginClient, error) {
 	l.openCalls++
 	lookup := l.lookups[pluginIDFromPath(path)]
 	if lookup == nil {
@@ -31,24 +32,84 @@ func (l *testSymbolLoader) Open(path string) (symbolLookup, error) {
 }
 
 type testSymbolLookup struct {
-	symbols map[string]any
+	plugin              *testPlugin
+	active              pluginapi.Plugin
+	registerOverride    func([]byte) pluginapi.Plugin
+	reconfigureOverride func([]byte) pluginapi.Plugin
 }
 
 func newTestSymbolLookup(plugin *testPlugin) *testSymbolLookup {
-	return &testSymbolLookup{
-		symbols: map[string]any{
-			"Register":    plugin.Register,
-			"Reconfigure": plugin.Reconfigure,
-		},
+	return &testSymbolLookup{plugin: plugin}
+}
+
+func (l *testSymbolLookup) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	switch method {
+	case pluginabi.MethodPluginRegister:
+		return l.callLifecycle(request, false)
+	case pluginabi.MethodPluginReconfigure:
+		return l.callLifecycle(request, true)
+	case pluginabi.MethodThinkingIdentifier:
+		if l.active.Capabilities.ThinkingApplier == nil {
+			return nil, fmt.Errorf("missing thinking applier")
+		}
+		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.ThinkingApplier.Identifier()})
+	case pluginabi.MethodThinkingApply:
+		var req pluginapi.ThinkingApplyRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errApply := l.active.Capabilities.ThinkingApplier.ApplyThinking(ctx, req)
+		if errApply != nil {
+			return nil, errApply
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodAuthIdentifier:
+		if l.active.Capabilities.AuthProvider == nil {
+			return nil, fmt.Errorf("missing auth provider")
+		}
+		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.AuthProvider.Identifier()})
+	case pluginabi.MethodUsageHandle:
+		if l.active.Capabilities.UsagePlugin == nil {
+			return marshalRPCResult(rpcEmptyResponse{})
+		}
+		var record pluginapi.UsageRecord
+		if errUnmarshal := json.Unmarshal(request, &record); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		l.active.Capabilities.UsagePlugin.HandleUsage(ctx, record)
+		return marshalRPCResult(rpcEmptyResponse{})
+	default:
+		return nil, fmt.Errorf("missing test method %s", method)
 	}
 }
 
-func (l *testSymbolLookup) Lookup(name string) (any, error) {
-	symbol, ok := l.symbols[name]
-	if !ok {
-		return nil, fmt.Errorf("missing symbol %s", name)
+func (l *testSymbolLookup) Shutdown() {}
+
+func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, error) {
+	var req rpcLifecycleRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, errUnmarshal
 	}
-	return symbol, nil
+	var plugin pluginapi.Plugin
+	if reload {
+		if l.reconfigureOverride != nil {
+			plugin = l.reconfigureOverride(req.ConfigYAML)
+		} else {
+			plugin = l.plugin.Reconfigure(req.ConfigYAML)
+		}
+	} else {
+		if l.registerOverride != nil {
+			plugin = l.registerOverride(req.ConfigYAML)
+		} else {
+			plugin = l.plugin.Register(req.ConfigYAML)
+		}
+	}
+	l.active = plugin
+	return marshalRPCResult(rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata:      plugin.Metadata,
+		Capabilities:  rpcCapabilitiesFromPlugin(plugin),
+	})
 }
 
 type testPlugin struct {
@@ -124,7 +185,7 @@ func makePluginDir(t *testing.T, ids ...string) string {
 		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
 	}
 	for _, id := range ids {
-		path := filepath.Join(archDir, id+".so")
+		path := filepath.Join(archDir, id+pluginExtension(runtime.GOOS))
 		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
 			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
 		}

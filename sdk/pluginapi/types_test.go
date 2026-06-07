@@ -2,6 +2,8 @@ package pluginapi
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +54,59 @@ func TestManagementRouteMenuFieldsExposeManagementUIHints(t *testing.T) {
 	}
 	if route.Menu == "" || route.Description == "" {
 		t.Fatalf("management route missing menu fields: %#v", route)
+	}
+}
+
+func TestHostInjectedHTTPClientIsNotEncodedInPluginJSON(t *testing.T) {
+	requests := []struct {
+		name string
+		req  any
+		dst  any
+	}{
+		{
+			name: "auth login start",
+			req:  AuthLoginStartRequest{Provider: "plugin-example", HTTPClient: compileTimePlugin{}},
+			dst:  &AuthLoginStartRequest{},
+		},
+		{
+			name: "auth login poll",
+			req:  AuthLoginPollRequest{Provider: "plugin-example", HTTPClient: compileTimePlugin{}},
+			dst:  &AuthLoginPollRequest{},
+		},
+		{
+			name: "auth refresh",
+			req:  AuthRefreshRequest{AuthID: "auth-1", HTTPClient: compileTimePlugin{}},
+			dst:  &AuthRefreshRequest{},
+		},
+		{
+			name: "auth model",
+			req:  AuthModelRequest{AuthID: "auth-1", HTTPClient: compileTimePlugin{}},
+			dst:  &AuthModelRequest{},
+		},
+		{
+			name: "executor request",
+			req:  ExecutorRequest{Model: "model-1", HTTPClient: compileTimePlugin{}},
+			dst:  &ExecutorRequest{},
+		},
+		{
+			name: "executor http request",
+			req:  ExecutorHTTPRequest{AuthID: "auth-1", HTTPClient: compileTimePlugin{}},
+			dst:  &ExecutorHTTPRequest{},
+		},
+	}
+
+	for _, tt := range requests {
+		raw, errMarshal := json.Marshal(tt.req)
+		if errMarshal != nil {
+			t.Fatalf("%s marshal error = %v", tt.name, errMarshal)
+		}
+		if strings.Contains(string(raw), "HTTPClient") {
+			t.Fatalf("%s JSON contains host HTTPClient: %s", tt.name, raw)
+		}
+		withLegacyHTTPClient := append(raw[:len(raw)-1], []byte(`,"HTTPClient":{}}`)...)
+		if errUnmarshal := json.Unmarshal(withLegacyHTTPClient, tt.dst); errUnmarshal != nil {
+			t.Fatalf("%s unmarshal with legacy HTTPClient object error = %v", tt.name, errUnmarshal)
+		}
 	}
 }
 

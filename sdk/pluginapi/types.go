@@ -1,4 +1,4 @@
-// Package pluginapi defines the stable ABI used by Go dynamic plugins.
+// Package pluginapi defines host-side plugin capability schemas and adapters.
 package pluginapi
 
 import (
@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Plugin is the exported plugin entrypoint returned by dynamic plugin binaries.
+// Plugin is the host-side representation produced from a dynamic plugin registration.
 type Plugin struct {
 	// Metadata identifies the plugin binary and its published source.
 	Metadata Metadata
@@ -79,6 +79,10 @@ type Capabilities struct {
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
 	// Empty defaults to ExecutorModelScopeBoth for backward compatibility.
 	ExecutorModelScope ExecutorModelScope
+	// ExecutorInputFormats lists request protocols accepted directly by Executor. Executors must declare at least one.
+	ExecutorInputFormats []string
+	// ExecutorOutputFormats lists response protocols emitted directly by Executor. Executors must declare at least one.
+	ExecutorOutputFormats []string
 	// RequestTranslator converts canonical requests into provider-specific payloads.
 	RequestTranslator RequestTranslator
 	// RequestNormalizer converts provider-specific requests into canonical payloads.
@@ -255,7 +259,7 @@ type AuthLoginStartRequest struct {
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
 	// HTTPClient executes upstream HTTP requests through host transport policy.
-	HTTPClient HostHTTPClient
+	HTTPClient HostHTTPClient `json:"-"`
 	// Metadata carries plugin-defined login context.
 	Metadata map[string]any
 }
@@ -283,7 +287,7 @@ type AuthLoginPollRequest struct {
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
 	// HTTPClient executes upstream HTTP requests through host transport policy.
-	HTTPClient HostHTTPClient
+	HTTPClient HostHTTPClient `json:"-"`
 	// Metadata carries plugin-defined polling context.
 	Metadata map[string]any
 }
@@ -325,7 +329,7 @@ type AuthRefreshRequest struct {
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
 	// HTTPClient executes upstream HTTP requests through host transport policy.
-	HTTPClient HostHTTPClient
+	HTTPClient HostHTTPClient `json:"-"`
 }
 
 // AuthRefreshResponse returns refreshed provider auth data.
@@ -386,7 +390,7 @@ type AuthModelRequest struct {
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
 	// HTTPClient executes upstream HTTP requests through host transport policy.
-	HTTPClient HostHTTPClient
+	HTTPClient HostHTTPClient `json:"-"`
 }
 
 // ModelResponse returns provider and model metadata discovered by a plugin.
@@ -507,7 +511,7 @@ type ExecutorHTTPRequest struct {
 	// Attributes contains immutable routing and provider attributes.
 	Attributes map[string]string
 	// HTTPClient executes upstream HTTP requests through host transport policy and request-log capture.
-	HTTPClient HostHTTPClient
+	HTTPClient HostHTTPClient `json:"-"`
 }
 
 // ExecutorHTTPResponse describes an executor-owned HTTP response.
@@ -553,7 +557,7 @@ type ExecutorRequest struct {
 	// AuthAttributes contains immutable routing and provider attributes.
 	AuthAttributes map[string]string
 	// HTTPClient executes upstream HTTP requests through host transport policy and request-log capture.
-	HTTPClient HostHTTPClient
+	HTTPClient HostHTTPClient `json:"-"`
 }
 
 // ExecutorResponse returns a non-streaming executor result.
