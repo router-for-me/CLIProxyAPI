@@ -95,6 +95,20 @@ type requestExecutionSummary struct {
 	FinalStatus    int
 }
 
+type routePlanSummary struct {
+	RequestedModel string `json:"requested_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	AuthIndex      string `json:"auth_index,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Protocol       string `json:"protocol,omitempty"`
+	Executor       string `json:"executor,omitempty"`
+	UpstreamPath   string `json:"upstream_path,omitempty"`
+	Translator     string `json:"translator,omitempty"`
+	RoutingGroup   string `json:"routing_group,omitempty"`
+	FallbackFrom   string `json:"fallback_from,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
+}
+
 func ensureRequestAttemptTrace(ctx context.Context) (context.Context, *requestAttemptTrace) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -327,6 +341,200 @@ func logRequestExecutionSummary(ctx context.Context, trace *requestAttemptTrace,
 		fields["final_executor"] = summary.FinalExecutor
 	}
 	logEntryWithRequestID(ctx).WithFields(fields).Info("request_execution_summary")
+}
+
+func logRoutePlan(ctx context.Context, auth *Auth, provider, routeModel, resolvedModel string, opts cliproxyexecutor.Options, executor ProviderExecutor, operation string) {
+	trace := requestAttemptTraceFromContext(ctx)
+	if trace == nil {
+		return
+	}
+	plan := buildRoutePlanSummary(trace.summary(), auth, provider, routeModel, resolvedModel, opts, executor, operation, coreusage.RequestAttemptFromContext(ctx))
+	fields := log.Fields{
+		"event":      "route_plan",
+		"route_plan": plan,
+	}
+	addRequestAttemptLogFields(ctx, fields)
+	logEntryWithRequestID(ctx).WithFields(fields).Info("route_plan")
+}
+
+func buildRoutePlanSummary(previous requestExecutionSummary, auth *Auth, provider, routeModel, resolvedModel string, opts cliproxyexecutor.Options, executor ProviderExecutor, operation string, attempt coreusage.RequestAttempt) routePlanSummary {
+	requestPath := metadataString(opts.Metadata, cliproxyexecutor.RequestPathMetadataKey)
+	sourceFormat := strings.TrimSpace(opts.SourceFormat.String())
+	executorName := providerExecutorName(executor)
+	protocol := routePlanProtocol(sourceFormat, requestPath)
+	routingGroup := ""
+	if auth != nil {
+		routingGroup = explicitAuthRoutingGroup(auth)
+	}
+	return routePlanSummary{
+		RequestedModel: routePlanRequestedModel(opts, routeModel),
+		ResolvedModel:  strings.TrimSpace(resolvedModel),
+		AuthIndex:      authMetricIndex(auth),
+		Provider:       strings.TrimSpace(provider),
+		Protocol:       protocol,
+		Executor:       executorName,
+		UpstreamPath:   routePlanUpstreamPath(protocol, requestPath, executorName, operation),
+		Translator:     routePlanTranslator(protocol, requestPath, executorName),
+		RoutingGroup:   routingGroup,
+		FallbackFrom:   routePlanFallbackFrom(previous),
+		FallbackReason: strings.TrimSpace(attempt.RetryReason),
+	}
+}
+
+func routePlanRequestedModel(opts cliproxyexecutor.Options, routeModel string) string {
+	if requested := strings.TrimSpace(requestedModelAliasFromOptions(opts, routeModel)); requested != "" {
+		return requested
+	}
+	return strings.TrimSpace(routeModel)
+}
+
+func routePlanProtocol(sourceFormat, requestPath string) string {
+	path := strings.ToLower(strings.TrimSpace(requestPath))
+	sourceFormat = strings.ToLower(strings.TrimSpace(sourceFormat))
+	switch {
+	case strings.HasSuffix(path, "/v1/images/generations"), strings.HasSuffix(path, "/v1/images/edits"), sourceFormat == "openai-image":
+		return "openai_image"
+	case strings.HasSuffix(path, "/v1/videos"), sourceFormat == "openai-video":
+		return "openai_video"
+	case isResponsesEndpointPath(path), sourceFormat == "openai-response":
+		return "openai_responses"
+	case sourceFormat == "claude":
+		return "claude_messages"
+	case sourceFormat == "gemini":
+		return "gemini_generate_content"
+	case sourceFormat == "openai":
+		return "openai_chat"
+	case sourceFormat != "":
+		return sourceFormat
+	default:
+		return "unknown"
+	}
+}
+
+func routePlanUpstreamPath(protocol, requestPath, executorName, operation string) string {
+	switch executorName {
+	case "CodexExecutor", "CodexAutoExecutor":
+		if protocol == "openai_image" {
+			if strings.HasSuffix(strings.ToLower(strings.TrimSpace(requestPath)), "/v1/images/edits") {
+				return "/v1/images/edits"
+			}
+			return "/v1/images/generations"
+		}
+		return "/responses"
+	case "ClaudeExecutor":
+		if operation == "count" {
+			return "/v1/messages/count_tokens?beta=true"
+		}
+		return "/v1/messages?beta=true"
+	case "KimiExecutor":
+		return "/v1/chat/completions"
+	case "OpenAICompatExecutor":
+		switch protocol {
+		case "openai_image":
+			if strings.HasSuffix(strings.ToLower(strings.TrimSpace(requestPath)), "/v1/images/edits") {
+				return "/images/edits"
+			}
+			return "/images/generations"
+		case "openai_responses":
+			if operation == "stream" {
+				return "/chat/completions"
+			}
+			return "/responses/compact"
+		default:
+			return "/chat/completions"
+		}
+	case "GeminiExecutor", "GeminiVertexExecutor", "GeminiCLIExecutor", "AIStudioExecutor":
+		return "generateContent"
+	default:
+		if protocol == "openai_image" {
+			if strings.HasSuffix(strings.ToLower(strings.TrimSpace(requestPath)), "/v1/images/edits") {
+				return "/v1/images/edits"
+			}
+			return "/v1/images/generations"
+		}
+		if protocol == "openai_responses" {
+			return "/v1/responses"
+		}
+		if operation == "count" {
+			return "count_tokens"
+		}
+		return requestPath
+	}
+}
+
+func routePlanTranslator(protocol, requestPath, executorName string) string {
+	switch executorName {
+	case "CodexExecutor", "CodexAutoExecutor":
+		switch protocol {
+		case "openai_responses":
+			return "OpenAIResponsesToCodex"
+		case "openai_image":
+			return "OpenAIImageToCodex"
+		default:
+			return "OpenAIToCodex"
+		}
+	case "KimiExecutor":
+		if protocol == "claude_messages" {
+			return "ClaudeToKimiOpenAICompat"
+		}
+		return "OpenAIToKimiOpenAICompat"
+	case "ClaudeExecutor":
+		switch protocol {
+		case "claude_messages":
+			return "ClaudePassthrough"
+		case "openai_responses":
+			return "OpenAIResponsesToClaude"
+		default:
+			return "OpenAIToClaude"
+		}
+	case "OpenAICompatExecutor":
+		switch protocol {
+		case "openai_responses":
+			return "OpenAIResponsesToOpenAICompat"
+		case "openai_image":
+			return "OpenAIImageToOpenAICompat"
+		case "claude_messages":
+			return "ClaudeToOpenAICompat"
+		default:
+			return "OpenAIChatCompatible"
+		}
+	case "GeminiExecutor", "GeminiVertexExecutor", "GeminiCLIExecutor", "AIStudioExecutor":
+		switch protocol {
+		case "openai_responses":
+			return "OpenAIResponsesToGemini"
+		case "openai_image":
+			return "OpenAIImageToGemini"
+		case "claude_messages":
+			return "ClaudeToGemini"
+		default:
+			return "OpenAIToGemini"
+		}
+	default:
+		if protocol == "openai_responses" {
+			return "OpenAIResponses"
+		}
+		if protocol == "claude_messages" {
+			return "ClaudeCompatible"
+		}
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(requestPath)), "/v1/images/edits") || strings.HasSuffix(strings.ToLower(strings.TrimSpace(requestPath)), "/v1/images/generations") {
+			return "OpenAIImageCompatible"
+		}
+		return "GenericTranslator"
+	}
+}
+
+func routePlanFallbackFrom(previous requestExecutionSummary) string {
+	parts := make([]string, 0, 3)
+	if previous.FinalProvider != "" {
+		parts = append(parts, previous.FinalProvider)
+	}
+	if previous.FinalModel != "" {
+		parts = append(parts, previous.FinalModel)
+	}
+	if previous.FinalExecutor != "" {
+		parts = append(parts, previous.FinalExecutor)
+	}
+	return strings.Join(parts, "/")
 }
 
 // RefreshEvaluator allows runtime state to override refresh decisions.
@@ -1866,6 +2074,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			m.markSelectorLoadDone(auth.ID, resultModel)
 			return nil, errReserve
 		}
+		logRoutePlan(ctx, auth, provider, routeModel, resultModel, opts, executor, "stream")
 		startedAt := time.Now()
 		if trace := requestAttemptTraceFromContext(ctx); trace != nil {
 			trace.recordExecution(provider, resultModel, providerExecutorName(executor))
@@ -2554,6 +2763,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				m.markSelectorLoadDone(auth.ID, resultModel)
 				return cliproxyexecutor.Response{}, errReserve
 			}
+			logRoutePlan(execCtx, auth, provider, routeModel, resultModel, opts, executor, "execute")
 			startedAt := time.Now()
 			trace.recordExecution(provider, resultModel, providerExecutorName(executor))
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
@@ -2714,6 +2924,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				m.markSelectorLoadDone(auth.ID, resultModel)
 				return cliproxyexecutor.Response{}, errReserve
 			}
+			logRoutePlan(execCtx, auth, provider, routeModel, resultModel, opts, executor, "count")
 			startedAt := time.Now()
 			trace.recordExecution(provider, resultModel, providerExecutorName(executor))
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
@@ -7197,6 +7408,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, len(models) > 1)
 			execReq := req
 			execReq.Model = upstreamModel
+			logRoutePlan(creditsCtx, c.auth, c.provider, routeModel, resultModel, creditsOpts, c.executor, "execute")
 			if trace := requestAttemptTraceFromContext(creditsCtx); trace != nil {
 				trace.recordExecution(c.provider, resultModel, providerExecutorName(c.executor))
 			}
