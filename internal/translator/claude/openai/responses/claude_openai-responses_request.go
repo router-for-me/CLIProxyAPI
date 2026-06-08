@@ -22,6 +22,11 @@ var (
 	session = ""
 )
 
+const (
+	responsesToolSearchType        = "tool_search"
+	responsesToolSearchDefaultName = "ToolSearch"
+)
+
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.
 // It supports:
@@ -170,6 +175,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	// input array processing
 	var pendingReasoningParts []string
+	toolSearchName := responsesToolSearchNameFromRequest(root)
+	toolSearchCallIDs := map[string]string{}
+	lastAnonymousToolSearchID := ""
+	var discoveredToolSearchTools []gjson.Result
 	flushPendingReasoning := func() {
 		if len(pendingReasoningParts) == 0 {
 			return
@@ -374,6 +383,62 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+
+			case "tool_search_call":
+				callID := item.Get("call_id").String()
+				if callID == "" {
+					callID = item.Get("id").String()
+				}
+				if callID == "" {
+					callID = genToolCallID()
+				}
+				if originalCallID := item.Get("call_id").String(); originalCallID != "" {
+					toolSearchCallIDs[originalCallID] = callID
+				} else {
+					lastAnonymousToolSearchID = callID
+				}
+
+				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
+				toolUse, _ = sjson.SetBytes(toolUse, "name", toolSearchName)
+				toolUse, _ = sjson.SetRawBytes(toolUse, "input", responsesToolSearchCallInputJSON(item))
+
+				asst := []byte(`{"role":"assistant","content":[]}`)
+				for _, partJSON := range pendingReasoningParts {
+					asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+				}
+				pendingReasoningParts = nil
+				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
+				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+
+			case "tool_search_output":
+				flushPendingReasoning()
+				callID := ""
+				if originalCallID := item.Get("call_id").String(); originalCallID != "" {
+					callID = toolSearchCallIDs[originalCallID]
+					if callID == "" {
+						callID = originalCallID
+					}
+				}
+				if callID == "" {
+					callID = lastAnonymousToolSearchID
+				}
+				if callID == "" {
+					callID = item.Get("id").String()
+				}
+				if callID == "" {
+					callID = genToolCallID()
+				}
+
+				discoveredToolSearchTools = append(discoveredToolSearchTools, responsesToolSearchDiscoveredTools(item)...)
+
+				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
+				toolResult, _ = sjson.SetBytes(toolResult, "content", responsesToolSearchOutputContent(item))
+
+				usr := []byte(`{"role":"user","content":[]}`)
+				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
+				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
 			}
 			return true
 		})
@@ -382,24 +447,29 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	includedToolNames := map[string]struct{}{}
 	toolNameMap := map[string]string{}
+	toolsJSON := []byte("[]")
+	appendClaudeTools := func(convertedTools [][]byte) {
+		for _, tJSON := range convertedTools {
+			toolName := gjson.GetBytes(tJSON, "name").String()
+			if toolName != "" {
+				includedToolNames[toolName] = struct{}{}
+			}
+			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)
+		}
+	}
 
 	// tools mapping: parameters -> input_schema
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		toolsJSON := []byte("[]")
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			convertedTools := convertResponsesToolToClaudeTools(tool, toolNameMap)
-			for _, tJSON := range convertedTools {
-				toolName := gjson.GetBytes(tJSON, "name").String()
-				if toolName != "" {
-					includedToolNames[toolName] = struct{}{}
-				}
-				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)
-			}
+			appendClaudeTools(convertResponsesToolToClaudeTools(tool, toolNameMap))
 			return true
 		})
-		if parsedTools := gjson.ParseBytes(toolsJSON); parsedTools.IsArray() && len(parsedTools.Array()) > 0 {
-			out, _ = sjson.SetRawBytes(out, "tools", toolsJSON)
-		}
+	}
+	for _, tool := range discoveredToolSearchTools {
+		appendClaudeTools(convertResponsesToolToClaudeTools(tool, toolNameMap))
+	}
+	if parsedTools := gjson.ParseBytes(toolsJSON); parsedTools.IsArray() && len(parsedTools.Array()) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", toolsJSON)
 	}
 
 	// Map tool_choice similar to Chat Completions translator (optional in docs, safe to handle)
@@ -467,6 +537,127 @@ func responsesReasoningSummaryText(item gjson.Result) string {
 	return builder.String()
 }
 
+func responsesToolSearchNameFromRequest(root gjson.Result) string {
+	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
+		name := ""
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if strings.TrimSpace(tool.Get("type").String()) != responsesToolSearchType {
+				return true
+			}
+			name = strings.TrimSpace(tool.Get("name").String())
+			return false
+		})
+		if name != "" {
+			return name
+		}
+	}
+	return responsesToolSearchDefaultName
+}
+
+func responsesToolSearchCallInputJSON(item gjson.Result) []byte {
+	if arguments := item.Get("arguments"); arguments.Exists() {
+		if arguments.IsObject() {
+			return []byte(arguments.Raw)
+		}
+		if arguments.Type == gjson.String {
+			argumentString := strings.TrimSpace(arguments.String())
+			if gjson.Valid(argumentString) {
+				parsed := gjson.Parse(argumentString)
+				if parsed.IsObject() {
+					return []byte(parsed.Raw)
+				}
+			}
+			if argumentString != "" {
+				return responsesToolSearchQueryJSON(argumentString)
+			}
+		}
+	}
+	if query := strings.TrimSpace(item.Get("query").String()); query != "" {
+		return responsesToolSearchQueryJSON(query)
+	}
+	if queries := item.Get("queries"); queries.Exists() && queries.IsArray() {
+		query := strings.TrimSpace(queries.Get("0.search_term").String())
+		if query == "" {
+			query = strings.TrimSpace(queries.Get("0.query").String())
+		}
+		if query != "" {
+			return responsesToolSearchQueryJSON(query)
+		}
+	}
+	return []byte(`{}`)
+}
+
+func responsesToolSearchQueryJSON(query string) []byte {
+	out := []byte(`{"query":""}`)
+	out, _ = sjson.SetBytes(out, "query", query)
+	return out
+}
+
+func responsesToolSearchOutputContent(item gjson.Result) string {
+	if output := item.Get("output"); output.Exists() && output.Type == gjson.String {
+		return output.String()
+	}
+	if strings.TrimSpace(item.Raw) != "" {
+		return item.Raw
+	}
+	return "{}"
+}
+
+func responsesToolSearchDiscoveredTools(item gjson.Result) []gjson.Result {
+	var tools []gjson.Result
+	appendTool := func(tool gjson.Result) {
+		if strings.TrimSpace(tool.Raw) != "" {
+			tools = append(tools, tool)
+		}
+	}
+
+	var appendFrom func(gjson.Result)
+	appendFrom = func(source gjson.Result) {
+		if !source.Exists() {
+			return
+		}
+		if source.IsArray() {
+			source.ForEach(func(_, candidate gjson.Result) bool {
+				appendFrom(candidate)
+				return true
+			})
+			return
+		}
+		if !source.IsObject() {
+			return
+		}
+
+		if tool := source.Get("tool"); tool.Exists() {
+			appendFrom(tool)
+			return
+		}
+		if tool := source.Get("definition"); tool.Exists() {
+			appendFrom(tool)
+			return
+		}
+		if tool := source.Get("tool_definition"); tool.Exists() {
+			appendFrom(tool)
+			return
+		}
+		if source.Get("type").Exists() || source.Get("name").Exists() || source.Get("function").Exists() {
+			appendTool(source)
+			return
+		}
+		appendFrom(source.Get("tools"))
+		appendFrom(source.Get("results"))
+	}
+
+	appendFrom(item.Get("tools"))
+	appendFrom(item.Get("results"))
+	if output := item.Get("output"); output.Exists() && output.Type == gjson.String {
+		outputString := strings.TrimSpace(output.String())
+		if gjson.Valid(outputString) {
+			appendFrom(gjson.Parse(outputString))
+		}
+	}
+	return tools
+}
+
 func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {
 	toolType := strings.TrimSpace(tool.Get("type").String())
 	switch toolType {
@@ -476,6 +667,13 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 		}
 	case "namespace":
 		return convertResponsesNamespaceToolToClaude(tool, toolNameMap)
+	case responsesToolSearchType:
+		if tJSON, ok := convertResponsesToolSearchToClaude(tool); ok {
+			if name := gjson.GetBytes(tJSON, "name").String(); name != "" {
+				toolNameMap[name] = name
+			}
+			return [][]byte{tJSON}
+		}
 	case "web_search":
 		if tJSON, ok := convertResponsesWebSearchToolToClaude(tool); ok {
 			if name := gjson.GetBytes(tJSON, "name").String(); name != "" {
@@ -532,6 +730,20 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
 	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", normalizeClaudeToolInputSchema(responsesToolParameters(tool)))
+	return tJSON, true
+}
+
+func convertResponsesToolSearchToClaude(tool gjson.Result) ([]byte, bool) {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = responsesToolSearchDefaultName
+	}
+
+	tJSON := []byte(`{"name":"","description":"Search available deferred tools by query.","input_schema":{"type":"object","properties":{"query":{"type":"string","description":"Search query for deferred tool metadata."}},"required":["query"]}}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	if description := strings.TrimSpace(tool.Get("description").String()); description != "" {
+		tJSON, _ = sjson.SetBytes(tJSON, "description", description)
+	}
 	return tJSON, true
 }
 

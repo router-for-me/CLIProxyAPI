@@ -125,6 +125,190 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsIncompatibleReasoningSignatu
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_ToolSearchGetsQuerySchema(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"search tools"}]}],
+		"tools":[{"type":"tool_search"}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	tool := gjson.GetBytes(out, "tools.0")
+
+	if got := tool.Get("name").String(); got != "ToolSearch" {
+		t.Fatalf("tool_search name = %q, want ToolSearch. Output: %s", got, string(out))
+	}
+	if tool.Get("type").Exists() {
+		t.Fatalf("tool_search should not leak raw Responses type. Output: %s", string(out))
+	}
+	if got := tool.Get("input_schema.type").String(); got != "object" {
+		t.Fatalf("input_schema.type = %q, want object. Output: %s", got, string(out))
+	}
+	if got := tool.Get("input_schema.properties.query.type").String(); got != "string" {
+		t.Fatalf("query.type = %q, want string. Output: %s", got, string(out))
+	}
+	if got := tool.Get("input_schema.required.0").String(); got != "query" {
+		t.Fatalf("required.0 = %q, want query. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_NamedToolSearchPreservesNameAndSchema(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"search tools"}]}],
+		"tools":[{"type":"tool_search","name":"CustomToolSearch"}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	tool := gjson.GetBytes(out, "tools.0")
+
+	if got := tool.Get("name").String(); got != "CustomToolSearch" {
+		t.Fatalf("tool_search name = %q, want CustomToolSearch. Output: %s", got, string(out))
+	}
+	if tool.Get("type").Exists() {
+		t.Fatalf("tool_search should not leak raw Responses type. Output: %s", string(out))
+	}
+	if got := tool.Get("input_schema.properties.query.type").String(); got != "string" {
+		t.Fatalf("query.type = %q, want string. Output: %s", got, string(out))
+	}
+	if got := tool.Get("input_schema.required.0").String(); got != "query" {
+		t.Fatalf("required.0 = %q, want query. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolSearchPreservesDescription(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"search tools"}]}],
+		"tools":[{"type":"tool_search","description":"Find deferred tools."}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "Find deferred tools." {
+		t.Fatalf("description = %q, want custom description. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolSearchToolChoice(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"search tools"}]}],
+		"tools":[{"type":"tool_search"}],
+		"tool_choice":{"type":"function","name":"ToolSearch"}
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "tool" {
+		t.Fatalf("tool_choice.type = %q, want tool. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "ToolSearch" {
+		t.Fatalf("tool_choice.name = %q, want ToolSearch. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolSearchReplayLoadsDiscoveredTaskTools(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"create a task"}]},
+			{"id":"tsc_1","type":"tool_search_call","call_id":"call_ts_1","arguments":{"query":"task"}},
+			{
+				"id":"tso_1",
+				"type":"tool_search_output",
+				"call_id":"call_ts_1",
+				"execution":"server",
+				"status":"completed",
+				"tools":[
+					{"type":"function","name":"TaskCreate","description":"Create a task.","parameters":{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]}},
+					{"type":"function","name":"TaskGet","description":"Get a task.","parameters":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}},
+					{"type":"function","name":"TaskList","description":"List tasks.","parameters":{"type":"object","properties":{"status":{"type":"string"}}}},
+					{"type":"function","name":"TaskOutput","description":"Read task output.","parameters":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}},
+					{"type":"function","name":"TaskStop","description":"Stop a task.","parameters":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}},
+					{"type":"function","name":"TaskUpdate","description":"Update a task.","parameters":{"type":"object","properties":{"task_id":{"type":"string"},"status":{"type":"string"}},"required":["task_id","status"]}}
+				]
+			}
+		],
+		"tools":[{"type":"tool_search"}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	toolUse := root.Get("messages.1.content.0")
+	if got := toolUse.Get("type").String(); got != "tool_use" {
+		t.Fatalf("tool_search_call content type = %q, want tool_use. Output: %s", got, string(out))
+	}
+	if got := toolUse.Get("name").String(); got != "ToolSearch" {
+		t.Fatalf("tool_search_call tool name = %q, want ToolSearch. Output: %s", got, string(out))
+	}
+	if got := toolUse.Get("id").String(); got != "call_ts_1" {
+		t.Fatalf("tool_search_call tool id = %q, want call_ts_1. Output: %s", got, string(out))
+	}
+	if got := toolUse.Get("input.query").String(); got != "task" {
+		t.Fatalf("tool_search_call input.query = %q, want task. Output: %s", got, string(out))
+	}
+
+	toolResult := root.Get("messages.2.content.0")
+	if got := toolResult.Get("type").String(); got != "tool_result" {
+		t.Fatalf("tool_search_output content type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := toolResult.Get("tool_use_id").String(); got != "call_ts_1" {
+		t.Fatalf("tool_search_output tool_use_id = %q, want call_ts_1. Output: %s", got, string(out))
+	}
+
+	requiredTaskTools := map[string]bool{
+		"TaskCreate": false,
+		"TaskGet":    false,
+		"TaskList":   false,
+		"TaskOutput": false,
+		"TaskStop":   false,
+		"TaskUpdate": false,
+	}
+	root.Get("tools").ForEach(func(_, tool gjson.Result) bool {
+		if _, ok := requiredTaskTools[tool.Get("name").String()]; ok {
+			requiredTaskTools[tool.Get("name").String()] = true
+			if got := tool.Get("input_schema.type").String(); got != "object" {
+				t.Fatalf("%s input_schema.type = %q, want object. Output: %s", tool.Get("name").String(), got, string(out))
+			}
+		}
+		return true
+	})
+	for name, found := range requiredTaskTools {
+		if !found {
+			t.Fatalf("discovered tool %s was not loaded into Claude tools. Output: %s", name, string(out))
+		}
+	}
+	if got := root.Get(`tools.#(name=="TaskCreate").input_schema.required.0`).String(); got != "prompt" {
+		t.Fatalf("TaskCreate required.0 = %q, want prompt. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolSearchOutputResultsLoadsDiscoveredTools(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"tool_search_call","call_id":"call_ts_2","arguments":"task"},
+			{"type":"tool_search_output","call_id":"call_ts_2","results":[{"tool":{"type":"function","name":"TaskOutput","parameters":{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}}}]}
+		],
+		"tools":[{"type":"tool_search","name":"CustomToolSearch"}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.0.content.0.name").String(); got != "CustomToolSearch" {
+		t.Fatalf("tool_search_call tool name = %q, want CustomToolSearch. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.content.0.input.query").String(); got != "task" {
+		t.Fatalf("string arguments should become query, got %q. Output: %s", got, string(out))
+	}
+	if got := root.Get(`tools.#(name=="TaskOutput").input_schema.required.0`).String(); got != "task_id" {
+		t.Fatalf("TaskOutput schema not loaded from results. required.0 = %q. Output: %s", got, string(out))
+	}
+}
+
 func testClaudeResponsesThinkingSignature(t *testing.T) (string, string) {
 	t.Helper()
 	channelBlock := []byte{}

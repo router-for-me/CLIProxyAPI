@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -460,6 +461,92 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 	)
 	if got := lastStopReason(events); got != "tool_use" {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
+
+func TestStreamingTool_ArgumentChunkEmitsInputDeltaImmediately(t *testing.T) {
+	originalRequest := []byte(`{
+		"stream":true,
+		"tools":[{"name":"ToolSearch","input_schema":{"type":"object","properties":{"query":{"type":"string"},"max_results":{"type":"number"}},"required":["query","max_results"]}}]
+	}`)
+	var param any
+
+	first := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"m",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"c1","model":"m","created":1,"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"ToolSearch","arguments":""}}]},"finish_reason":null}]}`),
+		&param,
+	)
+	if !bytes.Contains(bytes.Join(first, nil), []byte(`"name":"ToolSearch"`)) {
+		t.Fatalf("expected ToolSearch content_block_start, got %s", bytes.Join(first, nil))
+	}
+
+	second := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"m",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"c1","model":"m","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"max_results\": "}}]},"finish_reason":null}]}`),
+		&param,
+	)
+	if second == nil {
+		t.Fatal("argument-only tool chunk returned nil; registry would fall back to raw OpenAI SSE")
+	}
+	out := bytes.Join(second, nil)
+	if !bytes.Contains(out, []byte(`"type":"input_json_delta"`)) {
+		t.Fatalf("expected immediate input_json_delta for argument chunk, got %s", out)
+	}
+	if bytes.Contains(out, []byte(`"choices"`)) {
+		t.Fatalf("raw OpenAI chunk leaked into Claude stream: %s", out)
+	}
+
+	third := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"m",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"c1","model":"m","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"6, \"query\": \"TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate\"}"}}]},"finish_reason":null}]}`),
+		&param,
+	)
+	combined := string(bytes.Join(append(second, third...), nil))
+	if !strings.Contains(combined, `"query\": \"TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate\"`) {
+		t.Fatalf("ToolSearch query was not streamed in input_json_delta chunks: %s", combined)
+	}
+}
+
+func TestStreamingNoOutputChunkDoesNotFallbackToRawOpenAI(t *testing.T) {
+	var param any
+	originalRequest := []byte(streamReq)
+	translatedRequest := []byte(`{"stream":true}`)
+
+	_ = sdktranslator.TranslateStream(
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"m",
+		originalRequest,
+		translatedRequest,
+		[]byte(`data: {"id":"c1","model":"m","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`),
+		&param,
+	)
+
+	chunks := sdktranslator.TranslateStream(
+		context.Background(),
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"m",
+		originalRequest,
+		translatedRequest,
+		[]byte(`data: {"id":"c1","model":"m","created":1,"choices":[{"index":0,"delta":{"content":null},"finish_reason":null}]}`),
+		&param,
+	)
+	if chunks == nil {
+		t.Fatal("translator returned nil for a consumed no-output chunk")
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("expected consumed no-output chunk to be dropped, got %s", bytes.Join(chunks, nil))
 	}
 }
 

@@ -73,6 +73,9 @@ type ToolCallAccumulator struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
+	// StreamedArgumentBytes tracks how much of Arguments has already been
+	// emitted as input_json_delta for this tool_use block.
+	StreamedArgumentBytes int
 	// StartEmitted tracks whether content_block_start has already been sent
 	// for this tool index.
 	StartEmitted bool
@@ -154,7 +157,7 @@ func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) 
 // convertOpenAIStreamingChunkToAnthropic converts OpenAI streaming chunk to Anthropic streaming events
 func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAIResponseToAnthropicParams) [][]byte {
 	root := gjson.ParseBytes(rawJSON)
-	var results [][]byte
+	results := make([][]byte, 0)
 
 	// Initialize parameters if needed
 	if param.MessageID == "" {
@@ -295,6 +298,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				if !accumulator.StartEmitted && accumulator.SeenName && accumulator.ID != "" && !param.ContentBlocksStopped {
 					emitToolUseStart(param, index, accumulator, &results)
 				}
+				emitPendingToolInputDelta(param, index, accumulator, false, &results)
 
 				return true
 			})
@@ -343,13 +347,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				}
 				blockIndex := param.toolContentBlockIndex(index)
 
-				// Send complete input_json_delta with all accumulated arguments
-				if accumulator.Arguments.Len() > 0 {
-					inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
-					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
-					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
-				}
+				emitPendingToolInputDelta(param, index, accumulator, true, &results)
 
 				contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
 				contentBlockStopJSON, _ = sjson.SetBytes(contentBlockStopJSON, "index", blockIndex)
@@ -389,7 +387,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 // convertOpenAIDoneToAnthropic handles the [DONE] marker and sends final events
 func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams) [][]byte {
-	var results [][]byte
+	results := make([][]byte, 0)
 
 	// Ensure all content blocks are stopped before final events
 	if param.ThinkingContentBlockStarted {
@@ -417,12 +415,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 			}
 			blockIndex := param.toolContentBlockIndex(index)
 
-			if accumulator.Arguments.Len() > 0 {
-				inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
-				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
-				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
-			}
+			emitPendingToolInputDelta(param, index, accumulator, true, &results)
 
 			contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
 			contentBlockStopJSON, _ = sjson.SetBytes(contentBlockStopJSON, "index", blockIndex)
@@ -626,6 +619,26 @@ func emitToolUseStart(param *ConvertOpenAIResponseToAnthropicParams, openAIToolI
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSON, 2))
 	accumulator.StartEmitted = true
 	param.SawToolCall = true
+}
+
+func emitPendingToolInputDelta(param *ConvertOpenAIResponseToAnthropicParams, openAIToolIndex int, accumulator *ToolCallAccumulator, fixComplete bool, results *[][]byte) {
+	if accumulator == nil || !accumulator.StartEmitted || param.ContentBlocksStopped {
+		return
+	}
+	args := accumulator.Arguments.String()
+	if accumulator.StreamedArgumentBytes >= len(args) {
+		return
+	}
+
+	partial := args[accumulator.StreamedArgumentBytes:]
+	if fixComplete && accumulator.StreamedArgumentBytes == 0 {
+		partial = util.FixJSON(args)
+	}
+	inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+	inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", param.toolContentBlockIndex(openAIToolIndex))
+	inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", partial)
+	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
+	accumulator.StreamedArgumentBytes = len(args)
 }
 
 func fillMissingToolName(param *ConvertOpenAIResponseToAnthropicParams, openAIToolIndex int, accumulator *ToolCallAccumulator) bool {
