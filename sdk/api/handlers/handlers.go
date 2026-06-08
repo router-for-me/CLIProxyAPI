@@ -800,6 +800,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		var accumulatedBody strings.Builder
 		var historyChunks []string
 		localHeaders := cloneHeader(upstreamHeaders)
+
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
