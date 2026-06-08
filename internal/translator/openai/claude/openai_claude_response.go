@@ -134,7 +134,8 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 
 	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
 	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
+		p := (*param).(*ConvertOpenAIResponseToAnthropicParams)
+		return convertOpenAINonStreamingToAnthropic(rawJSON, p.OriginalRequestRawJSON, p.ToolNameMap)
 	} else {
 		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
 	}
@@ -445,7 +446,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 }
 
 // convertOpenAINonStreamingToAnthropic converts OpenAI non-streaming response to Anthropic format
-func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
+func convertOpenAINonStreamingToAnthropic(rawJSON, originalRequestRawJSON []byte, toolNameMap map[string]string) [][]byte {
 	root := gjson.ParseBytes(rawJSON)
 
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
@@ -475,12 +476,19 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 
 		// Handle tool calls
 		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+			toolIndex := 0
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
+				name, ok := resolveToolUseName(originalRequestRawJSON, toolNameMap, toolCall.Get("function.name").String(), argsStr, toolIndex)
+				toolIndex++
+				if !ok {
+					return true
+				}
+
 				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
-				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
+				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", name)
 
-				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 				if argsStr != "" && gjson.Valid(argsStr) {
 					argsJSON := gjson.Parse(argsStr)
 					if argsJSON.IsObject() {
@@ -624,15 +632,35 @@ func fillMissingToolName(param *ConvertOpenAIResponseToAnthropicParams, openAITo
 	if accumulator.Name != "" {
 		return true
 	}
-	if inferred := util.InferClaudeToolNameForMissingOpenAIName(param.OriginalRequestRawJSON, accumulator.Arguments.String()); inferred != "" {
-		accumulator.Name = inferred
-		return true
-	}
-	if accumulator.Arguments.Len() == 0 {
+	name, ok := resolveToolUseName(param.OriginalRequestRawJSON, nil, "", accumulator.Arguments.String(), openAIToolIndex)
+	if !ok {
 		return false
 	}
-	accumulator.Name = fmt.Sprintf("tool_%d", openAIToolIndex)
+	accumulator.Name = name
 	return true
+}
+
+// resolveToolUseName returns the tool name to announce for a tool_use block.
+// It mirrors the streaming recovery policy: prefer the upstream-supplied name
+// (run through ToolNameMap), then try to infer from the original Claude
+// request, and finally fall back to a synthetic tool_<idx> name when arguments
+// are present. It returns ("", false) when there is nothing usable to emit, in
+// which case the caller must skip the block. rawName is the already-mapped name
+// when toolNameMap is nil (streaming accumulators map at intake).
+func resolveToolUseName(originalRequestRawJSON []byte, toolNameMap map[string]string, rawName, arguments string, openAIIndex int) (string, bool) {
+	if rawName != "" {
+		if toolNameMap != nil {
+			return util.MapToolName(toolNameMap, rawName), true
+		}
+		return rawName, true
+	}
+	if inferred := util.InferClaudeToolNameForMissingOpenAIName(originalRequestRawJSON, arguments); inferred != "" {
+		return inferred, true
+	}
+	if strings.TrimSpace(arguments) == "" {
+		return "", false
+	}
+	return fmt.Sprintf("tool_%d", openAIIndex), true
 }
 
 func toolCallAccumulatorIndexes(accumulators map[int]*ToolCallAccumulator) []int {
@@ -710,13 +738,19 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 							flushText()
 							toolCalls := item.Get("tool_calls")
 							if toolCalls.IsArray() {
+								toolIndex := 0
 								toolCalls.ForEach(func(_, tc gjson.Result) bool {
+									argsStr := util.FixJSON(tc.Get("function.arguments").String())
+									name, ok := resolveToolUseName(originalRequestRawJSON, toolNameMap, tc.Get("function.name").String(), argsStr, toolIndex)
+									toolIndex++
+									if !ok {
+										return true
+									}
 									hasToolCall = true
 									toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 									toolUse, _ = sjson.SetBytes(toolUse, "id", util.SanitizeClaudeToolID(tc.Get("id").String()))
-									toolUse, _ = sjson.SetBytes(toolUse, "name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
+									toolUse, _ = sjson.SetBytes(toolUse, "name", name)
 
-									argsStr := util.FixJSON(tc.Get("function.arguments").String())
 									if argsStr != "" && gjson.Valid(argsStr) {
 										argsJSON := gjson.Parse(argsStr)
 										if argsJSON.IsObject() {
@@ -767,13 +801,19 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 			}
 
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+				toolIndex := 0
 				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
+					name, ok := resolveToolUseName(originalRequestRawJSON, toolNameMap, toolCall.Get("function.name").String(), argsStr, toolIndex)
+					toolIndex++
+					if !ok {
+						return true
+					}
 					hasToolCall = true
 					toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
-					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
+					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", name)
 
-					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 					if argsStr != "" && gjson.Valid(argsStr) {
 						argsJSON := gjson.Parse(argsStr)
 						if argsJSON.IsObject() {

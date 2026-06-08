@@ -462,3 +462,111 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+// nonStreamToolUses extracts tool_use content blocks from a non-streaming
+// Anthropic message payload.
+func nonStreamToolUses(payload []byte) []gjson.Result {
+	var out []gjson.Result
+	gjson.GetBytes(payload, "content").ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "tool_use" {
+			out = append(out, block)
+		}
+		return true
+	})
+	return out
+}
+
+func TestNonStreamingTool_EmptyNameInferredFromSingleClaudeTool(t *testing.T) {
+	originalReq := []byte(`{
+		"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}]
+	}`)
+	resp := []byte(`{"id":"r1","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"","arguments":"{\"file_path\":\"/tmp/a\"}"}}]}}]}`)
+
+	var param any
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "m", originalReq, nil, resp, &param)
+
+	tools := nonStreamToolUses(out)
+	if len(tools) != 1 {
+		t.Fatalf("expected one tool_use block, got %d (out=%s)", len(tools), string(out))
+	}
+	if name := tools[0].Get("name").String(); name != "Read" {
+		t.Fatalf("expected inferred tool name Read, got %q", name)
+	}
+}
+
+func TestNonStreamingTool_EmptyNameSyntheticFallback(t *testing.T) {
+	originalReq := []byte(`{
+		"tools":[
+			{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}},
+			{"name":"Write","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}}
+		]
+	}`)
+	resp := []byte(`{"id":"r1","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"","arguments":"{\"unmatched\":1}"}}]}}]}`)
+
+	var param any
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "m", originalReq, nil, resp, &param)
+
+	tools := nonStreamToolUses(out)
+	if len(tools) != 1 {
+		t.Fatalf("expected one tool_use block, got %d (out=%s)", len(tools), string(out))
+	}
+	if name := tools[0].Get("name").String(); name != "tool_0" {
+		t.Fatalf("expected synthetic name tool_0, got %q", name)
+	}
+}
+
+func TestNonStreamingTool_EmptyNameAndEmptyArgsSkipped(t *testing.T) {
+	originalReq := []byte(`{
+		"tools":[
+			{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}},
+			{"name":"Write","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}}
+		]
+	}`)
+	resp := []byte(`{"id":"r1","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"","arguments":""}}]}}]}`)
+
+	var param any
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "m", originalReq, nil, resp, &param)
+
+	if tools := nonStreamToolUses(out); len(tools) != 0 {
+		t.Fatalf("expected empty-name empty-args tool_use to be skipped, got %d (out=%s)", len(tools), string(out))
+	}
+}
+
+func TestStreamFalseDispatch_EmptyNameInferred(t *testing.T) {
+	originalReq := []byte(`{
+		"stream":false,
+		"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}]
+	}`)
+	resp := []byte(`data: {"id":"r1","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"","arguments":"{\"file_path\":\"/tmp/a\"}"}}]}}]}`)
+
+	var param any
+	chunks := ConvertOpenAIResponseToClaude(context.Background(), "m", originalReq, nil, resp, &param)
+	out := bytes.Join(chunks, nil)
+
+	tools := nonStreamToolUses(out)
+	if len(tools) != 1 {
+		t.Fatalf("expected one tool_use block, got %d (out=%s)", len(tools), string(out))
+	}
+	if name := tools[0].Get("name").String(); name != "Read" {
+		t.Fatalf("expected inferred tool name Read, got %q", name)
+	}
+}
+
+func TestStreamFalseDispatch_EmptyNameAndEmptyArgsSkipped(t *testing.T) {
+	originalReq := []byte(`{
+		"stream":false,
+		"tools":[
+			{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}},
+			{"name":"Write","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}}
+		]
+	}`)
+	resp := []byte(`data: {"id":"r1","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"","arguments":""}}]}}]}`)
+
+	var param any
+	chunks := ConvertOpenAIResponseToClaude(context.Background(), "m", originalReq, nil, resp, &param)
+	out := bytes.Join(chunks, nil)
+
+	if tools := nonStreamToolUses(out); len(tools) != 0 {
+		t.Fatalf("expected empty-name empty-args tool_use to be skipped, got %d (out=%s)", len(tools), string(out))
+	}
+}
