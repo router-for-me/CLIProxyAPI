@@ -420,6 +420,13 @@ nonstream-keepalive-interval: 0
 
 # Optional payload configuration
 # payload:
+#   # Registers JavaScript request/response interceptor hooks.
+#   # The scripts can view/modify requests in on_before_request and responses/chunks in on_after_response.
+#   js-handler:
+#     - models:
+#         - name: "gemini-*" # Supports wildcards (e.g., "gemini-*", "gpt-*")
+#       params:
+#         - "./examples/js-handler/copilot_handler.js" # path to the JS script
 #   default: # Default rules only set parameters when they are missing in the payload.
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
