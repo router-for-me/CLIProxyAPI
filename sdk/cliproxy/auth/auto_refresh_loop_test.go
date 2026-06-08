@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,41 @@ func setRefreshLeadFactory(t *testing.T, provider string, factory func() *time.D
 		}
 		refreshLeadMu.Unlock()
 	})
+}
+
+func TestAutoRefreshLoopUsesCanonicalProviderKeyForExecutorLookup(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	lead := 10 * time.Minute
+	setRefreshLeadFactory(t, "YT", func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	manager := NewManager(nil, nil, nil)
+	exec := &replaceAwareExecutor{id: "yt"}
+	manager.RegisterExecutor(exec)
+
+	const authID = "refresh-canonical-provider-auth"
+	manager.mu.Lock()
+	manager.auths[authID] = &Auth{
+		ID:       authID,
+		Provider: "YT",
+		Status:   StatusActive,
+		Metadata: map[string]any{"email": "x@example.com"},
+	}
+	manager.mu.Unlock()
+
+	loop := newAuthAutoRefreshLoop(manager, time.Hour, 1)
+	loop.handleDueAuth(context.Background(), now, authID)
+
+	select {
+	case got := <-loop.jobs:
+		if got != authID {
+			t.Fatalf("refresh job auth ID = %q, want %q", got, authID)
+		}
+	default:
+		t.Fatalf("expected refresh job to be queued for canonical provider executor lookup")
+	}
 }
 
 func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {

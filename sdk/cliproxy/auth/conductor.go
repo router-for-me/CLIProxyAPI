@@ -228,6 +228,10 @@ func isBuiltInSelector(selector Selector) bool {
 	}
 }
 
+func executorProviderKey(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
 func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
 	if m == nil || m.scheduler == nil {
 		return
@@ -726,6 +730,10 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if registryRef == nil || auth == nil {
 		return true
 	}
+	rawRouteModel := strings.TrimSpace(routeModel)
+	if rawRouteModel != "" && registryRef.ClientSupportsModel(auth.ID, rawRouteModel) {
+		return true
+	}
 	routeKey := canonicalModelKey(routeModel)
 	if routeKey == "" {
 		return true
@@ -1121,7 +1129,7 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
 		return
 	}
-	provider := strings.TrimSpace(executor.Identifier())
+	provider := executorProviderKey(executor.Identifier())
 	if provider == "" {
 		return
 	}
@@ -1142,7 +1150,7 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 
 // UnregisterExecutor removes the executor associated with the provider key.
 func (m *Manager) UnregisterExecutor(provider string) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
+	provider = executorProviderKey(provider)
 	if provider == "" {
 		return
 	}
@@ -3081,19 +3089,13 @@ func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
 	if m == nil {
 		return nil, false
 	}
-	provider = strings.TrimSpace(provider)
+	provider = executorProviderKey(provider)
 	if provider == "" {
 		return nil, false
 	}
 
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
-	if !okExecutor {
-		lowerProvider := strings.ToLower(provider)
-		if lowerProvider != provider {
-			executor, okExecutor = m.executors[lowerProvider]
-		}
-	}
 	m.mu.RUnlock()
 
 	if !okExecutor || executor == nil {
@@ -3158,9 +3160,16 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if m == nil {
+		return nil, nil, &Error{Code: "manager_nil", Message: "manager is nil"}
+	}
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
+	}
+	provider = executorProviderKey(provider)
+	if provider == "" {
+		return nil, nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
@@ -3183,7 +3192,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate.Provider != provider || candidate.Disabled {
+		if executorProviderKey(candidate.Provider) != provider || candidate.Disabled {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -3294,6 +3303,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if m == nil {
+		return nil, nil, "", &Error{Code: "manager_nil", Message: "manager is nil"}
+	}
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
@@ -3303,7 +3315,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
-		p := strings.TrimSpace(strings.ToLower(provider))
+		p := executorProviderKey(provider)
 		if p == "" {
 			continue
 		}
@@ -3334,7 +3346,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if disallowFreeAuth && isFreeCodexAuth(candidate) {
 			continue
 		}
-		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
+		providerKey := executorProviderKey(candidate.Provider)
 		if providerKey == "" {
 			continue
 		}
@@ -3370,7 +3382,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
+	providerKey := executorProviderKey(selected.Provider)
 	executor, okExecutor := m.executors[providerKey]
 	if !okExecutor {
 		m.mu.RUnlock()
@@ -3877,7 +3889,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opt
 		if !strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
 			continue
 		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		providerKey := executorProviderKey(auth.Provider)
 		executor, ok := m.executors[providerKey]
 		if !ok {
 			continue
@@ -4369,7 +4381,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	var exec ProviderExecutor
 	var cloned *Auth
 	if auth != nil {
-		exec = m.executors[auth.Provider]
+		exec = m.executors[executorKeyFromAuth(auth)]
 		cloned = auth.Clone()
 	}
 	m.mu.RUnlock()
@@ -4428,6 +4440,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
+	provider = executorProviderKey(provider)
+	if provider == "" {
+		return nil
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.executors[provider]
@@ -4469,10 +4485,10 @@ func executorKeyFromAuth(auth *Auth) string {
 			if providerKey == "" {
 				providerKey = compatName
 			}
-			return strings.ToLower(providerKey)
+			return executorProviderKey(providerKey)
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	return executorProviderKey(auth.Provider)
 }
 
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.

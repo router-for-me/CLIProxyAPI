@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -100,5 +101,40 @@ func TestManagerExecutorReturnsRegisteredExecutor(t *testing.T) {
 	_, okMissing := manager.Executor("unknown")
 	if okMissing {
 		t.Fatal("expected unknown provider lookup to fail")
+	}
+}
+
+func TestManagerMixedLegacyFindsExecutorWithCanonicalProviderKey(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	exec := &replaceAwareExecutor{id: "YT"}
+	manager.RegisterExecutor(exec)
+
+	const authID = "compat-auth-canonical-provider"
+	const routeModel = "YT-GPT-5.5(high)"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "yt", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	_, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       authID,
+		Provider: "yt",
+		Status:   StatusActive,
+	})
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	selected, selectedExec, provider, errPick := manager.pickNextMixedLegacy(context.Background(), []string{"yt"}, routeModel, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixedLegacy() error = %v", errPick)
+	}
+	if selected == nil || selected.ID != authID {
+		t.Fatalf("pickNextMixedLegacy() auth ID = %v, want %q", selected, authID)
+	}
+	if selectedExec != exec {
+		t.Fatalf("pickNextMixedLegacy() executor = %T, want registered executor", selectedExec)
+	}
+	if provider != "yt" {
+		t.Fatalf("pickNextMixedLegacy() provider = %q, want yt", provider)
 	}
 }
