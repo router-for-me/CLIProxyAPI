@@ -22,11 +22,37 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          release_notes_file="$(mktemp)"
+          current_notes_file="$(mktemp)"
+          updated_notes_file="$(mktemp)"
+          trap 'rm -f "$release_notes_file" "$current_notes_file" "$updated_notes_file"' EXIT
+
+          cat > "$release_notes_file" <<'EOF'
+          <!-- cliproxyapi-linux-release-assets:start -->
+          ## Linux release assets
+
+          - `CLIProxyAPI_<version>_linux_<arch>.tar.gz` is the default Linux build. It supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
+          - `CLIProxyAPI_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt. It does not support dynamic library plugins.
+
+          <!-- cliproxyapi-linux-release-assets:end -->
+          EOF
+
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME"
           else
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
           fi
+          gh release view "$GITHUB_REF_NAME" --json body -q .body > "$current_notes_file"
+          {
+            cat "$release_notes_file"
+            printf '\n'
+            awk '
+              /^<!-- cliproxyapi-linux-release-assets:start -->$/ { skip = 1; next }
+              /^<!-- cliproxyapi-linux-release-assets:end -->$/ { skip = 0; next }
+              !skip { print }
+            ' "$current_notes_file"
+          } > "$updated_notes_file"
+          gh release edit "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
 
   build-hosted:
     name: build ${{ matrix.target }}
@@ -36,18 +62,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: linux-amd64
-            runner: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            asset_arch: amd64
-            archive_format: tar.gz
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            goos: linux
-            goarch: arm64
-            asset_arch: aarch64
-            archive_format: tar.gz
           - target: darwin-amd64
             runner: macos-15-intel
             goos: darwin
@@ -166,6 +180,291 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip dist/CLIProxyAPI_*.tar.gz.sha256 dist/CLIProxyAPI_*.zip.sha256)
+          if [[ ${#assets[@]} -lt 2 ]]; then
+            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+            printf '%s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+      - name: Refresh release checksums
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern 'CLIProxyAPI_*.tar.gz' \
+            --pattern 'CLIProxyAPI_*.zip' \
+            --dir "$tmp_dir" \
+            --clobber
+          (
+            cd "$tmp_dir"
+            shopt -s nullglob
+            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            if [[ ${#archives[@]} -eq 0 ]]; then
+              echo "No release archives found"
+              exit 0
+            fi
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
+            else
+              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
+            fi
+          )
+          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
+
+  build-linux-glibc:
+    name: build linux-${{ matrix.goarch }} glibc
+    needs: prepare-release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+            goarch: amd64
+            asset_arch: amd64
+            manylinux_image: quay.io/pypa/manylinux2014_x86_64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            goarch: arm64
+            asset_arch: aarch64
+            manylinux_image: quay.io/pypa/manylinux2014_aarch64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Refresh models catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth 1 https://github.com/router-for-me/models.git main
+          git show FETCH_HEAD:models.json > internal/registry/models/models.json
+      - name: Fetch tags
+        shell: bash
+        run: git fetch --force --tags
+      - name: Generate Build Metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Build archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          GOARCH: ${{ matrix.goarch }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+          MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+        run: |
+          set -euo pipefail
+
+          archive_dir="dist/${TARGET}/archive"
+          archive_name="CLIProxyAPI_${RELEASE_VERSION}_linux_${ASSET_ARCH}.tar.gz"
+          rm -rf "dist/${TARGET}"
+          mkdir -p "$archive_dir"
+
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            -e GO_VERSION \
+            -e GOARCH \
+            -e RELEASE_VERSION \
+            -e COMMIT \
+            -e BUILD_DATE \
+            "$MANYLINUX_IMAGE" \
+            bash -euo pipefail -c '
+              go_archive="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+              curl -fsSL "https://go.dev/dl/${go_archive}" -o "/tmp/${go_archive}"
+              rm -rf /usr/local/go
+              tar -C /usr/local -xzf "/tmp/${go_archive}"
+              export PATH="/usr/local/go/bin:${PATH}"
+
+              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build -buildvcs=false \
+                -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+                -o "'"$archive_dir"'/cli-proxy-api" ./cmd/server/
+
+              glibc_versions="$(readelf --version-info "'"$archive_dir"'/cli-proxy-api" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -Vu)"
+              if [[ -n "${glibc_versions}" ]]; then
+                printf "GLIBC versions:\n%s\n" "${glibc_versions}"
+                max_glibc="$(printf "%s\n" "${glibc_versions}" | sort -V | tail -n 1)"
+                if [[ "$(printf "2.17\n%s\n" "${max_glibc}" | sort -V | tail -n 1)" != "2.17" ]]; then
+                  printf "linux ${GOARCH} binary requires GLIBC_%s, expected GLIBC_2.17 or older\n" "${max_glibc}" >&2
+                  exit 1
+                fi
+              fi
+            '
+
+          cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
+          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+      - name: Create asset checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/CLIProxyAPI_*.tar.gz)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
+            printf '%s\n' "${archives[@]}" >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+          archive_name="$(basename "$archive")"
+          sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/CLIProxyAPI_*
+          if-no-files-found: error
+      - name: Upload release assets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.tar.gz.sha256)
+          if [[ ${#assets[@]} -lt 2 ]]; then
+            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+            printf '%s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+      - name: Refresh release checksums
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern 'CLIProxyAPI_*.tar.gz' \
+            --pattern 'CLIProxyAPI_*.zip' \
+            --dir "$tmp_dir" \
+            --clobber
+          (
+            cd "$tmp_dir"
+            shopt -s nullglob
+            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            if [[ ${#archives[@]} -eq 0 ]]; then
+              echo "No release archives found"
+              exit 0
+            fi
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
+            else
+              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
+            fi
+          )
+          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
+
+  build-linux-no-plugin:
+    name: build linux-${{ matrix.goarch }} no-plugin
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64-no-plugin
+            goarch: amd64
+            asset_arch: amd64
+          - target: linux-arm64-no-plugin
+            goarch: arm64
+            asset_arch: aarch64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Refresh models catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth 1 https://github.com/router-for-me/models.git main
+          git show FETCH_HEAD:models.json > internal/registry/models/models.json
+      - name: Fetch tags
+        shell: bash
+        run: git fetch --force --tags
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-linux-no-plugin-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-linux-no-plugin-${{ matrix.goarch }}-
+            go-linux-no-plugin-
+      - name: Generate Build Metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Build archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          GOARCH: ${{ matrix.goarch }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+        run: |
+          set -euo pipefail
+
+          archive_dir="dist/${TARGET}/archive"
+          archive_name="CLIProxyAPI_${RELEASE_VERSION}_linux_${ASSET_ARCH}_no-plugin.tar.gz"
+          rm -rf "dist/${TARGET}"
+          mkdir -p "$archive_dir"
+
+          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -buildvcs=false \
+            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+            -o "$archive_dir/cli-proxy-api" ./cmd/server/
+
+          if readelf -l "$archive_dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
+            readelf -l "$archive_dir/cli-proxy-api" >&2
+            echo "no-plugin linux binary must not require a dynamic interpreter" >&2
+            exit 1
+          fi
+
+          cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
+          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+      - name: Create asset checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(dist/CLIProxyAPI_*.tar.gz)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
+            printf '%s\n' "${archives[@]}" >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+          archive_name="$(basename "$archive")"
+          sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/CLIProxyAPI_*
+          if-no-files-found: error
+      - name: Upload release assets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.tar.gz.sha256)
           if [[ ${#assets[@]} -lt 2 ]]; then
             printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
@@ -355,6 +654,8 @@ jobs:
     if: always()
     needs:
       - build-hosted
+      - build-linux-glibc
+      - build-linux-no-plugin
       - build-freebsd
     steps:
       - uses: actions/download-artifact@v4
