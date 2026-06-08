@@ -16,7 +16,7 @@ import (
 
 const (
 	antigravityReleasesURL     = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
-	antigravityFallbackVersion = "1.21.9"
+	antigravityFallbackVersion = "1.23.2"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
