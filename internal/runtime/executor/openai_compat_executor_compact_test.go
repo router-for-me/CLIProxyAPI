@@ -442,3 +442,30 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 		t.Fatalf("stream payload = %s", got.String())
 	}
 }
+
+func TestSplitOpenAICompatSSEDataLinesSplitsJoinedJSONDataFrames(t *testing.T) {
+	line := []byte(`data: {"choices":[{"delta":{"content":"literal data: value"}}]}data: {"choices":[{"delta":{"content":"second"}}]}`)
+
+	got := splitOpenAICompatSSEDataLines(line)
+	if len(got) != 2 {
+		t.Fatalf("split lines = %d, want 2; got=%q", len(got), got)
+	}
+	if string(got[0]) != `data: {"choices":[{"delta":{"content":"literal data: value"}}]}` {
+		t.Fatalf("first split line = %q", string(got[0]))
+	}
+	if string(got[1]) != `data: {"choices":[{"delta":{"content":"second"}}]}` {
+		t.Fatalf("second split line = %q", string(got[1]))
+	}
+}
+
+func TestSplitOpenAICompatSSEDataLinesLeavesSingleJSONFrameWithDataText(t *testing.T) {
+	line := []byte(`data: {"choices":[{"delta":{"content":"literal data: value"}}]}`)
+
+	got := splitOpenAICompatSSEDataLines(line)
+	if len(got) != 1 {
+		t.Fatalf("split lines = %d, want 1; got=%q", len(got), got)
+	}
+	if string(got[0]) != string(line) {
+		t.Fatalf("split line = %q, want %q", string(got[0]), string(line))
+	}
+}

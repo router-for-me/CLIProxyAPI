@@ -222,6 +222,42 @@ func FixJSON(input string) string {
 	return out.String()
 }
 
+// NormalizeToolArgumentsObjectJSON returns a JSON object string suitable for
+// Anthropic tool_use.input and OpenAI function.arguments. Some compatible
+// providers double-encode tool arguments as a JSON string, so this unwraps a
+// small number of nested JSON strings before validating the final value.
+func NormalizeToolArgumentsObjectJSON(input string) string {
+	const maxUnwrapDepth = 3
+
+	candidate := strings.TrimSpace(input)
+	for depth := 0; depth < maxUnwrapDepth; depth++ {
+		if candidate == "" {
+			return "{}"
+		}
+
+		fixed := strings.TrimSpace(FixJSON(candidate))
+		if !gjson.Valid(fixed) {
+			return "{}"
+		}
+
+		parsed := gjson.Parse(fixed)
+		if parsed.IsObject() {
+			return parsed.Raw
+		}
+		if parsed.Type != gjson.String {
+			return "{}"
+		}
+
+		next := strings.TrimSpace(parsed.String())
+		if next == candidate {
+			return "{}"
+		}
+		candidate = next
+	}
+
+	return "{}"
+}
+
 func CanonicalToolName(name string) string {
 	canonical := strings.TrimSpace(name)
 	canonical = strings.TrimLeft(canonical, "_")

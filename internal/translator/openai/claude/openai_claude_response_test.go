@@ -364,3 +364,54 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+func TestStreamingTool_DoubleEncodedArguments(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"\"{\\\"path\\\":\\\"/tmp/a\\\"}\""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	var gotArgs string
+	for _, e := range events {
+		if e.Type != "content_block_delta" {
+			continue
+		}
+		if gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			gotArgs = gjson.Get(e.Payload, "delta.partial_json").String()
+			break
+		}
+	}
+	if gotArgs == "" {
+		t.Fatalf("expected input_json_delta event, got %+v", events)
+	}
+	if got := gjson.Get(gotArgs, "path").String(); got != "/tmp/a" {
+		t.Fatalf("partial_json path = %q, want /tmp/a; partial_json=%q", got, gotArgs)
+	}
+}
+
+func TestConvertOpenAIResponseToClaudeNonStream_DoubleEncodedArguments(t *testing.T) {
+	inputJSON := []byte(`{
+		"id":"chatcmpl_1",
+		"model":"m",
+		"choices":[{
+			"index":0,
+			"message":{
+				"role":"assistant",
+				"tool_calls":[{
+					"id":"call_a",
+					"type":"function",
+					"function":{
+						"name":"read_file",
+						"arguments":"\"{\\\"path\\\":\\\"/tmp/a\\\"}\""
+					}
+				}]
+			},
+			"finish_reason":"tool_calls"
+		}]
+	}`)
+
+	output := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "m", []byte(`{}`), nil, inputJSON, nil)
+	if got := gjson.GetBytes(output, "content.0.input.path").String(); got != "/tmp/a" {
+		t.Fatalf("tool input path = %q, want /tmp/a; output=%s", got, string(output))
+	}
+}

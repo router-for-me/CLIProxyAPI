@@ -394,9 +394,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
 			trimmedLine := bytes.TrimSpace(line)
 			if len(trimmedLine) == 0 {
 				continue
@@ -421,12 +418,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			// OpenAI-compatible streams must use SSE data lines.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
+			for _, dataLine := range splitOpenAICompatSSEDataLines(trimmedLine) {
+				if detail, ok := helps.ParseOpenAIStreamUsage(dataLine); ok {
+					reporter.Publish(ctx, detail)
+				}
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(dataLine), &param)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -454,6 +456,60 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func splitOpenAICompatSSEDataLines(line []byte) [][]byte {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return [][]byte{bytes.Clone(trimmed)}
+	}
+
+	var lines [][]byte
+	remaining := trimmed
+	for bytes.HasPrefix(remaining, []byte("data:")) {
+		payloadWithPadding := remaining[len("data:"):]
+		payload := bytes.TrimLeft(payloadWithPadding, " \t")
+		leadingPadding := len(payloadWithPadding) - len(payload)
+		if len(payload) == 0 {
+			lines = append(lines, bytes.Clone(remaining))
+			break
+		}
+
+		if bytes.HasPrefix(payload, []byte("[DONE]")) {
+			consumed := len("data:") + leadingPadding + len("[DONE]")
+			rest := bytes.TrimSpace(remaining[consumed:])
+			if bytes.HasPrefix(rest, []byte("data:")) {
+				lines = append(lines, []byte("data: [DONE]"))
+				remaining = rest
+				continue
+			}
+			lines = append(lines, bytes.Clone(remaining))
+			break
+		}
+
+		decoder := json.NewDecoder(bytes.NewReader(payload))
+		var raw json.RawMessage
+		if errDecode := decoder.Decode(&raw); errDecode != nil {
+			lines = append(lines, bytes.Clone(remaining))
+			break
+		}
+
+		payloadEnd := int(decoder.InputOffset())
+		consumed := len("data:") + leadingPadding + payloadEnd
+		rest := bytes.TrimSpace(remaining[consumed:])
+		if !bytes.HasPrefix(rest, []byte("data:")) {
+			lines = append(lines, bytes.Clone(remaining))
+			break
+		}
+
+		dataPayload := bytes.TrimSpace(payload[:payloadEnd])
+		lines = append(lines, append([]byte("data: "), dataPayload...))
+		remaining = rest
+	}
+	if len(lines) == 0 {
+		return [][]byte{bytes.Clone(trimmed)}
+	}
+	return lines
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {

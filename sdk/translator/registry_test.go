@@ -243,6 +243,24 @@ func TestTranslateNonStream_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) 
 	}
 }
 
+func TestTranslateStream_NativeEmptyOutputSuppressesRawFallback(t *testing.T) {
+	ctx := context.Background()
+	from := Format("client")
+	to := Format("upstream")
+
+	r := NewRegistry()
+	r.Register(to, from, nil, ResponseTransform{
+		Stream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+			return nil
+		},
+	})
+
+	got := r.TranslateStream(ctx, from, to, "model", nil, nil, []byte(`data: {"raw":true}`), nil)
+	if len(got) != 0 {
+		t.Fatalf("native stream transformer returned empty output, got raw fallback %q", got)
+	}
+}
+
 func TestPluginNormalizersChainAfterNative(t *testing.T) {
 	ctx := context.Background()
 	r := NewRegistry()
