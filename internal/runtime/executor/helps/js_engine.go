@@ -51,11 +51,14 @@ func (engine *js_engine) run_program(program *goja.Program) error {
 	return nil
 }
 
+// ErrFunctionNotFound 表示调用的 JS 函数未找到或未定义的哨兵错误。
+var ErrFunctionNotFound = errors.New("函数未找到")
+
 // call_function 用来在 Go 中同步调用 JS 的全局函数，并传参、获取返回值，同时支持执行超时保护。
 func (engine *js_engine) call_function(name string, timeout time.Duration, args ...interface{}) (goja.Value, error) {
 	js_val := engine.vm.Get(name)
 	if js_val == nil || goja.IsUndefined(js_val) {
-		return nil, fmt.Errorf("函数 '%s' 不存在", name)
+		return nil, fmt.Errorf("%w: 函数 '%s' 不存在", ErrFunctionNotFound, name)
 	}
 	js_func, ok := goja.AssertFunction(js_val)
 	if !ok {

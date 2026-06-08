@@ -642,19 +642,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	}
 
 	if !PassthroughHeadersEnabled(h.Cfg) {
-		// 即使未开启全局响应头透传，也必须保留并返回 x-request-id 与 x-github-request-id 响应头
-		var resultHeaders http.Header
-		if resp.Headers != nil {
-			for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
-				if v := resp.Headers.Values(k); len(v) > 0 {
-					if resultHeaders == nil {
-						resultHeaders = make(http.Header)
-					}
-					resultHeaders[http.CanonicalHeaderKey(k)] = v
-				}
-			}
-		}
-		return resp.Payload, resultHeaders, nil
+		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
@@ -704,19 +692,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
-		// 即使未开启全局响应头透传，也必须保留并返回 x-request-id 与 x-github-request-id 响应头
-		var resultHeaders http.Header
-		if resp.Headers != nil {
-			for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
-				if v := resp.Headers.Values(k); len(v) > 0 {
-					if resultHeaders == nil {
-						resultHeaders = make(http.Header)
-					}
-					resultHeaders[http.CanonicalHeaderKey(k)] = v
-				}
-			}
-		}
-		return resp.Payload, resultHeaders, nil
+		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
@@ -787,21 +763,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	var upstreamHeaders http.Header
 	if passthroughHeadersEnabled {
 		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
-		if upstreamHeaders == nil {
-			upstreamHeaders = make(http.Header)
-		}
-	} else {
-		// 即使没有开启响应头透传，也必须保留并放行 x-request-id 和 x-github-request-id 响应头
-		if streamResult.Headers != nil {
-			for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
-				if v := streamResult.Headers.Values(k); len(v) > 0 {
-					if upstreamHeaders == nil {
-						upstreamHeaders = make(http.Header)
-					}
-					upstreamHeaders[http.CanonicalHeaderKey(k)] = v
-				}
-			}
-		}
 	}
 
 	cfg := h.AuthManager.RuntimeConfig()
@@ -911,16 +872,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 								if passthroughHeadersEnabled {
 									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
 								} else {
-									// 未开启全局透传时，清空原有响应头并重新保留 x-request-id 与 x-github-request-id
+									// 未开启全局透传时，清空原有响应头
 									for k := range upstreamHeaders {
 										delete(upstreamHeaders, k)
-									}
-									if retryResult.Headers != nil {
-										for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
-											if v := retryResult.Headers.Values(k); len(v) > 0 {
-												upstreamHeaders[http.CanonicalHeaderKey(k)] = v
-											}
-										}
 									}
 								}
 								// 重试连接建立后，新响应头可能已发生变化，重新进行一次响应头预处理以让 JS 重新注入/修改

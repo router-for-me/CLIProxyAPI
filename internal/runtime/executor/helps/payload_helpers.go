@@ -2,6 +2,7 @@ package helps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -1049,7 +1050,7 @@ func apply_js_before_request(script_path string, payload_bytes []byte, req_id st
 	js_val, err_call := engine.call_function("on_before_request", 1*time.Second, js_ctx)
 	if err_call != nil {
 		// 如果函数本身没声明，call_function 会返回错误，我们在此处捕获若为不存在则透传，否则报出错误
-		if strings.Contains(err_call.Error(), "不存在") {
+		if errors.Is(err_call, ErrFunctionNotFound) {
 			return payload_bytes, nil
 		}
 		return nil, err_call
@@ -1212,7 +1213,7 @@ func apply_js_after_response(script_path string, req_id string, model, protocol 
 	js_val, err_call := engine.call_function("on_after_response", 1*time.Second, js_ctx_val)
 	if err_call != nil {
 		// 如果函数本身没有声明，直接返回原始数据
-		if strings.Contains(err_call.Error(), "不存在") {
+		if errors.Is(err_call, ErrFunctionNotFound) {
 			return body_str, chunk_str, nil
 		}
 		return body_str, chunk_str, err_call
@@ -1265,6 +1266,10 @@ func apply_js_after_response(script_path string, req_id string, model, protocol 
 
 // ApplyJSAfterResponse 运行所有匹配的 JavaScript 处理器对非流式响应进行处理。
 func ApplyJSAfterResponse(cfg *config.Config, req_id string, model, requested_model, protocol string, headers http.Header, req_body []byte, resp_body []byte, resp_headers http.Header) ([]byte, http.Header) {
+	if resp_headers == nil {
+		// 防御性初始化，防止后续 JS 注入/修改响应头时因 nil 导致修改丢失
+		resp_headers = make(http.Header)
+	}
 	if cfg == nil || len(resp_body) == 0 || len(cfg.Payload.JSHandler) == 0 {
 		return resp_body, resp_headers
 	}
@@ -1302,6 +1307,10 @@ func ApplyJSAfterResponse(cfg *config.Config, req_id string, model, requested_mo
 
 // ApplyJSAfterResponseStream 运行所有匹配的 JavaScript 处理器对流式响应的单个分块进行处理。
 func ApplyJSAfterResponseStream(cfg *config.Config, req_id string, model, requested_model, protocol string, headers http.Header, req_body []byte, history_chunks []string, current_chunk []byte, resp_headers http.Header) ([]byte, http.Header) {
+	if resp_headers == nil {
+		// 防御性初始化，防止后续 JS 注入/修改响应头时因 nil 导致修改丢失
+		resp_headers = make(http.Header)
+	}
 	if cfg == nil || len(cfg.Payload.JSHandler) == 0 {
 		return current_chunk, resp_headers
 	}

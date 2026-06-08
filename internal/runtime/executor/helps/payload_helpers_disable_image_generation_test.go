@@ -533,4 +533,15 @@ func TestApplyJSAfterResponse_Hooks(t *testing.T) {
 	if got := mock_stream_headers.Get("X-Stream-Resp-Header"); got != "stream-value" {
 		t.Fatalf("预期响应头 X-Stream-Resp-Header 被修改为 %q, 实际为 %q", "stream-value", got)
 	}
+
+	// 3. 验证当传入的 resp_headers 为 nil 时的防御性初始化和返回
+	_, ret_headers := ApplyJSAfterResponse(cfg_normal, "test-req-id", "gpt-4", "gpt-4", "openai", nil, req_body, resp_body, nil)
+	if got := ret_headers.Get("X-Test-Resp-Header"); got != "test-value" {
+		t.Fatalf("预期当传入 nil 时，返回的响应头中仍然包含 X-Test-Resp-Header 并被修改为 %q, 实际为 %q", "test-value", got)
+	}
+
+	_, ret_stream_headers := ApplyJSAfterResponseStream(cfg_stream, "test-req-id-stream", "gpt-4", "gpt-4", "openai", nil, req_body, nil, chunk1, nil)
+	if got := ret_stream_headers.Get("X-Stream-Resp-Header"); got != "stream-value" {
+		t.Fatalf("预期流式响应当传入 nil 时，返回的响应头中仍然包含 X-Stream-Resp-Header 并被修改为 %q, 实际为 %q", "stream-value", got)
+	}
 }
