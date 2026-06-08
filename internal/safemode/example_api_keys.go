@@ -73,7 +73,7 @@ func WarningServerURL(cfg *config.Config) string {
 func NewExampleAPIKeyWarningHandler(configPath string, keys []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL == nil || r.URL.Path != "/" {
+		if r.URL == nil || (r.URL.Path != "/" && r.URL.Path != "/management.html") {
 			http.NotFound(w, r)
 			return
 		}
