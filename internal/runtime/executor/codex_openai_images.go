@@ -583,7 +583,7 @@ func codexMultipartFileToDataURL(fileHeader *multipart.FileHeader) (string, erro
 //
 // It prefers image_generation_call items already present in the completed event's
 // response.output and only falls back to the collected items when that output is
-// empty — mirroring the semantics of patchCodexCompletedOutput + the previous
+// empty, mirroring the semantics of patchCodexCompletedOutput + the previous
 // extractor. Skipping the concatenate-and-reparse step avoids two large copies of
 // the base64 payload, which matters for multi-megabyte generated images.
 func codexExtractImageResults(completed []byte, itemsByIndex map[int64][]byte, fallback [][]byte) (results []codexImageCallResult, createdAt int64, usageRaw []byte, firstMeta codexImageCallResult, err error) {
