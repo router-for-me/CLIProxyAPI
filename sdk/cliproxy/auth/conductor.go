@@ -272,6 +272,22 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	m.scheduler.upsertAuth(snapshot)
 }
 
+// RefreshSchedulerAll rebuilds scheduler entries for every known auth.
+func (m *Manager) RefreshSchedulerAll() {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.auths))
+	for id := range m.auths {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.RefreshSchedulerEntry(id)
+	}
+}
+
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
