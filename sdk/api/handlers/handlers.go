@@ -799,6 +799,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		defer close(errChan)
 		var accumulatedBody strings.Builder
 		var historyChunks []string
+		localHeaders := cloneHeader(upstreamHeaders)
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
@@ -870,20 +871,23 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
 								if passthroughHeadersEnabled {
-									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+									if localHeaders == nil {
+										localHeaders = make(http.Header)
+									}
+									replaceHeader(localHeaders, FilterUpstreamHeaders(retryResult.Headers))
 								} else {
 									// 未开启全局透传时，清空原有响应头
-									for k := range upstreamHeaders {
-										delete(upstreamHeaders, k)
+									for k := range localHeaders {
+										delete(localHeaders, k)
 									}
 								}
 								// 重试连接建立后，新响应头可能已发生变化，重新进行一次响应头预处理以让 JS 重新注入/修改
 								if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
-									if upstreamHeaders == nil {
-										upstreamHeaders = make(http.Header)
+									if localHeaders == nil {
+										localHeaders = make(http.Header)
 									}
 									reqID := logging.GetRequestID(ctx)
-									_, upstreamHeaders = helps.ApplyJSAfterResponseStream(
+									_, localHeaders = helps.ApplyJSAfterResponseStream(
 										cfg,
 										reqID,
 										normalizedModel,
@@ -893,12 +897,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 										rawJSON,
 										nil,
 										nil,
-										upstreamHeaders,
+										localHeaders,
 									)
 								}
 								// 重试后若未启用透传且无追踪头，将其置为 nil 以保持兼容
-								if !passthroughHeadersEnabled && len(upstreamHeaders) == 0 {
-									upstreamHeaders = nil
+								if !passthroughHeadersEnabled && len(localHeaders) == 0 {
+									localHeaders = nil
 								}
 								chunks = retryResult.Chunks
 								continue outer
@@ -927,7 +931,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
 						reqID := logging.GetRequestID(ctx)
 						var updatedPayload []byte
-						updatedPayload, upstreamHeaders = helps.ApplyJSAfterResponseStream(
+						updatedPayload, localHeaders = helps.ApplyJSAfterResponseStream(
 							cfg,
 							reqID,
 							normalizedModel,
@@ -937,7 +941,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							rawJSON,
 							historyChunks,
 							chunk.Payload,
-							upstreamHeaders,
+							localHeaders,
 						)
 						chunk.Payload = updatedPayload
 					}
@@ -950,7 +954,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							return
 						}
 					}
-					sentPayload = true
+					if !sentPayload {
+						// 第一次向主协程发送数据分块前，将 localHeaders 的内容同步回共享的 upstreamHeaders。
+						// 此时主协程尚未开始读取 upstreamHeaders，因此此操作是绝对并发安全的。
+						if upstreamHeaders != nil && localHeaders != nil {
+							replaceHeader(upstreamHeaders, localHeaders)
+						}
+						sentPayload = true
+					}
 					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
 						return
 					}

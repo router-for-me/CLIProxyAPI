@@ -32,7 +32,7 @@ func (engine *js_engine) init_console() {
 			args[i] = arg.Export()
 		}
 		// 根据全局日志规则要求，使用中文输出日志
-		log.Infof("JS 控制台日志: %v", args...)
+		log.Info("JS 控制台日志: ", fmt.Sprint(args...))
 		return goja.Undefined()
 	}
 	_ = console.Set("log", console_log_wrapper)
