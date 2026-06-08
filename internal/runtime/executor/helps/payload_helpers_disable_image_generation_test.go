@@ -414,6 +414,15 @@ func TestApplyPayloadConfigWithRequest_JSHandlerHooks(t *testing.T) {
 	if got := gjson.GetBytes(out_loop, "model").String(); got != "gemini-2.5-pro" {
 		t.Fatalf("预期死循环超时中断后降级并保留原始 model = gemini-2.5-pro, 实际为: %q", got)
 	}
+
+	// 4. 验证直接调用的导出接口 ApplyJSBeforeRequest
+	out_direct, err_direct := ApplyJSBeforeRequest(cfg_normal, "test-req-id", "gemini-2.5-pro", "gemini-2.5-pro", "gemini", nil, payload)
+	if err_direct != nil {
+		t.Fatalf("预期 ApplyJSBeforeRequest 成功执行，实际报错: %v", err_direct)
+	}
+	if got := gjson.GetBytes(out_direct, "model").String(); got != "gemini-2.5-pro-modified" {
+		t.Fatalf("预期通过 ApplyJSBeforeRequest 修改后的 model 为 gemini-2.5-pro-modified, 实际为: %q", got)
+	}
 }
 
 func TestApplyJSAfterResponse_Hooks(t *testing.T) {

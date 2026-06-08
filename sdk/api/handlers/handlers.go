@@ -27,6 +27,7 @@ import (
 	"golang.org/x/net/context"
 
 	helps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	log "github.com/sirupsen/logrus"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -588,6 +589,28 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+
+	// 在将请求负载发送给上游前，拦截并执行 JavaScript 请求前处理器以支持清理/修改 Payload 及 Headers
+	reqHeaders := headersFromContext(ctx)
+	cfg := h.AuthManager.RuntimeConfig()
+	if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
+		reqID := logging.GetRequestID(ctx)
+		processedPayload, errJS := helps.ApplyJSBeforeRequest(
+			cfg,
+			reqID,
+			normalizedModel,
+			modelName,
+			handlerType,
+			reqHeaders,
+			rawJSON,
+		)
+		if errJS != nil {
+			log.Warnf("执行 JavaScript 请求前拦截失败: %v", errJS)
+		} else {
+			rawJSON = processedPayload
+		}
+	}
+
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -601,7 +624,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		Alt:             alt,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
-		Headers:         headersFromContext(ctx),
+		Headers:         reqHeaders,
 	}
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
@@ -622,7 +645,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if err == nil {
-		cfg := h.AuthManager.RuntimeConfig()
+		cfg = h.AuthManager.RuntimeConfig()
 		if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
 			reqID := logging.GetRequestID(ctx)
 			var updatedPayload []byte
@@ -658,6 +681,28 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+
+	// 在将请求负载发送给上游前，拦截并执行 JavaScript 请求前处理器以支持清理/修改 Payload 及 Headers
+	reqHeaders := headersFromContext(ctx)
+	cfg := h.AuthManager.RuntimeConfig()
+	if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
+		reqID := logging.GetRequestID(ctx)
+		processedPayload, errJS := helps.ApplyJSBeforeRequest(
+			cfg,
+			reqID,
+			normalizedModel,
+			modelName,
+			handlerType,
+			reqHeaders,
+			rawJSON,
+		)
+		if errJS != nil {
+			log.Warnf("执行 JavaScript 请求前拦截失败: %v", errJS)
+		} else {
+			rawJSON = processedPayload
+		}
+	}
+
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -671,7 +716,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		Alt:             alt,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
-		Headers:         headersFromContext(ctx),
+		Headers:         reqHeaders,
 	}
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
@@ -721,6 +766,28 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+
+	// 在将请求负载发送给上游前，拦截并执行 JavaScript 请求前处理器以支持清理/修改 Payload 及 Headers
+	reqHeaders := headersFromContext(ctx)
+	cfg := h.AuthManager.RuntimeConfig()
+	if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
+		reqID := logging.GetRequestID(ctx)
+		processedPayload, errJS := helps.ApplyJSBeforeRequest(
+			cfg,
+			reqID,
+			normalizedModel,
+			modelName,
+			handlerType,
+			reqHeaders,
+			rawJSON,
+		)
+		if errJS != nil {
+			log.Warnf("执行 JavaScript 请求前拦截失败: %v", errJS)
+		} else {
+			rawJSON = processedPayload
+		}
+	}
+
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -734,7 +801,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		Alt:             alt,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
-		Headers:         headersFromContext(ctx),
+		Headers:         reqHeaders,
 	}
 	opts.Metadata = reqMeta
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
@@ -765,7 +832,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
 	}
 
-	cfg := h.AuthManager.RuntimeConfig()
+	cfg = h.AuthManager.RuntimeConfig()
 	if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
 		// 如果匹配到 JS 脚本，即使未启用透传也初始化空响应头以接受 JS 修改
 		if upstreamHeaders == nil {
@@ -800,7 +867,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		var accumulatedBody strings.Builder
 		var historyChunks []string
 		localHeaders := cloneHeader(upstreamHeaders)
-
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)

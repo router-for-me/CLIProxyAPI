@@ -1347,3 +1347,40 @@ func ApplyJSAfterResponseStream(cfg *config.Config, req_id string, model, reques
 
 	return []byte(chunk_str), resp_headers
 }
+
+// ApplyJSBeforeRequest 运行所有匹配的 JavaScript 处理器对请求载荷和请求头进行处理。
+func ApplyJSBeforeRequest(cfg *config.Config, req_id string, model, requested_model, protocol string, headers http.Header, raw_json []byte) ([]byte, error) {
+	if cfg == nil || len(raw_json) == 0 || len(cfg.Payload.JSHandler) == 0 {
+		return raw_json, nil
+	}
+
+	model = strings.TrimSpace(model)
+	requested_model = strings.TrimSpace(requested_model)
+	if model == "" && requested_model == "" {
+		return raw_json, nil
+	}
+
+	candidates := payloadModelCandidates(model, requested_model)
+	out := raw_json
+
+	for i := range cfg.Payload.JSHandler {
+		rule := &cfg.Payload.JSHandler[i]
+		if payloadModelRulesMatch(rule.Models, protocol, "", headers, out, "", candidates) {
+			for _, script_path := range rule.Params {
+				script_path = strings.TrimSpace(script_path)
+				if script_path == "" {
+					continue
+				}
+				processed, err_js := apply_js_before_request(script_path, out, req_id, model, protocol, headers)
+				if err_js != nil {
+					// 捕获异常并打印中文警告日志，随后跳过继续下一个处理
+					log.Warnf("执行 JavaScript 请求前拦截处理器 [%s] 失败: %v", script_path, err_js)
+					continue
+				}
+				out = processed
+			}
+		}
+	}
+
+	return out, nil
+}
