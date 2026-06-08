@@ -356,6 +356,36 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 //   - cfg: The new application configuration
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
 
+// AppendVirtualModels appends virtual model entries in the appropriate format for the handler type.
+func (h *BaseAPIHandler) AppendVirtualModels(models []map[string]any, handlerType string) []map[string]any {
+	if h.Cfg == nil || len(h.Cfg.VirtualModels) == 0 {
+		return models
+	}
+	for _, vm := range h.Cfg.VirtualModels {
+		var modelEntry map[string]any
+		switch handlerType {
+		case "claude":
+			modelEntry = map[string]any{
+				"id":           vm.Name,
+				"object":       "model",
+				"created_at":   int64(0),
+				"type":         "model",
+				"display_name": vm.Name,
+				"owned_by":     "virtual",
+			}
+		default:
+			modelEntry = map[string]any{
+				"id":       vm.Name,
+				"object":   "model",
+				"created":  int64(0),
+				"owned_by": "virtual",
+			}
+		}
+		models = append(models, modelEntry)
+	}
+	return models
+}
+
 // GetAlt extracts the 'alt' parameter from the request query string.
 // It checks both 'alt' and '$alt' parameters and returns the appropriate value.
 //
@@ -934,6 +964,22 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	// Check if this is a virtual model first
+	if h.AuthManager != nil {
+		virtualModel := h.AuthManager.ResolveVirtualModel(baseModel)
+		if virtualModel != "" {
+			// Preserve the thinking suffix from the original request.
+			// e.g. "fast(8192)" -> resolve "fast" to "gpt-5-codex-mini" -> "gpt-5-codex-mini(8192)"
+			if initialSuffix.HasSuffix {
+				resolvedModelName = virtualModel + "(" + initialSuffix.RawSuffix + ")"
+			} else {
+				resolvedModelName = virtualModel
+			}
+			parsed = thinking.ParseSuffix(resolvedModelName)
+			baseModel = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+
 	if strings.EqualFold(routeModelBaseName(baseModel), "gpt-image-2") && !allowImageModel {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
@@ -944,7 +990,6 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 		return []string{"home"}, resolvedModelName, nil
 	}
-
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
