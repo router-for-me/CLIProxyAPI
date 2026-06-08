@@ -1,6 +1,24 @@
 /**
  * @file copilot_handler.js
- * @description 这是一个通用的 JavaScript 拦截处理器脚本，用于在请求被发送至上游前进行请求体清洗以及在响应返回客户端前进行日志记录和修改。
+ * @description 
+ * 本脚本为一个通用的 JavaScript 载荷拦截处理器，主要用于解决 GitHub Copilot / Client 端在调用大模型时的请求格式兼容问题，以及流式响应中工具调用（Tool Calling）的生命周期转换。
+ * 
+ * 核心作用：
+ * 1. 【请求清洗】：上游大模型可能不支持某些非标 Schema 属性（如 `$comment` 或 `enumDescriptions`）而导致 400 报错。脚本在前置拦截中递归清洗这些多余字段，并对请求的 temperature、敏感词等内容进行动态重写。
+ * 2. 【工具调用流控制】：兼容 GitHub Copilot / Client 的工具调用状态机。
+ *    - 如果流式响应的单帧分块包含 tool_calls（工具调用），则强制重置 `finish_reason` 为 `null`，避免客户端提前关闭数据接收。
+ *    - 如果当前帧是结束收尾帧，且先前已发生的历史分块中检测到曾经发出过工具调用，则强制将当前帧的 `finish_reason` 重置修改为 `"tool_calls"`，通知客户端工具调用执行已到达终点并唤醒客户端状态机。
+ * 
+ * 原理流程：
+ * 1. 【请求前置拦截 - on_before_request(ctx)】：
+ *    - Go 网关收到客户端请求 -> 将请求体与 Header 装载进 `ctx` 传给 JS 虚拟机 -> 解析 `ctx.body` 为 JSON。
+ *    - 递归遍历 JSON 节点并删除 `$comment` 和 `enumDescriptions` 字段。
+ *    - 重写 `ctx.body` 为序列化后的新 JSON 传回 Go -> Go 网关将清洗后的载荷发送至上游 AI 提供商。
+ * 2. 【响应后置拦截 - on_after_response(ctx)】：
+ *    - 网关接收到上游流式分块（SSE 数据流）-> 剥离 `"data: "` 前缀并提取 JSON 数据传入 `ctx.chunk` -> 调用此钩子。
+ *    - 如果 `ctx.chunk` 为当前工具块，重置 `finish_reason` 为 `null`。
+ *    - 如果当前为收尾分块，则读取网关提供的只读 `ctx.history_chunks` 历史字符串数组。如果历史记录中存在工具调用标记，强行在当前分块中将 `finish_reason` 设为 `"tool_calls"`。
+ *    - 返回修改后的 `ctx.chunk`，Go 网关重新在前面拼装 `"data: "` 并将数据推给客户端。
  * 
  * 使用方式：
  * 在配置文件 (如 config.yaml) 的 payload 属性中进行注册：
