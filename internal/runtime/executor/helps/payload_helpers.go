@@ -2,14 +2,20 @@ package helps
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/dop251/goja"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -178,6 +184,42 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 			}
 		}
 	}
+	// 运行匹配的 JavaScript 请求前处理器规则以支持动态拦截修改请求载荷与请求头
+	if len(cfg.Payload.JSHandler) > 0 {
+		model = strings.TrimSpace(model)
+		requestedModel = strings.TrimSpace(requestedModel)
+		if model != "" || requestedModel != "" {
+			candidates := payloadModelCandidates(model, requestedModel)
+			reqID := ""
+			if headers != nil {
+				reqID = headers.Get("X-Request-Id")
+				if reqID == "" {
+					reqID = headers.Get("x-request-id")
+				}
+			}
+			if reqID == "" {
+				reqID = generate_request_id()
+			}
+			for i := range cfg.Payload.JSHandler {
+				rule := &cfg.Payload.JSHandler[i]
+				if payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
+					for _, script_path := range rule.Params {
+						script_path = strings.TrimSpace(script_path)
+						if script_path == "" {
+							continue
+						}
+						processed, err_js := apply_js_before_request(script_path, out, reqID, model, protocol, headers)
+						if err_js != nil {
+							log.Warnf("执行 JavaScript 请求前处理器 [%s] 失败: %v", script_path, err_js)
+							continue
+						}
+						out = processed
+					}
+				}
+			}
+		}
+	}
+
 	return out
 }
 
@@ -910,4 +952,389 @@ func matchModelPattern(pattern, model string) bool {
 		pi++
 	}
 	return pi == len(pattern)
+}
+
+// js_cached_program 结构体表示已编译的 JS 脚本程序及其实时文件修改时间，供热重载比对使用。
+type js_cached_program struct {
+	program  *goja.Program // 已编译的 JavaScript 程序
+	mod_time time.Time     // 文件最后修改时间
+}
+
+var (
+	// js_programs_mu 读写锁，用于保护 js_programs_cache 的并发访问
+	js_programs_mu sync.RWMutex
+	// js_programs_cache 缓存已编译的 JS 脚本，避免重复解析编译
+	js_programs_cache = make(map[string]js_cached_program)
+)
+
+// generate_request_id 生成带有当前时间前缀和十六进制后缀的唯一追踪 ID。
+func generate_request_id() string {
+	t := time.Now().Format("20060102150405")
+	nano := time.Now().UnixNano()
+	return fmt.Sprintf("%s-%x", t, nano&0xffffffff)
+}
+
+// get_js_program 读取 JavaScript 脚本并将其编译为 goja.Program，支持基于文件修改时间进行热重载，避免重复进行语法分析。
+func get_js_program(path string) (*goja.Program, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	mod_time := info.ModTime()
+
+	js_programs_mu.RLock()
+	cached, exists := js_programs_cache[path]
+	js_programs_mu.RUnlock()
+	if exists && cached.mod_time.Equal(mod_time) {
+		return cached.program, nil
+	}
+
+	js_programs_mu.Lock()
+	defer js_programs_mu.Unlock()
+	// 双重检查锁定
+	if cached, exists = js_programs_cache[path]; exists && cached.mod_time.Equal(mod_time) {
+		return cached.program, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	compiled, err := goja.Compile(path, string(data), false)
+	if err != nil {
+		return nil, fmt.Errorf("编译 JS 脚本 %s 失败: %w", path, err)
+	}
+
+	js_programs_cache[path] = js_cached_program{
+		program:  compiled,
+		mod_time: mod_time,
+	}
+	return compiled, nil
+}
+
+// apply_js_before_request 在新虚拟机中加载并运行匹配的 JS 脚本，触发 on_before_request 钩子函数拦截请求载荷。
+func apply_js_before_request(script_path string, payload_bytes []byte, req_id string, model, protocol string, headers http.Header) ([]byte, error) {
+	program, err := get_js_program(script_path)
+	if err != nil {
+		return nil, err
+	}
+
+	engine := new_js_engine()
+	if err_run := engine.run_program(program); err_run != nil {
+		return nil, err_run
+	}
+
+	// 拼装请求头 map
+	headers_map := make(map[string]any)
+	if headers != nil {
+		for k, v := range headers {
+			if len(v) > 0 {
+				headers_map[k] = v[0]
+			}
+		}
+	}
+
+	// 组装统一的 ctx 参数对象，body 直接传递原始字符串以保证非 JSON 兼容的鲁棒性
+	js_ctx := map[string]any{
+		"id":       req_id,
+		"body":     string(payload_bytes),
+		"headers":  headers_map,
+		"url":      "", // 暂时空缺，在拦截前请求时不需要，但保持占位
+		"model":    model,
+		"protocol": protocol,
+	}
+
+	// 触发执行钩子，限制 1 秒超时
+	js_val, err_call := engine.call_function("on_before_request", 1*time.Second, js_ctx)
+	if err_call != nil {
+		// 如果函数本身没声明，call_function 会返回错误，我们在此处捕获若为不存在则透传，否则报出错误
+		if strings.Contains(err_call.Error(), "不存在") {
+			return payload_bytes, nil
+		}
+		return nil, err_call
+	}
+
+	if js_val == nil || goja.IsUndefined(js_val) || goja.IsNull(js_val) {
+		return payload_bytes, nil
+	}
+
+	// 多态兼容数据获取
+	exported := js_val.Export()
+	if exported == nil {
+		return payload_bytes, nil
+	}
+
+	// 情况 A：返回的是包装后的 ctx 对象
+	if obj_map, ok := exported.(map[string]any); ok {
+		// 从返回 of ctx 对象中提取修改后的请求头，并写回 headers
+		if headers_val, exists_headers := obj_map["headers"]; exists_headers {
+			update_header_from_any(headers, headers_val)
+		}
+
+		if body_val, exists := obj_map["body"]; exists {
+			if body_str, ok_str := body_val.(string); ok_str {
+				return []byte(body_str), nil
+			}
+		}
+	}
+
+	// 情况 B：返回的直接就是 body 字符串本身
+	if body_str, ok := exported.(string); ok {
+		return []byte(body_str), nil
+	}
+
+	return payload_bytes, nil
+}
+
+// header_to_map 将 Go 语言的 http.Header 对象转为 JS 易读的扁平 map 结构。
+func header_to_map(h http.Header) map[string]string {
+	m := make(map[string]string)
+	if h == nil {
+		return m
+	}
+	for k, v := range h {
+		if len(v) > 0 {
+			m[k] = v[0]
+		}
+	}
+	return m
+}
+
+// update_header_from_any 将 JS 修改后的扁平响应头 map 字段（支持 map[string]any 或 map[string]string 等多种类型）更新回 Go 语言的 http.Header。
+// 针对值为 nil、空字符串的情况，会在 Go 端的 http.Header 中同步将其 Del 删除。
+func update_header_from_any(h http.Header, val interface{}) {
+	if h == nil || val == nil {
+		return
+	}
+	rv := reflect.ValueOf(val)
+	if rv.Kind() != reflect.Map {
+		return
+	}
+	for _, key := range rv.MapKeys() {
+		kStr := key.String()
+		vVal := rv.MapIndex(key).Interface()
+		if vVal == nil {
+			h.Del(kStr)
+		} else if val_str, ok := vVal.(string); ok {
+			if strings.TrimSpace(val_str) == "" {
+				h.Del(kStr)
+			} else {
+				h.Set(kStr, val_str)
+			}
+		} else {
+			// 如果是非字符串但也非 nil，可以使用 fmt.Sprintf 兜底以确保容错性
+			h.Set(kStr, fmt.Sprintf("%v", vVal))
+		}
+	}
+}
+
+// apply_js_after_response 在新虚拟机中加载并运行匹配的 JS 脚本，触发 on_after_response 钩子函数拦截并修改响应载荷、响应流分块或响应头。
+func apply_js_after_response(script_path string, req_id string, model, protocol string, headers http.Header, req_body []byte, body_str string, chunk_str *string, resp_headers http.Header, is_stream bool, history_chunks []string) (string, *string, error) {
+	program, err := get_js_program(script_path)
+	if err != nil {
+		return body_str, chunk_str, err
+	}
+
+	engine := new_js_engine()
+	if err_run := engine.run_program(program); err_run != nil {
+		return body_str, chunk_str, err_run
+	}
+
+	// 拼装请求头 map
+	headers_map := make(map[string]any)
+	if headers != nil {
+		for k, v := range headers {
+			if len(v) > 0 {
+				headers_map[k] = v[0]
+			}
+		}
+	}
+
+	// 构造 req 上下文信息
+	req_ctx := map[string]any{
+		"body":    string(req_body),
+		"headers": headers_map,
+		"url":     "", // 暂时留空
+	}
+
+	// 构造 body 的值：当为流式响应时，body 必须为 null
+	var body_val any = body_str
+	if is_stream {
+		body_val = nil
+	}
+
+	// 组装统一的 ctx 参数对象。响应头 headers 直接挂在根属性上，不需要 resp 对象。
+	js_ctx := map[string]any{
+		"id":       req_id,
+		"body":     body_val,
+		"req":      req_ctx,
+		"protocol": protocol,
+		"headers":  header_to_map(resp_headers),
+	}
+
+	if is_stream {
+		if chunk_str != nil {
+			js_ctx["chunk"] = *chunk_str
+		} else {
+			js_ctx["chunk"] = ""
+		}
+		js_ctx["history_chunks"] = history_chunks
+	} else {
+		js_ctx["chunk"] = nil
+		js_ctx["history_chunks"] = nil
+	}
+
+	// 注入 js_ctx 到 JS VM 中
+	_ = engine.vm.Set("js_ctx", js_ctx)
+
+	// 如果是流式响应，对 history_chunks 执行锁定和深度冻结，确保 JS 内彻底只读
+	if is_stream {
+		_, _ = engine.vm.RunString(`
+			(function() {
+				if (js_ctx) {
+					var list = js_ctx.history_chunks || [];
+					Object.freeze(list);
+					Object.defineProperty(js_ctx, "history_chunks", {
+						value: list,
+						writable: false,
+						configurable: false
+					});
+				}
+			})();
+		`)
+	}
+
+	// 从全局中提取已锁定并深度冻结的对象作为实参，保证只读策略生效
+	js_ctx_val := engine.vm.Get("js_ctx")
+
+	// 触发执行钩子，限制 1 秒超时
+	js_val, err_call := engine.call_function("on_after_response", 1*time.Second, js_ctx_val)
+	if err_call != nil {
+		// 如果函数本身没有声明，直接返回原始数据
+		if strings.Contains(err_call.Error(), "不存在") {
+			return body_str, chunk_str, nil
+		}
+		return body_str, chunk_str, err_call
+	}
+
+	if js_val == nil || goja.IsUndefined(js_val) || goja.IsNull(js_val) {
+		return body_str, chunk_str, nil
+	}
+
+	exported := js_val.Export()
+	if exported == nil {
+		return body_str, chunk_str, nil
+	}
+
+	// 情况 A：返回的是包装后的 ctx 对象
+	if obj_map, ok := exported.(map[string]any); ok {
+		// 从返回的 ctx 根对象中直接提取修改后的响应头，并写回 resp_headers
+		if headers_val, exists := obj_map["headers"]; exists {
+			update_header_from_any(resp_headers, headers_val)
+		}
+
+		// 常规非流式响应：读取 body 属性并修改
+		if !is_stream {
+			if body_val, exists := obj_map["body"]; exists {
+				if b_str, ok_str := body_val.(string); ok_str {
+					return b_str, nil, nil
+				}
+			}
+		} else {
+			// 流式响应：读取 chunk 属性并修改（只提取 chunk，忽略 history_chunks 属性以防篡改）
+			if chunk_val, exists := obj_map["chunk"]; exists {
+				if c_str, ok_str := chunk_val.(string); ok_str {
+					return body_str, &c_str, nil
+				}
+			}
+		}
+	}
+
+	// 情况 B：返回的直接就是字符串本身
+	if str_val, ok := exported.(string); ok {
+		if !is_stream {
+			return str_val, nil, nil
+		} else {
+			return body_str, &str_val, nil
+		}
+	}
+
+	return body_str, chunk_str, nil
+}
+
+// ApplyJSAfterResponse 运行所有匹配的 JavaScript 处理器对非流式响应进行处理。
+func ApplyJSAfterResponse(cfg *config.Config, req_id string, model, requested_model, protocol string, headers http.Header, req_body []byte, resp_body []byte, resp_headers http.Header) ([]byte, http.Header) {
+	if cfg == nil || len(resp_body) == 0 || len(cfg.Payload.JSHandler) == 0 {
+		return resp_body, resp_headers
+	}
+
+	model = strings.TrimSpace(model)
+	requested_model = strings.TrimSpace(requested_model)
+	if model == "" && requested_model == "" {
+		return resp_body, resp_headers
+	}
+
+	candidates := payloadModelCandidates(model, requested_model)
+	out := string(resp_body)
+
+	for i := range cfg.Payload.JSHandler {
+		rule := &cfg.Payload.JSHandler[i]
+		if payloadModelRulesMatch(rule.Models, protocol, "", headers, req_body, "", candidates) {
+			for _, script_path := range rule.Params {
+				script_path = strings.TrimSpace(script_path)
+				if script_path == "" {
+					continue
+				}
+				processed_body, _, err_js := apply_js_after_response(script_path, req_id, model, protocol, headers, req_body, out, nil, resp_headers, false, nil)
+				if err_js != nil {
+					// 捕获异常，打印中文警告日志，降级使用未修改的数据
+					log.Warnf("执行 JavaScript 响应处理器 [%s] 失败: %v", script_path, err_js)
+					continue
+				}
+				out = processed_body
+			}
+		}
+	}
+
+	return []byte(out), resp_headers
+}
+
+// ApplyJSAfterResponseStream 运行所有匹配的 JavaScript 处理器对流式响应的单个分块进行处理。
+func ApplyJSAfterResponseStream(cfg *config.Config, req_id string, model, requested_model, protocol string, headers http.Header, req_body []byte, history_chunks []string, current_chunk []byte, resp_headers http.Header) ([]byte, http.Header) {
+	if cfg == nil || len(cfg.Payload.JSHandler) == 0 {
+		return current_chunk, resp_headers
+	}
+
+	model = strings.TrimSpace(model)
+	requested_model = strings.TrimSpace(requested_model)
+	if model == "" && requested_model == "" {
+		return current_chunk, resp_headers
+	}
+
+	candidates := payloadModelCandidates(model, requested_model)
+	chunk_str := string(current_chunk)
+
+	for i := range cfg.Payload.JSHandler {
+		rule := &cfg.Payload.JSHandler[i]
+		if payloadModelRulesMatch(rule.Models, protocol, "", headers, req_body, "", candidates) {
+			for _, script_path := range rule.Params {
+				script_path = strings.TrimSpace(script_path)
+				if script_path == "" {
+					continue
+				}
+				_, processed_chunk, err_js := apply_js_after_response(script_path, req_id, model, protocol, headers, req_body, "", &chunk_str, resp_headers, true, history_chunks)
+				if err_js != nil {
+					// 捕获异常，打印中文警告日志，降级使用原始分块数据
+					log.Warnf("执行 JavaScript 流式响应处理器 [%s] 失败: %v", script_path, err_js)
+					continue
+				}
+				if processed_chunk != nil {
+					chunk_str = *processed_chunk
+				}
+			}
+		}
+	}
+
+	return []byte(chunk_str), resp_headers
 }

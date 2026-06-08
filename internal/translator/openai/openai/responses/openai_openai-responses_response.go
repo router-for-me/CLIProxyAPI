@@ -183,8 +183,11 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 	}
 	if st.UsageSeen {
 		completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", st.PromptTokens)
+		// 同时写入 prompt_tokens 与 completion_tokens，以防客户端 JS 的 zwe 校验因为没有这两个属性导致过滤失败引发崩溃
+		completed, _ = sjson.SetBytes(completed, "response.usage.prompt_tokens", st.PromptTokens)
 		completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
 		completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", st.CompletionTokens)
+		completed, _ = sjson.SetBytes(completed, "response.usage.completion_tokens", st.CompletionTokens)
 		if st.ReasoningTokens > 0 {
 			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
 		}
@@ -778,10 +781,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		// Map common tokens
 		if usage.Get("prompt_tokens").Exists() || usage.Get("completion_tokens").Exists() || usage.Get("total_tokens").Exists() {
 			resp, _ = sjson.SetBytes(resp, "usage.input_tokens", usage.Get("prompt_tokens").Int())
+			// 同时写入 prompt_tokens 与 completion_tokens，以防客户端 JS 因为没有这两个属性导致过滤失败引发崩溃
+			resp, _ = sjson.SetBytes(resp, "usage.prompt_tokens", usage.Get("prompt_tokens").Int())
 			if d := usage.Get("prompt_tokens_details.cached_tokens"); d.Exists() {
 				resp, _ = sjson.SetBytes(resp, "usage.input_tokens_details.cached_tokens", d.Int())
 			}
 			resp, _ = sjson.SetBytes(resp, "usage.output_tokens", usage.Get("completion_tokens").Int())
+			resp, _ = sjson.SetBytes(resp, "usage.completion_tokens", usage.Get("completion_tokens").Int())
 			// Reasoning tokens not available in Chat Completions; set only if present under output_tokens_details
 			if d := usage.Get("output_tokens_details.reasoning_tokens"); d.Exists() {
 				resp, _ = sjson.SetBytes(resp, "usage.output_tokens_details.reasoning_tokens", d.Int())

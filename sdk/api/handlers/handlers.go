@@ -25,6 +25,8 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
+
+	helps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -619,8 +621,40 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
+	if err == nil {
+		cfg := h.AuthManager.RuntimeConfig()
+		if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
+			reqID := logging.GetRequestID(ctx)
+			var updatedPayload []byte
+			updatedPayload, resp.Headers = helps.ApplyJSAfterResponse(
+				cfg,
+				reqID,
+				normalizedModel,
+				modelName,
+				handlerType,
+				headersFromContext(ctx),
+				rawJSON,
+				resp.Payload,
+				resp.Headers,
+			)
+			resp.Payload = updatedPayload
+		}
+	}
+
 	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
+		// 即使未开启全局响应头透传，也必须保留并返回 x-request-id 与 x-github-request-id 响应头
+		var resultHeaders http.Header
+		if resp.Headers != nil {
+			for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
+				if v := resp.Headers.Values(k); len(v) > 0 {
+					if resultHeaders == nil {
+						resultHeaders = make(http.Header)
+					}
+					resultHeaders[http.CanonicalHeaderKey(k)] = v
+				}
+			}
+		}
+		return resp.Payload, resultHeaders, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
@@ -670,7 +704,19 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
+		// 即使未开启全局响应头透传，也必须保留并返回 x-request-id 与 x-github-request-id 响应头
+		var resultHeaders http.Header
+		if resp.Headers != nil {
+			for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
+				if v := resp.Headers.Values(k); len(v) > 0 {
+					if resultHeaders == nil {
+						resultHeaders = make(http.Header)
+					}
+					resultHeaders[http.CanonicalHeaderKey(k)] = v
+				}
+			}
+		}
+		return resp.Payload, resultHeaders, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
@@ -736,14 +782,53 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
-	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
-	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
+	// 在协程启动前同步捕获初始连接的上游响应头。
+	// 保持一个可变 map 结构，使引导重试能够在发送第一个载荷前替换它。
 	var upstreamHeaders http.Header
 	if passthroughHeadersEnabled {
 		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
 		if upstreamHeaders == nil {
 			upstreamHeaders = make(http.Header)
 		}
+	} else {
+		// 即使没有开启响应头透传，也必须保留并放行 x-request-id 和 x-github-request-id 响应头
+		if streamResult.Headers != nil {
+			for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
+				if v := streamResult.Headers.Values(k); len(v) > 0 {
+					if upstreamHeaders == nil {
+						upstreamHeaders = make(http.Header)
+					}
+					upstreamHeaders[http.CanonicalHeaderKey(k)] = v
+				}
+			}
+		}
+	}
+
+	cfg := h.AuthManager.RuntimeConfig()
+	if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
+		// 如果匹配到 JS 脚本，即使未启用透传也初始化空响应头以接受 JS 修改
+		if upstreamHeaders == nil {
+			upstreamHeaders = make(http.Header)
+		}
+		reqID := logging.GetRequestID(ctx)
+		// 传入 nil 分块进行响应头初始化预处理，使 JS 能够在响应头被发送给客户端前进行注入修改
+		_, upstreamHeaders = helps.ApplyJSAfterResponseStream(
+			cfg,
+			reqID,
+			normalizedModel,
+			modelName,
+			handlerType,
+			headersFromContext(ctx),
+			rawJSON,
+			nil,
+			nil,
+			upstreamHeaders,
+		)
+	}
+
+	// 兼容旧单元测试：若未启用全局响应头透传且没有注入或保留的响应头，重置为 nil
+	if !passthroughHeadersEnabled && len(upstreamHeaders) == 0 {
+		upstreamHeaders = nil
 	}
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
@@ -751,6 +836,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
+		var accumulatedBody strings.Builder
+		var historyChunks []string
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
@@ -823,6 +910,41 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							if retryErr == nil {
 								if passthroughHeadersEnabled {
 									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+								} else {
+									// 未开启全局透传时，清空原有响应头并重新保留 x-request-id 与 x-github-request-id
+									for k := range upstreamHeaders {
+										delete(upstreamHeaders, k)
+									}
+									if retryResult.Headers != nil {
+										for _, k := range []string{"X-Request-Id", "X-Github-Request-Id", "x-request-id", "x-github-request-id"} {
+											if v := retryResult.Headers.Values(k); len(v) > 0 {
+												upstreamHeaders[http.CanonicalHeaderKey(k)] = v
+											}
+										}
+									}
+								}
+								// 重试连接建立后，新响应头可能已发生变化，重新进行一次响应头预处理以让 JS 重新注入/修改
+								if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
+									if upstreamHeaders == nil {
+										upstreamHeaders = make(http.Header)
+									}
+									reqID := logging.GetRequestID(ctx)
+									_, upstreamHeaders = helps.ApplyJSAfterResponseStream(
+										cfg,
+										reqID,
+										normalizedModel,
+										modelName,
+										handlerType,
+										headersFromContext(ctx),
+										rawJSON,
+										nil,
+										nil,
+										upstreamHeaders,
+									)
+								}
+								// 重试后若未启用透传且无追踪头，将其置为 nil 以保持兼容
+								if !passthroughHeadersEnabled && len(upstreamHeaders) == 0 {
+									upstreamHeaders = nil
 								}
 								chunks = retryResult.Chunks
 								continue outer
@@ -847,6 +969,27 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					return
 				}
 				if len(chunk.Payload) > 0 {
+					cfg := h.AuthManager.RuntimeConfig()
+					if cfg != nil && len(cfg.Payload.JSHandler) > 0 {
+						reqID := logging.GetRequestID(ctx)
+						var updatedPayload []byte
+						updatedPayload, upstreamHeaders = helps.ApplyJSAfterResponseStream(
+							cfg,
+							reqID,
+							normalizedModel,
+							modelName,
+							handlerType,
+							headersFromContext(ctx),
+							rawJSON,
+							historyChunks,
+							chunk.Payload,
+							upstreamHeaders,
+						)
+						chunk.Payload = updatedPayload
+					}
+					accumulatedBody.Write(chunk.Payload)
+					historyChunks = append(historyChunks, string(chunk.Payload))
+
 					if handlerType == "openai-response" {
 						if err := validateSSEDataJSON(chunk.Payload); err != nil {
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})

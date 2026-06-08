@@ -1300,6 +1300,16 @@ func (m *Manager) Load(ctx context.Context) error {
 	return nil
 }
 
+// RuntimeConfig 返回当前运行时的完整配置。
+func (m *Manager) RuntimeConfig() *internalconfig.Config {
+	// 如果 Manager 实例为空，直接返回空配置
+	if m == nil {
+		return nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	return cfg
+}
+
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

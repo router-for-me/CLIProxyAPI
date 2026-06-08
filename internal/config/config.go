@@ -411,6 +411,16 @@ type PayloadConfig struct {
 	OverrideRaw []PayloadRule `yaml:"override-raw" json:"override-raw"`
 	// Filter defines rules that remove parameters from the payload by JSON path.
 	Filter []PayloadFilterRule `yaml:"filter" json:"filter"`
+	// JSHandler 用于定义通过 JavaScript 脚本动态修改匹配模型载荷的规则。
+	JSHandler []JSHandlerRule `yaml:"js-handler" json:"js-handler"`
+}
+
+// JSHandlerRule 描述了使用 JavaScript 脚本动态处理符合条件的载荷的规则。
+type JSHandlerRule struct {
+	// Models 包含匹配的模型规则列表。
+	Models []PayloadModelRule `yaml:"models" json:"models"`
+	// Params 包含指向 JavaScript 脚本的文件路径列表（支持绝对路径和相对路径）。
+	Params []string `yaml:"params" json:"params"`
 }
 
 // PayloadFilterRule describes a rule to remove specific JSON paths from matching model payloads.
