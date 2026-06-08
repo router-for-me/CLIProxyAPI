@@ -35,6 +35,98 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// APIKeyAffinitySelector routes each inbound proxy API key to a deterministic
+// credential using rendezvous (highest-random-weight) hashing. Every request from
+// the same API key resolves to the same account, which preserves per-account upstream
+// caching and isolates each key's quota, while different API keys are spread across
+// accounts. Because the caller only ever passes currently-available (non cooling-down)
+// candidates, a key whose home account is capped deterministically falls over to its
+// next-best available account. The behaviour is stateless and therefore stable across
+// restarts. When no inbound API key can be extracted, it defers to a fallback selector.
+type APIKeyAffinitySelector struct {
+	fallback Selector
+}
+
+// NewAPIKeyAffinitySelector builds an API-key-affinity selector with the provided
+// fallback (used when a request carries no recognizable API key). A nil fallback
+// defaults to FillFirstSelector.
+func NewAPIKeyAffinitySelector(fallback Selector) *APIKeyAffinitySelector {
+	if fallback == nil {
+		fallback = &FillFirstSelector{}
+	}
+	return &APIKeyAffinitySelector{fallback: fallback}
+}
+
+// Pick selects the rendezvous-winning available auth for the request's API key.
+func (s *APIKeyAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	apiKey := apiKeyFromOptions(opts)
+	if apiKey == "" {
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+	best := pickByRendezvous(apiKey, available)
+	if best == nil {
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+	selectorLogEntry(ctx).Infof("api-key-affinity: bound | key=%s auth=%s provider=%s model=%s", truncateSessionID(apiKey), best.ID, provider, model)
+	return best, nil
+}
+
+// pickByRendezvous returns the available auth with the highest rendezvous score for
+// the given API key. Ties break on the lexicographically smaller auth ID for stability.
+func pickByRendezvous(apiKey string, available []*Auth) *Auth {
+	var best *Auth
+	var bestScore uint64
+	for _, candidate := range available {
+		if candidate == nil {
+			continue
+		}
+		score := rendezvousScore(apiKey, candidate.ID)
+		if best == nil || score > bestScore || (score == bestScore && candidate.ID < best.ID) {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return best
+}
+
+// rendezvousScore computes a stable 64-bit weight for an (apiKey, authID) pair.
+func rendezvousScore(apiKey, authID string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(apiKey))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(authID))
+	return h.Sum64()
+}
+
+// apiKeyFromOptions extracts the inbound proxy API key from request headers, mirroring
+// the precedence used by the config access provider (Authorization bearer, then the
+// Google and Anthropic header variants). Returns "" when none is present.
+func apiKeyFromOptions(opts cliproxyexecutor.Options) string {
+	headers := opts.Headers
+	if headers == nil {
+		return ""
+	}
+	if authz := strings.TrimSpace(headers.Get("Authorization")); authz != "" {
+		if parts := strings.SplitN(authz, " ", 2); len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+			return strings.TrimSpace(parts[1])
+		}
+		return authz
+	}
+	if v := strings.TrimSpace(headers.Get("X-Goog-Api-Key")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(headers.Get("X-Api-Key")); v != "" {
+		return v
+	}
+	return ""
+}
+
 type blockReason int
 
 const (

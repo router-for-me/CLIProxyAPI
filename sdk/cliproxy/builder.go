@@ -210,11 +210,13 @@ func (b *Builder) Build() (*Service, error) {
 
 		strategy := ""
 		sessionAffinity := false
+		apiKeyAffinity := false
 		sessionAffinityTTL := time.Hour
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
 			// Support both legacy ClaudeCodeSessionAffinity and new universal SessionAffinity
 			sessionAffinity = b.cfg.Routing.SessionAffinity
+			apiKeyAffinity = b.cfg.Routing.APIKeyAffinity
 			if ttlStr := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttlStr != "" {
 				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
 					sessionAffinityTTL = parsed
@@ -229,8 +231,11 @@ func (b *Builder) Build() (*Service, error) {
 			selector = &coreauth.RoundRobinSelector{}
 		}
 
-		// Wrap with session affinity if enabled (failover is always on)
-		if sessionAffinity {
+		// API-key affinity takes precedence; otherwise wrap with session affinity.
+		// Failover is always on for both.
+		if apiKeyAffinity {
+			selector = coreauth.NewAPIKeyAffinitySelector(selector)
+		} else if sessionAffinity {
 			selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 				Fallback: selector,
 				TTL:      sessionAffinityTTL,

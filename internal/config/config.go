@@ -241,6 +241,15 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// APIKeyAffinity, when true, routes each inbound proxy API key to a deterministic
+	// credential using rendezvous (highest-random-weight) hashing. Every request for a
+	// given API key sticks to the same account (preserving upstream caching and isolating
+	// per-key quota), while different API keys are spread across accounts. When a key's
+	// account is cooling down or capped, the key deterministically fails over to its
+	// next-best available account. Takes precedence over Strategy/SessionAffinity for
+	// credential selection.
+	APIKeyAffinity bool `yaml:"api-key-affinity,omitempty" json:"api-key-affinity,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

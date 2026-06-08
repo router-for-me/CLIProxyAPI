@@ -485,11 +485,13 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	previousStrategy := ""
 	var previousSessionAffinity bool
 	var previousSessionAffinityTTL string
+	var previousAPIKeyAffinity bool
 	s.cfgMu.RLock()
 	if s.cfg != nil {
 		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 		previousSessionAffinity = s.cfg.Routing.SessionAffinity
 		previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+		previousAPIKeyAffinity = s.cfg.Routing.APIKeyAffinity
 	}
 	s.cfgMu.RUnlock()
 
@@ -516,10 +518,12 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 
 	nextSessionAffinity := newCfg.Routing.SessionAffinity
 	nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+	nextAPIKeyAffinity := newCfg.Routing.APIKeyAffinity
 
 	selectorChanged := previousStrategy != nextStrategy ||
 		previousSessionAffinity != nextSessionAffinity ||
-		previousSessionAffinityTTL != nextSessionAffinityTTL
+		previousSessionAffinityTTL != nextSessionAffinityTTL ||
+		previousAPIKeyAffinity != nextAPIKeyAffinity
 
 	if s.coreManager != nil && selectorChanged {
 		var selector coreauth.Selector
@@ -530,7 +534,9 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 			selector = &coreauth.RoundRobinSelector{}
 		}
 
-		if nextSessionAffinity {
+		if nextAPIKeyAffinity {
+			selector = coreauth.NewAPIKeyAffinitySelector(selector)
+		} else if nextSessionAffinity {
 			ttl := time.Hour
 			if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
 				if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
