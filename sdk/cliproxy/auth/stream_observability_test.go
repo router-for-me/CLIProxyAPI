@@ -112,11 +112,74 @@ func TestManager_WrapStreamResult_LogsStreamExecutionSummary(t *testing.T) {
 	if got := entry.Data["time_to_first_chunk_ms"]; got != int64(40) {
 		t.Fatalf("time_to_first_chunk_ms = %#v, want 40", got)
 	}
+	if got := entry.Data["output_tokens"]; got != int64(0) {
+		t.Fatalf("output_tokens = %#v, want 0", got)
+	}
+	if got := entry.Data["tokens_per_second"]; got != float64(0) {
+		t.Fatalf("tokens_per_second = %#v, want 0", got)
+	}
 	if got := entry.Data["finish_reason"]; got != "done" {
 		t.Fatalf("finish_reason = %#v, want done", got)
 	}
 	if got := entry.Data["client_gone"]; got != false {
 		t.Fatalf("client_gone = %#v, want false", got)
+	}
+}
+
+func TestManager_WrapStreamResult_LogsSemanticFinishReasonAndUsage(t *testing.T) {
+	hook := logtest.NewGlobal()
+	hook.Reset()
+
+	previousLevel := log.GetLevel()
+	log.SetLevel(log.InfoLevel)
+	defer log.SetLevel(previousLevel)
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-stream-2"}
+	ctx := logging.WithRequestID(context.Background(), "req-stream-2")
+	meta := streamExecutionLogMeta{
+		requestedModel: "gpt-5.5",
+		upstreamModel:  "gpt-5.5",
+		provider:       "openai",
+		executor:       "CodexExecutor",
+		requestPath:    "/v1/responses",
+	}
+
+	remaining := make(chan cliproxyexecutor.StreamChunk, 1)
+	remaining <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"completion_tokens\":5,\"total_tokens\":12,\"prompt_tokens\":7}}\n")}
+	close(remaining)
+
+	startedAt := time.Now().Add(-1100 * time.Millisecond)
+	result := m.wrapStreamResult(
+		ctx,
+		auth,
+		meta,
+		"",
+		nil,
+		[]cliproxyexecutor.StreamChunk{{Payload: []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n")}},
+		remaining,
+		nil,
+		startedAt,
+		100*time.Millisecond,
+		nil,
+	)
+
+	for range result.Chunks {
+	}
+
+	entry := findStreamExecutionSummaryEntry(t, hook.AllEntries())
+	if got := entry.Data["finish_reason"]; got != "tool_calls" {
+		t.Fatalf("finish_reason = %#v, want tool_calls", got)
+	}
+	if got := entry.Data["output_tokens"]; got != int64(5) {
+		t.Fatalf("output_tokens = %#v, want 5", got)
+	}
+	tps, ok := entry.Data["tokens_per_second"].(float64)
+	if !ok {
+		t.Fatalf("tokens_per_second type = %T, want float64", entry.Data["tokens_per_second"])
+	}
+	if tps <= 0 {
+		t.Fatalf("tokens_per_second = %v, want > 0", tps)
 	}
 }
 

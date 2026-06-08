@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -2094,19 +2095,23 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, meta streamE
 		var clientGone bool
 		chunksCount := 0
 		bytesOut := 0
+		summaryFields := streamSummaryFields{}
 		defer func() {
 			totalDuration := time.Since(startedAt)
 			streamDuration := totalDuration - firstPayloadDelay
 			if streamDuration < 0 {
 				streamDuration = 0
 			}
-			finishReason := "done"
-			if failed {
-				finishReason = "error"
-			} else if clientGone {
-				finishReason = "client_gone"
+			finishReason := summaryFields.finishReason
+			if finishReason == "" {
+				finishReason = "done"
+				if failed {
+					finishReason = "error"
+				} else if clientGone {
+					finishReason = "client_gone"
+				}
 			}
-			logEntryWithRequestID(ctx).WithFields(log.Fields{
+			fields := log.Fields{
 				"event":                  "stream_execution_summary",
 				"requested_model":        meta.requestedModel,
 				"upstream_model":         meta.upstreamModel,
@@ -2118,9 +2123,24 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, meta streamE
 				"total_duration_ms":      totalDuration.Milliseconds(),
 				"chunks_count":           chunksCount,
 				"bytes_out":              bytesOut,
+				"output_tokens":          summaryFields.outputTokens,
+				"tokens_per_second":      streamTokensPerSecond(summaryFields.outputTokens, streamDuration),
 				"client_gone":            clientGone && !failed,
 				"finish_reason":          finishReason,
-			}).Info("stream execution summary")
+			}
+			addRequestAttemptLogFields(ctx, fields)
+			logEntryWithRequestID(ctx).WithFields(fields).Info("stream execution summary")
+			if dbPlugin := internalusage.GetDatabasePlugin(); dbPlugin != nil {
+				dbPlugin.HandleStreamSummary(ctx, internalusage.StreamSummaryRecord{
+					TimeToFirstChunkMs: firstPayloadDelay.Milliseconds(),
+					StreamDurationMs:   streamDuration.Milliseconds(),
+					TotalDurationMs:    totalDuration.Milliseconds(),
+					ChunksCount:        chunksCount,
+					BytesOut:           int64(bytesOut),
+					ClientGone:         clientGone && !failed,
+					FinishReason:       finishReason,
+				})
+			}
 		}()
 		forward := true
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
@@ -2146,6 +2166,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, meta streamE
 			if len(chunk.Payload) > 0 {
 				chunksCount++
 				bytesOut += len(chunk.Payload)
+				summaryFields.observePayload(chunk.Payload)
 			}
 			if ctx == nil {
 				out <- chunk

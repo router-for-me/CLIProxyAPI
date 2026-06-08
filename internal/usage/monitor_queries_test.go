@@ -262,6 +262,13 @@ func insertUsageRecords(t *testing.T, store *sqliteUsageStore, records ...UsageR
 	}
 }
 
+func upsertStreamSummary(t *testing.T, store *sqliteUsageStore, record StreamSummaryRecord) {
+	t.Helper()
+	if err := store.UpsertStreamSummary(context.Background(), record); err != nil {
+		t.Fatalf("UpsertStreamSummary failed: %v", err)
+	}
+}
+
 func assertStringSliceEqual(t *testing.T, got, want []string) {
 	t.Helper()
 	gotCopy := append([]string(nil), got...)
@@ -285,14 +292,26 @@ func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
 
 	base := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	insertUsageRecords(t, store,
-		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "source-a", AuthIndex: "0", Method: "POST", Path: "/v1/chat/completions", RequestedAt: base.Add(-3 * time.Hour)},
-		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "source-a", AuthIndex: "1", Method: "POST", Path: "/v1/chat/completions", RequestedAt: base.Add(-2 * time.Hour), Failed: true},
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "source-a", AuthIndex: "0", Method: "POST", Path: "/v1/chat/completions", RequestID: "req-a1", AttemptNo: 1, RequestedAt: base.Add(-3 * time.Hour)},
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "source-a", AuthIndex: "1", Method: "POST", Path: "/v1/chat/completions", RequestID: "req-a2", AttemptNo: 2, RequestedAt: base.Add(-2 * time.Hour), Failed: true},
 		UsageRecord{APIKey: "api-1", Model: "model-b", Source: "source-b", AuthIndex: "0", Method: "GET", Path: "/v1/models", RequestedAt: base.Add(-1 * time.Hour)},
 		UsageRecord{APIKey: "api-2", Model: "model-c", Source: "source-b", AuthIndex: "2", Method: "POST", Path: "/v1/responses", RequestedAt: base.Add(-30 * time.Minute)},
 	)
+	upsertStreamSummary(t, store, StreamSummaryRecord{
+		RequestID:          "req-a2",
+		AttemptNo:          2,
+		TimeToFirstChunkMs: 120,
+		StreamDurationMs:   800,
+		TotalDurationMs:    920,
+		ChunksCount:        16,
+		BytesOut:           4096,
+		ClientGone:         false,
+		FinishReason:       "tool_calls",
+		RecordedAt:         base,
+	})
 
 	// Test: no filters, returns all ordered by timestamp DESC
-	results, err := store.QueryMonitorRequestDetails(ctx, nil, 0, "", "", 100)
+	results, err := store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{Limit: 100})
 	if err != nil {
 		t.Fatalf("QueryMonitorRequestDetails failed: %v", err)
 	}
@@ -304,7 +323,7 @@ func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
 	}
 
 	// Test: filter by method
-	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "GET", "", 100)
+	results, err = store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{Method: "GET", Limit: 100})
 	if err != nil {
 		t.Fatalf("QueryMonitorRequestDetails with method filter failed: %v", err)
 	}
@@ -316,7 +335,7 @@ func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
 	}
 
 	// Test: filter by path prefix
-	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "", "/v1/chat", 100)
+	results, err = store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{Path: "/v1/chat", Limit: 100})
 	if err != nil {
 		t.Fatalf("QueryMonitorRequestDetails with path filter failed: %v", err)
 	}
@@ -326,7 +345,7 @@ func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
 
 	// Test: time window filter (center=base-2h, window=2h → covers base-3h to base-1h)
 	center := base.Add(-2 * time.Hour)
-	results, err = store.QueryMonitorRequestDetails(ctx, &center, 7200, "", "", 100)
+	results, err = store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{Center: &center, WindowSec: 7200, Limit: 100})
 	if err != nil {
 		t.Fatalf("QueryMonitorRequestDetails with time window failed: %v", err)
 	}
@@ -335,7 +354,7 @@ func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
 	}
 
 	// Test: limit
-	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "", "", 2)
+	results, err = store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{Limit: 2})
 	if err != nil {
 		t.Fatalf("QueryMonitorRequestDetails with limit failed: %v", err)
 	}
@@ -344,7 +363,7 @@ func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
 	}
 
 	// Test: failed flag is preserved
-	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "", "", 100)
+	results, err = store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{Limit: 100})
 	if err != nil {
 		t.Fatalf("QueryMonitorRequestDetails failed: %v", err)
 	}
@@ -356,5 +375,32 @@ func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
 	}
 	if failedCount != 1 {
 		t.Fatalf("expected 1 failed record, got %d", failedCount)
+	}
+
+	// Test: filter by request_id and include stream summary fields
+	results, err = store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{RequestID: "req-a2", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails with request_id filter failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result for request_id filter, got %d", len(results))
+	}
+	if results[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls", results[0].FinishReason)
+	}
+	if results[0].TimeToFirstChunkMs != 120 || results[0].StreamDurationMs != 800 || results[0].TotalDurationMs != 920 {
+		t.Fatalf("unexpected stream timing fields: %+v", results[0])
+	}
+	if results[0].TokensPerSecond != 0 {
+		t.Fatalf("tokens_per_second = %v, want 0 without output tokens", results[0].TokensPerSecond)
+	}
+
+	// Test: filter by model
+	results, err = store.QueryMonitorRequestDetails(ctx, MonitorRequestDetailFilter{Model: "model-b", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails with model filter failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Model != "model-b" {
+		t.Fatalf("unexpected model filter result: %+v", results)
 	}
 }

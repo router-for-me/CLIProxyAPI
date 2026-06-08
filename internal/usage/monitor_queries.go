@@ -32,6 +32,17 @@ type MonitorQueryFilter struct {
 	End         *time.Time
 }
 
+// MonitorRequestDetailFilter describes request-details endpoint filters.
+type MonitorRequestDetailFilter struct {
+	Center    *time.Time
+	WindowSec int
+	Method    string
+	Path      string
+	Model     string
+	RequestID string
+	Limit     int
+}
+
 // MonitorRecentRequest stores the request status and time for trend bars.
 type MonitorRecentRequest struct {
 	Failed    bool
@@ -130,7 +141,7 @@ type monitorQueryableStore interface {
 	QueryMonitorRequestLogs(ctx context.Context, filter MonitorQueryFilter, page, pageSize, recentLimit int) (MonitorRequestLogsResult, error)
 	QueryMonitorChannelStats(ctx context.Context, filter MonitorQueryFilter, limit, recentLimit int) (MonitorChannelStatsResult, error)
 	QueryMonitorFailureStats(ctx context.Context, filter MonitorQueryFilter, limit, recentLimit int) (MonitorFailureStatsResult, error)
-	QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error)
+	QueryMonitorRequestDetails(ctx context.Context, filter MonitorRequestDetailFilter) ([]MonitorRequestDetail, error)
 	QueryMonitorKpi(ctx context.Context, filter MonitorQueryFilter) (MonitorKpiResult, error)
 	QueryMonitorModelDistribution(ctx context.Context, filter MonitorQueryFilter, limit int, sortByTokens bool) ([]MonitorModelDistItem, error)
 	QueryMonitorDailyTrend(ctx context.Context, filter MonitorQueryFilter) ([]MonitorDailyTrendItem, error)
@@ -153,6 +164,15 @@ type MonitorRequestDetail struct {
 	RetryReason        string
 	FinalSuccess       *bool
 	Failed             bool
+	OutputTokens       int64
+	TimeToFirstChunkMs int64
+	StreamDurationMs   int64
+	TotalDurationMs    int64
+	ChunksCount        int
+	BytesOut           int64
+	TokensPerSecond    float64
+	ClientGone         bool
+	FinishReason       string
 	ProviderStatusCode int
 	ErrorCode          string
 }
@@ -270,7 +290,7 @@ func (p *DatabasePlugin) QueryMonitorFailureStats(ctx context.Context, filter Mo
 }
 
 // QueryMonitorRequestDetails queries request details directly from persistence layer.
-func (p *DatabasePlugin) QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error) {
+func (p *DatabasePlugin) QueryMonitorRequestDetails(ctx context.Context, filter MonitorRequestDetailFilter) ([]MonitorRequestDetail, error) {
 	queryable, err := p.monitorQueryableStore()
 	if err != nil {
 		return nil, err
@@ -278,7 +298,13 @@ func (p *DatabasePlugin) QueryMonitorRequestDetails(ctx context.Context, center 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return queryable.QueryMonitorRequestDetails(ctx, center, windowSec, method, path, limit)
+	if filter.Method != "" {
+		filter.Method = strings.ToUpper(strings.TrimSpace(filter.Method))
+	}
+	filter.Path = strings.TrimSpace(filter.Path)
+	filter.Model = strings.TrimSpace(filter.Model)
+	filter.RequestID = strings.TrimSpace(filter.RequestID)
+	return queryable.QueryMonitorRequestDetails(ctx, filter)
 }
 
 func (p *DatabasePlugin) monitorQueryableStore() (monitorQueryableStore, error) {
@@ -898,11 +924,11 @@ func (s *mirrorUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 	return s.local.QueryMonitorFailureStats(ctx, filter, limit, recentLimit)
 }
 
-func (s *mirrorUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error) {
+func (s *mirrorUsageStore) QueryMonitorRequestDetails(ctx context.Context, filter MonitorRequestDetailFilter) ([]MonitorRequestDetail, error) {
 	if s == nil || s.local == nil {
 		return nil, fmt.Errorf("usage store: mirror store not initialized")
 	}
-	return s.local.QueryMonitorRequestDetails(ctx, center, windowSec, method, path, limit)
+	return s.local.QueryMonitorRequestDetails(ctx, filter)
 }
 
 func (s *mirrorUsageStore) QueryMonitorKpi(ctx context.Context, filter MonitorQueryFilter) (MonitorKpiResult, error) {
@@ -2496,34 +2522,42 @@ func sortedSet(items map[string]struct{}) []string {
 	return out
 }
 
-func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error) {
+func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, filter MonitorRequestDetailFilter) ([]MonitorRequestDetail, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("usage store: sqlite store not initialized")
 	}
-	if limit <= 0 {
-		limit = 100
+	if filter.Limit <= 0 {
+		filter.Limit = 100
 	}
-	if limit > 500 {
-		limit = 500
+	if filter.Limit > 500 {
+		filter.Limit = 500
 	}
 
 	clauses := []string{}
 	args := []any{}
 
-	if center != nil && windowSec > 0 {
-		half := int64(windowSec) / 2
-		start := center.Unix() - half
-		end := center.Unix() + half
-		clauses = append(clauses, "requested_at >= ?", "requested_at <= ?")
+	if filter.Center != nil && filter.WindowSec > 0 {
+		half := int64(filter.WindowSec) / 2
+		start := filter.Center.Unix() - half
+		end := filter.Center.Unix() + half
+		clauses = append(clauses, "u.requested_at >= ?", "u.requested_at <= ?")
 		args = append(args, start, end)
 	}
-	if method != "" {
-		clauses = append(clauses, "method = ?")
-		args = append(args, method)
+	if filter.Method != "" {
+		clauses = append(clauses, "u.method = ?")
+		args = append(args, filter.Method)
 	}
-	if path != "" {
-		clauses = append(clauses, "path LIKE ? ESCAPE '\\'")
-		args = append(args, escapeSQLiteLike(path)+"%")
+	if filter.Path != "" {
+		clauses = append(clauses, "u.path LIKE ? ESCAPE '\\'")
+		args = append(args, escapeSQLiteLike(filter.Path)+"%")
+	}
+	if filter.Model != "" {
+		clauses = append(clauses, "u.model = ?")
+		args = append(args, filter.Model)
+	}
+	if filter.RequestID != "" {
+		clauses = append(clauses, "u.request_id = ?")
+		args = append(args, filter.RequestID)
 	}
 
 	whereClause := "1=1"
@@ -2532,16 +2566,26 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 	}
 
 	query := fmt.Sprintf(`
-		SELECT requested_at, method, path, model,
-			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed,
-			provider_status_code, error_code,
-			request_id, attempt_no, retry_reason, final_success
-		FROM usage_records
+		SELECT u.requested_at, u.method, u.path, u.model,
+			COALESCE(NULLIF(u.source, ''), 'unknown'), u.auth_index, u.failed,
+			u.provider_status_code, u.error_code,
+			u.request_id, u.attempt_no, u.retry_reason, u.final_success,
+			u.output_tokens,
+			COALESCE(ss.time_to_first_chunk_ms, 0),
+			COALESCE(ss.stream_duration_ms, 0),
+			COALESCE(ss.total_duration_ms, 0),
+			COALESCE(ss.chunks_count, 0),
+			COALESCE(ss.bytes_out, 0),
+			COALESCE(ss.client_gone, 0),
+			COALESCE(ss.finish_reason, '')
+		FROM usage_records u
+		LEFT JOIN usage_stream_summaries ss
+			ON ss.request_id = u.request_id AND ss.attempt_no = u.attempt_no
 		WHERE %s
-		ORDER BY requested_at DESC
+		ORDER BY u.requested_at DESC
 		LIMIT ?
 	`, whereClause)
-	args = append(args, limit)
+	args = append(args, filter.Limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -2549,13 +2593,14 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 	}
 	defer rows.Close()
 
-	items := make([]MonitorRequestDetail, 0, limit)
+	items := make([]MonitorRequestDetail, 0, filter.Limit)
 	for rows.Next() {
 		var (
-			item     MonitorRequestDetail
-			unixTime int64
-			failed   int
-			final    int
+			item       MonitorRequestDetail
+			unixTime   int64
+			failed     int
+			final      int
+			clientGone int
 		)
 		if err = rows.Scan(
 			&unixTime,
@@ -2571,12 +2616,22 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 			&item.AttemptNo,
 			&item.RetryReason,
 			&final,
+			&item.OutputTokens,
+			&item.TimeToFirstChunkMs,
+			&item.StreamDurationMs,
+			&item.TotalDurationMs,
+			&item.ChunksCount,
+			&item.BytesOut,
+			&clientGone,
+			&item.FinishReason,
 		); err != nil {
 			return nil, fmt.Errorf("usage store: scan monitor request detail: %w", err)
 		}
 		item.Timestamp = time.Unix(unixTime, 0)
 		item.Failed = failed != 0
 		item.FinalSuccess = finalSuccessPtr(final)
+		item.ClientGone = clientGone != 0
+		item.TokensPerSecond = computeTokensPerSecond(item.OutputTokens, item.StreamDurationMs)
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {
@@ -2585,34 +2640,42 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 	return items, nil
 }
 
-func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error) {
+func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, filter MonitorRequestDetailFilter) ([]MonitorRequestDetail, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("usage store: postgres store not initialized")
 	}
-	if limit <= 0 {
-		limit = 100
+	if filter.Limit <= 0 {
+		filter.Limit = 100
 	}
-	if limit > 500 {
-		limit = 500
+	if filter.Limit > 500 {
+		filter.Limit = 500
 	}
 
 	clauses := []string{}
 	args := []any{}
 
-	if center != nil && windowSec > 0 {
-		half := time.Duration(windowSec) * time.Second / 2
-		start := center.Add(-half)
-		end := center.Add(half)
+	if filter.Center != nil && filter.WindowSec > 0 {
+		half := time.Duration(filter.WindowSec) * time.Second / 2
+		start := filter.Center.Add(-half)
+		end := filter.Center.Add(half)
 		args = append(args, start, end)
-		clauses = append(clauses, "requested_at >= "+pgPlaceholder(len(args)-1), "requested_at <= "+pgPlaceholder(len(args)))
+		clauses = append(clauses, "u.requested_at >= "+pgPlaceholder(len(args)-1), "u.requested_at <= "+pgPlaceholder(len(args)))
 	}
-	if method != "" {
-		args = append(args, method)
-		clauses = append(clauses, "method = "+pgPlaceholder(len(args)))
+	if filter.Method != "" {
+		args = append(args, filter.Method)
+		clauses = append(clauses, "u.method = "+pgPlaceholder(len(args)))
 	}
-	if path != "" {
-		args = append(args, escapeLike(path)+"%")
-		clauses = append(clauses, "path LIKE "+pgPlaceholder(len(args))+" ESCAPE '\\'")
+	if filter.Path != "" {
+		args = append(args, escapeLike(filter.Path)+"%")
+		clauses = append(clauses, "u.path LIKE "+pgPlaceholder(len(args))+" ESCAPE '\\'")
+	}
+	if filter.Model != "" {
+		args = append(args, filter.Model)
+		clauses = append(clauses, "u.model = "+pgPlaceholder(len(args)))
+	}
+	if filter.RequestID != "" {
+		args = append(args, filter.RequestID)
+		clauses = append(clauses, "u.request_id = "+pgPlaceholder(len(args)))
 	}
 
 	whereClause := "1=1"
@@ -2621,17 +2684,28 @@ func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *t
 	}
 
 	table := s.fullTableName("usage_records")
+	streamTable := s.fullTableName("usage_stream_summaries")
 	query := fmt.Sprintf(`
-		SELECT requested_at, method, path, model,
-			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed,
-			provider_status_code, error_code,
-			request_id, attempt_no, retry_reason, final_success
-		FROM %s
+		SELECT u.requested_at, u.method, u.path, u.model,
+			COALESCE(NULLIF(u.source, ''), 'unknown'), u.auth_index, u.failed,
+			u.provider_status_code, u.error_code,
+			u.request_id, u.attempt_no, u.retry_reason, u.final_success,
+			u.output_tokens,
+			COALESCE(ss.time_to_first_chunk_ms, 0),
+			COALESCE(ss.stream_duration_ms, 0),
+			COALESCE(ss.total_duration_ms, 0),
+			COALESCE(ss.chunks_count, 0),
+			COALESCE(ss.bytes_out, 0),
+			COALESCE(ss.client_gone, 0),
+			COALESCE(ss.finish_reason, '')
+		FROM %s u
+		LEFT JOIN %s ss
+			ON ss.request_id = u.request_id AND ss.attempt_no = u.attempt_no
 		WHERE %s
-		ORDER BY requested_at DESC, id DESC
+		ORDER BY u.requested_at DESC, u.id DESC
 		LIMIT %s
-	`, table, whereClause, pgPlaceholder(len(args)+1))
-	args = append(args, limit)
+	`, table, streamTable, whereClause, pgPlaceholder(len(args)+1))
+	args = append(args, filter.Limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -2639,12 +2713,13 @@ func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *t
 	}
 	defer rows.Close()
 
-	items := make([]MonitorRequestDetail, 0, limit)
+	items := make([]MonitorRequestDetail, 0, filter.Limit)
 	for rows.Next() {
 		var (
-			item   MonitorRequestDetail
-			failed int
-			final  int
+			item       MonitorRequestDetail
+			failed     int
+			final      int
+			clientGone int
 		)
 		if err = rows.Scan(
 			&item.Timestamp,
@@ -2660,11 +2735,21 @@ func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *t
 			&item.AttemptNo,
 			&item.RetryReason,
 			&final,
+			&item.OutputTokens,
+			&item.TimeToFirstChunkMs,
+			&item.StreamDurationMs,
+			&item.TotalDurationMs,
+			&item.ChunksCount,
+			&item.BytesOut,
+			&clientGone,
+			&item.FinishReason,
 		); err != nil {
 			return nil, fmt.Errorf("usage store: scan monitor request detail: %w", err)
 		}
 		item.Failed = failed != 0
 		item.FinalSuccess = finalSuccessPtr(final)
+		item.ClientGone = clientGone != 0
+		item.TokensPerSecond = computeTokensPerSecond(item.OutputTokens, item.StreamDurationMs)
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {

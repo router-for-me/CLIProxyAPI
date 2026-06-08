@@ -34,7 +34,7 @@ var logFieldOrder = []string{
 	"provider", "model", "auth_index", "routing_strategy", "routing_scope", "routing_group",
 	"status", "success", "error_code", "retryable", "retry_after_ms", "reset_ms", "providers",
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
-	"requested_model", "upstream_model", "request_path", "tool_type", "tool_source", "policy", "reason",
+	"requested_model", "upstream_model", "request_path", "attempt_no", "retry_reason", "tool_type", "tool_source", "policy", "reason",
 	"executor", "compat_kind", "repairs", "merged_tool_result_messages", "deduped_tool_results",
 	"reordered_tool_results", "removed_tool_uses", "removed_tool_results", "repair_type", "repairs_count",
 	"payload_bytes_before", "payload_bytes_after", "repair_duration_ms",
@@ -42,7 +42,7 @@ var logFieldOrder = []string{
 	"attempt_count", "fallback_count", "max_attempts", "max_fallbacks", "translator_run_count",
 	"final_success", "final_status", "final_provider", "final_model", "final_executor",
 	"duration_ms", "time_to_first_chunk_ms", "stream_duration_ms", "total_duration_ms",
-	"chunks_count", "bytes_out", "client_gone", "finish_reason",
+	"chunks_count", "bytes_out", "output_tokens", "tokens_per_second", "client_gone", "finish_reason",
 	"upstream_status", "upstream_error_code", "route_plan",
 }
 

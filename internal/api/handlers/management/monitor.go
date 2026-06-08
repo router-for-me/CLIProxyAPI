@@ -2226,6 +2226,8 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 
 	method := strings.ToUpper(strings.TrimSpace(firstQuery(c, "method")))
 	path := strings.TrimSpace(firstQuery(c, "path"))
+	model := strings.TrimSpace(firstQuery(c, "model"))
+	requestID := strings.TrimSpace(firstQuery(c, "request_id"))
 
 	dbPlugin := usage.GetDatabasePlugin()
 	if dbPlugin == nil {
@@ -2240,7 +2242,15 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 		}
 	}
 
-	results, queryErr := dbPlugin.QueryMonitorRequestDetails(c.Request.Context(), center, windowSec, method, path, limit)
+	results, queryErr := dbPlugin.QueryMonitorRequestDetails(c.Request.Context(), usage.MonitorRequestDetailFilter{
+		Center:    center,
+		WindowSec: windowSec,
+		Method:    method,
+		Path:      path,
+		Model:     model,
+		RequestID: requestID,
+		Limit:     limit,
+	})
 	if queryErr != nil {
 		c.JSON(http.StatusOK, gin.H{"items": []any{}})
 		return
@@ -2258,6 +2268,15 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 		RetryReason        string    `json:"retry_reason,omitempty"`
 		FinalSuccess       *bool     `json:"final_success,omitempty"`
 		Failed             bool      `json:"failed"`
+		OutputTokens       int64     `json:"output_tokens"`
+		TimeToFirstChunkMs int64     `json:"time_to_first_chunk_ms"`
+		StreamDurationMs   int64     `json:"stream_duration_ms"`
+		TotalDurationMs    int64     `json:"total_duration_ms"`
+		ChunksCount        int       `json:"chunks_count"`
+		BytesOut           int64     `json:"bytes_out"`
+		TokensPerSecond    float64   `json:"tokens_per_second"`
+		ClientGone         bool      `json:"client_gone"`
+		FinishReason       string    `json:"finish_reason,omitempty"`
 		ProviderStatusCode int       `json:"provider_status_code,omitempty"`
 		ErrorCode          string    `json:"error_code,omitempty"`
 	}
@@ -2276,6 +2295,15 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 			RetryReason:        r.RetryReason,
 			FinalSuccess:       r.FinalSuccess,
 			Failed:             r.Failed,
+			OutputTokens:       r.OutputTokens,
+			TimeToFirstChunkMs: r.TimeToFirstChunkMs,
+			StreamDurationMs:   r.StreamDurationMs,
+			TotalDurationMs:    r.TotalDurationMs,
+			ChunksCount:        r.ChunksCount,
+			BytesOut:           r.BytesOut,
+			TokensPerSecond:    r.TokensPerSecond,
+			ClientGone:         r.ClientGone,
+			FinishReason:       r.FinishReason,
 			ProviderStatusCode: r.ProviderStatusCode,
 			ErrorCode:          r.ErrorCode,
 		})

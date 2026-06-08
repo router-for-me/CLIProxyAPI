@@ -98,6 +98,7 @@ type UsageStore interface {
 	Insert(ctx context.Context, record UsageRecord) error
 	InsertBatch(ctx context.Context, records []UsageRecord) (added, skipped int64, err error)
 	UpdateRequestFinal(ctx context.Context, requestID string, finalSuccess bool) error
+	UpsertStreamSummary(ctx context.Context, record StreamSummaryRecord) error
 	GetAggregatedStats(ctx context.Context) (AggregatedStats, error)
 	GetDetails(ctx context.Context, offset, limit int) ([]DetailRecord, error)
 	DeleteOldRecords(ctx context.Context, retentionDays int) (deleted int64, err error)
@@ -256,6 +257,15 @@ func (s *mirrorUsageStore) bootstrapLocalFromPrimary(ctx context.Context) error 
 		}
 		lastID = newLastID
 	}
+	summaries, err := s.primary.ListAllStreamSummaries(ctx)
+	if err != nil {
+		return fmt.Errorf("usage store: sync stream summaries from postgres: %w", err)
+	}
+	for _, summary := range summaries {
+		if err := s.local.UpsertStreamSummary(ctx, summary); err != nil {
+			return fmt.Errorf("usage store: write sqlite stream summary mirror: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -316,6 +326,24 @@ func (s *mirrorUsageStore) UpdateRequestFinal(ctx context.Context, requestID str
 	var errLocal error
 	if s.local != nil {
 		errLocal = s.local.UpdateRequestFinal(ctx, requestID, finalSuccess)
+	}
+	if errPrimary != nil {
+		return errPrimary
+	}
+	return errLocal
+}
+
+func (s *mirrorUsageStore) UpsertStreamSummary(ctx context.Context, record StreamSummaryRecord) error {
+	if s == nil {
+		return fmt.Errorf("usage store: mirror store not initialized")
+	}
+	var errPrimary error
+	if s.primary != nil {
+		errPrimary = s.primary.UpsertStreamSummary(ctx, record)
+	}
+	var errLocal error
+	if s.local != nil {
+		errLocal = s.local.UpsertStreamSummary(ctx, record)
 	}
 	if errPrimary != nil {
 		return errPrimary
@@ -527,6 +555,34 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 		}
 	}
 
+	streamTable := s.fullTableName("usage_stream_summaries")
+	createStreamTable := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			request_id              TEXT NOT NULL,
+			attempt_no              INTEGER NOT NULL DEFAULT 0,
+			time_to_first_chunk_ms  BIGINT NOT NULL DEFAULT 0,
+			stream_duration_ms      BIGINT NOT NULL DEFAULT 0,
+			total_duration_ms       BIGINT NOT NULL DEFAULT 0,
+			chunks_count            INTEGER NOT NULL DEFAULT 0,
+			bytes_out               BIGINT NOT NULL DEFAULT 0,
+			client_gone             INTEGER NOT NULL DEFAULT 0,
+			finish_reason           TEXT NOT NULL DEFAULT '',
+			recorded_at             TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (request_id, attempt_no)
+		)
+	`, streamTable)
+	if _, err := s.db.ExecContext(ctx, createStreamTable); err != nil {
+		return fmt.Errorf("usage store: create stream summary table: %w", err)
+	}
+	streamIndexes := []string{
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_stream_summary_recorded_at ON %s(recorded_at DESC)", streamTable),
+	}
+	for _, idx := range streamIndexes {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("usage store: create stream summary index: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -673,6 +729,94 @@ func (s *pgUsageStore) UpdateRequestFinal(ctx context.Context, requestID string,
 	query := fmt.Sprintf("UPDATE %s SET final_success = $1 WHERE request_id = $2 AND final_success <> $1", table)
 	if _, err := s.db.ExecContext(ctx, query, finalValue, requestID); err != nil {
 		return fmt.Errorf("usage store: update request final: %w", err)
+	}
+	return nil
+}
+
+func (s *pgUsageStore) ListAllStreamSummaries(ctx context.Context) ([]StreamSummaryRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: postgres store not initialized")
+	}
+	table := s.fullTableName("usage_stream_summaries")
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT request_id, attempt_no, time_to_first_chunk_ms, stream_duration_ms,
+			total_duration_ms, chunks_count, bytes_out, client_gone, finish_reason, recorded_at
+		FROM %s
+		ORDER BY recorded_at ASC, request_id ASC, attempt_no ASC
+	`, table))
+	if err != nil {
+		return nil, fmt.Errorf("usage store: list stream summaries: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]StreamSummaryRecord, 0)
+	for rows.Next() {
+		var (
+			record     StreamSummaryRecord
+			clientGone int
+		)
+		if err = rows.Scan(
+			&record.RequestID,
+			&record.AttemptNo,
+			&record.TimeToFirstChunkMs,
+			&record.StreamDurationMs,
+			&record.TotalDurationMs,
+			&record.ChunksCount,
+			&record.BytesOut,
+			&clientGone,
+			&record.FinishReason,
+			&record.RecordedAt,
+		); err != nil {
+			return nil, fmt.Errorf("usage store: scan stream summary: %w", err)
+		}
+		record.ClientGone = clientGone != 0
+		out = append(out, record)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate stream summaries: %w", err)
+	}
+	return out, nil
+}
+
+func (s *pgUsageStore) UpsertStreamSummary(ctx context.Context, record StreamSummaryRecord) error {
+	record, ok := normalizeStreamSummaryRecord(record)
+	if !ok {
+		return nil
+	}
+	table := s.fullTableName("usage_stream_summaries")
+	query := fmt.Sprintf(`
+		INSERT INTO %s (
+			request_id, attempt_no, time_to_first_chunk_ms, stream_duration_ms,
+			total_duration_ms, chunks_count, bytes_out, client_gone, finish_reason, recorded_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (request_id, attempt_no) DO UPDATE SET
+			time_to_first_chunk_ms = EXCLUDED.time_to_first_chunk_ms,
+			stream_duration_ms = EXCLUDED.stream_duration_ms,
+			total_duration_ms = EXCLUDED.total_duration_ms,
+			chunks_count = EXCLUDED.chunks_count,
+			bytes_out = EXCLUDED.bytes_out,
+			client_gone = EXCLUDED.client_gone,
+			finish_reason = EXCLUDED.finish_reason,
+			recorded_at = EXCLUDED.recorded_at
+	`, table)
+	clientGone := 0
+	if record.ClientGone {
+		clientGone = 1
+	}
+	if _, err := s.db.ExecContext(ctx, query,
+		record.RequestID,
+		record.AttemptNo,
+		record.TimeToFirstChunkMs,
+		record.StreamDurationMs,
+		record.TotalDurationMs,
+		record.ChunksCount,
+		record.BytesOut,
+		clientGone,
+		record.FinishReason,
+		record.RecordedAt,
+	); err != nil {
+		return fmt.Errorf("usage store: upsert stream summary: %w", err)
 	}
 	return nil
 }
@@ -921,7 +1065,13 @@ func (s *pgUsageStore) DeleteOldRecords(ctx context.Context, retentionDays int) 
 		return 0, fmt.Errorf("usage store: delete old records: %w", err)
 	}
 	deleted, _ = result.RowsAffected()
-	return deleted, nil
+	streamTable := s.fullTableName("usage_stream_summaries")
+	streamResult, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE recorded_at < $1", streamTable), cutoff)
+	if err != nil {
+		return deleted, fmt.Errorf("usage store: delete old stream summaries: %w", err)
+	}
+	streamDeleted, _ := streamResult.RowsAffected()
+	return deleted + streamDeleted, nil
 }
 
 func (s *pgUsageStore) Close() error {
@@ -1061,6 +1211,28 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 		}
 	}
 
+	createStreamTable := `
+		CREATE TABLE IF NOT EXISTS usage_stream_summaries (
+			request_id             TEXT NOT NULL,
+			attempt_no             INTEGER NOT NULL DEFAULT 0,
+			time_to_first_chunk_ms INTEGER NOT NULL DEFAULT 0,
+			stream_duration_ms     INTEGER NOT NULL DEFAULT 0,
+			total_duration_ms      INTEGER NOT NULL DEFAULT 0,
+			chunks_count           INTEGER NOT NULL DEFAULT 0,
+			bytes_out              INTEGER NOT NULL DEFAULT 0,
+			client_gone            INTEGER NOT NULL DEFAULT 0,
+			finish_reason          TEXT NOT NULL DEFAULT '',
+			recorded_at            INTEGER NOT NULL,
+			PRIMARY KEY (request_id, attempt_no)
+		)
+	`
+	if _, err := s.db.ExecContext(ctx, createStreamTable); err != nil {
+		return fmt.Errorf("usage store: create stream summary table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_stream_summary_recorded_at ON usage_stream_summaries(recorded_at DESC)"); err != nil {
+		return fmt.Errorf("usage store: create stream summary index: %w", err)
+	}
+
 	return nil
 }
 
@@ -1076,6 +1248,9 @@ func (s *sqliteUsageStore) Reset(ctx context.Context) error {
 
 	if _, err = tx.ExecContext(ctx, "DELETE FROM usage_records"); err != nil {
 		return fmt.Errorf("usage store: reset records: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM usage_stream_summaries"); err != nil {
+		return fmt.Errorf("usage store: reset stream summaries: %w", err)
 	}
 	_, _ = tx.ExecContext(ctx, "DELETE FROM sqlite_sequence WHERE name = 'usage_records'")
 
@@ -1186,6 +1361,48 @@ func (s *sqliteUsageStore) InsertBatch(ctx context.Context, records []UsageRecor
 		return 0, 0, fmt.Errorf("usage store: commit tx: %w", err)
 	}
 	return added, skipped, nil
+}
+
+func (s *sqliteUsageStore) UpsertStreamSummary(ctx context.Context, record StreamSummaryRecord) error {
+	record, ok := normalizeStreamSummaryRecord(record)
+	if !ok {
+		return nil
+	}
+	query := `
+		INSERT INTO usage_stream_summaries (
+			request_id, attempt_no, time_to_first_chunk_ms, stream_duration_ms,
+			total_duration_ms, chunks_count, bytes_out, client_gone, finish_reason, recorded_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(request_id, attempt_no) DO UPDATE SET
+			time_to_first_chunk_ms = excluded.time_to_first_chunk_ms,
+			stream_duration_ms = excluded.stream_duration_ms,
+			total_duration_ms = excluded.total_duration_ms,
+			chunks_count = excluded.chunks_count,
+			bytes_out = excluded.bytes_out,
+			client_gone = excluded.client_gone,
+			finish_reason = excluded.finish_reason,
+			recorded_at = excluded.recorded_at
+	`
+	clientGone := 0
+	if record.ClientGone {
+		clientGone = 1
+	}
+	if _, err := s.db.ExecContext(ctx, query,
+		record.RequestID,
+		record.AttemptNo,
+		record.TimeToFirstChunkMs,
+		record.StreamDurationMs,
+		record.TotalDurationMs,
+		record.ChunksCount,
+		record.BytesOut,
+		clientGone,
+		record.FinishReason,
+		record.RecordedAt.Unix(),
+	); err != nil {
+		return fmt.Errorf("usage store: upsert stream summary: %w", err)
+	}
+	return nil
 }
 
 func (s *sqliteUsageStore) UpdateRequestFinal(ctx context.Context, requestID string, finalSuccess bool) error {
@@ -1374,7 +1591,12 @@ func (s *sqliteUsageStore) DeleteOldRecords(ctx context.Context, retentionDays i
 		return 0, fmt.Errorf("usage store: delete old records: %w", err)
 	}
 	deleted, _ = result.RowsAffected()
-	return deleted, nil
+	streamResult, err := s.db.ExecContext(ctx, "DELETE FROM usage_stream_summaries WHERE recorded_at < ?", cutoff)
+	if err != nil {
+		return deleted, fmt.Errorf("usage store: delete old stream summaries: %w", err)
+	}
+	streamDeleted, _ := streamResult.RowsAffected()
+	return deleted + streamDeleted, nil
 }
 
 func (s *sqliteUsageStore) Close() error {

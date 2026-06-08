@@ -376,6 +376,37 @@ func (p *DatabasePlugin) HandleRequestFinal(ctx context.Context, final coreusage
 	}()
 }
 
+// HandleStreamSummary persists stream-level timing and completion metadata keyed by request_id + attempt_no.
+func (p *DatabasePlugin) HandleStreamSummary(ctx context.Context, summary StreamSummaryRecord) {
+	if p == nil || p.store == nil {
+		return
+	}
+
+	attempt := coreusage.RequestAttemptFromContext(ctx)
+	if summary.RequestID == "" {
+		summary.RequestID = strings.TrimSpace(attempt.RequestID)
+	}
+	if summary.RequestID == "" {
+		summary.RequestID = internallogging.GetRequestID(ctx)
+	}
+	if summary.AttemptNo <= 0 {
+		summary.AttemptNo = attempt.AttemptNo
+	}
+	normalized, ok := normalizeStreamSummaryRecord(summary)
+	if !ok {
+		return
+	}
+
+	go func(record StreamSummaryRecord) {
+		if err := p.store.UpsertStreamSummary(context.Background(), record); err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"request_id": record.RequestID,
+				"attempt_no": record.AttemptNo,
+			}).Warn("usage: failed to persist stream summary")
+		}
+	}(normalized)
+}
+
 func boolToFinalSuccess(success bool) int {
 	if success {
 		return finalSuccessTrue

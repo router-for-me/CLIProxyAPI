@@ -19,6 +19,9 @@ func (s *fakeUsageStore) InsertBatch(context.Context, []UsageRecord) (int64, int
 	return 0, 0, nil
 }
 func (s *fakeUsageStore) UpdateRequestFinal(context.Context, string, bool) error { return nil }
+func (s *fakeUsageStore) UpsertStreamSummary(context.Context, StreamSummaryRecord) error {
+	return nil
+}
 
 func (s *fakeUsageStore) GetAggregatedStats(context.Context) (AggregatedStats, error) {
 	return s.stats, nil
