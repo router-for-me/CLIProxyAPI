@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/tidwall/gjson"
 )
 
 // ============================================================================
@@ -345,5 +346,121 @@ func TestConvertAntigravityResponseToClaude_SignatureOnlyChunk(t *testing.T) {
 	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", "Full thinking text.")
 	if cachedSig != validSignature {
 		t.Errorf("Signature-only chunk should still cache correctly, got %q", cachedSig)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_SignatureOnlyChunkWithoutThoughtFlag(t *testing.T) {
+	cache.ClearSignatureCache("")
+
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Test"}]}]
+	}`)
+
+	validSignature := "RtestSig1234567890123456789012345678901234567890123456789"
+
+	chunk1 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "Full thinking text.", "thought": true}]
+				}
+			}],
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"responseId": "resp-test"
+		}
+	}`)
+
+	chunk2 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "", "thoughtSignature": "` + validSignature + `"}]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 10,
+				"thoughtsTokenCount": 2,
+				"totalTokenCount": 12
+			},
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"responseId": "resp-test"
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if strings.Contains(outputText, `"content_block":{"type":"text"`) {
+		t.Fatalf("signature-only part must not open an empty text block: %s", outputText)
+	}
+	if strings.Contains(outputText, `"type":"content_block_stop","index":1`) {
+		t.Fatalf("signature-only part must not produce a stop for unopened index 1: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"signature_delta"`) {
+		t.Fatalf("signature-only part must be emitted as a thinking signature delta: %s", outputText)
+	}
+	if got := strings.Count(outputText, `"type":"content_block_stop","index":0`); got != 1 {
+		t.Fatalf("expected exactly one stop for thinking index 0, got %d: %s", got, outputText)
+	}
+	if !strings.Contains(outputText, `"type":"message_delta"`) || !strings.Contains(outputText, `"output_tokens":2`) {
+		t.Fatalf("finish chunk without candidatesTokenCount must still emit final message_delta: %s", outputText)
+	}
+	if !strings.Contains(outputText, `"type":"message_stop"`) {
+		t.Fatalf("DONE chunk must still emit message_stop after final events: %s", outputText)
+	}
+
+	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", "Full thinking text.")
+	if cachedSig != validSignature {
+		t.Fatalf("signature-only chunk without thought flag should still cache correctly, got %q", cachedSig)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_SignatureOnlyPartWithoutThoughtFlag(t *testing.T) {
+	previousCache := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	defer cache.SetSignatureCacheEnabled(previousCache)
+
+	requestJSON := []byte(`{"model":"claude-sonnet-4-5-thinking"}`)
+	validSignature := "EtestSig1234567890123456789012345678901234567890123456789"
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [
+						{"text": "Full thinking text.", "thought": true},
+						{"text": "", "thoughtSignature": "` + validSignature + `"}
+					]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 10,
+				"thoughtsTokenCount": 2,
+				"totalTokenCount": 12
+			},
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"responseId": "resp-test"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, nil)
+
+	if got := gjson.GetBytes(output, "content.#").Int(); got != 1 {
+		t.Fatalf("expected exactly one content block, got %d: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.0.type").String(); got != "thinking" {
+		t.Fatalf("expected thinking content block, got %q: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.0.thinking").String(); got != "Full thinking text." {
+		t.Fatalf("unexpected thinking text %q: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.0.signature").String(); got != validSignature {
+		t.Fatalf("expected signature %q, got %q: %s", validSignature, got, output)
 	}
 }

@@ -125,6 +125,19 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
+	appendThinkingSignature := func(signature string) {
+		if signature == "" || params.ResponseType != 2 {
+			return
+		}
+		if params.CurrentThinkingText.Len() > 0 {
+			cache.CacheSignature(modelName, params.CurrentThinkingText.String(), signature)
+			params.CurrentThinkingText.Reset()
+		}
+		sigValue := formatClaudeSignatureValue(modelName, signature)
+		data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex)), "delta.signature", sigValue)
+		appendEvent("content_block_delta", string(data))
+		params.HasContent = true
+	}
 
 	// Initialize the streaming session with a message_start event
 	// This is only sent for the very first response chunk to establish the streaming session
@@ -164,12 +177,22 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			// Extract the different types of content from each part
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" && !functionCallResult.Exists()
+
+			if hasThoughtSignature && !partTextResult.Exists() {
+				appendThinkingSignature(thoughtSignatureResult.String())
+				continue
+			}
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() {
-					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
+				if partResult.Get("thought").Bool() || hasThoughtSignature {
+					if hasThoughtSignature {
 						// log.Debug("Branch: signature_delta")
 
 						// Flush co-located text before emitting the signature
@@ -188,16 +211,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 							appendEvent("content_block_delta", string(data))
 						}
 
-						if params.CurrentThinkingText.Len() > 0 {
-							cache.CacheSignature(modelName, params.CurrentThinkingText.String(), thoughtSignature.String())
-							// log.Debugf("Cached signature for thinking block (textLen=%d)", params.CurrentThinkingText.Len())
-							params.CurrentThinkingText.Reset()
-						}
-
-						sigValue := formatClaudeSignatureValue(modelName, thoughtSignature.String())
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex)), "delta.signature", sigValue)
-						appendEvent("content_block_delta", string(data))
-						params.HasContent = true
+						appendThinkingSignature(thoughtSignatureResult.String())
 					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
 						params.CurrentThinkingText.WriteString(partTextResult.String())
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partTextResult.String())
@@ -474,15 +488,14 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
-			isThought := part.Get("thought").Bool()
-			if isThought {
-				sig := part.Get("thoughtSignature")
-				if !sig.Exists() {
-					sig = part.Get("thought_signature")
-				}
-				if sig.Exists() && sig.String() != "" {
-					thinkingSignature = sig.String()
-				}
+			sig := part.Get("thoughtSignature")
+			if !sig.Exists() {
+				sig = part.Get("thought_signature")
+			}
+			hasThoughtSignature := sig.Exists() && sig.String() != "" && !part.Get("functionCall").Exists()
+			isThought := part.Get("thought").Bool() || hasThoughtSignature
+			if hasThoughtSignature {
+				thinkingSignature = sig.String()
 			}
 
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
