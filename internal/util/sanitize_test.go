@@ -109,6 +109,58 @@ func TestSanitizedToolNameMap(t *testing.T) {
 	})
 }
 
+func TestInferClaudeToolNameForMissingOpenAIName(t *testing.T) {
+	t.Run("specific tool choice wins", func(t *testing.T) {
+		raw := []byte(`{
+			"tool_choice":{"type":"tool","name":"Bash"},
+			"tools":[
+				{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}},
+				{"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}
+			]
+		}`)
+		if got := InferClaudeToolNameForMissingOpenAIName(raw, `{"file_path":"/tmp/a"}`); got != "Bash" {
+			t.Fatalf("got %q, want Bash", got)
+		}
+	})
+
+	t.Run("single declared tool", func(t *testing.T) {
+		raw := []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]}`)
+		if got := InferClaudeToolNameForMissingOpenAIName(raw, `{"file_path":"/tmp/a"}`); got != "Read" {
+			t.Fatalf("got %q, want Read", got)
+		}
+	})
+
+	t.Run("unique schema match", func(t *testing.T) {
+		raw := []byte(`{"tools":[
+			{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}},
+			{"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"},"description":{"type":"string"}},"required":["command"]}}
+		]}`)
+		if got := InferClaudeToolNameForMissingOpenAIName(raw, `{"command":"pwd"}`); got != "Bash" {
+			t.Fatalf("got %q, want Bash", got)
+		}
+	})
+
+	t.Run("openai shaped request", func(t *testing.T) {
+		raw := []byte(`{"tools":[
+			{"type":"function","function":{"name":"Read","parameters":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}},
+			{"type":"function","function":{"name":"Bash","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}
+		]}`)
+		if got := InferClaudeToolNameForMissingOpenAIName(raw, `{"command":"pwd"}`); got != "Bash" {
+			t.Fatalf("got %q, want Bash", got)
+		}
+	})
+
+	t.Run("ambiguous schema does not guess", func(t *testing.T) {
+		raw := []byte(`{"tools":[
+			{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}},
+			{"name":"Stat","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}
+		]}`)
+		if got := InferClaudeToolNameForMissingOpenAIName(raw, `{"file_path":"/tmp/a"}`); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+}
+
 func TestRestoreSanitizedToolName(t *testing.T) {
 	m := map[string]string{
 		"mcp_server_read": "mcp/server/read",

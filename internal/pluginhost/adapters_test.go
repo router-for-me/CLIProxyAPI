@@ -1845,6 +1845,42 @@ func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T
 	}
 }
 
+func TestExecutorAdapterPrepareCallRequiresBothLegacyFormatsMissing(t *testing.T) {
+	req := coreexecutor.Request{
+		Model:   "model-1",
+		Format:  sdktranslator.FormatOpenAI,
+		Payload: []byte(`{"model":"model-1","messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := coreexecutor.Options{}
+
+	legacy := &executorAdapter{provider: "legacy"}
+	prepared, errPrepare := legacy.prepareExecutorCall(req, opts)
+	if errPrepare != nil {
+		t.Fatalf("legacy prepareExecutorCall() error = %v", errPrepare)
+	}
+	if prepared.inputFormat != sdktranslator.FormatOpenAI || prepared.outputFormat != sdktranslator.FormatOpenAI {
+		t.Fatalf("legacy prepared formats = input %q output %q, want openai/openai", prepared.inputFormat, prepared.outputFormat)
+	}
+
+	inputOnly := &executorAdapter{
+		provider:     "input-only",
+		inputFormats: []sdktranslator.Format{sdktranslator.FormatClaude},
+	}
+	if _, errPrepare = inputOnly.prepareExecutorCall(req, opts); errPrepare == nil ||
+		!strings.Contains(errPrepare.Error(), "declares no output formats") {
+		t.Fatalf("input-only prepareExecutorCall() error = %v, want missing output formats", errPrepare)
+	}
+
+	outputOnly := &executorAdapter{
+		provider:      "output-only",
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatClaude},
+	}
+	if _, errPrepare = outputOnly.prepareExecutorCall(req, opts); errPrepare == nil ||
+		!strings.Contains(errPrepare.Error(), "declares no input formats") {
+		t.Fatalf("output-only prepareExecutorCall() error = %v, want missing input formats", errPrepare)
+	}
+}
+
 func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 	host := New()
 	calls := 0

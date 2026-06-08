@@ -28,6 +28,9 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	Model       string
 	CreatedAt   int64
 	ToolNameMap map[string]string
+	// OriginalRequestRawJSON keeps the Claude request available for safe tool
+	// name inference when upstream streaming deltas omit function.name.
+	OriginalRequestRawJSON []byte
 	// SawToolCall is true once at least one tool_use content_block_start has
 	// been emitted on the wire. Using raw upstream tool_calls presence here
 	// can produce stop_reason=tool_use with zero announced tool blocks.
@@ -119,6 +122,9 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 
 	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
 		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	}
+	if len((*param).(*ConvertOpenAIResponseToAnthropicParams).OriginalRequestRawJSON) == 0 && len(originalRequestRawJSON) > 0 {
+		(*param).(*ConvertOpenAIResponseToAnthropicParams).OriginalRequestRawJSON = originalRequestRawJSON
 	}
 
 	// Check if this is the [DONE] marker
@@ -329,11 +335,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					// If the name is empty (some providers send empty names in
 					// initial deltas), generate a synthetic name so the tool
 					// call is not silently dropped.
-					if accumulator.Name == "" {
-						if accumulator.Arguments.Len() == 0 {
-							continue
-						}
-						accumulator.Name = fmt.Sprintf("tool_%d", index)
+					if !fillMissingToolName(param, index, accumulator) {
+						continue
 					}
 					emitToolUseStart(param, index, accumulator, &results)
 				}
@@ -406,11 +409,8 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 				// path for name-but-no-id streams.
 				// If the name is empty but we have arguments, generate a
 				// synthetic name so the tool call is not silently dropped.
-				if accumulator.Name == "" {
-					if accumulator.Arguments.Len() == 0 {
-						continue
-					}
-					accumulator.Name = fmt.Sprintf("tool_%d", index)
+				if !fillMissingToolName(param, index, accumulator) {
+					continue
 				}
 				emitToolUseStart(param, index, accumulator, &results)
 			}
@@ -618,6 +618,21 @@ func emitToolUseStart(param *ConvertOpenAIResponseToAnthropicParams, openAIToolI
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSON, 2))
 	accumulator.StartEmitted = true
 	param.SawToolCall = true
+}
+
+func fillMissingToolName(param *ConvertOpenAIResponseToAnthropicParams, openAIToolIndex int, accumulator *ToolCallAccumulator) bool {
+	if accumulator.Name != "" {
+		return true
+	}
+	if inferred := util.InferClaudeToolNameForMissingOpenAIName(param.OriginalRequestRawJSON, accumulator.Arguments.String()); inferred != "" {
+		accumulator.Name = inferred
+		return true
+	}
+	if accumulator.Arguments.Len() == 0 {
+		return false
+	}
+	accumulator.Name = fmt.Sprintf("tool_%d", openAIToolIndex)
+	return true
 }
 
 func toolCallAccumulatorIndexes(accumulators map[int]*ToolCallAccumulator) []int {

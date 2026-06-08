@@ -276,6 +276,119 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 	return name
 }
 
+// InferClaudeToolNameForMissingOpenAIName returns a client-facing Claude tool
+// name when an OpenAI-compatible stream omits function.name. It only returns a
+// name when the original Claude request makes the choice unambiguous.
+func InferClaudeToolNameForMissingOpenAIName(rawJSON []byte, arguments string) string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return ""
+	}
+
+	if toolChoice := gjson.GetBytes(rawJSON, "tool_choice"); toolChoice.Exists() {
+		if toolChoice.Get("type").String() == "tool" {
+			return strings.TrimSpace(toolChoice.Get("name").String())
+		}
+		if toolChoice.Get("type").String() == "function" {
+			return strings.TrimSpace(toolChoice.Get("function.name").String())
+		}
+	}
+
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return ""
+	}
+
+	toolList := tools.Array()
+	if len(toolList) == 1 {
+		return claudeToolName(toolList[0])
+	}
+
+	argKeys := topLevelObjectKeys(arguments)
+	if len(argKeys) == 0 {
+		return ""
+	}
+
+	var matches []string
+	for _, tool := range toolList {
+		name := claudeToolName(tool)
+		if name == "" {
+			continue
+		}
+		schema := tool.Get("input_schema")
+		if !schema.Exists() {
+			schema = tool.Get("function.parameters")
+		}
+		if toolSchemaMatchesArguments(schema, argKeys) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	return ""
+}
+
+func claudeToolName(tool gjson.Result) string {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	return name
+}
+
+func topLevelObjectKeys(arguments string) map[string]struct{} {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" {
+		return nil
+	}
+	if !gjson.Valid(arguments) {
+		arguments = FixJSON(arguments)
+		if !gjson.Valid(arguments) {
+			return nil
+		}
+	}
+
+	root := gjson.Parse(arguments)
+	if !root.IsObject() {
+		return nil
+	}
+
+	keys := make(map[string]struct{})
+	root.ForEach(func(key, _ gjson.Result) bool {
+		if key.Type == gjson.String {
+			keys[key.String()] = struct{}{}
+		}
+		return true
+	})
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
+}
+
+func toolSchemaMatchesArguments(schema gjson.Result, argKeys map[string]struct{}) bool {
+	properties := schema.Get("properties")
+	if !properties.Exists() || !properties.IsObject() {
+		return false
+	}
+
+	for key := range argKeys {
+		if !properties.Get(key).Exists() {
+			return false
+		}
+	}
+
+	required := schema.Get("required")
+	if required.Exists() && required.IsArray() {
+		for _, requiredKey := range required.Array() {
+			if _, ok := argKeys[requiredKey.String()]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // SanitizedToolNameMap builds a sanitized-name → original-name map from Claude request tools.
 // It is used to restore exact tool names for clients (e.g. Claude Code) after the proxy
 // sanitizes tool names for Gemini/Vertex API compatibility via SanitizeFunctionName.

@@ -1106,6 +1106,17 @@ type preparedExecutorCall struct {
 
 func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
 	requestedFormat := executorRequestedFormat(req, opts)
+
+	if len(a.inputFormats) == 0 && len(a.outputFormats) == 0 {
+		return preparedExecutorCall{
+			req:             req,
+			opts:            opts,
+			requestedFormat: requestedFormat,
+			inputFormat:     requestedFormat,
+			outputFormat:    requestedFormat,
+		}, nil
+	}
+
 	inputFormat, errInput := a.selectExecutorInputFormat(requestedFormat)
 	if errInput != nil {
 		return preparedExecutorCall{}, errInput

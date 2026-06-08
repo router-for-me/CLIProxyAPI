@@ -164,6 +164,98 @@ func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 	}
 }
 
+func TestStreamingTool_EmptyNameInfersSingleClaudeTool(t *testing.T) {
+	originalReq := `{
+		"stream":true,
+		"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}]
+	}`
+	events := runStream(t, originalReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"/tmp/a\"}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one tool_use content_block_start, got %d (events=%+v)", len(starts), events)
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "Read" {
+		t.Fatalf("expected inferred tool name Read, got %q", name)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", got)
+	}
+}
+
+func TestStreamingTool_EmptyNameInfersForcedClaudeToolChoice(t *testing.T) {
+	originalReq := `{
+		"stream":true,
+		"tool_choice":{"type":"tool","name":"Bash"},
+		"tools":[
+			{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}},
+			{"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}
+		]
+	}`
+	events := runStream(t, originalReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"pwd\"}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one tool_use content_block_start, got %d (events=%+v)", len(starts), events)
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "Bash" {
+		t.Fatalf("expected inferred tool name Bash, got %q", name)
+	}
+}
+
+func TestStreamingTool_EmptyNameInfersSingleZeroParameterClaudeTool(t *testing.T) {
+	originalReq := `{
+		"stream":true,
+		"tools":[{"name":"List","input_schema":{"type":"object","properties":{}}}]
+	}`
+	events := runStream(t, originalReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one zero-parameter tool_use content_block_start, got %d (events=%+v)", len(starts), events)
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "List" {
+		t.Fatalf("expected inferred tool name List, got %q", name)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", got)
+	}
+}
+
+func TestStreamingTool_EmptyNameInfersForcedZeroParameterClaudeToolChoice(t *testing.T) {
+	originalReq := `{
+		"stream":true,
+		"tool_choice":{"type":"tool","name":"List"},
+		"tools":[
+			{"name":"Read","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}},
+			{"name":"List","input_schema":{"type":"object","properties":{}}}
+		]
+	}`
+	events := runStream(t, originalReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one forced zero-parameter tool_use content_block_start, got %d (events=%+v)", len(starts), events)
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "List" {
+		t.Fatalf("expected inferred tool name List, got %q", name)
+	}
+}
+
 func TestStreamingTool_NullName(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":null,"arguments":""}}]}}]}`,
