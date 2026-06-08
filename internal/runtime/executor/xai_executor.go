@@ -114,8 +114,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return resp, err
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
@@ -126,6 +127,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -300,8 +302,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
@@ -312,6 +315,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -502,6 +506,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
+	body = normalizeXAIToolChoiceForTools(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
@@ -709,6 +714,28 @@ func normalizeXAITools(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+// normalizeXAIToolChoiceForTools drops tool_choice and parallel_tool_calls
+// when tools are absent or empty (including after normalizeXAITools filtering).
+// xAI rejects payloads that include tool_choice without any tools defined.
+// Existence checks avoid unnecessary sjson parse/copy passes.
+func normalizeXAIToolChoiceForTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
+	if hasTools {
+		return body
+	}
+	if tools.Exists() {
+		body, _ = sjson.DeleteBytes(body, "tools")
+	}
+	if gjson.GetBytes(body, "tool_choice").Exists() {
+		body, _ = sjson.DeleteBytes(body, "tool_choice")
+	}
+	if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
+		body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	}
+	return body
 }
 
 func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {

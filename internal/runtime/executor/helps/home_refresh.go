@@ -30,10 +30,24 @@ type homeErrorEnvelope struct {
 	Error *homeErrorDetail `json:"error"`
 }
 
+type homeRefreshAuthEnvelope struct {
+	Auth      cliproxyauth.Auth `json:"auth"`
+	AuthIndex string            `json:"auth_index"`
+}
+
 type homeErrorDetail struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 	Code    string `json:"code,omitempty"`
+}
+
+type homeRefreshClient interface {
+	HeartbeatOK() bool
+	GetRefreshAuth(ctx context.Context, authIndex string) ([]byte, error)
+}
+
+var currentHomeRefreshClient = func() homeRefreshClient {
+	return home.Current()
 }
 
 // RefreshAuthViaHome replaces local refresh logic when home control plane integration is enabled.
@@ -50,7 +64,7 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		return nil, true, homeStatusErr{code: http.StatusInternalServerError, msg: "home refresh: auth is nil"}
 	}
 
-	client := home.Current()
+	client := currentHomeRefreshClient()
 	if client == nil || !client.HeartbeatOK() {
 		return nil, true, homeStatusErr{code: http.StatusServiceUnavailable, msg: "home control center unavailable"}
 	}
@@ -81,13 +95,35 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		return nil, true, homeStatusErr{code: statusFromHomeErrorCode(code), msg: msg}
 	}
 
-	var updated cliproxyauth.Auth
-	if errUnmarshal := json.Unmarshal(raw, &updated); errUnmarshal != nil {
+	updated, returnedIndex, errParse := parseHomeRefreshAuth(raw)
+	if errParse != nil {
 		return nil, true, homeStatusErr{code: http.StatusBadGateway, msg: "home returned invalid auth payload"}
+	}
+	if returnedIndex != "" {
+		authIndex = returnedIndex
 	}
 	updated.Index = authIndex
 	updated.EnsureIndex()
-	return &updated, true, nil
+	return updated, true, nil
+}
+
+func parseHomeRefreshAuth(raw []byte) (*cliproxyauth.Auth, string, error) {
+	var rawObject map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &rawObject); errUnmarshal != nil {
+		return nil, "", errUnmarshal
+	}
+	if _, ok := rawObject["auth"]; ok {
+		var envelope homeRefreshAuthEnvelope
+		if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
+			return nil, "", errUnmarshal
+		}
+		return &envelope.Auth, strings.TrimSpace(envelope.AuthIndex), nil
+	}
+	var updated cliproxyauth.Auth
+	if errUnmarshal := json.Unmarshal(raw, &updated); errUnmarshal != nil {
+		return nil, "", errUnmarshal
+	}
+	return &updated, "", nil
 }
 
 func statusFromHomeErrorCode(code string) int {

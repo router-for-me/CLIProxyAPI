@@ -90,3 +90,45 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 		t.Fatalf("expected forked model name %q, got %q", "models/g5-2", out[2].Name)
 	}
 }
+
+func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"qoder": {
+				{Name: "qmodel_latest", Alias: "qlatest"},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "qmodel_latest", Name: "models/qmodel_latest"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "qoder", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(out))
+	}
+	if out[0].ID != "qlatest" {
+		t.Fatalf("expected plugin alias id %q, got %q", "qlatest", out[0].ID)
+	}
+	if out[0].Name != "models/qlatest" {
+		t.Fatalf("expected plugin alias name %q, got %q", "models/qlatest", out[0].Name)
+	}
+}
+
+func TestApplyOAuthModelAlias_PluginProviderSkipsAPIKey(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"qoder": {
+				{Name: "qmodel_latest", Alias: "qlatest"},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "qmodel_latest", Name: "models/qmodel_latest"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "qoder", "api_key", models)
+	if len(out) != 1 || out[0].ID != "qmodel_latest" {
+		t.Fatalf("expected API key plugin model to remain unchanged, got %#v", out)
+	}
+}
