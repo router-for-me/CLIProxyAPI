@@ -623,19 +623,23 @@ func codexExtractImageResults(completed []byte, itemsByIndex map[int64][]byte, f
 	}
 	if len(outputItems) > 0 {
 		// Completed event already carries the output; extract from it in place.
+		results = make([]codexImageCallResult, 0, len(outputItems))
 		for _, item := range outputItems {
 			appendItem(item)
 		}
 	} else if len(itemsByIndex) > 0 || len(fallback) > 0 {
 		// Completed output was empty; extract directly from the collected items,
 		// preserving their original output_index ordering.
-		indexes := make([]int64, 0, len(itemsByIndex))
-		for idx := range itemsByIndex {
-			indexes = append(indexes, idx)
-		}
-		sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
-		for _, idx := range indexes {
-			appendItem(gjson.ParseBytes(itemsByIndex[idx]))
+		results = make([]codexImageCallResult, 0, len(itemsByIndex)+len(fallback))
+		if len(itemsByIndex) > 0 {
+			indexes := make([]int64, 0, len(itemsByIndex))
+			for idx := range itemsByIndex {
+				indexes = append(indexes, idx)
+			}
+			sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
+			for _, idx := range indexes {
+				appendItem(gjson.ParseBytes(itemsByIndex[idx]))
+			}
 		}
 		for _, raw := range fallback {
 			appendItem(gjson.ParseBytes(raw))
