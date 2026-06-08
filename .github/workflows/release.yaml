@@ -149,24 +149,6 @@ jobs:
           else
             tar -C "$archive_dir" -czf "dist/$archive_name" "$binary_name" LICENSE README.md README_CN.md config.example.yaml
           fi
-      - name: Create asset checksum
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          archives=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip)
-          if [[ ${#archives[@]} -ne 1 ]]; then
-            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
-            printf '%s\n' "${archives[@]}" >&2
-            exit 1
-          fi
-          archive="${archives[0]}"
-          archive_name="$(basename "$archive")"
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
-          else
-            shasum -a 256 "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
-          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -179,9 +161,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip dist/CLIProxyAPI_*.tar.gz.sha256 dist/CLIProxyAPI_*.zip.sha256)
-          if [[ ${#assets[@]} -lt 2 ]]; then
-            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
@@ -302,20 +284,6 @@ jobs:
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
-      - name: Create asset checksum
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          archives=(dist/CLIProxyAPI_*.tar.gz)
-          if [[ ${#archives[@]} -ne 1 ]]; then
-            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
-            printf '%s\n' "${archives[@]}" >&2
-            exit 1
-          fi
-          archive="${archives[0]}"
-          archive_name="$(basename "$archive")"
-          sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -328,9 +296,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.tar.gz.sha256)
-          if [[ ${#assets[@]} -lt 2 ]]; then
-            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+          assets=(dist/CLIProxyAPI_*.tar.gz)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
@@ -438,20 +406,6 @@ jobs:
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
-      - name: Create asset checksum
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          archives=(dist/CLIProxyAPI_*.tar.gz)
-          if [[ ${#archives[@]} -ne 1 ]]; then
-            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
-            printf '%s\n' "${archives[@]}" >&2
-            exit 1
-          fi
-          archive="${archives[0]}"
-          archive_name="$(basename "$archive")"
-          sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -464,9 +418,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.tar.gz.sha256)
-          if [[ ${#assets[@]} -lt 2 ]]; then
-            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+          assets=(dist/CLIProxyAPI_*.tar.gz)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
@@ -586,20 +540,6 @@ jobs:
           cp "dist/${TARGET}/bin/cli-proxy-api" "$archive_dir/cli-proxy-api"
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
-      - name: Create asset checksum
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          archives=(dist/CLIProxyAPI_*.tar.gz)
-          if [[ ${#archives[@]} -ne 1 ]]; then
-            printf 'expected one archive, found %s\n' "${#archives[@]}" >&2
-            printf '%s\n' "${archives[@]}" >&2
-            exit 1
-          fi
-          archive="${archives[0]}"
-          archive_name="$(basename "$archive")"
-          sha256sum "$archive" | awk -v name="$archive_name" '{print $1 "  " name}' > "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: freebsd-${{ matrix.goarch }}
@@ -612,9 +552,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.tar.gz.sha256)
-          if [[ ${#assets[@]} -lt 2 ]]; then
-            printf 'expected archive and checksum assets, found %s\n' "${#assets[@]}" >&2
+          assets=(dist/CLIProxyAPI_*.tar.gz)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
             exit 1
           fi
