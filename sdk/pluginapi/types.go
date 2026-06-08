@@ -93,6 +93,12 @@ type Capabilities struct {
 	ResponseBeforeTranslator ResponseNormalizer
 	// ResponseAfterTranslator normalizes translated responses before delivery.
 	ResponseAfterTranslator ResponseNormalizer
+	// RequestInterceptor rewrites execution requests before they reach the upstream executor.
+	RequestInterceptor RequestInterceptor
+	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
+	ResponseInterceptor ResponseInterceptor
+	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
+	StreamChunkInterceptor StreamChunkInterceptor
 	// ThinkingApplier applies validated thinking configuration to provider payloads.
 	ThinkingApplier ThinkingApplier
 	// UsagePlugin receives completed usage records.
@@ -606,6 +612,24 @@ type ResponseNormalizer interface {
 	NormalizeResponse(context.Context, ResponseTransformRequest) (PayloadResponse, error)
 }
 
+// RequestInterceptor rewrites execution requests before they reach the upstream executor.
+type RequestInterceptor interface {
+	InterceptRequest(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
+}
+
+// ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
+type ResponseInterceptor interface {
+	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
+}
+
+// StreamChunkInterceptor rewrites successful stream chunks before downstream delivery.
+type StreamChunkInterceptor interface {
+	InterceptStreamChunk(context.Context, StreamChunkInterceptRequest) (StreamChunkInterceptResponse, error)
+}
+
+// StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
+const StreamChunkHeaderInitIndex = -1
+
 // RequestTransformRequest describes a request payload transformation.
 type RequestTransformRequest struct {
 	// FromFormat is the source protocol format.
@@ -636,6 +660,84 @@ type ResponseTransformRequest struct {
 	TranslatedRequest []byte
 	// Body contains the response payload to transform.
 	Body []byte
+}
+
+// RequestInterceptRequest describes a request about to be executed upstream.
+type RequestInterceptRequest struct {
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Stream         bool
+	Headers        http.Header
+	Body           []byte
+	Metadata       map[string]any
+}
+
+// RequestInterceptResponse returns request modifications.
+type RequestInterceptResponse struct {
+	// Headers replaces matching current request headers and preserves headers not mentioned here.
+	Headers http.Header
+	// Body replaces the current request body only when non-empty.
+	Body []byte
+	// ClearHeaders explicitly removes current request headers before Headers is applied.
+	ClearHeaders []string
+}
+
+// ResponseInterceptRequest describes a successful non-streaming response.
+type ResponseInterceptRequest struct {
+	SourceFormat    string
+	Model           string
+	RequestedModel  string
+	Stream          bool
+	RequestHeaders  http.Header
+	ResponseHeaders http.Header
+	OriginalRequest []byte
+	RequestBody     []byte
+	Body            []byte
+	StatusCode      int
+	Metadata        map[string]any
+}
+
+// ResponseInterceptResponse returns non-streaming response modifications.
+type ResponseInterceptResponse struct {
+	// Headers replaces matching current response headers and preserves headers not mentioned here.
+	Headers http.Header
+	// Body replaces the current response body only when non-empty.
+	Body []byte
+	// ClearHeaders explicitly removes current response headers before Headers is applied.
+	ClearHeaders []string
+}
+
+// StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
+type StreamChunkInterceptRequest struct {
+	SourceFormat    string
+	Model           string
+	RequestedModel  string
+	RequestHeaders  http.Header
+	ResponseHeaders http.Header
+	OriginalRequest []byte
+	RequestBody     []byte
+	Body            []byte
+	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
+	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
+	HistoryChunks [][]byte
+	// ChunkIndex starts at 0 for payload chunks. StreamChunkHeaderInitIndex marks the header-only initialization call.
+	ChunkIndex int
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
+	Metadata map[string]any
+}
+
+// StreamChunkInterceptResponse returns stream chunk modifications.
+type StreamChunkInterceptResponse struct {
+	// Headers replaces matching current stream headers and preserves headers not mentioned here.
+	Headers http.Header
+	// Body replaces the current stream chunk body only when non-empty.
+	Body []byte
+	// ClearHeaders explicitly removes current stream headers before Headers is applied.
+	ClearHeaders []string
+	// DropChunk skips delivery of the current payload chunk and prevents it from entering HistoryChunks.
+	// Header updates returned with DropChunk still apply to the interceptor chain state.
+	DropChunk bool
 }
 
 // PayloadResponse returns a transformed raw payload.
