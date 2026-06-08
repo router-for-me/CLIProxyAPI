@@ -80,7 +80,6 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 
 	// THEN: Handle logging based on response type
 	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
 			w.firstChunkTimestamp = time.Now()
 		}
@@ -128,7 +127,6 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 
 	// THEN: Capture for logging
 	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
 			w.firstChunkTimestamp = time.Now()
 		}
@@ -572,4 +570,11 @@ func cleanupFileBodySources(sources ...*logging.FileBodySource) {
 		}
 		_ = source.Cleanup()
 	}
+}
+
+func (w *ResponseWriterWrapper) FirstChunkTimestamp() time.Time {
+	if w == nil {
+		return time.Time{}
+	}
+	return w.firstChunkTimestamp
 }

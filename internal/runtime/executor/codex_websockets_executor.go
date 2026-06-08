@@ -233,11 +233,17 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
+	reqMuWait := time.Duration(0)
 	if executionSessionID != "" {
 		sess = e.getOrCreateSessionScoped(authID, executionSessionID)
+		lockStart := time.Now()
 		sess.reqMu.Lock()
+		reqMuWait = time.Since(lockStart)
 		defer sess.reqMu.Unlock()
 	}
+
+	requestStart := time.Now()
+	log.Infof("codex ws timing: begin auth=%s session=%s reqMu_wait=%dms", authID, executionSessionID, reqMuWait.Milliseconds())
 
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	wsReqLog := helps.UpstreamRequestLog{
@@ -253,7 +259,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
+	dialStart := time.Now()
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	dialDur := time.Since(dialStart)
+	log.Infof("codex ws timing: dial auth=%s session=%s dur=%dms reused=%v err=%v", authID, executionSessionID, dialDur.Milliseconds(), respHS == nil, errDial)
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
@@ -333,6 +342,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	ttft := codexTTFTTimeout(e.cfg)
 	firstEventSeen := false
+	sendDone := time.Now()
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -348,6 +358,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "ttft_timeout", ttftErr)
 				}
+				log.Warnf("codex ws timing: ttft_timeout auth=%s session=%s waited=%dms", authID, executionSessionID, time.Since(sendDone).Milliseconds())
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "ttft_timeout", ttftErr)
 				return resp, ttftErr
 			}
@@ -370,6 +381,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if len(payload) == 0 {
 			continue
 		}
+		if !firstEventSeen {
+			log.Infof("codex ws timing: ttfe auth=%s session=%s dur=%dms total=%dms", authID, executionSessionID, time.Since(sendDone).Milliseconds(), time.Since(requestStart).Milliseconds())
+		}
 		firstEventSeen = true
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
@@ -384,6 +398,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
 		if eventType == "response.completed" {
+			log.Infof("codex ws timing: completed auth=%s session=%s total=%dms", authID, executionSessionID, time.Since(requestStart).Milliseconds())
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -446,12 +461,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
+	reqMuWait := time.Duration(0)
 	if executionSessionID != "" {
 		sess = e.getOrCreateSessionScoped(authID, executionSessionID)
 		if sess != nil {
+			lockStart := time.Now()
 			sess.reqMu.Lock()
+			reqMuWait = time.Since(lockStart)
 		}
 	}
+
+	streamRequestStart := time.Now()
+	log.Infof("codex ws timing: stream_begin auth=%s session=%s reqMu_wait=%dms", authID, executionSessionID, reqMuWait.Milliseconds())
 
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	wsReqLog := helps.UpstreamRequestLog{
@@ -467,7 +488,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
+	dialStart := time.Now()
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	dialDur := time.Since(dialStart)
+	log.Infof("codex ws timing: stream_dial auth=%s session=%s dur=%dms reused=%v err=%v", authID, executionSessionID, dialDur.Milliseconds(), respHS == nil, errDial)
 	var upstreamHeaders http.Header
 	if respHS != nil {
 		upstreamHeaders = respHS.Header.Clone()
@@ -579,6 +603,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 		ttft := codexTTFTTimeout(e.cfg)
 		firstEventSeen := false
+		streamSendDone := time.Now()
 		var param any
 		for {
 			if ctx != nil && ctx.Err() != nil {
@@ -603,6 +628,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					ttftErr := codexTTFTTimeoutErr(ttft)
 					terminateReason = "ttft_timeout"
 					terminateErr = ttftErr
+					log.Warnf("codex ws timing: stream_ttft_timeout auth=%s session=%s waited=%dms", authID, executionSessionID, time.Since(streamSendDone).Milliseconds())
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "ttft_timeout", ttftErr)
 					reporter.PublishFailure(ctx, ttftErr)
 					if sess != nil {
@@ -638,6 +664,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if len(payload) == 0 {
 				continue
 			}
+			if !firstEventSeen {
+				log.Infof("codex ws timing: stream_ttfe auth=%s session=%s dur=%dms total=%dms", authID, executionSessionID, time.Since(streamSendDone).Milliseconds(), time.Since(streamRequestStart).Milliseconds())
+			}
 			firstEventSeen = true
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
@@ -656,6 +685,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
 			if eventType == "response.completed" || eventType == "response.done" {
+				log.Infof("codex ws timing: stream_completed auth=%s session=%s total=%dms", authID, executionSessionID, time.Since(streamRequestStart).Milliseconds())
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}

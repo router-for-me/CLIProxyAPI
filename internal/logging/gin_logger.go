@@ -83,6 +83,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 			requestID = "--------"
 		}
 		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
+		if ttfb := writerTTFB(c, start); ttfb > 0 {
+			logLine += fmt.Sprintf(" ttfb=%v", ttfb.Truncate(time.Millisecond))
+		}
 		if creditsUsed(c) {
 			logLine += " [credits]"
 		}
@@ -155,6 +158,23 @@ func shouldSkipGinRequestLogging(c *gin.Context) bool {
 	}
 	flag, ok := val.(bool)
 	return ok && flag
+}
+
+type firstChunkProvider interface {
+	FirstChunkTimestamp() time.Time
+}
+
+func writerTTFB(c *gin.Context, requestStart time.Time) time.Duration {
+	if c == nil {
+		return 0
+	}
+	if fcp, ok := c.Writer.(firstChunkProvider); ok {
+		ts := fcp.FirstChunkTimestamp()
+		if !ts.IsZero() {
+			return ts.Sub(requestStart)
+		}
+	}
+	return 0
 }
 
 func creditsUsed(c *gin.Context) bool {
