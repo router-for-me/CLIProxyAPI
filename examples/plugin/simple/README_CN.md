@@ -185,7 +185,9 @@ PUT /v0/management/plugins/{pluginID}/config
 PATCH /v0/management/plugins/{pluginID}/config
 ```
 
-插件自有 Management API 路由通过 `management.register` 注册，通过 `management.handle` 处理。
+插件自有 Management API 路由通过 `management.register` 的 `routes` 字段注册，并通过 `management.handle` 处理。
+
+可由浏览器直接访问的菜单资源通过 `management.register` 的 `resources` 字段注册。CPA 会将这些资源暴露在 `/v0/resource/plugins/<pluginID>/...` 下；例如插件 ID 为 `example` 且资源路径为 `/status` 时，最终路径是 `/v0/resource/plugins/example/status`。
 
 ## 信任边界
 
