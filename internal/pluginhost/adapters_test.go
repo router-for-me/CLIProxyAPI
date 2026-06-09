@@ -2051,6 +2051,177 @@ func TestRegisterFrontendAuthProvidersIdentifierPanicFusesPlugin(t *testing.T) {
 	}
 }
 
+func TestRegisterFrontendAuthProvidersSelectsHighestPriorityExclusiveProvider(t *testing.T) {
+	lowKey := "plugin:exclusive-low:custom-auth"
+	highKey := "plugin:exclusive-high:custom-auth"
+	normalKey := "plugin:normal-auth:custom-auth"
+	for _, key := range []string{lowKey, highKey, normalKey} {
+		sdkaccess.UnregisterProvider(key)
+		defer sdkaccess.UnregisterProvider(key)
+	}
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "exclusive-low",
+			priority: 1,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "exclusive-high",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "normal-auth",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != highKey {
+		t.Fatalf("exclusive provider = %q, want %q", providers[0].Identifier(), highKey)
+	}
+}
+
+func TestRegisterFrontendAuthProvidersSelectsExclusiveProviderByPluginIDWhenPriorityTies(t *testing.T) {
+	alphaKey := "plugin:alpha-auth:custom-auth"
+	betaKey := "plugin:beta-auth:custom-auth"
+	for _, key := range []string{alphaKey, betaKey} {
+		sdkaccess.UnregisterProvider(key)
+		defer sdkaccess.UnregisterProvider(key)
+	}
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "beta-auth",
+			priority: 5,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "alpha-auth",
+			priority: 5,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != alphaKey {
+		t.Fatalf("exclusive provider = %q, want %q", providers[0].Identifier(), alphaKey)
+	}
+}
+
+func TestRegisterFrontendAuthProvidersClearsExclusiveProviderWhenExclusivePluginRemoved(t *testing.T) {
+	exclusiveKey := "plugin:exclusive-auth:custom-auth"
+	normalKey := "plugin:normal-auth:custom-auth"
+	for _, key := range []string{exclusiveKey, normalKey} {
+		sdkaccess.UnregisterProvider(key)
+		defer sdkaccess.UnregisterProvider(key)
+	}
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "exclusive-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id: "normal-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+	if got := sdkaccess.RegisteredProviders(); len(got) != 1 || got[0].Identifier() != exclusiveKey {
+		t.Fatalf("exclusive RegisteredProviders() = %#v, want only %q", got, exclusiveKey)
+	}
+
+	host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{
+		{
+			id: "normal-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	}})
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != normalKey {
+		t.Fatalf("restored provider = %q, want %q", providers[0].Identifier(), normalKey)
+	}
+}
+
+func TestRegisterFrontendAuthProvidersIgnoresExclusiveWithoutFrontendAuthProvider(t *testing.T) {
+	normalKey := "plugin:normal-auth:custom-auth"
+	sdkaccess.UnregisterProvider(normalKey)
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.UnregisterProvider(normalKey)
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "exclusive-without-provider",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id: "normal-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != normalKey {
+		t.Fatalf("provider = %q, want %q", providers[0].Identifier(), normalKey)
+	}
+}
+
 func TestUsageAdapterUsesCurrentSnapshotCapability(t *testing.T) {
 	oldCalls := 0
 	newCalls := 0

@@ -13,6 +13,7 @@ var _ ModelRegistrar = (*compileTimePlugin)(nil)
 var _ ModelProvider = (*compileTimePlugin)(nil)
 var _ AuthProvider = (*compileTimePlugin)(nil)
 var _ FrontendAuthProvider = (*compileTimePlugin)(nil)
+var _ Scheduler = (*compileTimePlugin)(nil)
 var _ ProviderExecutor = (*compileTimePlugin)(nil)
 var _ HostHTTPClient = (*compileTimePlugin)(nil)
 var _ RequestTranslator = (*compileTimePlugin)(nil)
@@ -113,6 +114,71 @@ func TestHostInjectedHTTPClientIsNotEncodedInPluginJSON(t *testing.T) {
 	}
 }
 
+func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
+	request := SchedulerPickRequest{
+		Plugin:    Metadata{Name: "scheduler-plugin"},
+		Provider:  "openai",
+		Providers: []string{"openai", "gemini"},
+		Model:     "gpt-test",
+		Stream:    true,
+		Options: SchedulerOptions{
+			Headers:  map[string][]string{"X-Test": []string{"1"}},
+			Metadata: map[string]any{"tenant": "demo"},
+		},
+		Candidates: []SchedulerAuthCandidate{{
+			ID:         "auth-1",
+			Provider:   "openai",
+			Priority:   10,
+			Status:     "ready",
+			Attributes: map[string]string{"region": "us"},
+			Metadata:   map[string]any{"load": float64(0.5)},
+		}},
+	}
+	response := SchedulerPickResponse{
+		AuthID:          request.Candidates[0].ID,
+		DelegateBuiltin: SchedulerBuiltinRoundRobin,
+		Handled:         true,
+	}
+
+	if request.Plugin.Name != "scheduler-plugin" {
+		t.Fatalf("Plugin.Name = %q", request.Plugin.Name)
+	}
+	if request.Provider != "openai" {
+		t.Fatalf("Provider = %q", request.Provider)
+	}
+	if len(request.Providers) != 2 || request.Providers[1] != "gemini" {
+		t.Fatalf("Providers = %#v", request.Providers)
+	}
+	if request.Model != "gpt-test" {
+		t.Fatalf("Model = %q", request.Model)
+	}
+	if !request.Stream {
+		t.Fatalf("Stream = %v", request.Stream)
+	}
+	if got := request.Options.Headers["X-Test"]; len(got) != 1 || got[0] != "1" {
+		t.Fatalf("Options.Headers = %#v", request.Options.Headers)
+	}
+	if request.Options.Metadata["tenant"] != "demo" {
+		t.Fatalf("Options.Metadata = %#v", request.Options.Metadata)
+	}
+	if len(request.Candidates) != 1 {
+		t.Fatalf("Candidates = %#v", request.Candidates)
+	}
+	candidate := request.Candidates[0]
+	if candidate.ID != "auth-1" || candidate.Provider != "openai" || candidate.Priority != 10 || candidate.Status != "ready" {
+		t.Fatalf("Candidate = %#v", candidate)
+	}
+	if candidate.Attributes["region"] != "us" {
+		t.Fatalf("Candidate.Attributes = %#v", candidate.Attributes)
+	}
+	if candidate.Metadata["load"] != float64(0.5) {
+		t.Fatalf("Candidate.Metadata = %#v", candidate.Metadata)
+	}
+	if response.AuthID != "auth-1" || response.DelegateBuiltin != SchedulerBuiltinRoundRobin || !response.Handled {
+		t.Fatalf("SchedulerPickResponse = %#v", response)
+	}
+}
+
 func (compileTimePlugin) RegisterModels(context.Context, ModelRegistrationRequest) (ModelRegistrationResponse, error) {
 	return ModelRegistrationResponse{}, nil
 }
@@ -145,6 +211,10 @@ func (compileTimePlugin) RefreshAuth(context.Context, AuthRefreshRequest) (AuthR
 
 func (compileTimePlugin) Authenticate(context.Context, FrontendAuthRequest) (FrontendAuthResponse, error) {
 	return FrontendAuthResponse{}, nil
+}
+
+func (compileTimePlugin) Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error) {
+	return SchedulerPickResponse{}, nil
 }
 
 func (compileTimePlugin) Execute(context.Context, ExecutorRequest) (ExecutorResponse, error) {

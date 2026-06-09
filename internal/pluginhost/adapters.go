@@ -1037,7 +1037,14 @@ func (h *Host) RegisterFrontendAuthProviders() {
 		return
 	}
 
+	type exclusiveFrontendAuthCandidate struct {
+		key      string
+		pluginID string
+		priority int
+	}
+
 	nextKeys := make(map[string]struct{})
+	var bestExclusive exclusiveFrontendAuthCandidate
 	for _, record := range h.Snapshot().records {
 		provider := record.plugin.Capabilities.FrontendAuthProvider
 		if provider == nil || h.isPluginFused(record.id) {
@@ -1054,8 +1061,25 @@ func (h *Host) RegisterFrontendAuthProviders() {
 		}
 		sdkaccess.RegisterProvider(key, adapter)
 		nextKeys[key] = struct{}{}
+		if record.plugin.Capabilities.FrontendAuthProviderExclusive {
+			candidate := exclusiveFrontendAuthCandidate{
+				key:      key,
+				pluginID: record.id,
+				priority: record.priority,
+			}
+			if bestExclusive.key == "" ||
+				candidate.priority > bestExclusive.priority ||
+				(candidate.priority == bestExclusive.priority && candidate.pluginID < bestExclusive.pluginID) {
+				bestExclusive = candidate
+			}
+		}
 	}
 
+	if bestExclusive.key != "" {
+		sdkaccess.SetExclusiveProvider(bestExclusive.key)
+	} else {
+		sdkaccess.ClearExclusiveProvider()
+	}
 	h.pruneStaleAccessProviders(nextKeys)
 }
 

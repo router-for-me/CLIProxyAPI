@@ -107,6 +107,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, fmt.Errorf("missing auth provider")
 		}
 		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.AuthProvider.Identifier()})
+	case pluginabi.MethodSchedulerPick:
+		if l.active.Capabilities.Scheduler == nil {
+			return nil, fmt.Errorf("missing scheduler")
+		}
+		var req pluginapi.SchedulerPickRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errPick := l.active.Capabilities.Scheduler.Pick(ctx, req)
+		if errPick != nil {
+			return nil, errPick
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodUsageHandle:
 		if l.active.Capabilities.UsagePlugin == nil {
 			return marshalRPCResult(rpcEmptyResponse{})
@@ -221,6 +234,15 @@ type requestInterceptorFunc func(context.Context, pluginapi.RequestInterceptRequ
 func (f requestInterceptorFunc) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 	if f == nil {
 		return pluginapi.RequestInterceptResponse{}, fmt.Errorf("missing request interceptor callback")
+	}
+	return f(ctx, req)
+}
+
+type schedulerFunc func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error)
+
+func (f schedulerFunc) Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+	if f == nil {
+		return pluginapi.SchedulerPickResponse{}, fmt.Errorf("missing scheduler callback")
 	}
 	return f(ctx, req)
 }
