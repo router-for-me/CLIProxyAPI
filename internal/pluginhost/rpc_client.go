@@ -498,7 +498,12 @@ func (a *rpcPluginAdapter) RegisterManagement(ctx context.Context, req pluginapi
 		route.Handler = a
 		routes = append(routes, route)
 	}
-	return pluginapi.ManagementRegistrationResponse{Routes: routes}, nil
+	resources := make([]pluginapi.ResourceRoute, 0, len(resp.Resources))
+	for _, route := range resp.Resources {
+		route.Handler = a
+		resources = append(resources, route)
+	}
+	return pluginapi.ManagementRegistrationResponse{Routes: routes, Resources: resources}, nil
 }
 
 func (a *rpcPluginAdapter) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {

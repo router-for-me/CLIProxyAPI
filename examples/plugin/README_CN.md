@@ -20,8 +20,8 @@
 - `thinking/`：只演示 Thinking 处理能力。
 - `usage/`：只演示 Usage 观察能力。
 - `cli/`：只演示命令行扩展能力。
-- `management-api/`：只演示 Management API 扩展能力。
-- `host-callback/`：使用最小 Management API 路由演示宿主回调。
+- `management-api/`：只演示 Management API 和资源扩展能力。
+- `host-callback/`：使用最小插件资源演示宿主回调。
 
 多数标准能力示例都包含 `go/`、`c/` 和 `rust/` 三个子目录。专用示例可能只提供所需的实现语言。
 
@@ -68,4 +68,6 @@ make -C examples/plugin build
 
 `protocol-format` 使用最小执行器承载，因为格式声明属于执行器能力。
 
-`host-callback` 使用最小 Management API 路由承载，因为宿主回调只能从插件方法内部发起，不是独立能力。
+`host-callback` 使用最小插件资源承载，因为宿主回调只能从插件方法内部发起，不是独立能力。
+
+`management.register` 通过 `resources` 字段返回的菜单资源会由 CPA 暴露在 `/v0/resource/plugins/<pluginID>/...` 下。需要认证的插件自有 Management API 路由仍保留在 `/v0/management/...` 下。

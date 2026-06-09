@@ -103,7 +103,8 @@ type rpcThinkingApplyRequest struct {
 }
 
 type rpcManagementRegistrationResponse struct {
-	Routes []pluginapi.ManagementRoute `json:"routes,omitempty"`
+	Routes    []pluginapi.ManagementRoute `json:"routes,omitempty"`
+	Resources []pluginapi.ResourceRoute   `json:"resources,omitempty"`
 }
 
 type rpcEmptyResponse struct{}

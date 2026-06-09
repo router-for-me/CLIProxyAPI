@@ -18,7 +18,7 @@ const FRONTEND_AUTH_RESPONSE: &str = r#"{"ok":true,"result":{"Authenticated":tru
 const STREAM_RESPONSE: &str = r#"{"ok":true,"result":{"headers":{"content-type":["text/event-stream"]},"chunks":[{"Payload":"cGx1Z2luLWV4YW1wbGUtcnVzdAo="}]}}"#;
 const CLI_REGISTER_RESPONSE: &str = r#"{"ok":true,"result":{"Flags":[{"Name":"plugin-example-rust-command","Usage":"Run the example Rust ABI plugin command","Type":"bool"}]}}"#;
 const CLI_EXECUTE_RESPONSE: &str = r#"{"ok":true,"result":{"Stdout":"cGx1Z2luIGV4YW1wbGUgcnVzdCBjb21tYW5kCg==","ExitCode":0}}"#;
-const MANAGEMENT_REGISTER_RESPONSE: &str = r#"{"ok":true,"result":{"Routes":[{"Method":"GET","Path":"/plugins/example-rust/status","Menu":"Example Rust Plugin","Description":"Shows example Rust plugin status."}]}}"#;
+const MANAGEMENT_REGISTER_RESPONSE: &str = r#"{"ok":true,"result":{"Resources":[{"Path":"/status","Menu":"Example Rust Plugin","Description":"CPA exposes this menu resource under /v0/resource/plugins/example-rust/status."}]}}"#;
 const UNKNOWN_METHOD_RESPONSE: &str = r#"{"ok":false,"error":{"code":"unknown_method","message":"unknown method"}}"#;
 const INVALID_METHOD_RESPONSE: &str = r#"{"ok":false,"error":{"code":"invalid_method","message":"method is required"}}"#;
 
@@ -170,7 +170,7 @@ fn make_http_response(request: &[u8]) -> String {
     let method = extract_json_string(&json, "Method").unwrap_or_else(|| "GET".to_string());
     let target = extract_json_string(&json, "URL")
         .or_else(|| extract_json_string(&json, "Path"))
-        .unwrap_or_else(|| "/plugins/example-rust/status".to_string());
+        .unwrap_or_else(|| "/v0/resource/plugins/example-rust/status".to_string());
     let body = format!(
         r#"{{"plugin":"example-rust","method":"{}","target":"{}"}}"#,
         json_escape(&method),
