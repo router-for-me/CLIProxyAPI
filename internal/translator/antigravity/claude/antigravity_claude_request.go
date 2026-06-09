@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -289,6 +290,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// contents
 	contentsJSON := []byte(`[]`)
 	hasContents := false
+	prevRole := ""
 
 	// tool_use_id → tool_name lookup, populated incrementally during the main loop.
 	// Claude's tool_result references tool_use by ID; Gemini requires functionResponse.name.
@@ -574,7 +576,18 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					continue
 				}
 
-				contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
+				// Gemini requires strict user/model role alternation.
+				// Merge parts into the previous content entry when roles match
+				// (e.g. system→user conversion producing consecutive user messages).
+				if prevRole == role {
+					lastIdx := gjson.GetBytes(contentsJSON, "#").Int() - 1
+					for _, part := range partsCheck.Array() {
+						contentsJSON, _ = sjson.SetRawBytes(contentsJSON, fmt.Sprintf("%d.parts.-1", lastIdx), []byte(part.Raw))
+					}
+				} else {
+					contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
+					prevRole = role
+				}
 				hasContents = true
 			} else if contentsResult.Type == gjson.String {
 				prompt := contentsResult.String()
@@ -583,7 +596,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					partJSON, _ = sjson.SetBytes(partJSON, "text", prompt)
 				}
 				clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
-				contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
+				if prevRole == role {
+					lastIdx := gjson.GetBytes(contentsJSON, "#").Int() - 1
+					contentsJSON, _ = sjson.SetRawBytes(contentsJSON, fmt.Sprintf("%d.parts.-1", lastIdx), partJSON)
+				} else {
+					contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
+					prevRole = role
+				}
 				hasContents = true
 			}
 		}

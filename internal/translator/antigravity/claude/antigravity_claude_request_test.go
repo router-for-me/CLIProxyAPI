@@ -151,24 +151,26 @@ func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserConten
 		t.Fatalf("system role should not be emitted in request.contents: %s", systemContent.Raw)
 	}
 
+	// Consecutive user-role messages (original user + system→user conversions) are merged.
 	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 3 {
-		t.Fatalf("Expected the user and message-level system turns in request.contents, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
+	if len(contents) != 1 {
+		t.Fatalf("Expected 1 merged content entry (user + system→user), got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
 	}
 	if got := contents[0].Get("role").String(); got != "user" {
-		t.Fatalf("Expected first content role user, got %q", got)
+		t.Fatalf("Expected merged content role user, got %q", got)
 	}
-	if got := contents[1].Get("role").String(); got != "user" {
-		t.Fatalf("Expected message-level system content to be downgraded to user role, got %q", got)
+	mergedParts := contents[0].Get("parts").Array()
+	if len(mergedParts) != 3 {
+		t.Fatalf("Expected 3 parts in merged content, got %d", len(mergedParts))
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "String mid-conversation rule" {
-		t.Fatalf("Unexpected string message-level system content text: %q", got)
+	if got := mergedParts[0].Get("text").String(); got != "Hello" {
+		t.Fatalf("Unexpected first part text: %q", got)
 	}
-	if got := contents[2].Get("role").String(); got != "user" {
-		t.Fatalf("Expected array message-level system content to be downgraded to user role, got %q", got)
+	if got := mergedParts[1].Get("text").String(); got != "String mid-conversation rule" {
+		t.Fatalf("Unexpected second part text (from string system): %q", got)
 	}
-	if got := contents[2].Get("parts.0.text").String(); got != "Array mid-conversation rule" {
-		t.Fatalf("Unexpected array message-level system content text: %q", got)
+	if got := mergedParts[2].Get("text").String(); got != "Array mid-conversation rule" {
+		t.Fatalf("Unexpected third part text (from array system): %q", got)
 	}
 
 	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
