@@ -74,6 +74,8 @@ type Capabilities struct {
 	AuthProvider AuthProvider
 	// FrontendAuthProvider authenticates frontend requests before proxy handling.
 	FrontendAuthProvider FrontendAuthProvider
+	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
+	FrontendAuthProviderExclusive bool
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.

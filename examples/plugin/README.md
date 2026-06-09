@@ -8,6 +8,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `model/`: model capability only.
 - `auth/`: auth provider capability only.
 - `frontend-auth/`: frontend auth provider capability only.
+- `frontend-auth-exclusive/`: frontend auth provider that becomes the only request authentication provider when selected.
 - `executor/`: executor capability only.
 - `protocol-format/`: minimal executor focused on input/output format declarations.
 - `request-translator/`: request translation capability only.

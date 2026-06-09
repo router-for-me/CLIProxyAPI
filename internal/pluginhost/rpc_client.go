@@ -52,9 +52,10 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	plugin := pluginapi.Plugin{
 		Metadata: resp.Metadata,
 		Capabilities: pluginapi.Capabilities{
-			ExecutorModelScope:    resp.Capabilities.ExecutorModelScope,
-			ExecutorInputFormats:  append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
-			ExecutorOutputFormats: append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
+			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
+			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
+			ExecutorInputFormats:          append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
+			ExecutorOutputFormats:         append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
 		},
 	}
 	if resp.Capabilities.ModelRegistrar {

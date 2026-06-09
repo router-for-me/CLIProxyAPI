@@ -8,6 +8,7 @@
 - `model/`：只演示模型能力。
 - `auth/`：只演示认证提供方能力。
 - `frontend-auth/`：只演示前端认证提供方能力。
+- `frontend-auth-exclusive/`：演示被选中后成为唯一请求认证方式的前端认证提供方。
 - `executor/`：只演示执行器能力。
 - `protocol-format/`：使用最小执行器重点演示输入和输出格式声明。
 - `request-translator/`：只演示请求转换能力。
