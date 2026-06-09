@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
@@ -42,6 +44,69 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
+	}
+}
+
+// TestRefreshTokens_ConcurrentSingleFlight verifies that concurrent refreshes for the
+// same refresh token are collapsed into a single upstream call. OpenAI rotates the
+// refresh token on each success, so without de-duplication concurrent refreshes race
+// and the loser fails with refresh_token_reused.
+func TestRefreshTokens_ConcurrentSingleFlight(t *testing.T) {
+	const concurrency = 8
+	var calls int32
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				// Block so concurrent callers coalesce into the in-flight refresh.
+				<-release
+				body := `{"access_token":"new_access","refresh_token":"new_refresh","id_token":"","expires_in":3600}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	var (
+		wg      sync.WaitGroup
+		started sync.WaitGroup
+		results = make([]error, concurrency)
+	)
+	started.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			started.Done()
+			_, err := auth.RefreshTokens(context.Background(), "shared_refresh_token")
+			results[idx] = err
+		}(i)
+	}
+
+	started.Wait()
+	<-entered                         // the single upstream call has reached the transport
+	time.Sleep(50 * time.Millisecond) // let the remaining callers coalesce via singleflight
+	close(release)                    // allow the upstream call to complete
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected exactly 1 upstream refresh call, got %d", got)
+	}
+	for i, err := range results {
+		if err != nil {
+			t.Fatalf("concurrent refresh %d failed: %v", i, err)
+		}
 	}
 }
 
