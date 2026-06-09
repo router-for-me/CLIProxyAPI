@@ -84,6 +84,9 @@ func TestIsAIAPIPathIncludesCodexBackend(t *testing.T) {
 			t.Fatalf("expected %s to be treated as AI API path", path)
 		}
 	}
+	if isAIAPIPath("/backend-api/codex-status") {
+		t.Fatalf("expected /backend-api/codex-status not to be treated as AI API path")
+	}
 }
 
 func TestGinLogrusLoggerAddsRequestIDForCodexBackend(t *testing.T) {
