@@ -22,6 +22,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -193,7 +194,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	translationBody := normalizeOpenAICompatToolCallArguments(body)
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, translationBody, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -422,7 +424,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if detail, ok := helps.ParseOpenAIStreamUsage(dataLine); ok {
 					reporter.Publish(ctx, detail)
 				}
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(dataLine), &param)
+				translationDataLine := normalizeOpenAICompatSSEToolCallArguments(dataLine)
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, translationDataLine, &param)
 				for i := range chunks {
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -461,7 +464,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 func splitOpenAICompatSSEDataLines(line []byte) [][]byte {
 	trimmed := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
-		return [][]byte{bytes.Clone(trimmed)}
+		return [][]byte{trimmed}
+	}
+	if !bytes.Contains(trimmed[len("data:"):], []byte("data:")) {
+		return [][]byte{trimmed}
 	}
 
 	var lines [][]byte
@@ -471,7 +477,7 @@ func splitOpenAICompatSSEDataLines(line []byte) [][]byte {
 		payload := bytes.TrimLeft(payloadWithPadding, " \t")
 		leadingPadding := len(payloadWithPadding) - len(payload)
 		if len(payload) == 0 {
-			lines = append(lines, bytes.Clone(remaining))
+			lines = append(lines, remaining)
 			break
 		}
 
@@ -483,14 +489,14 @@ func splitOpenAICompatSSEDataLines(line []byte) [][]byte {
 				remaining = rest
 				continue
 			}
-			lines = append(lines, bytes.Clone(remaining))
+			lines = append(lines, remaining)
 			break
 		}
 
 		decoder := json.NewDecoder(bytes.NewReader(payload))
 		var raw json.RawMessage
 		if errDecode := decoder.Decode(&raw); errDecode != nil {
-			lines = append(lines, bytes.Clone(remaining))
+			lines = append(lines, remaining)
 			break
 		}
 
@@ -498,7 +504,7 @@ func splitOpenAICompatSSEDataLines(line []byte) [][]byte {
 		consumed := len("data:") + leadingPadding + payloadEnd
 		rest := bytes.TrimSpace(remaining[consumed:])
 		if !bytes.HasPrefix(rest, []byte("data:")) {
-			lines = append(lines, bytes.Clone(remaining))
+			lines = append(lines, remaining)
 			break
 		}
 
@@ -507,9 +513,100 @@ func splitOpenAICompatSSEDataLines(line []byte) [][]byte {
 		remaining = rest
 	}
 	if len(lines) == 0 {
-		return [][]byte{bytes.Clone(trimmed)}
+		return [][]byte{trimmed}
 	}
 	return lines
+}
+
+func normalizeOpenAICompatSSEToolCallArguments(line []byte) []byte {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return line
+	}
+
+	payload := bytes.TrimSpace(trimmed[len("data:"):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return line
+	}
+
+	normalized := normalizeOpenAICompatToolCallArguments(payload)
+	if bytes.Equal(normalized, payload) {
+		return line
+	}
+
+	out := make([]byte, 0, len("data: ")+len(normalized))
+	out = append(out, "data: "...)
+	out = append(out, normalized...)
+	return out
+}
+
+func normalizeOpenAICompatToolCallArguments(body []byte) []byte {
+	if len(body) == 0 || !bytes.Contains(body, []byte(`"tool_calls"`)) || !bytes.Contains(body, []byte(`"arguments"`)) {
+		return body
+	}
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+
+	out := body
+	choices := gjson.GetBytes(out, "choices")
+	if !choices.IsArray() {
+		return out
+	}
+
+	choices.ForEach(func(choiceKey, choice gjson.Result) bool {
+		choiceIndex := int(choiceKey.Int())
+		out = normalizeOpenAICompatToolCallArrayArguments(out, choice.Get("message.tool_calls"), fmt.Sprintf("choices.%d.message.tool_calls", choiceIndex))
+		out = normalizeOpenAICompatToolCallArrayArguments(out, choice.Get("delta.tool_calls"), fmt.Sprintf("choices.%d.delta.tool_calls", choiceIndex))
+
+		content := choice.Get("message.content")
+		if content.IsArray() {
+			content.ForEach(func(contentKey, item gjson.Result) bool {
+				toolCalls := item.Get("tool_calls")
+				if toolCalls.IsArray() {
+					path := fmt.Sprintf("choices.%d.message.content.%d.tool_calls", choiceIndex, contentKey.Int())
+					out = normalizeOpenAICompatToolCallArrayArguments(out, toolCalls, path)
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return out
+}
+
+func normalizeOpenAICompatToolCallArrayArguments(body []byte, toolCalls gjson.Result, path string) []byte {
+	if !toolCalls.IsArray() {
+		return body
+	}
+
+	out := body
+	toolCalls.ForEach(func(toolCallKey, toolCall gjson.Result) bool {
+		args := toolCall.Get("function.arguments")
+		normalized, ok := normalizeOpenAICompatToolArgumentValue(args)
+		if !ok || normalized == args.String() {
+			return true
+		}
+
+		updated, errSet := sjson.SetBytes(out, fmt.Sprintf("%s.%d.function.arguments", path, toolCallKey.Int()), normalized)
+		if errSet == nil {
+			out = updated
+		}
+		return true
+	})
+	return out
+}
+
+func normalizeOpenAICompatToolArgumentValue(args gjson.Result) (string, bool) {
+	if !args.Exists() || args.Type != gjson.String {
+		return "", false
+	}
+
+	normalized := util.NormalizeToolArgumentsObjectJSON(args.String())
+	if normalized == "{}" {
+		return "", false
+	}
+	return normalized, true
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {

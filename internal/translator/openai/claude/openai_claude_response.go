@@ -319,7 +319,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				if accumulator.Arguments.Len() > 0 {
 					inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.NormalizeToolArgumentsObjectJSON(accumulator.Arguments.String()))
+					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
 					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
 				}
 
@@ -390,7 +390,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 			if accumulator.Arguments.Len() > 0 {
 				inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.NormalizeToolArgumentsObjectJSON(accumulator.Arguments.String()))
+				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
 				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
 			}
 
@@ -451,8 +451,17 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
 
-				argsStr := util.NormalizeToolArgumentsObjectJSON(toolCall.Get("function.arguments").String())
-				toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsStr))
+				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
+				if argsStr != "" && gjson.Valid(argsStr) {
+					argsJSON := gjson.Parse(argsStr)
+					if argsJSON.IsObject() {
+						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+					} else {
+						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+					}
+				} else {
+					toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+				}
 
 				out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
 				return true
@@ -663,8 +672,17 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 									toolUse, _ = sjson.SetBytes(toolUse, "id", util.SanitizeClaudeToolID(tc.Get("id").String()))
 									toolUse, _ = sjson.SetBytes(toolUse, "name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
 
-									argsStr := util.NormalizeToolArgumentsObjectJSON(tc.Get("function.arguments").String())
-									toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsStr))
+									argsStr := util.FixJSON(tc.Get("function.arguments").String())
+									if argsStr != "" && gjson.Valid(argsStr) {
+										argsJSON := gjson.Parse(argsStr)
+										if argsJSON.IsObject() {
+											toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+										} else {
+											toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
+										}
+									} else {
+										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
+									}
 
 									out, _ = sjson.SetRawBytes(out, "content.-1", toolUse)
 									return true
@@ -711,8 +729,17 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
 					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
 
-					argsStr := util.NormalizeToolArgumentsObjectJSON(toolCall.Get("function.arguments").String())
-					toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsStr))
+					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
+					if argsStr != "" && gjson.Valid(argsStr) {
+						argsJSON := gjson.Parse(argsStr)
+						if argsJSON.IsObject() {
+							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+						} else {
+							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+						}
+					} else {
+						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+					}
 
 					out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
 					return true

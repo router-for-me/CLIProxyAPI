@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -440,6 +441,95 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 	}
 	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
 		t.Fatalf("stream payload = %s", got.String())
+	}
+}
+
+func TestOpenAICompatExecutorClaudeNonStreamNormalizesDoubleEncodedToolArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"read_file","arguments":"\"{\\\"path\\\":\\\"/tmp/a\\\"}\""}}]},"finish_reason":"tool_calls"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "m",
+		Payload: []byte(`{
+			"model":"m",
+			"max_tokens":1024,
+			"messages":[{"role":"user","content":"hi"}],
+			"tools":[{"name":"read_file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.input.path").String(); got != "/tmp/a" {
+		t.Fatalf("tool input path = %q, want /tmp/a; payload=%s", got, string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorClaudeStreamNormalizesDoubleEncodedToolArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":"\"{\\\"path\\\":\\\"/tmp/a\\\"}\""}}]}}]}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{
+		"model":"m",
+		"max_tokens":1024,
+		"stream":true,
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"name":"read_file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
+	}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "m",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          true,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamed strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		streamed.Write(chunk.Payload)
+	}
+
+	var gotArgs string
+	for _, line := range strings.Split(streamed.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if gjson.Get(payload, "delta.type").String() == "input_json_delta" {
+			gotArgs = gjson.Get(payload, "delta.partial_json").String()
+			break
+		}
+	}
+	if got := gjson.Get(gotArgs, "path").String(); got != "/tmp/a" {
+		t.Fatalf("partial_json path = %q, want /tmp/a; stream=%s", got, streamed.String())
 	}
 }
 
