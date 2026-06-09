@@ -1,3 +1,14 @@
+## Work State
+
+| Field | Value |
+|---|---|
+| Last commit | 2026-06-08 |
+| Open issues | 36 |
+| Open PRs | 9 |
+| Focus | multi-provider LLM proxy fork — builds + CI workflows repaired |
+
+Progress: ████████░░ 80%
+
 > **Work state:** ACTIVE · **Progress:** `███████░░░ 70%`
 > CLIProxyAPI++ — multi-provider LLM proxy fork. Builds + CI workflows repaired (25 files). Residual: pre-existing Go test failures surfaced now that CI runs. · updated 2026-06-02
 
