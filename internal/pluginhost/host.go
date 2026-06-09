@@ -267,9 +267,12 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.Executor != nil ||
 		caps.RequestTranslator != nil ||
 		caps.RequestNormalizer != nil ||
+		caps.RequestInterceptor != nil ||
 		caps.ResponseTranslator != nil ||
 		caps.ResponseBeforeTranslator != nil ||
 		caps.ResponseAfterTranslator != nil ||
+		caps.ResponseInterceptor != nil ||
+		caps.StreamChunkInterceptor != nil ||
 		caps.ThinkingApplier != nil ||
 		caps.UsagePlugin != nil ||
 		caps.CommandLinePlugin != nil ||

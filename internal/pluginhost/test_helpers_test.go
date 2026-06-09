@@ -63,6 +63,45 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errApply
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodRequestInterceptBefore:
+		if l.active.Capabilities.RequestInterceptor == nil {
+			return nil, fmt.Errorf("missing request interceptor")
+		}
+		var req pluginapi.RequestInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errIntercept := l.active.Capabilities.RequestInterceptor.InterceptRequest(ctx, req)
+		if errIntercept != nil {
+			return nil, errIntercept
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodResponseInterceptAfter:
+		if l.active.Capabilities.ResponseInterceptor == nil {
+			return nil, fmt.Errorf("missing response interceptor")
+		}
+		var req pluginapi.ResponseInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errIntercept := l.active.Capabilities.ResponseInterceptor.InterceptResponse(ctx, req)
+		if errIntercept != nil {
+			return nil, errIntercept
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodResponseInterceptStreamChunk:
+		if l.active.Capabilities.StreamChunkInterceptor == nil {
+			return nil, fmt.Errorf("missing stream chunk interceptor")
+		}
+		var req pluginapi.StreamChunkInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errIntercept := l.active.Capabilities.StreamChunkInterceptor.InterceptStreamChunk(ctx, req)
+		if errIntercept != nil {
+			return nil, errIntercept
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodAuthIdentifier:
 		if l.active.Capabilities.AuthProvider == nil {
 			return nil, fmt.Errorf("missing auth provider")
@@ -175,6 +214,34 @@ func (c testThinkingCapability) ApplyThinking(ctx context.Context, req pluginapi
 		return pluginapi.PayloadResponse{}, errMarshal
 	}
 	return pluginapi.PayloadResponse{Body: out}, nil
+}
+
+type requestInterceptorFunc func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error)
+
+func (f requestInterceptorFunc) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	if f == nil {
+		return pluginapi.RequestInterceptResponse{}, fmt.Errorf("missing request interceptor callback")
+	}
+	return f(ctx, req)
+}
+
+type responseInterceptorFunc struct {
+	interceptResponse    func(context.Context, pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error)
+	interceptStreamChunk func(context.Context, pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error)
+}
+
+func (f responseInterceptorFunc) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+	if f.interceptResponse == nil {
+		return pluginapi.ResponseInterceptResponse{}, fmt.Errorf("missing response interceptor callback")
+	}
+	return f.interceptResponse(ctx, req)
+}
+
+func (f responseInterceptorFunc) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+	if f.interceptStreamChunk == nil {
+		return pluginapi.StreamChunkInterceptResponse{}, fmt.Errorf("missing stream chunk interceptor callback")
+	}
+	return f.interceptStreamChunk(ctx, req)
 }
 
 func makePluginDir(t *testing.T, ids ...string) string {
