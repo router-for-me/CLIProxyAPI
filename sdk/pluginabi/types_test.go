@@ -49,3 +49,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
 	}
 }
+
+func TestSchedulerPickMethodName(t *testing.T) {
+	if MethodSchedulerPick != "scheduler.pick" {
+		t.Fatalf("MethodSchedulerPick = %q", MethodSchedulerPick)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,27 +14,43 @@ import (
 )
 
 type jsEngine struct {
-	vm *goja.Runtime
+	vm            *goja.Runtime
+	consoleLogger jsConsoleLogger
 }
 
 const maxJSScriptBytes = 8 * 1024 * 1024
 
-func newJSEngine() *jsEngine {
+type jsConsoleLogger func(message string) error
+
+func newJSEngine(loggers ...jsConsoleLogger) *jsEngine {
+	consoleLogger := defaultJSConsoleLogger
+	if len(loggers) > 0 && loggers[0] != nil {
+		consoleLogger = loggers[0]
+	}
 	engine := &jsEngine{
-		vm: goja.New(),
+		vm:            goja.New(),
+		consoleLogger: consoleLogger,
 	}
 	engine.initConsole()
 	return engine
 }
 
+func defaultJSConsoleLogger(message string) error {
+	log.Info("JS console log: ", message)
+	return nil
+}
+
 func (engine *jsEngine) initConsole() {
 	console := engine.vm.NewObject()
 	consoleLogWrapper := func(call goja.FunctionCall) goja.Value {
-		args := make([]interface{}, len(call.Arguments))
+		args := make([]string, len(call.Arguments))
 		for i, arg := range call.Arguments {
-			args[i] = arg.Export()
+			args[i] = fmt.Sprint(arg.Export())
 		}
-		log.Info("JS console log: ", fmt.Sprint(args...))
+		message := strings.Join(args, " ")
+		if errLog := engine.consoleLogger(message); errLog != nil {
+			defaultJSConsoleLogger(message)
+		}
 		return goja.Undefined()
 	}
 	_ = console.Set("log", consoleLogWrapper)
