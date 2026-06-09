@@ -126,6 +126,10 @@ type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }
 
+type pluginSchedulerState interface {
+	HasScheduler() bool
+}
+
 // StoppableSelector is an optional interface for selectors that hold resources.
 // Selectors that implement this interface will have Stop called during shutdown.
 type StoppableSelector interface {
@@ -245,9 +249,15 @@ func (m *Manager) hasPluginScheduler() bool {
 		return false
 	}
 	m.mu.RLock()
-	ok := m.pluginScheduler != nil
+	scheduler := m.pluginScheduler
 	m.mu.RUnlock()
-	return ok
+	if scheduler == nil {
+		return false
+	}
+	if state, ok := scheduler.(pluginSchedulerState); ok {
+		return state.HasScheduler()
+	}
+	return true
 }
 
 func isBuiltInSelector(selector Selector) bool {

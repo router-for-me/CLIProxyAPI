@@ -30,6 +30,10 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	return resp, true, nil
 }
 
+func (h *Host) HasScheduler() bool {
+	return h.schedulerRecord() != nil
+}
+
 func (h *Host) schedulerRecord() *capabilityRecord {
 	if h == nil {
 		return nil
