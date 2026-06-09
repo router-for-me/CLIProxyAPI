@@ -3,6 +3,7 @@ package antigravity
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,8 +44,37 @@ func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *Antigravit
 	if httpClient != nil {
 		return &AntigravityAuth{httpClient: httpClient}
 	}
-	return &AntigravityAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+	// Apply proxy first, then force HTTP/1.1 on whatever transport results.
+	// Order matters: SetProxy replaces the transport, so HTTP/1.1 must be
+	// enforced after. Matches the executor's newAntigravityHTTPClient.
+	client := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	forceHTTP1Transport(client)
+	return &AntigravityAuth{httpClient: client}
+}
+
+// forceHTTP1Transport configures the client's transport to use HTTP/1.1 only,
+// disabling HTTP/2. This is required for Google Cloud Code Companion API compatibility.
+func forceHTTP1Transport(client *http.Client) {
+	if client.Transport == nil {
+		base, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			base = &http.Transport{}
+		}
+		transport := base.Clone()
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+		client.Transport = transport
+	} else if transport, ok := client.Transport.(*http.Transport); ok {
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	}
 }
 
@@ -54,6 +84,18 @@ func (o *AntigravityAuth) shortUserAgent() string {
 
 func (o *AntigravityAuth) nodeUserAgent() string {
 	return misc.AntigravityLoadCodeAssistUserAgent("")
+}
+
+// oauthUserAgent returns the User-Agent for OAuth HTTP calls (token exchange, refresh, userinfo).
+// Mirrors Rust: NATIVE_OAUTH_USER_AGENT = "vscode/1.X.X (Antigravity/<version>)"
+func (o *AntigravityAuth) oauthUserAgent() string {
+	return OAuthUserAgent()
+}
+
+// OAuthUserAgent returns the canonical OAuth User-Agent string.
+// Mirrors Rust: NATIVE_OAUTH_USER_AGENT = "vscode/1.X.X (Antigravity/<version>)"
+func OAuthUserAgent() string {
+	return fmt.Sprintf("vscode/1.X.X (Antigravity/%s)", misc.AntigravityLatestVersion())
 }
 
 func antigravityLoadCodeAssistMetadata() map[string]string {
@@ -91,8 +133,44 @@ func extractCloudaicompanionProject(data map[string]any) string {
 	return ""
 }
 
-func defaultAntigravityTierID(loadResp map[string]any) string {
-	if tiers, okTiers := loadResp["allowedTiers"].([]any); okTiers {
+// resolveSubscriptionTier extracts the subscription tier from a loadCodeAssist response.
+// Priority mirrors Rust: paid_tier -> current_tier (if not ineligible) -> default from allowed_tiers.
+// Returns a canonical tier ID suitable for use as tier_id in onboardUser requests.
+func resolveSubscriptionTier(loadResp map[string]any) string {
+	// 1. Paid Tier (Google One AI Premium etc.) -- highest priority
+	if paidTier, ok := loadResp["paidTier"].(map[string]any); ok {
+		if id, ok := paidTier["id"].(string); ok && strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+		if name, ok := paidTier["name"].(string); ok && strings.TrimSpace(name) != "" {
+			if id := lookupTierIDByName(loadResp, name); id != "" {
+				return id
+			}
+			return strings.TrimSpace(name)
+		}
+	}
+
+	// 2. Current Tier -- only if not ineligible
+	isIneligible := false
+	if ineligible, ok := loadResp["ineligibleTiers"].([]any); ok && len(ineligible) > 0 {
+		isIneligible = true
+	}
+	if !isIneligible {
+		if currentTier, ok := loadResp["currentTier"].(map[string]any); ok {
+			if id, ok := currentTier["id"].(string); ok && strings.TrimSpace(id) != "" {
+				return strings.TrimSpace(id)
+			}
+			if name, ok := currentTier["name"].(string); ok && strings.TrimSpace(name) != "" {
+				if id := lookupTierIDByName(loadResp, name); id != "" {
+					return id
+				}
+				return strings.TrimSpace(name)
+			}
+		}
+	}
+
+	// 3. Default from Allowed Tiers (restricted proxy access)
+	if tiers, ok := loadResp["allowedTiers"].([]any); ok {
 		for _, rawTier := range tiers {
 			tier, okTier := rawTier.(map[string]any)
 			if !okTier {
@@ -101,21 +179,44 @@ func defaultAntigravityTierID(loadResp map[string]any) string {
 			if isDefault, okDefault := tier["isDefault"].(bool); !okDefault || !isDefault {
 				continue
 			}
-			if id, okID := tier["id"].(string); okID {
-				if trimmed := strings.TrimSpace(id); trimmed != "" {
-					return trimmed
-				}
+			if id, ok := tier["id"].(string); ok && strings.TrimSpace(id) != "" {
+				return strings.TrimSpace(id)
+			}
+			if name, ok := tier["name"].(string); ok && strings.TrimSpace(name) != "" {
+				return strings.TrimSpace(name)
 			}
 		}
 	}
-	if currentTier, okTier := loadResp["currentTier"].(map[string]any); okTier {
-		if id, okID := currentTier["id"].(string); okID {
-			if trimmed := strings.TrimSpace(id); trimmed != "" {
-				return trimmed
-			}
-		}
-	}
+
 	return "free-tier"
+}
+
+// lookupTierIDByName searches allowedTiers for a tier whose id or name matches
+// the given label (case-insensitive) and returns its machine id.
+func lookupTierIDByName(loadResp map[string]any, label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	tiers, ok := loadResp["allowedTiers"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, rawTier := range tiers {
+		tier, okTier := rawTier.(map[string]any)
+		if !okTier {
+			continue
+		}
+		if id, okID := tier["id"].(string); okID && strings.EqualFold(strings.TrimSpace(id), label) {
+			return strings.TrimSpace(id)
+		}
+		if tierName, okName := tier["name"].(string); okName && strings.EqualFold(strings.TrimSpace(tierName), label) {
+			if id, okID := tier["id"].(string); okID && strings.TrimSpace(id) != "" {
+				return strings.TrimSpace(id)
+			}
+		}
+	}
+	return ""
 }
 
 // BuildAuthURL generates the OAuth authorization URL.
@@ -131,6 +232,7 @@ func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
 	params.Set("response_type", "code")
 	params.Set("scope", strings.Join(Scopes, " "))
 	params.Set("state", state)
+	params.Set("include_granted_scopes", "true")
 	return AuthEndpoint + "?" + params.Encode()
 }
 
@@ -148,6 +250,7 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 		return nil, fmt.Errorf("antigravity token exchange: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", o.oauthUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -159,7 +262,7 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 		}
 	}()
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	if resp.StatusCode > 299 {
 		bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		if errRead != nil {
 			return nil, fmt.Errorf("antigravity token exchange: read response: %w", errRead)
@@ -178,6 +281,56 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 	return &token, nil
 }
 
+// RefreshAccessToken refreshes an access token using a refresh token.
+// Mirrors Rust: refresh_access_token_once — POST to TokenEndpoint with refresh_token grant.
+func (o *AntigravityAuth) RefreshAccessToken(ctx context.Context, refreshToken string) (*TokenResponse, error) {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil, fmt.Errorf("antigravity token refresh: missing refresh token")
+	}
+
+	data := url.Values{}
+	data.Set("client_id", ClientID)
+	data.Set("client_secret", ClientSecret)
+	data.Set("refresh_token", refreshToken)
+	data.Set("grant_type", "refresh_token")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, TokenEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("antigravity token refresh: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", o.oauthUserAgent())
+
+	resp, errDo := o.httpClient.Do(req)
+	if errDo != nil {
+		return nil, fmt.Errorf("antigravity token refresh: execute request: %w", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity token refresh: close body error: %v", errClose)
+		}
+	}()
+
+	if resp.StatusCode > 299 {
+		bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		if errRead != nil {
+			return nil, fmt.Errorf("antigravity token refresh: read response: %w", errRead)
+		}
+		body := strings.TrimSpace(string(bodyBytes))
+		if body == "" {
+			return nil, fmt.Errorf("antigravity token refresh: request failed: status %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("antigravity token refresh: request failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var token TokenResponse
+	if errDecode := json.NewDecoder(resp.Body).Decode(&token); errDecode != nil {
+		return nil, fmt.Errorf("antigravity token refresh: decode response: %w", errDecode)
+	}
+	return &token, nil
+}
+
 // FetchUserInfo retrieves user email from Google
 func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string) (string, error) {
 	accessToken = strings.TrimSpace(accessToken)
@@ -189,7 +342,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		return "", fmt.Errorf("antigravity userinfo: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", o.shortUserAgent())
+	req.Header.Set("User-Agent", o.oauthUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -201,7 +354,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		}
 	}()
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	if resp.StatusCode > 299 {
 		bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		if errRead != nil {
 			return "", fmt.Errorf("antigravity userinfo: read response: %w", errRead)
@@ -225,7 +378,6 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
 func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
-	userAgent := o.shortUserAgent()
 	loadReqBody := map[string]any{
 		"metadata": antigravityLoadCodeAssistMetadata(),
 	}
@@ -235,15 +387,14 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		return "", fmt.Errorf("marshal request body: %w", errMarshal)
 	}
 
-	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", APIEndpoint, APIVersion)
+	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", DailySandboxAPIEndpoint, APIVersion)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", o.oauthUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -260,7 +411,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		return "", fmt.Errorf("read response: %w", errRead)
 	}
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	if resp.StatusCode > 299 {
 		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
@@ -272,7 +423,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	projectID := extractCloudaicompanionProject(loadResp)
 
 	if projectID == "" {
-		projectID, err = o.OnboardUser(ctx, accessToken, defaultAntigravityTierID(loadResp))
+		projectID, err = o.OnboardUser(ctx, accessToken, resolveSubscriptionTier(loadResp))
 		if err != nil {
 			return "", err
 		}
@@ -288,6 +439,9 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 // OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	userAgent := o.nodeUserAgent()
 	requestBody := map[string]any{
 		"tier_id":  tierID,
@@ -303,12 +457,13 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		log.Debugf("Polling attempt %d/%d", attempt, maxAttempts)
 
-		reqCtx := ctx
-		var cancel context.CancelFunc
-		if reqCtx == nil {
-			reqCtx = context.Background()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
 		}
-		reqCtx, cancel = context.WithTimeout(reqCtx, 30*time.Second)
+
+		reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 
 		endpointURL := fmt.Sprintf("%s/%s:onboardUser", DailyAPIEndpoint, APIVersion)
 		req, errRequest := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
@@ -317,7 +472,6 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			return "", fmt.Errorf("create request: %w", errRequest)
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
