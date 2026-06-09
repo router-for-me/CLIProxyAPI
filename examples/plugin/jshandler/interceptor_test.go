@@ -4,8 +4,44 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestApplyJSBeforeRequestUsesReturnedCtxBody(t *testing.T) {
+	scriptPath := filepath.Join(t.TempDir(), "before.js")
+	script := `
+function on_before_request(ctx) {
+    var req = JSON.parse(ctx.body);
+    req.messages[0].content = req.messages[0].content.replace("sensitive_word", "safe_word");
+    ctx.body = JSON.stringify(req);
+    ctx.headers["X-Plugin"] = "updated";
+    return ctx;
+}
+`
+	if errWrite := os.WriteFile(scriptPath, []byte(script), 0600); errWrite != nil {
+		t.Fatalf("os.WriteFile() error = %v", errWrite)
+	}
+
+	plugin := &jsHandlerPlugin{cfg: defaultJSHandlerConfig()}
+	headers := http.Header{"X-Plugin": []string{"original"}}
+	processed, _, errApply := plugin.applyJSBeforeRequest(
+		scriptPath,
+		[]byte(`{"messages":[{"role":"user","content":"contains sensitive_word"}]}`),
+		"gpt-test",
+		"openai",
+		headers,
+	)
+	if errApply != nil {
+		t.Fatalf("applyJSBeforeRequest() error = %v", errApply)
+	}
+	if body := string(processed); !strings.Contains(body, "safe_word") || strings.Contains(body, "sensitive_word") {
+		t.Fatalf("processed body = %q, want sensitive word rewritten", body)
+	}
+	if got := headers.Get("X-Plugin"); got != "updated" {
+		t.Fatalf("header X-Plugin = %q, want updated", got)
+	}
+}
 
 func TestApplyJSAfterResponseUsesFrozenNativeHistoryChunks(t *testing.T) {
 	scriptPath := filepath.Join(t.TempDir(), "stream.js")

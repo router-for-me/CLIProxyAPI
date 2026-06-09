@@ -214,6 +214,9 @@ func TestHandlerRequestInterceptorRewritesExecutorRequest(t *testing.T) {
 	if string(gotReq.Payload) != wantPayload {
 		t.Fatalf("executor payload = %q, want %q", gotReq.Payload, wantPayload)
 	}
+	if string(gotOpts.OriginalRequest) != wantPayload {
+		t.Fatalf("executor original request = %q, want %q", gotOpts.OriginalRequest, wantPayload)
+	}
 	if gotOpts.Headers.Get("X-Original") != "plugin" || gotOpts.Headers.Get("X-Plugin") != "1" {
 		t.Fatalf("executor headers = %#v, want plugin rewrite", gotOpts.Headers)
 	}
