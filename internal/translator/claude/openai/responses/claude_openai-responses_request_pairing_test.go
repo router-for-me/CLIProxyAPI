@@ -100,6 +100,39 @@ func TestConvertOpenAIResponses_ReordersInterveningMessageAfterPair(t *testing.T
 	}
 }
 
+// TestConvertOpenAIResponses_ReorderKeepsStrictRoleAlternation verifies that when
+// an intervening user message is moved after a tool_use/tool_result pair, the
+// result does NOT contain consecutive same-role messages (which Anthropic/Bedrock
+// reject with HTTP 400). Any consecutive same-role messages produced by the
+// reorder must be merged.
+func TestConvertOpenAIResponses_ReorderKeepsStrictRoleAlternation(t *testing.T) {
+	body := []byte(`{
+		"model": "kiro-api/claude-opus-4-7-thinking",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"function_call","call_id":"toolu_a","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"[compact] resuming previous session"}]},
+			{"type":"function_call_output","call_id":"toolu_a","output":"file1\nfile2"}
+		],
+		"tools": []
+	}`)
+	out := ConvertOpenAIResponsesRequestToClaude("kiro-api/claude-opus-4-7-thinking", body, false)
+	msgs := gjson.GetBytes(out, "messages").Array()
+	lastRole := ""
+	for i, m := range msgs {
+		role := m.Get("role").String()
+		if role == lastRole {
+			t.Fatalf("consecutive same-role messages at index %d (role=%q) violate alternation:\n%s", i, role, string(out))
+		}
+		lastRole = role
+	}
+	// And it must still be idempotent (running reorder again is a no-op).
+	again := reorderClaudeToolUseResultPairs(out)
+	if string(again) != string(out) {
+		t.Fatalf("reorder not idempotent after merge.\nbefore=%s\nafter=%s", string(out), string(again))
+	}
+}
+
 // TestConvertOpenAIResponses_PairingIdempotent verifies that an already
 // correctly-ordered tool_use/tool_result sequence is unchanged by the
 // sanitization pass (running it again produces identical bytes).
@@ -278,12 +311,21 @@ func TestConvertOpenAIResponses_ReorderSplitBatchesWithMergedResults(t *testing.
 		t.Fatalf("res:a wrongly placed after use:b: %v\n%s", bRes, string(out))
 	}
 
-	// The compact message must survive somewhere.
+	// The compact message must survive somewhere. After the strict-alternation
+	// merge pass it may be a text block inside an adjacent user message rather
+	// than a standalone string-content message, so check both forms (same as
+	// TestConvertOpenAIResponses_ReordersInterveningMessageAfterPair).
 	foundCompact := false
 	for _, m := range msgs {
 		if m.Get("content").String() == "[compact] resuming previous session" {
 			foundCompact = true
 		}
+		m.Get("content").ForEach(func(_, b gjson.Result) bool {
+			if b.Get("text").String() == "[compact] resuming previous session" {
+				foundCompact = true
+			}
+			return true
+		})
 	}
 	if !foundCompact {
 		t.Fatalf("intervening compact message was dropped: %s", string(out))
@@ -321,5 +363,111 @@ func TestConvertOpenAIResponses_PairingIdempotentAfterRealReorder(t *testing.T) 
 	second := reorderClaudeToolUseResultPairs(first)
 	if string(second) != string(first) {
 		t.Fatalf("reorder not idempotent on a truly-reordered sequence.\nfirst =%s\nsecond=%s", string(first), string(second))
+	}
+}
+
+// TestConvertOpenAIResponses_ReasoningAttachedBeforeAppendedToolUse verifies the
+// append path keeps signed reasoning attached to the assistant message BEFORE
+// the tool_use it precedes. The sequence: assistant text -> function_call(a) ->
+// reasoning -> function_call(b). The reasoning must land in the assistant
+// message in front of tool_use(b), not get flushed later (which would move the
+// signed thinking block after the tool call and break ordering).
+func TestConvertOpenAIResponses_ReasoningAttachedBeforeAppendedToolUse(t *testing.T) {
+	rawSignature, _ := testClaudeResponsesThinkingSignature(t)
+	body := []byte(`{
+		"model": "kiro-api/claude-opus-4-7-thinking",
+		"input": [
+			{"type":"function_call","call_id":"toolu_a","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+			{"type":"reasoning","encrypted_content":"` + rawSignature + `","summary":[{"type":"summary_text","text":"thinking before b"}]},
+			{"type":"function_call","call_id":"toolu_b","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}
+		],
+		"tools": []
+	}`)
+	out := ConvertOpenAIResponsesRequestToClaude("kiro-api/claude-opus-4-7-thinking", body, false)
+	msgs := gjson.GetBytes(out, "messages").Array()
+
+	// Locate the assistant message that carries tool_use toolu_b.
+	bIdx := findToolUseMsgIndexByID(msgs, "toolu_b")
+	if bIdx < 0 {
+		t.Fatalf("no assistant message with tool_use toolu_b: %s", string(out))
+	}
+	asst := msgs[bIdx]
+	blocks := asst.Get("content").Array()
+	// Find positions of the thinking block and the toolu_b tool_use block.
+	thinkPos, bPos := -1, -1
+	for i, b := range blocks {
+		switch b.Get("type").String() {
+		case "thinking", "reasoning":
+			thinkPos = i
+		case "tool_use":
+			if b.Get("id").String() == "toolu_b" {
+				bPos = i
+			}
+		}
+	}
+	if bPos < 0 {
+		t.Fatalf("tool_use toolu_b not found in assistant content: %s", asst.Raw)
+	}
+	if thinkPos < 0 {
+		t.Fatalf("reasoning block was not attached to the assistant message before tool_use(b); it was lost or flushed elsewhere: %s", string(out))
+	}
+	if thinkPos > bPos {
+		t.Fatalf("reasoning must come BEFORE tool_use(b) in the same assistant message; got think@%d use@%d: %s", thinkPos, bPos, asst.Raw)
+	}
+}
+
+// TestConvertOpenAIResponses_ToolResultNotAppendedIntoNonToolUserArray verifies that
+// a tool_result is never appended AFTER non-tool content in a user message. Anthropic/
+// Bedrock require tool_result block(s) to come FIRST in a user turn; the old append
+// path put a tool_result behind existing text blocks (text, text, tool_result),
+// producing an invalid turn. After the fix any user message that contains a
+// tool_result must have it before any text/other block, and role alternation holds.
+func TestConvertOpenAIResponses_ToolResultNotAppendedIntoNonToolUserArray(t *testing.T) {
+	body := []byte(`{
+		"model": "kiro-api/claude-opus-4-7-thinking",
+		"input": [
+			{"type":"function_call","call_id":"toolu_a","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"part1"},{"type":"input_text","text":"part2"}]},
+			{"type":"function_call_output","call_id":"toolu_a","output":"done"}
+		],
+		"tools": []
+	}`)
+	out := ConvertOpenAIResponsesRequestToClaude("kiro-api/claude-opus-4-7-thinking", body, false)
+	msgs := gjson.GetBytes(out, "messages").Array()
+	// Invariant 1: in any user message, no tool_result may appear AFTER a non
+	// tool_result block (tool_result must be first).
+	for _, m := range msgs {
+		if m.Get("role").String() != "user" {
+			continue
+		}
+		c := m.Get("content")
+		if !c.IsArray() {
+			continue
+		}
+		seenNonToolResult := false
+		c.ForEach(func(_, b gjson.Result) bool {
+			if b.Get("type").String() == "tool_result" {
+				if seenNonToolResult {
+					t.Fatalf("tool_result placed AFTER non-tool content (invalid turn): %s", string(out))
+				}
+			} else {
+				seenNonToolResult = true
+			}
+			return true
+		})
+	}
+	// Invariant 2: strict role alternation.
+	lastRole := ""
+	for i, m := range msgs {
+		role := m.Get("role").String()
+		if role == lastRole {
+			t.Fatalf("consecutive same-role at %d (%q): %s", i, role, string(out))
+		}
+		lastRole = role
+	}
+	// Invariant 3: tool_use toolu_a is immediately followed by its tool_result.
+	tuIdx := findToolUseMsgIndexByID(msgs, "toolu_a")
+	if tuIdx < 0 || tuIdx+1 >= len(msgs) || !msgHasToolResult(msgs[tuIdx+1]) {
+		t.Fatalf("tool_use toolu_a not immediately followed by tool_result: %s", string(out))
 	}
 }

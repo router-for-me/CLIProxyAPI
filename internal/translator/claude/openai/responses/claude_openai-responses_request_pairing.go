@@ -171,11 +171,76 @@ func reorderClaudeToolUseResultPairs(out []byte) []byte {
 			rebuilt, _ = sjson.SetRawBytes(rebuilt, "-1", e.raw)
 		}
 	}
+	// Moving an intervening message after a tool_use/tool_result pair can leave two
+	// consecutive same-role messages (e.g. the relocated tool_result user message
+	// followed by an intervening user message). Anthropic/Bedrock require strict
+	// user/assistant alternation and reject violations with HTTP 400, so merge any
+	// consecutive same-role messages by concatenating their content blocks.
+	rebuilt = mergeConsecutiveSameRoleMessages(rebuilt)
 	result, err := sjson.SetRawBytes(out, "messages", rebuilt)
 	if err != nil {
 		return out
 	}
 	return result
+}
+
+// mergeConsecutiveSameRoleMessages collapses adjacent messages that share the
+// same role into a single message whose content is the concatenation of both
+// messages' content blocks. String content is wrapped into a single text block
+// so it can be merged with array content. Input is a JSON array of messages;
+// output is the (possibly shorter) JSON array.
+func mergeConsecutiveSameRoleMessages(msgsJSON []byte) []byte {
+	arr := gjson.ParseBytes(msgsJSON).Array()
+	if len(arr) < 2 {
+		return msgsJSON
+	}
+	// contentBlocksOf returns the raw JSON of each content block for a message,
+	// wrapping string content into one text block.
+	contentBlocksOf := func(m gjson.Result) []string {
+		c := m.Get("content")
+		if c.IsArray() {
+			var bs []string
+			c.ForEach(func(_, b gjson.Result) bool {
+				bs = append(bs, b.Raw)
+				return true
+			})
+			return bs
+		}
+		tb := []byte(`{"type":"text","text":""}`)
+		tb, _ = sjson.SetBytes(tb, "text", c.String())
+		return []string{string(tb)}
+	}
+
+	merged := false
+	out := []byte(`[]`)
+	var curRole string
+	var curBlocks []string
+	haveCur := false
+	flush := func() {
+		if !haveCur {
+			return
+		}
+		out, _ = sjson.SetRawBytes(out, "-1", buildBlocksMessage(curRole, curBlocks))
+	}
+	for _, m := range arr {
+		role := m.Get("role").String()
+		if haveCur && role == curRole {
+			curBlocks = append(curBlocks, contentBlocksOf(m)...)
+			merged = true
+			continue
+		}
+		flush()
+		curRole = role
+		curBlocks = contentBlocksOf(m)
+		haveCur = true
+	}
+	flush()
+	if !merged {
+		// No adjacent same-role messages: keep original bytes (preserves any
+		// string-content messages verbatim instead of rewrapping into blocks).
+		return msgsJSON
+	}
+	return out
 }
 
 // contentBlock is a lightweight view of one content array element. For

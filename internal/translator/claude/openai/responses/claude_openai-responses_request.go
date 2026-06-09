@@ -366,6 +366,15 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					lastRole := gjson.GetBytes(out, fmt.Sprintf("messages.%d.role", lastIdx)).String()
 					lastContent := gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
 					if lastRole == "assistant" && lastContent.IsArray() {
+						// Attach any pending (signed) reasoning blocks to THIS assistant
+						// message BEFORE the tool_use, then clear them. Otherwise they
+						// linger and get flushed later (e.g. just before the
+						// function_call_output), moving the signed thinking block after
+						// the tool call/result instead of before the call.
+						for _, partJSON := range pendingReasoningParts {
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), []byte(partJSON))
+						}
+						pendingReasoningParts = nil
 						out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), toolUse)
 						appendedToolUse = true
 					}
@@ -398,7 +407,12 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					lastIdx := msgsCount - 1
 					lastRole := gjson.GetBytes(out, fmt.Sprintf("messages.%d.role", lastIdx)).String()
 					lastContent := gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
-					if lastRole == "user" && lastContent.IsArray() {
+					// Only append into the previous user message when it is a genuine
+					// tool_result container (every block is a tool_result). A user array
+					// holding multi-part text / image / document input is NOT a
+					// tool_result container; appending a tool_result into it would create
+					// an invalid mixed-content turn, so fall through to a new user message.
+					if lastRole == "user" && lastContent.IsArray() && isAllToolResultBlocks(lastContent) {
 						out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), toolResult)
 						appendedToolResult = true
 					}
@@ -477,6 +491,26 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out = reorderClaudeToolUseResultPairs(out)
 
 	return out
+}
+
+// isAllToolResultBlocks reports whether every block in a (user message) content
+// array is a tool_result. Used to decide whether a tool_result may be appended
+// into the previous user message: a multi-part text/image/document user array is
+// NOT a tool_result container and must not absorb a tool_result block.
+func isAllToolResultBlocks(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	blocks := content.Array()
+	if len(blocks) == 0 {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Get("type").String() != "tool_result" {
+			return false
+		}
+	}
+	return true
 }
 
 func convertResponsesReasoningToClaudeThinking(item gjson.Result) []byte {
