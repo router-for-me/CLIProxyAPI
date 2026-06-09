@@ -46,6 +46,10 @@ type oaiToResponsesState struct {
 	// function item done state
 	FuncArgsDone map[string]bool
 	FuncItemDone map[string]bool
+	// CustomToolNames is the set of tool names declared as freeform `custom`
+	// tools in the original request; their tool calls must be re-emitted as
+	// custom_tool_call (bare input) instead of function_call (JSON arguments).
+	CustomToolNames map[string]struct{}
 	// usage aggregation
 	PromptTokens     int64
 	CachedTokens     int64
@@ -171,6 +175,9 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", callID)
 			item, _ = sjson.SetBytes(item, "name", name)
+			if isCustomToolName(st.CustomToolNames, name) {
+				item = rewriteFunctionCallItemAsCustom(item)
+			}
 			outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
 		}
 	}
@@ -214,6 +221,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			FuncArgsDone:    make(map[string]bool),
 			FuncItemDone:    make(map[string]bool),
 			Reasonings:      make([]oaiToResponsesStateReasoning, 0),
+			CustomToolNames: translatorcommon.CustomToolNamesFromRequest(pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON)),
 		}
 	}
 	st := (*param).(*oaiToResponsesState)
@@ -483,12 +491,22 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 						if shouldEmitItem && effectiveCallID != "" {
 							outputIndex := st.FuncOutputIx[key]
-							o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
-							o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
-							o, _ = sjson.SetBytes(o, "output_index", outputIndex)
-							o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
-							o, _ = sjson.SetBytes(o, "item.call_id", effectiveCallID)
-							o, _ = sjson.SetBytes(o, "item.name", st.FuncNames[key])
+							var o []byte
+							if isCustomToolName(st.CustomToolNames, st.FuncNames[key]) {
+								o = []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","call_id":"","name":"","input":""}}`)
+								o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
+								o, _ = sjson.SetBytes(o, "output_index", outputIndex)
+								o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
+								o, _ = sjson.SetBytes(o, "item.call_id", effectiveCallID)
+								o, _ = sjson.SetBytes(o, "item.name", st.FuncNames[key])
+							} else {
+								o = []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
+								o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
+								o, _ = sjson.SetBytes(o, "output_index", outputIndex)
+								o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
+								o, _ = sjson.SetBytes(o, "item.call_id", effectiveCallID)
+								o, _ = sjson.SetBytes(o, "item.name", st.FuncNames[key])
+							}
 							out = append(out, emitRespEvent("response.output_item.added", o))
 						}
 
@@ -501,7 +519,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							if refCallID == "" {
 								refCallID = newCallID
 							}
-							if refCallID != "" {
+							// For freeform custom tools (apply_patch) the arguments
+							// arrive as a {"input": "..."} JSON wrapper; we cannot
+							// stream partial JSON as the bare input text, so we only
+							// buffer here and emit the unwrapped input at done.
+							if refCallID != "" && !isCustomToolName(st.CustomToolNames, st.FuncNames[key]) {
 								outputIndex := st.FuncOutputIx[key]
 								ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
 								ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
@@ -588,6 +610,27 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						args := "{}"
 						if b := st.FuncArgsBuf[key]; b != nil && b.Len() > 0 {
 							args = b.String()
+						}
+						if isCustomToolName(st.CustomToolNames, st.FuncNames[key]) {
+							input := translatorcommon.UnwrapCustomToolInput(args)
+							ctcDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
+							ctcDone, _ = sjson.SetBytes(ctcDone, "sequence_number", nextSeq())
+							ctcDone, _ = sjson.SetBytes(ctcDone, "item_id", fmt.Sprintf("fc_%s", callID))
+							ctcDone, _ = sjson.SetBytes(ctcDone, "output_index", outputIndex)
+							ctcDone, _ = sjson.SetBytes(ctcDone, "input", input)
+							out = append(out, emitRespEvent("response.custom_tool_call_input.done", ctcDone))
+
+							itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","call_id":"","name":"","input":""}}`)
+							itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+							itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
+							itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", callID))
+							itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
+							itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[key])
+							itemDone, _ = sjson.SetBytes(itemDone, "item.input", input)
+							out = append(out, emitRespEvent("response.output_item.done", itemDone))
+							st.FuncItemDone[key] = true
+							st.FuncArgsDone[key] = true
+							continue
 						}
 						fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
 						fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
@@ -752,6 +795,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 				// Function/tool calls
 				if tcs := msg.Get("tool_calls"); tcs.Exists() && tcs.IsArray() {
+					customNames := translatorcommon.CustomToolNamesFromRequest(pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON))
 					tcs.ForEach(func(_, tc gjson.Result) bool {
 						callID := tc.Get("id").String()
 						name := tc.Get("function.name").String()
@@ -761,6 +805,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item, _ = sjson.SetBytes(item, "name", name)
+						if isCustomToolName(customNames, name) {
+							item = rewriteFunctionCallItemAsCustom(item)
+						}
 						outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 						return true
 					})
@@ -794,4 +841,42 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	}
 
 	return resp
+}
+
+// pickResponsesRequestJSON returns the most authoritative request JSON
+// available (original Responses request preferred) for extracting metadata
+// like the set of freeform custom tool names.
+func pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
+	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
+		return originalRequestRawJSON
+	}
+	return requestRawJSON
+}
+
+// isCustomToolName reports whether name was declared as a freeform `custom`
+// tool in the original request.
+func isCustomToolName(customNames map[string]struct{}, name string) bool {
+	if name == "" {
+		return false
+	}
+	if _, ok := customNames[name]; ok {
+		return true
+	}
+	// Defensive fallback: apply_patch is the canonical freeform tool even if
+	// the request snapshot was unavailable.
+	return name == "apply_patch"
+}
+
+// rewriteFunctionCallItemAsCustom converts a completed `function_call` output
+// item (with JSON `arguments`) into a `custom_tool_call` item with the bare
+// `input` text the Codex host expects for freeform tools.
+func rewriteFunctionCallItemAsCustom(item []byte) []byte {
+	args := gjson.GetBytes(item, "arguments").String()
+	input := translatorcommon.UnwrapCustomToolInput(args)
+	rebuilt := []byte(`{"id":"","type":"custom_tool_call","status":"completed","call_id":"","name":"","input":""}`)
+	rebuilt, _ = sjson.SetBytes(rebuilt, "id", gjson.GetBytes(item, "id").String())
+	rebuilt, _ = sjson.SetBytes(rebuilt, "call_id", gjson.GetBytes(item, "call_id").String())
+	rebuilt, _ = sjson.SetBytes(rebuilt, "name", gjson.GetBytes(item, "name").String())
+	rebuilt, _ = sjson.SetBytes(rebuilt, "input", input)
+	return rebuilt
 }

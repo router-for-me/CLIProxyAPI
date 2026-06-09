@@ -42,7 +42,9 @@ type geminiToResponsesState struct {
 	FuncNames        map[int]string
 	FuncCallIDs      map[int]string
 	FuncDone         map[int]bool
+	CustomDone       map[int]bool
 	SanitizedNameMap map[string]string
+	CustomToolNames  map[string]struct{}
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -96,7 +98,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			FuncNames:        make(map[int]string),
 			FuncCallIDs:      make(map[int]string),
 			FuncDone:         make(map[int]bool),
+			CustomDone:       make(map[int]bool),
 			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
+			CustomToolNames:  translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON)),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -112,8 +116,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	if st.FuncDone == nil {
 		st.FuncDone = make(map[int]bool)
 	}
+	if st.CustomDone == nil {
+		st.CustomDone = make(map[int]bool)
+	}
 	if st.SanitizedNameMap == nil {
 		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+	}
+	if st.CustomToolNames == nil {
+		st.CustomToolNames = translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
@@ -313,6 +323,13 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				finalizeReasoning()
 				finalizeMessage()
 				name := util.RestoreSanitizedToolName(st.SanitizedNameMap, fc.Get("name").String())
+				// A freeform `custom` tool (e.g. apply_patch) was downgraded to a
+				// regular function on the request side; the host expects it back as a
+				// custom_tool_call carrying bare `input` text, not a function_call.
+				_, isCustom := st.CustomToolNames[name]
+				if !isCustom && name == "apply_patch" {
+					isCustom = true
+				}
 				idx := st.NextIndex
 				st.NextIndex++
 				// Ensure buffers
@@ -323,6 +340,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					st.FuncCallIDs[idx] = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
 				}
 				st.FuncNames[idx] = name
+				if isCustom {
+					st.CustomDone[idx] = true
+				}
 
 				argsJSON := "{}"
 				if args := fc.Get("args"); args.Exists() {
@@ -330,6 +350,48 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				}
 				if st.FuncArgsBuf[idx].Len() == 0 && argsJSON != "" {
 					st.FuncArgsBuf[idx].WriteString(argsJSON)
+				}
+
+				if isCustom {
+					// custom_tool_call: bare input text, no JSON arguments wrapper.
+					customInput := translatorcommon.UnwrapCustomToolInput(argsJSON)
+
+					item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","call_id":"","name":"","input":""}}`)
+					item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+					item, _ = sjson.SetBytes(item, "output_index", idx)
+					item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+					item, _ = sjson.SetBytes(item, "item.call_id", st.FuncCallIDs[idx])
+					item, _ = sjson.SetBytes(item, "item.name", name)
+					out = append(out, emitEvent("response.output_item.added", item))
+
+					if !st.FuncDone[idx] {
+						delta := []byte(`{"type":"response.custom_tool_call_input.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
+						delta, _ = sjson.SetBytes(delta, "sequence_number", nextSeq())
+						delta, _ = sjson.SetBytes(delta, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+						delta, _ = sjson.SetBytes(delta, "output_index", idx)
+						delta, _ = sjson.SetBytes(delta, "delta", customInput)
+						out = append(out, emitEvent("response.custom_tool_call_input.delta", delta))
+
+						inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
+						inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
+						inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+						inputDone, _ = sjson.SetBytes(inputDone, "output_index", idx)
+						inputDone, _ = sjson.SetBytes(inputDone, "input", customInput)
+						out = append(out, emitEvent("response.custom_tool_call_input.done", inputDone))
+
+						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","call_id":"","name":"","input":""}}`)
+						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+						itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
+						itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+						itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
+						itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+						itemDone, _ = sjson.SetBytes(itemDone, "item.input", customInput)
+						out = append(out, emitEvent("response.output_item.done", itemDone))
+
+						st.FuncDone[idx] = true
+					}
+
+					return true
 				}
 
 				// Emit item.added for function call
@@ -524,6 +586,15 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 					args = b.String()
 				}
+				if st.CustomDone[idx] {
+					item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","call_id":"","name":"","input":""}`)
+					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
+					item, _ = sjson.SetBytes(item, "call_id", callID)
+					item, _ = sjson.SetBytes(item, "name", st.FuncNames[idx])
+					item, _ = sjson.SetBytes(item, "input", translatorcommon.UnwrapCustomToolInput(args))
+					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+					continue
+				}
 				item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 				item, _ = sjson.SetBytes(item, "arguments", args)
@@ -572,6 +643,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
 	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	customNames := translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -704,14 +776,30 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				name := util.RestoreSanitizedToolName(sanitizedNameMap, fc.Get("name").String())
 				args := fc.Get("args")
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
-				itemJSON := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
-				itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
-				itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
-				itemJSON, _ = sjson.SetBytes(itemJSON, "name", name)
 				argsStr := ""
 				if args.Exists() {
 					argsStr = args.Raw
 				}
+				// A freeform `custom` tool (e.g. apply_patch) was downgraded to a
+				// regular function on the request side; the host expects it back as a
+				// custom_tool_call carrying bare `input` text, not a function_call.
+				_, isCustom := customNames[name]
+				if !isCustom && name == "apply_patch" {
+					isCustom = true
+				}
+				if isCustom {
+					itemJSON := []byte(`{"id":"","type":"custom_tool_call","status":"completed","call_id":"","name":"","input":""}`)
+					itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
+					itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
+					itemJSON, _ = sjson.SetBytes(itemJSON, "name", name)
+					itemJSON, _ = sjson.SetBytes(itemJSON, "input", translatorcommon.UnwrapCustomToolInput(argsStr))
+					appendOutput(itemJSON)
+					return true
+				}
+				itemJSON := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
+				itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
+				itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
+				itemJSON, _ = sjson.SetBytes(itemJSON, "name", name)
 				itemJSON, _ = sjson.SetBytes(itemJSON, "arguments", argsStr)
 				appendOutput(itemJSON)
 				return true

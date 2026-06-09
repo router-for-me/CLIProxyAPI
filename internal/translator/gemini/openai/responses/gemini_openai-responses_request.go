@@ -6,6 +6,7 @@ import (
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -388,6 +389,15 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 
 				geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
+			} else if tool.Get("type").String() == "custom" {
+				// Freeform `custom` tools (apply_patch) have no Gemini-native
+				// equivalent. Downgrade to a functionDeclaration carrying a
+				// single string `input` argument; the response side re-emits
+				// the model's functionCall as a custom_tool_call with the bare
+				// input text.
+				if funcDecl := buildGeminiResponsesCustomDeclaration(tool); funcDecl != nil {
+					geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
+				}
 			}
 			return true
 		})
@@ -458,4 +468,22 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 func openAIResponsesGeminiThoughtSignature(rawSignature string) string {
 	return sigcompat.GeminiReplaySignatureOrBypass(rawSignature, sigcompat.SignatureBlockKindGeminiModelPart)
+}
+
+// buildGeminiResponsesCustomDeclaration downgrades a freeform `custom` tool
+// (e.g. apply_patch) into a Gemini functionDeclaration with a single string
+// `input` parameter, since the freeform tool carries no JSON-Schema of its own.
+func buildGeminiResponsesCustomDeclaration(tool gjson.Result) []byte {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	if name == "" {
+		return nil
+	}
+	funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
+	funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name))
+	funcDecl, _ = sjson.SetBytes(funcDecl, "description", translatorcommon.CustomToolDescription(tool.Get("description").String()))
+	funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", translatorcommon.CustomToolFunctionSchema())
+	return funcDecl
 }
