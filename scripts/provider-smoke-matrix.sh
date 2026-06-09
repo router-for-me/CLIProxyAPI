@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 set -Eeuo pipefail
 
 BASE_URL="${CLIPROXY_BASE_URL:-http://127.0.0.1:8317}"

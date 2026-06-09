@@ -1,4 +1,5 @@
 #!/bin/sh
+set -euo pipefail
 # docker-init.sh - Docker entrypoint script for CLIProxyAPI++
 # This script handles initialization tasks before starting the main application.
 # It enables "out-of-the-box" Docker deployment without manual config creation.

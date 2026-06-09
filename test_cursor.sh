@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 # Test script for Cursor proxy integration
 # Usage:
 #   ./test_cursor.sh login    - Login to Cursor (opens browser)

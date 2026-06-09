@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 #
 # build.sh - Linux/macOS Build Script
 #
