@@ -31,6 +31,7 @@ function on_before_request(ctx) {
 		"gpt-test",
 		"openai",
 		headers,
+		"",
 	)
 	if errApply != nil {
 		t.Fatalf("applyJSBeforeRequest() error = %v", errApply)
@@ -85,6 +86,7 @@ function on_after_stream_response(ctx) {
 		http.Header{},
 		true,
 		[]string{`data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`},
+		"",
 	)
 	if errApply != nil {
 		t.Fatalf("applyJSAfterResponse() error = %v", errApply)
@@ -123,6 +125,7 @@ function on_after_nonstream_response(ctx) {
 		http.Header{},
 		false,
 		nil,
+		"",
 	)
 	if errApply != nil {
 		t.Fatalf("applyJSAfterResponse() error = %v", errApply)

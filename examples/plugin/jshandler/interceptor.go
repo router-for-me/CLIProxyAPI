@@ -45,6 +45,10 @@ func (p *jsHandlerPlugin) allScriptPaths() []string {
 }
 
 func (p *jsHandlerPlugin) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	return p.interceptRequest(ctx, req, "")
+}
+
+func (p *jsHandlerPlugin) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, hostCallbackID string) (pluginapi.RequestInterceptResponse, error) {
 	resp := pluginapi.RequestInterceptResponse{}
 	scriptPaths := p.allScriptPaths()
 	if len(scriptPaths) == 0 {
@@ -60,7 +64,7 @@ func (p *jsHandlerPlugin) InterceptRequest(ctx context.Context, req pluginapi.Re
 		if scriptPath == "" {
 			continue
 		}
-		processed, cleared, errJS := p.applyJSBeforeRequest(scriptPath, []byte(body), req.Model, req.SourceFormat, headers)
+		processed, cleared, errJS := p.applyJSBeforeRequest(scriptPath, []byte(body), req.Model, req.SourceFormat, headers, hostCallbackID)
 		if errJS != nil {
 			log.Warnf("failed to execute JS request interceptor [%s]: %v", scriptPath, errJS)
 			continue
@@ -78,6 +82,10 @@ func (p *jsHandlerPlugin) InterceptRequest(ctx context.Context, req pluginapi.Re
 }
 
 func (p *jsHandlerPlugin) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+	return p.interceptResponse(ctx, req, "")
+}
+
+func (p *jsHandlerPlugin) interceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest, hostCallbackID string) (pluginapi.ResponseInterceptResponse, error) {
 	resp := pluginapi.ResponseInterceptResponse{}
 	scriptPaths := p.allScriptPaths()
 	if len(scriptPaths) == 0 {
@@ -98,6 +106,7 @@ func (p *jsHandlerPlugin) InterceptResponse(ctx context.Context, req pluginapi.R
 			scriptPath, req.Model, req.SourceFormat,
 			reqHeadersMap, req.RequestBody,
 			bodyStr, nil, respHeaders, false, nil,
+			hostCallbackID,
 		)
 		if errJS != nil {
 			log.Warnf("failed to execute JS response interceptor [%s]: %v", scriptPath, errJS)
@@ -121,6 +130,10 @@ func (p *jsHandlerPlugin) InterceptResponse(ctx context.Context, req pluginapi.R
 }
 
 func (p *jsHandlerPlugin) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+	return p.interceptStreamChunk(ctx, req, "")
+}
+
+func (p *jsHandlerPlugin) interceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest, hostCallbackID string) (pluginapi.StreamChunkInterceptResponse, error) {
 	resp := pluginapi.StreamChunkInterceptResponse{}
 	scriptPaths := p.allScriptPaths()
 	if len(scriptPaths) == 0 {
@@ -156,6 +169,7 @@ func (p *jsHandlerPlugin) InterceptStreamChunk(ctx context.Context, req pluginap
 			scriptPath, req.Model, req.SourceFormat,
 			reqHeadersMap, req.RequestBody,
 			"", chunkPtr, respHeaders, !isHeaderInit, historyStrings,
+			hostCallbackID,
 		)
 		if errJS != nil {
 			log.Warnf("failed to execute JS stream chunk interceptor [%s]: %v", scriptPath, errJS)
@@ -183,13 +197,13 @@ func (p *jsHandlerPlugin) InterceptStreamChunk(ctx context.Context, req pluginap
 	return resp, nil
 }
 
-func (p *jsHandlerPlugin) applyJSBeforeRequest(scriptPath string, payloadBytes []byte, model, protocol string, headers http.Header) ([]byte, []string, error) {
+func (p *jsHandlerPlugin) applyJSBeforeRequest(scriptPath string, payloadBytes []byte, model, protocol string, headers http.Header, hostCallbackID string) ([]byte, []string, error) {
 	program, err := getJSProgram(scriptPath)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	engine := newJSEngine()
+	engine := newJSEngine(newHostJSConsoleLogger(hostCallbackID))
 	if errRun := engine.runProgram(program, p.cfg.Timeout); errRun != nil {
 		return nil, nil, errRun
 	}
@@ -246,13 +260,14 @@ func (p *jsHandlerPlugin) applyJSAfterResponse(
 	reqHeadersMap map[string]any, reqBody []byte,
 	bodyStr string, chunkStr *string,
 	respHeaders http.Header, isStream bool, historyChunks []string,
+	hostCallbackID string,
 ) (string, *processedHeaders, bool, error) {
 	program, err := getJSProgram(scriptPath)
 	if err != nil {
 		return bodyStr, nil, false, err
 	}
 
-	engine := newJSEngine()
+	engine := newJSEngine(newHostJSConsoleLogger(hostCallbackID))
 	if errRun := engine.runProgram(program, p.cfg.Timeout); errRun != nil {
 		return bodyStr, nil, false, errRun
 	}

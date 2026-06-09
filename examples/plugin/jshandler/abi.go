@@ -92,6 +92,28 @@ type abiLifecycleRequest struct {
 	PluginDir  string `json:"plugin_dir,omitempty"`
 }
 
+type abiRequestInterceptRequest struct {
+	pluginapi.RequestInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type abiResponseInterceptRequest struct {
+	pluginapi.ResponseInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type abiStreamChunkInterceptRequest struct {
+	pluginapi.StreamChunkInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type abiHostLogRequest struct {
+	HostCallbackID string         `json:"host_callback_id,omitempty"`
+	Level          string         `json:"level,omitempty"`
+	Message        string         `json:"message,omitempty"`
+	Fields         map[string]any `json:"fields,omitempty"`
+}
+
 type abiRegistration struct {
 	SchemaVersion uint32             `json:"schema_version"`
 	Metadata      pluginapi.Metadata `json:"metadata"`
@@ -192,25 +214,25 @@ func handleJSHandlerABIMethod(ctx context.Context, method string, request []byte
 	defer done()
 	switch method {
 	case pluginabi.MethodRequestInterceptBefore:
-		var req pluginapi.RequestInterceptRequest
+		var req abiRequestInterceptRequest
 		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
 			return nil, errDecode
 		}
-		resp, errCall := p.InterceptRequest(ctx, req)
+		resp, errCall := p.interceptRequest(ctx, req.RequestInterceptRequest, req.HostCallbackID)
 		return abiOKEnvelopeWithError(resp, errCall)
 	case pluginabi.MethodResponseInterceptAfter:
-		var req pluginapi.ResponseInterceptRequest
+		var req abiResponseInterceptRequest
 		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
 			return nil, errDecode
 		}
-		resp, errCall := p.InterceptResponse(ctx, req)
+		resp, errCall := p.interceptResponse(ctx, req.ResponseInterceptRequest, req.HostCallbackID)
 		return abiOKEnvelopeWithError(resp, errCall)
 	case pluginabi.MethodResponseInterceptStreamChunk:
-		var req pluginapi.StreamChunkInterceptRequest
+		var req abiStreamChunkInterceptRequest
 		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
 			return nil, errDecode
 		}
-		resp, errCall := p.InterceptStreamChunk(ctx, req)
+		resp, errCall := p.interceptStreamChunk(ctx, req.StreamChunkInterceptRequest, req.HostCallbackID)
 		return abiOKEnvelopeWithError(resp, errCall)
 	default:
 		return abiErrorEnvelope("unknown_method", "unknown method: "+method), nil
@@ -288,4 +310,86 @@ func writeABIResponse(response *C.cliproxy_buffer, raw []byte) {
 	}
 	response.ptr = ptr
 	response.len = C.size_t(len(raw))
+}
+
+func newHostJSConsoleLogger(hostCallbackID string) jsConsoleLogger {
+	return func(message string) error {
+		if errLog := writeHostJSConsoleLog(hostCallbackID, message); errLog != nil {
+			return defaultJSConsoleLogger(message)
+		}
+		return nil
+	}
+}
+
+func writeHostJSConsoleLog(hostCallbackID string, message string) error {
+	raw, errMarshal := json.Marshal(abiHostLogRequest{
+		HostCallbackID: hostCallbackID,
+		Level:          "info",
+		Message:        "JS console log: " + message,
+		Fields: map[string]any{
+			"plugin_id": pluginName,
+		},
+	})
+	if errMarshal != nil {
+		return errMarshal
+	}
+
+	rawResp, errCall := callHost(pluginabi.MethodHostLog, raw)
+	if errCall != nil {
+		return errCall
+	}
+	if len(rawResp) == 0 {
+		return nil
+	}
+	var resp abiEnvelope
+	if errDecode := json.Unmarshal(rawResp, &resp); errDecode != nil {
+		return fmt.Errorf("decode host log response: %w", errDecode)
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			return fmt.Errorf("host log failed: %s", resp.Error.Message)
+		}
+		return fmt.Errorf("host log failed")
+	}
+	return nil
+}
+
+func callHost(method string, payload []byte) ([]byte, error) {
+	jsHandlerABIState.RLock()
+	defer jsHandlerABIState.RUnlock()
+	if jsHandlerABIState.host == nil {
+		return nil, fmt.Errorf("host callback is unavailable")
+	}
+
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+
+	var cPayload unsafe.Pointer
+	if len(payload) > 0 {
+		cPayload = C.CBytes(payload)
+		if cPayload == nil {
+			return nil, fmt.Errorf("allocate host callback payload")
+		}
+		defer C.free(cPayload)
+	}
+
+	var response C.cliproxy_buffer
+	rc := C.jshandler_call_host(
+		jsHandlerABIState.host,
+		cMethod,
+		(*C.uint8_t)(cPayload),
+		C.size_t(len(payload)),
+		&response,
+	)
+	var out []byte
+	if response.ptr != nil && response.len > 0 {
+		out = C.GoBytes(response.ptr, C.int(response.len))
+	}
+	if response.ptr != nil {
+		C.jshandler_free_host_buffer(jsHandlerABIState.host, response.ptr, response.len)
+	}
+	if rc != 0 {
+		return nil, fmt.Errorf("host callback %s returned %d: %s", method, int(rc), string(out))
+	}
+	return out, nil
 }

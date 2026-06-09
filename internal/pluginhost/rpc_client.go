@@ -169,6 +169,15 @@ func sanitizePluginRequest(request any) any {
 	case pluginapi.StreamChunkInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case rpcRequestInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcResponseInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcStreamChunkInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case pluginapi.ExecutorHTTPRequest:
 		req.HTTPClient = nil
 		return req
@@ -424,7 +433,12 @@ func (a *rpcPluginAdapter) NormalizeRequest(ctx context.Context, req pluginapi.R
 }
 
 func (a *rpcPluginAdapter) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
-	return callPlugin[pluginapi.RequestInterceptResponse](ctx, a.client, pluginabi.MethodRequestInterceptBefore, req)
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.RequestInterceptResponse](ctx, a.client, pluginabi.MethodRequestInterceptBefore, rpcRequestInterceptRequest{
+		RequestInterceptRequest: req,
+		HostCallbackID:          callbackID,
+	})
 }
 
 func (a *rpcPluginAdapter) TranslateResponse(ctx context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
@@ -436,11 +450,21 @@ func (a rpcResponseNormalizer) NormalizeResponse(ctx context.Context, req plugin
 }
 
 func (a *rpcPluginAdapter) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
-	return callPlugin[pluginapi.ResponseInterceptResponse](ctx, a.client, pluginabi.MethodResponseInterceptAfter, req)
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.ResponseInterceptResponse](ctx, a.client, pluginabi.MethodResponseInterceptAfter, rpcResponseInterceptRequest{
+		ResponseInterceptRequest: req,
+		HostCallbackID:           callbackID,
+	})
 }
 
 func (a *rpcPluginAdapter) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
-	return callPlugin[pluginapi.StreamChunkInterceptResponse](ctx, a.client, pluginabi.MethodResponseInterceptStreamChunk, req)
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.StreamChunkInterceptResponse](ctx, a.client, pluginabi.MethodResponseInterceptStreamChunk, rpcStreamChunkInterceptRequest{
+		StreamChunkInterceptRequest: req,
+		HostCallbackID:              callbackID,
+	})
 }
 
 func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.ThinkingApplyRequest) (pluginapi.PayloadResponse, error) {

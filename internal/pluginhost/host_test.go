@@ -7,6 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
@@ -212,6 +213,47 @@ func TestInterceptorHelpersReturnErrorsWhenCallbackMissing(t *testing.T) {
 	}
 }
 
+func TestRPCInterceptorsIncludeHostCallbackID(t *testing.T) {
+	client := &capturePluginClient{}
+	adapter := &rpcPluginAdapter{
+		host:   New(),
+		client: client,
+	}
+
+	if _, errReq := adapter.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")}); errReq != nil {
+		t.Fatalf("InterceptRequest() error = %v", errReq)
+	}
+	var req rpcRequestInterceptRequest
+	if errDecode := json.Unmarshal(client.requests[pluginabi.MethodRequestInterceptBefore], &req); errDecode != nil {
+		t.Fatalf("decode request interceptor request: %v", errDecode)
+	}
+	if req.HostCallbackID == "" {
+		t.Fatal("request interceptor host_callback_id is empty")
+	}
+
+	if _, errResp := adapter.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{Body: []byte("response")}); errResp != nil {
+		t.Fatalf("InterceptResponse() error = %v", errResp)
+	}
+	var resp rpcResponseInterceptRequest
+	if errDecode := json.Unmarshal(client.requests[pluginabi.MethodResponseInterceptAfter], &resp); errDecode != nil {
+		t.Fatalf("decode response interceptor request: %v", errDecode)
+	}
+	if resp.HostCallbackID == "" {
+		t.Fatal("response interceptor host_callback_id is empty")
+	}
+
+	if _, errChunk := adapter.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{Body: []byte("chunk")}); errChunk != nil {
+		t.Fatalf("InterceptStreamChunk() error = %v", errChunk)
+	}
+	var chunk rpcStreamChunkInterceptRequest
+	if errDecode := json.Unmarshal(client.requests[pluginabi.MethodResponseInterceptStreamChunk], &chunk); errDecode != nil {
+		t.Fatalf("decode stream chunk interceptor request: %v", errDecode)
+	}
+	if chunk.HostCallbackID == "" {
+		t.Fatal("stream chunk interceptor host_callback_id is empty")
+	}
+}
+
 func TestSanitizePluginRequestRemovesNonJSONMetadata(t *testing.T) {
 	req := pluginapi.RequestInterceptRequest{
 		Metadata: map[string]any{
@@ -256,6 +298,19 @@ func TestSanitizePluginRequestRemovesNonJSONMetadata(t *testing.T) {
 	}
 	if _, errMarshalExec := json.Marshal(sanitizePluginRequest(execReq)); errMarshalExec != nil {
 		t.Fatalf("Marshal(sanitized executor request) error = %v", errMarshalExec)
+	}
+
+	wrappedReq := rpcRequestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			Metadata: map[string]any{
+				"keep":     "value",
+				"callback": func(string) {},
+			},
+		},
+		HostCallbackID: "callback-1",
+	}
+	if _, errMarshalWrapped := json.Marshal(sanitizePluginRequest(wrappedReq)); errMarshalWrapped != nil {
+		t.Fatalf("Marshal(sanitized wrapped request interceptor) error = %v", errMarshalWrapped)
 	}
 }
 
@@ -407,3 +462,17 @@ func TestSortRecordsPriorityDescendingAndIDTieBreak(t *testing.T) {
 		}
 	}
 }
+
+type capturePluginClient struct {
+	requests map[string][]byte
+}
+
+func (c *capturePluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	if c.requests == nil {
+		c.requests = make(map[string][]byte)
+	}
+	c.requests[method] = append([]byte(nil), request...)
+	return marshalRPCResult(rpcEmptyResponse{})
+}
+
+func (c *capturePluginClient) Shutdown() {}

@@ -82,6 +82,21 @@ type rpcExecutorHTTPRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type rpcRequestInterceptRequest struct {
+	pluginapi.RequestInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type rpcResponseInterceptRequest struct {
+	pluginapi.ResponseInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type rpcStreamChunkInterceptRequest struct {
+	pluginapi.StreamChunkInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcThinkingApplyRequest struct {
 	pluginapi.ThinkingApplyRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`
