@@ -50,6 +50,11 @@ type oaiToResponsesState struct {
 	// tools in the original request; their tool calls must be re-emitted as
 	// custom_tool_call (bare input) instead of function_call (JSON arguments).
 	CustomToolNames map[string]struct{}
+	// RequestHasTools reports whether the request snapshot declared any tools.
+	// When true, CustomToolNames is authoritative and the apply_patch fallback
+	// must NOT fire (a declared regular function named apply_patch stays a
+	// function_call). When false (snapshot unavailable), the fallback applies.
+	RequestHasTools bool
 	// usage aggregation
 	PromptTokens     int64
 	CachedTokens     int64
@@ -175,7 +180,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", callID)
 			item, _ = sjson.SetBytes(item, "name", name)
-			if isCustomToolName(st.CustomToolNames, name) {
+			if isCustomToolName(st.CustomToolNames, name, st.RequestHasTools) {
 				item = rewriteFunctionCallItemAsCustom(item)
 			}
 			outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
@@ -222,6 +227,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			FuncItemDone:    make(map[string]bool),
 			Reasonings:      make([]oaiToResponsesStateReasoning, 0),
 			CustomToolNames: translatorcommon.CustomToolNamesFromRequest(pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON)),
+			RequestHasTools: translatorcommon.RequestDeclaresTools(pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON)),
 		}
 	}
 	st := (*param).(*oaiToResponsesState)
@@ -492,7 +498,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						if shouldEmitItem && effectiveCallID != "" {
 							outputIndex := st.FuncOutputIx[key]
 							var o []byte
-							if isCustomToolName(st.CustomToolNames, st.FuncNames[key]) {
+							if isCustomToolName(st.CustomToolNames, st.FuncNames[key], st.RequestHasTools) {
 								o = []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"in_progress","call_id":"","name":"","input":""}}`)
 								o, _ = sjson.SetBytes(o, "sequence_number", nextSeq())
 								o, _ = sjson.SetBytes(o, "output_index", outputIndex)
@@ -523,7 +529,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							// arrive as a {"input": "..."} JSON wrapper; we cannot
 							// stream partial JSON as the bare input text, so we only
 							// buffer here and emit the unwrapped input at done.
-							if refCallID != "" && !isCustomToolName(st.CustomToolNames, st.FuncNames[key]) {
+							if refCallID != "" && !isCustomToolName(st.CustomToolNames, st.FuncNames[key], st.RequestHasTools) {
 								outputIndex := st.FuncOutputIx[key]
 								ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
 								ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
@@ -611,7 +617,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						if b := st.FuncArgsBuf[key]; b != nil && b.Len() > 0 {
 							args = b.String()
 						}
-						if isCustomToolName(st.CustomToolNames, st.FuncNames[key]) {
+						if isCustomToolName(st.CustomToolNames, st.FuncNames[key], st.RequestHasTools) {
 							input := translatorcommon.UnwrapCustomToolInput(args)
 							ctcDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
 							ctcDone, _ = sjson.SetBytes(ctcDone, "sequence_number", nextSeq())
@@ -795,7 +801,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 				// Function/tool calls
 				if tcs := msg.Get("tool_calls"); tcs.Exists() && tcs.IsArray() {
-					customNames := translatorcommon.CustomToolNamesFromRequest(pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON))
+					reqJSON := pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON)
+					customNames := translatorcommon.CustomToolNamesFromRequest(reqJSON)
+					reqHasTools := translatorcommon.RequestDeclaresTools(reqJSON)
 					tcs.ForEach(func(_, tc gjson.Result) bool {
 						callID := tc.Get("id").String()
 						name := tc.Get("function.name").String()
@@ -805,7 +813,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item, _ = sjson.SetBytes(item, "name", name)
-						if isCustomToolName(customNames, name) {
+						if isCustomToolName(customNames, name, reqHasTools) {
 							item = rewriteFunctionCallItemAsCustom(item)
 						}
 						outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
@@ -855,16 +863,19 @@ func pickResponsesRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []b
 
 // isCustomToolName reports whether name was declared as a freeform `custom`
 // tool in the original request.
-func isCustomToolName(customNames map[string]struct{}, name string) bool {
+func isCustomToolName(customNames map[string]struct{}, name string, requestHasTools bool) bool {
 	if name == "" {
 		return false
 	}
 	if _, ok := customNames[name]; ok {
 		return true
 	}
-	// Defensive fallback: apply_patch is the canonical freeform tool even if
-	// the request snapshot was unavailable.
-	return name == "apply_patch"
+	// Defensive fallback: apply_patch is the canonical freeform tool, but ONLY
+	// when the request snapshot was unavailable (no tools declared). When the
+	// snapshot IS available and apply_patch is absent from the custom set, it was
+	// deliberately declared as a regular function — keep it a function_call and
+	// preserve its JSON arguments.
+	return name == "apply_patch" && !requestHasTools
 }
 
 // rewriteFunctionCallItemAsCustom converts a completed `function_call` output

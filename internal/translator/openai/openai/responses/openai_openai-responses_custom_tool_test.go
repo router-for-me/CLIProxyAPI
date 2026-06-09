@@ -131,3 +131,34 @@ func TestDeepSeekResponse_NonStreamFunctionUnaffected(t *testing.T) {
 		t.Fatalf("shell must stay function_call, got %q", item.Get("type").String())
 	}
 }
+
+// regression: when the request snapshot IS available and declares apply_patch as
+// a *regular function* (not a freeform custom tool), the response must keep it as
+// a function_call with its JSON arguments intact. The defensive apply_patch
+// fallback must only fire when the request snapshot is unavailable, not whenever
+// the name happens to be absent from the (correctly empty) custom set.
+func TestDeepSeekResponse_NonStreamRegularApplyPatchNotForcedCustom(t *testing.T) {
+	originalReq := []byte(`{"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}]}`)
+	backendResp := []byte(`{
+		"choices":[{"message":{"role":"assistant","tool_calls":[
+			{"id":"call_7","type":"function","function":{"name":"apply_patch","arguments":"{\"path\":\"/tmp/x\"}"}}
+		]},"finish_reason":"tool_calls"}]
+	}`)
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "deepseek-v4-pro", originalReq, originalReq, backendResp, nil)
+	var item gjson.Result
+	gjson.GetBytes(out, "output").ForEach(func(_, it gjson.Result) bool {
+		if it.Get("name").String() == "apply_patch" {
+			item = it
+		}
+		return true
+	})
+	if !item.Exists() {
+		t.Fatalf("no apply_patch output item, got: %s", out)
+	}
+	if item.Get("type").String() != "function_call" {
+		t.Fatalf("regular function apply_patch must stay function_call, got %q: %s", item.Get("type").String(), item.Raw)
+	}
+	if item.Get("arguments").String() != `{"path":"/tmp/x"}` {
+		t.Fatalf("function_call must keep JSON arguments, got %q", item.Get("arguments").String())
+	}
+}

@@ -45,6 +45,7 @@ type geminiToResponsesState struct {
 	CustomDone       map[int]bool
 	SanitizedNameMap map[string]string
 	CustomToolNames  map[string]struct{}
+	RequestHasTools  bool
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -101,6 +102,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			CustomDone:       make(map[int]bool),
 			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 			CustomToolNames:  translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON)),
+			RequestHasTools:  translatorcommon.RequestDeclaresTools(pickRequestJSON(originalRequestRawJSON, requestRawJSON)),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -124,6 +126,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 	if st.CustomToolNames == nil {
 		st.CustomToolNames = translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
+		st.RequestHasTools = translatorcommon.RequestDeclaresTools(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
@@ -327,7 +330,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				// regular function on the request side; the host expects it back as a
 				// custom_tool_call carrying bare `input` text, not a function_call.
 				_, isCustom := st.CustomToolNames[name]
-				if !isCustom && name == "apply_patch" {
+				if !isCustom && name == "apply_patch" && !st.RequestHasTools {
 					isCustom = true
 				}
 				idx := st.NextIndex
@@ -644,6 +647,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	root = unwrapGeminiResponseRoot(root)
 	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 	customNames := translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
+	customReqHasTools := translatorcommon.RequestDeclaresTools(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -784,7 +788,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				// regular function on the request side; the host expects it back as a
 				// custom_tool_call carrying bare `input` text, not a function_call.
 				_, isCustom := customNames[name]
-				if !isCustom && name == "apply_patch" {
+				if !isCustom && name == "apply_patch" && !customReqHasTools {
 					isCustom = true
 				}
 				if isCustom {

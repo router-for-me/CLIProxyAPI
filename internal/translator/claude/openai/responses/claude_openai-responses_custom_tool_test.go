@@ -120,6 +120,48 @@ func TestConvertClaudeResponse_Stream_CustomToolEmitsCustomToolCall(t *testing.T
 }
 
 // Non-stream: same scenario via the aggregating non-stream converter.
+func TestConvertClaudeResponse_Stream_CustomToolDoesNotLeakWrapperDelta(t *testing.T) {
+	// For downgraded custom tools the streamed input_json_delta fragments are
+	// pieces of the JSON wrapper ({"input":"...). Emitting them verbatim as
+	// response.custom_tool_call_input.delta corrupts the bare-input stream the
+	// host concatenates. We must NOT emit custom_tool_call_input.delta events;
+	// the bare input is delivered once at .done.
+	lines := []string{
+		`data: {"type":"message_start","message":{"id":"msg_cust","usage":{"input_tokens":5}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"id":"toolu_patch","type":"tool_use","name":"apply_patch"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"*** Begin Patch\\n*** Add File: /tmp/x.txt\\n"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"+hi\\n*** End Patch\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}
+	req := []byte(customToolRequest)
+	var state any
+	var inputDone string
+	deltaCount := 0
+	for _, ln := range lines {
+		evs := ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude", req, req, []byte(ln), &state)
+		for _, e := range evs {
+			s := string(e)
+			if strings.Contains(s, "response.custom_tool_call_input.delta") {
+				deltaCount++
+			}
+			if strings.Contains(s, "response.custom_tool_call_input.done") {
+				inputDone = s
+			}
+		}
+	}
+	if deltaCount != 0 {
+		t.Fatalf("custom tools must NOT emit custom_tool_call_input.delta (raw JSON wrapper would corrupt the stream); got %d delta events", deltaCount)
+	}
+	if inputDone == "" {
+		t.Fatal("expected the bare input to still arrive via custom_tool_call_input.done")
+	}
+	inDonePayload := inputDone[strings.Index(inputDone, "{"):]
+	if got := gjson.Get(inDonePayload, "input").String(); got != barePatch {
+		t.Fatalf("input.done must carry the bare patch, got %q", got)
+	}
+}
+
 func TestConvertClaudeResponse_NonStream_CustomToolEmitsCustomToolCall(t *testing.T) {
 	raw := []byte(strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_cust2"}}`,

@@ -30,6 +30,9 @@ type claudeToResponsesState struct {
 	// tools in the original request; such tool calls must be re-emitted as
 	// custom_tool_call (bare input) instead of function_call (JSON arguments).
 	CustomToolNames map[string]struct{}
+	// RequestHasTools reports whether the request snapshot declared any tools;
+	// gates the apply_patch fallback (see isCustomToolName).
+	RequestHasTools bool
 	// message text aggregation
 	TextBuf        strings.Builder
 	CurrentTextBuf strings.Builder
@@ -71,6 +74,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			FuncCallIDs:     make(map[int]string),
 			FuncIsCustom:    make(map[int]bool),
 			CustomToolNames: translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON)),
+			RequestHasTools: translatorcommon.RequestDeclaresTools(pickRequestJSON(originalRequestRawJSON, requestRawJSON)),
 		}
 	}
 	st := (*param).(*claudeToResponsesState)
@@ -158,7 +162,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
 			name := cb.Get("name").String()
-			isCustom := isCustomToolName(st.CustomToolNames, name)
+			isCustom := isCustomToolName(st.CustomToolNames, name, st.RequestHasTools)
 			st.FuncIsCustom[idx] = isCustom
 			if isCustom {
 				// Freeform custom tool (e.g. apply_patch): the host expects a
@@ -235,16 +239,14 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				}
 				st.FuncArgsBuf[idx].WriteString(pj.String())
 				if st.FuncIsCustom[idx] {
-					// Custom tools buffer the JSON arguments here and unwrap the
-					// bare input only at content_block_stop; the partial JSON
-					// fragments are not valid standalone input text, so we emit
-					// the custom delta event using the raw fragment best-effort.
-					msg := []byte(`{"type":"response.custom_tool_call_input.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
-					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
-					msg, _ = sjson.SetBytes(msg, "item_id", fmt.Sprintf("fc_%s", st.CurrentFCID))
-					msg, _ = sjson.SetBytes(msg, "output_index", idx)
-					msg, _ = sjson.SetBytes(msg, "delta", pj.String())
-					out = append(out, emitEvent("response.custom_tool_call_input.delta", msg))
+					// Custom tools buffer the JSON-wrapper fragments here and unwrap
+					// the BARE input only at content_block_stop. The partial_json
+					// fragments are pieces of {"input":"..."} — NOT valid bare input
+					// text — so we must NOT emit response.custom_tool_call_input.delta
+					// with them: a streaming host concatenates deltas before .done and
+					// would otherwise see JSON syntax / escaped chars that don't match
+					// the final bare input. Buffer only; the bare input is delivered
+					// once via custom_tool_call_input.done at content_block_stop.
 				} else {
 					msg := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
 					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
@@ -543,14 +545,16 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 // freeform `custom` tool in the original request. As a defensive fallback it
 // also treats the well-known "apply_patch" name as custom even if the request
 // scan came up empty (e.g. the original request JSON was unavailable).
-func isCustomToolName(customNames map[string]struct{}, name string) bool {
+func isCustomToolName(customNames map[string]struct{}, name string, requestHasTools bool) bool {
 	if name == "" {
 		return false
 	}
 	if _, ok := customNames[name]; ok {
 		return true
 	}
-	return name == "apply_patch"
+	// Defensive fallback only when the request snapshot was unavailable; a
+	// declared regular function named apply_patch must stay a function_call.
+	return name == "apply_patch" && !requestHasTools
 }
 
 // ConvertClaudeResponseToOpenAIResponsesNonStream aggregates Claude SSE into a single OpenAI Responses JSON.
@@ -606,6 +610,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// original request; these must be re-emitted as custom_tool_call items
 	// carrying bare `input` text instead of function_call JSON arguments.
 	customToolNames := translatorcommon.CustomToolNamesFromRequest(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
+	customReqHasTools := translatorcommon.RequestDeclaresTools(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
 
 	// Walk through SSE chunks to fill state
 	for _, ch := range chunks {
@@ -802,7 +807,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if args == "" {
 				args = "{}"
 			}
-			if isCustomToolName(customToolNames, st.name) {
+			if isCustomToolName(customToolNames, st.name, customReqHasTools) {
 				input := translatorcommon.UnwrapCustomToolInput(args)
 				item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","call_id":"","name":"","input":""}`)
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", st.id))

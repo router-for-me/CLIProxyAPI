@@ -45,6 +45,18 @@ func CustomToolNamesFromRequest(rawJSON []byte) map[string]struct{} {
 	return out
 }
 
+// RequestDeclaresTools reports whether the request snapshot declares a non-empty
+// `tools` array. It distinguishes "snapshot available" (tools were declared, so
+// the custom-tool set is authoritative) from "snapshot unavailable" (no tools
+// found — either the request had none or the snapshot was lost). Callers use
+// this to decide whether the defensive apply_patch fallback should fire: when
+// the snapshot IS available and apply_patch is absent from the custom set, it is
+// a deliberately-declared regular function and must NOT be force-customed.
+func RequestDeclaresTools(rawJSON []byte) bool {
+	tools := gjson.GetBytes(rawJSON, "tools")
+	return tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
+}
+
 // CustomToolFunctionSchema returns the JSON Schema (as raw bytes) used when a
 // freeform custom tool is downgraded to a regular function. The freeform tool
 // carries no JSON-Schema parameters of its own (the model emits raw text), so
@@ -69,6 +81,10 @@ func CustomToolDescription(original string) string {
 		"This is a FREEFORM tool, so do not wrap the patch in JSON",
 		"do not wrap the patch in JSON.",
 		"do not wrap the patch in JSON",
+		"This is a freeform tool, so do not wrap the patch in JSON.",
+		"This is a freeform tool, so do not wrap the patch in JSON",
+		"Do not wrap the patch in JSON.",
+		"Do not wrap the patch in JSON",
 	} {
 		desc = strings.ReplaceAll(desc, bad, "")
 	}
@@ -121,16 +137,41 @@ func UnwrapCustomToolInput(argumentsJSON string) string {
 func escapeControlCharsInJSONString(in string) string {
 	var b strings.Builder
 	b.Grow(len(in))
+	inString := false // are we currently inside a double-quoted JSON string literal?
+	escaped := false  // was the previous byte a backslash inside a string?
 	for i := 0; i < len(in); i++ {
-		switch in[i] {
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		case '\t':
-			b.WriteString(`\t`)
-		default:
-			b.WriteByte(in[i])
+		ch := in[i]
+		if inString {
+			if escaped {
+				// previous byte was '\\'; emit this byte verbatim (it's the escapee)
+				b.WriteByte(ch)
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '\\':
+				b.WriteByte(ch)
+				escaped = true
+			case '"':
+				b.WriteByte(ch)
+				inString = false
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
+			default:
+				b.WriteByte(ch)
+			}
+		} else {
+			// Outside string literals: never escape. Structural whitespace
+			// (newlines/indent in pretty-printed JSON) must be left untouched,
+			// otherwise we'd corrupt valid JSON into invalid JSON.
+			if ch == '"' {
+				inString = true
+			}
+			b.WriteByte(ch)
 		}
 	}
 	return b.String()

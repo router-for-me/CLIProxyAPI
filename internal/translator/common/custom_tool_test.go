@@ -47,6 +47,33 @@ func TestUnwrapCustomToolInput(t *testing.T) {
 	}
 }
 
+func TestUnwrapCustomToolInput_RawControlCharsInsideString(t *testing.T) {
+	// A backend emits the wrapper with literal (unescaped) newlines INSIDE the
+	// "input" string value, which makes it invalid JSON. The control-char escape
+	// fallback must repair it and recover the multi-line payload.
+	raw := "{\"input\":\"line1\nline2\tend\"}"
+	got := UnwrapCustomToolInput(raw)
+	if got != "line1\nline2\tend" {
+		t.Fatalf("expected recovered multi-line payload, got %q", got)
+	}
+}
+
+func TestUnwrapCustomToolInput_PreservesStructuralWhitespace(t *testing.T) {
+	// A pretty-printed wrapper (structural newlines/indent OUTSIDE string literals)
+	// whose input value ALSO contains a raw, unescaped newline. The first
+	// gjson.Valid fails (raw newline in the string), so the escape fallback runs.
+	// The OLD global escape turned BOTH the in-string newline AND the structural
+	// newlines into literal \n tokens -> {\n ... became invalid JSON -> fallback
+	// failed and the raw blob leaked. The state-machine escape must escape ONLY
+	// the in-string control chars and leave structural whitespace intact, so the
+	// repaired JSON parses and the multi-line payload is recovered.
+	pretty := "{\n  \"input\": \"line1\nline2\"\n}"
+	got := UnwrapCustomToolInput(pretty)
+	if got != "line1\nline2" {
+		t.Fatalf("pretty wrapper with in-string newline must unwrap to multi-line payload, got %q", got)
+	}
+}
+
 func TestCustomToolDescription(t *testing.T) {
 	orig := "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON."
 	got := CustomToolDescription(orig)
@@ -58,6 +85,23 @@ func TestCustomToolDescription(t *testing.T) {
 	}
 	if !contains(got, CustomToolInputKey) {
 		t.Fatalf("description must mention the input arg, got %q", got)
+	}
+}
+
+func TestCustomToolDescription_CapitalizedVariants(t *testing.T) {
+	// The contradictory instruction can appear with different capitalization.
+	// All variants must be stripped, otherwise the downgraded function tool keeps
+	// a "do not wrap in JSON" instruction that conflicts with the JSON-arguments form.
+	cases := []string{
+		"Use apply_patch. Do not wrap the patch in JSON.",
+		"Use apply_patch. This is a freeform tool, so do not wrap the patch in JSON.",
+	}
+	for _, orig := range cases {
+		got := CustomToolDescription(orig)
+		lower := got
+		if contains(lower, "wrap the patch in JSON") {
+			t.Fatalf("capitalized contradictory sentence must be stripped, got %q", got)
+		}
 	}
 }
 
