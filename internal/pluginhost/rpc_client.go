@@ -70,6 +70,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.FrontendAuthProvider {
 		plugin.Capabilities.FrontendAuthProvider = rpcFrontendAuthProvider{rpcPluginAdapter: adapter}
 	}
+	if resp.Capabilities.Scheduler {
+		plugin.Capabilities.Scheduler = adapter
+	}
 	if resp.Capabilities.Executor {
 		plugin.Capabilities.Executor = rpcProviderExecutor{rpcPluginAdapter: adapter}
 	}
@@ -146,6 +149,12 @@ func sanitizePluginRequest(request any) any {
 		return req
 	case pluginapi.AuthModelRequest:
 		req.HTTPClient = nil
+		return req
+	case pluginapi.SchedulerPickRequest:
+		req.Options.Metadata = sanitizePluginMetadata(req.Options.Metadata)
+		for index := range req.Candidates {
+			req.Candidates[index].Metadata = sanitizePluginMetadata(req.Candidates[index].Metadata)
+		}
 		return req
 	case pluginapi.ExecutorRequest:
 		req.HTTPClient = nil
@@ -285,6 +294,10 @@ func (a *rpcPluginAdapter) ModelsForAuth(ctx context.Context, req pluginapi.Auth
 		AuthModelRequest: req,
 		HostCallbackID:   callbackID,
 	})
+}
+
+func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
 }
 
 func callPluginIdentifier(client pluginClient, method string) string {

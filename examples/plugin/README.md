@@ -14,6 +14,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `request-translator/`: request translation capability only.
 - `request-normalizer/`: request normalization capability only.
 - `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.4` requests to the priority service tier when enabled.
+- `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
 - `response-translator/`: response translation capability only.
 - `response-normalizer/`: response normalization capability only.
 - `thinking/`: thinking applier capability only.
@@ -36,6 +37,23 @@ plugins:
       priority: 1
       fast: false
 ```
+
+## Scheduler
+
+`scheduler` declares the scheduler capability. It can select a configured auth ID from the candidate list, delegate to the built-in `fill-first` or `round-robin` scheduler, or reject picks when `deny` is `true`.
+
+```yaml
+plugins:
+  configs:
+    scheduler:
+      enabled: true
+      priority: 1
+      auth_id: ""
+      delegate: ""
+      deny: false
+```
+
+`auth_id` selects a matching candidate when `delegate` is empty. `delegate` accepts `""`, `fill-first`, or `round-robin`; other non-empty values leave the pick unhandled. `deny` returns a scheduler error.
 
 ## Build All Examples
 

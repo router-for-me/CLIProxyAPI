@@ -25,6 +25,9 @@ const (
 	MethodFrontendAuthIdentifier   = "frontend_auth.identifier"
 	MethodFrontendAuthAuthenticate = "frontend_auth.authenticate"
 
+	// MethodSchedulerPick asks a scheduler plugin to select an auth candidate.
+	MethodSchedulerPick = "scheduler.pick"
+
 	MethodExecutorIdentifier    = "executor.identifier"
 	MethodExecutorExecute       = "executor.execute"
 	MethodExecutorExecuteStream = "executor.execute_stream"

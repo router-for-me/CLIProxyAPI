@@ -2,12 +2,15 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type schedulerTestExecutor struct{}
@@ -32,6 +35,24 @@ func (schedulerTestExecutor) CountTokens(ctx context.Context, auth *Auth, req cl
 
 func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type fakePluginScheduler struct {
+	resp     pluginapi.SchedulerPickResponse
+	handled  bool
+	err      error
+	calls    int
+	requests []pluginapi.SchedulerPickRequest
+	pick     func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
+}
+
+func (s *fakePluginScheduler) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	s.calls++
+	s.requests = append(s.requests, req)
+	if s.pick != nil {
+		return s.pick(ctx, req)
+	}
+	return s.resp, s.handled, s.err
 }
 
 type trackingSelector struct {
@@ -363,6 +384,328 @@ func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) 
 	}
 	if got.ID != "codex-b-plus" {
 		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, "codex-b-plus")
+	}
+}
+
+func TestManagerPluginSchedulerSelectsAuthID(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-b"},
+		handled: true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{Stream: true}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickNext() auth = nil")
+	}
+	if got.ID != "auth-b" {
+		t.Fatalf("pickNext() auth.ID = %q, want %q", got.ID, "auth-b")
+	}
+	if scheduler.calls != 1 {
+		t.Fatalf("scheduler.calls = %d, want %d", scheduler.calls, 1)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want %d", len(scheduler.requests), 1)
+	}
+	if !scheduler.requests[0].Stream {
+		t.Fatalf("scheduler request Stream = false, want true")
+	}
+}
+
+func TestManagerPluginSchedulerSkippedWhenHomeEnabled(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	scheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"},
+		handled: true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	_, _, _ = manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+
+	if scheduler.calls != 0 {
+		t.Fatalf("scheduler.calls = %d, want %d", scheduler.calls, 0)
+	}
+}
+
+func TestManagerPluginSchedulerCalledOutsideManagerLock(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		handled: true,
+		pick: func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+			if !manager.mu.TryLock() {
+				t.Fatalf("plugin scheduler called while manager lock is held")
+			}
+			manager.mu.Unlock()
+			return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, true, nil
+		},
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickNext() auth = nil")
+	}
+	if got.ID != "auth-a" {
+		t.Fatalf("pickNext() auth.ID = %q, want auth-a", got.ID)
+	}
+	if scheduler.calls != 1 {
+		t.Fatalf("scheduler.calls = %d, want %d", scheduler.calls, 1)
+	}
+}
+
+func TestManagerPluginSchedulerErrorStopsPick(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		handled: true,
+		err:     errors.New("tenant denied"),
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatalf("pickNext() error = nil, want tenant denied")
+	}
+	if errPick.Error() != "tenant denied" {
+		t.Fatalf("pickNext() error = %v, want tenant denied", errPick)
+	}
+	if got != nil {
+		t.Fatalf("pickNext() auth = %v, want nil", got)
+	}
+}
+
+func TestManagerPluginSchedulerFallsBackWhenUnhandledOrUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		resp    pluginapi.SchedulerPickResponse
+		handled bool
+	}{
+		{
+			name:    "unhandled",
+			resp:    pluginapi.SchedulerPickResponse{Handled: false},
+			handled: false,
+		},
+		{
+			name:    "unknown auth id",
+			resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "missing"},
+			handled: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, &FillFirstSelector{}, nil)
+			manager.executors["gemini"] = schedulerTestExecutor{}
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+				t.Fatalf("Register(auth-b) error = %v", errRegister)
+			}
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+				t.Fatalf("Register(auth-a) error = %v", errRegister)
+			}
+
+			scheduler := &fakePluginScheduler{resp: tc.resp, handled: tc.handled}
+			manager.SetPluginScheduler(scheduler)
+
+			got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+			if errPick != nil {
+				t.Fatalf("pickNext() error = %v", errPick)
+			}
+			if got == nil {
+				t.Fatalf("pickNext() auth = nil")
+			}
+			if got.ID != "auth-a" {
+				t.Fatalf("pickNext() auth.ID = %q, want %q", got.ID, "auth-a")
+			}
+		})
+	}
+}
+
+func TestManagerPluginSchedulerDelegatesBuiltin(t *testing.T) {
+	t.Run("round-robin", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		manager.executors["gemini"] = schedulerTestExecutor{}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-b) error = %v", errRegister)
+		}
+		manager.SetPluginScheduler(&fakePluginScheduler{
+			resp:    pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinRoundRobin},
+			handled: true,
+		})
+
+		gotA, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNext() first error = %v", errPick)
+		}
+		gotB, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNext() second error = %v", errPick)
+		}
+		if gotA == nil || gotB == nil {
+			t.Fatalf("pickNext() auths = %v, %v; want non-nil", gotA, gotB)
+		}
+		if gotA.ID != "auth-a" || gotB.ID != "auth-b" {
+			t.Fatalf("round-robin picks = %q, %q; want auth-a, auth-b", gotA.ID, gotB.ID)
+		}
+	})
+
+	t.Run("fill-first", func(t *testing.T) {
+		manager := NewManager(nil, &RoundRobinSelector{}, nil)
+		manager.executors["gemini"] = schedulerTestExecutor{}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-b) error = %v", errRegister)
+		}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+		manager.SetPluginScheduler(&fakePluginScheduler{
+			resp:    pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst},
+			handled: true,
+		})
+
+		got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNext() error = %v", errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNext() auth = nil")
+		}
+		if got.ID != "auth-a" {
+			t.Fatalf("fill-first pick = %q, want auth-a", got.ID)
+		}
+	})
+}
+
+func TestManagerPluginSchedulerPickNextMixedSelectsProvider(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "gemini-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(gemini-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "claude-a", Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(claude-a) error = %v", errRegister)
+	}
+	scheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "claude-a"},
+		handled: true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, executor, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickNextMixed() auth = nil")
+	}
+	if got.ID != "claude-a" {
+		t.Fatalf("pickNextMixed() auth.ID = %q, want claude-a", got.ID)
+	}
+	if provider != "claude" {
+		t.Fatalf("pickNextMixed() provider = %q, want claude", provider)
+	}
+	if executor == nil {
+		t.Fatalf("pickNextMixed() executor = nil")
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want %d", len(scheduler.requests), 1)
+	}
+	req := scheduler.requests[0]
+	if req.Provider != "" {
+		t.Fatalf("scheduler request Provider = %q, want empty for mixed provider pick", req.Provider)
+	}
+	if len(req.Providers) != 2 || req.Providers[0] != "gemini" || req.Providers[1] != "claude" {
+		t.Fatalf("scheduler request Providers = %#v, want [gemini claude]", req.Providers)
+	}
+}
+
+func TestManagerPluginSchedulerCandidatesAreSafeCopies(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	auth := &Auth{
+		ID:       "auth-a",
+		Provider: "gemini",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"access_token": "token-value",
+			"api_key":      "api-key-value",
+			"cookie":       "cookie-value",
+			"priority":     "7",
+			"team":         "alpha",
+		},
+		Metadata: map[string]any{"tenant": "one"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		handled: true,
+		pick: func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+			if len(req.Candidates) != 1 {
+				t.Fatalf("len(req.Candidates) = %d, want %d", len(req.Candidates), 1)
+			}
+			candidate := req.Candidates[0]
+			if candidate.ID != "auth-a" || candidate.Provider != "gemini" || candidate.Priority != 7 || candidate.Status != string(StatusActive) {
+				t.Fatalf("scheduler candidate = %#v, want sanitized auth-a metadata", candidate)
+			}
+			for _, key := range []string{"access_token", "api_key", "cookie"} {
+				if _, ok := candidate.Attributes[key]; ok {
+					t.Fatalf("scheduler candidate Attributes contains sensitive key %q", key)
+				}
+			}
+			if candidate.Attributes["priority"] != "7" {
+				t.Fatalf("scheduler candidate priority attribute = %q, want 7", candidate.Attributes["priority"])
+			}
+			if len(candidate.Metadata) != 0 {
+				t.Fatalf("scheduler candidate Metadata = %#v, want empty", candidate.Metadata)
+			}
+			candidate.Attributes["team"] = "mutated"
+			req.Candidates[0] = candidate
+			return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, true, nil
+		},
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	if _, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil); errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+
+	manager.mu.RLock()
+	gotAttr := manager.auths["auth-a"].Attributes["team"]
+	gotAPIKey := manager.auths["auth-a"].Attributes["api_key"]
+	manager.mu.RUnlock()
+	if gotAttr != "alpha" {
+		t.Fatalf("manager auth attribute team = %q, want alpha", gotAttr)
+	}
+	if gotAPIKey != "api-key-value" {
+		t.Fatalf("manager auth attribute api_key = %q, want api-key-value", gotAPIKey)
 	}
 }
 

@@ -76,6 +76,8 @@ type Capabilities struct {
 	FrontendAuthProvider FrontendAuthProvider
 	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
 	FrontendAuthProviderExclusive bool
+	// Scheduler chooses an auth candidate before the built-in scheduler runs.
+	Scheduler Scheduler
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -439,6 +441,70 @@ type FrontendAuthResponse struct {
 	Principal string
 	// Metadata carries plugin-defined identity attributes for downstream use.
 	Metadata map[string]string
+}
+
+const (
+	// SchedulerBuiltinRoundRobin delegates auth selection to the built-in round-robin scheduler.
+	SchedulerBuiltinRoundRobin = "round-robin"
+	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
+	SchedulerBuiltinFillFirst = "fill-first"
+)
+
+// Scheduler chooses an auth candidate before the built-in scheduler runs.
+type Scheduler interface {
+	Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error)
+}
+
+// SchedulerPickRequest describes the routing context offered to a scheduler plugin.
+type SchedulerPickRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata
+	// Provider is the primary provider key requested by the route.
+	Provider string
+	// Providers contains every provider key accepted by the route.
+	Providers []string
+	// Model is the requested model identifier.
+	Model string
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Options contains request-scoped scheduler inputs.
+	Options SchedulerOptions
+	// Candidates contains auth records available for selection.
+	Candidates []SchedulerAuthCandidate
+}
+
+// SchedulerOptions carries request-scoped scheduler inputs.
+type SchedulerOptions struct {
+	// Headers contains request headers relevant to scheduling.
+	Headers map[string][]string
+	// Metadata carries host-provided scheduler context.
+	Metadata map[string]any
+}
+
+// SchedulerAuthCandidate describes one auth candidate available to a scheduler.
+type SchedulerAuthCandidate struct {
+	// ID identifies the auth record.
+	ID string
+	// Provider identifies the auth provider.
+	Provider string
+	// Priority is the host priority assigned to the auth record.
+	Priority int
+	// Status is the current host-visible auth status.
+	Status string
+	// Attributes contains immutable routing and provider attributes.
+	Attributes map[string]string
+	// Metadata contains mutable host-managed auth metadata.
+	Metadata map[string]any
+}
+
+// SchedulerPickResponse returns a scheduler plugin routing decision.
+type SchedulerPickResponse struct {
+	// AuthID identifies the selected auth record.
+	AuthID string
+	// DelegateBuiltin asks the host to use a named built-in scheduler.
+	DelegateBuiltin string
+	// Handled reports whether the plugin made a scheduling decision.
+	Handled bool
 }
 
 // ProviderExecutor handles model execution, streaming, HTTP bridging, and token counting.
