@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // OAuth configuration constants for OpenAI Codex
@@ -180,14 +181,43 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	return bundle, nil
 }
 
+// codexRefreshGroup de-duplicates concurrent refreshes for the same refresh token
+// within this process. OpenAI rotates the refresh token on every successful refresh
+// and immediately invalidates the previous one, so two concurrent refreshes of the
+// same token would race: the first succeeds while the second sends the now-stale
+// token and fails with "refresh_token_reused". singleflight collapses concurrent
+// refreshes of the same token into a single upstream call whose result is shared.
+var codexRefreshGroup singleflight.Group
+
 // RefreshTokens refreshes an access token using a refresh token.
 // This method is called when an access token has expired. It makes a request to the
-// token endpoint to obtain a new set of tokens.
+// token endpoint to obtain a new set of tokens. Concurrent calls for the same refresh
+// token are collapsed via singleflight to avoid refresh_token_reused races caused by
+// rotating refresh tokens.
 func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
 
+	// Use WithoutCancel so a single caller's cancellation does not abort the shared
+	// refresh that other waiting callers depend on.
+	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+	})
+	if err != nil {
+		return nil, err
+	}
+	tokenData, ok := result.(*CodexTokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
+	}
+	return tokenData, nil
+}
+
+// refreshTokensSingleFlight performs the actual token refresh HTTP request against the
+// OpenAI token endpoint. It is invoked by RefreshTokens through singleflight so that at
+// most one in-flight refresh runs per refresh token at a time.
+func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
 	data := url.Values{
 		"client_id":     {ClientID},
 		"grant_type":    {"refresh_token"},
