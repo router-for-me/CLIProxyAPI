@@ -187,7 +187,9 @@ PUT /v0/management/plugins/{pluginID}/config
 PATCH /v0/management/plugins/{pluginID}/config
 ```
 
-Plugin-owned Management API routes are registered through `management.register` and handled through `management.handle`.
+Plugin-owned Management API routes are registered through the `routes` field of `management.register` and handled through `management.handle`.
+
+Browser-navigable menu resources are registered through the `resources` field of `management.register`. CPA exposes those resources under `/v0/resource/plugins/<pluginID>/...`; for example, a plugin with ID `example` and resource path `/status` is served as `/v0/resource/plugins/example/status`.
 
 ## Trust Boundary
 
