@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 type windowsBuffer struct {
@@ -179,7 +181,7 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 	if len(resp) == 0 || responsePtr == 0 {
 		return 0
 	}
-	mem, errAlloc := syscall.LocalAlloc(0, uint32(len(resp)))
+	mem, errAlloc := windows.LocalAlloc(windows.LMEM_FIXED, uint32(len(resp)))
 	if errAlloc != nil || mem == 0 {
 		return 1
 	}
@@ -192,7 +194,7 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 
 func windowsHostFree(ptr uintptr, len uintptr) uintptr {
 	if ptr != 0 {
-		_, _ = syscall.LocalFree(syscall.Handle(ptr))
+		_, _ = windows.LocalFree(windows.Handle(ptr))
 	}
 	return 0
 }

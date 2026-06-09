@@ -12,6 +12,7 @@
 - `protocol-format/`：使用最小执行器重点演示输入和输出格式声明。
 - `request-translator/`：只演示请求转换能力。
 - `request-normalizer/`：只演示请求规整能力。
+- `codex-service-tier/`：仅 Go 实现的请求规整插件，启用后会将 Codex `gpt-5.4` 请求设置为 priority service tier。
 - `response-translator/`：只演示响应转换能力。
 - `response-normalizer/`：只演示响应规整能力。
 - `thinking/`：只演示 Thinking 处理能力。
@@ -20,7 +21,20 @@
 - `management-api/`：只演示 Management API 扩展能力。
 - `host-callback/`：使用最小 Management API 路由演示宿主回调。
 
-每个示例目录都包含 `go/`、`c/` 和 `rust/` 三个子目录。
+多数标准能力示例都包含 `go/`、`c/` 和 `rust/` 三个子目录。专用示例可能只提供所需的实现语言。
+
+## Codex Service Tier
+
+`codex-service-tier` 声明请求规整能力。当 `fast` 为 `true` 时，如果 `req.ToFormat` 为 `codex` 且 `req.Model` 为 `gpt-5.4`，它会将 `service_tier` 设置为 `priority`。
+
+```yaml
+plugins:
+  configs:
+    codex-service-tier:
+      enabled: true
+      priority: 1
+      fast: false
+```
 
 ## 构建全部示例
 

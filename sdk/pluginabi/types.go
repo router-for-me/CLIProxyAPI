@@ -31,12 +31,15 @@ const (
 	MethodExecutorCountTokens   = "executor.count_tokens"
 	MethodExecutorHTTPRequest   = "executor.http_request"
 
-	MethodRequestTranslate = "request.translate"
-	MethodRequestNormalize = "request.normalize"
+	MethodRequestTranslate       = "request.translate"
+	MethodRequestNormalize       = "request.normalize"
+	MethodRequestInterceptBefore = "request.intercept_before"
 
-	MethodResponseTranslate       = "response.translate"
-	MethodResponseNormalizeBefore = "response.normalize_before"
-	MethodResponseNormalizeAfter  = "response.normalize_after"
+	MethodResponseTranslate            = "response.translate"
+	MethodResponseNormalizeBefore      = "response.normalize_before"
+	MethodResponseNormalizeAfter       = "response.normalize_after"
+	MethodResponseInterceptAfter       = "response.intercept_after"
+	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
 
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"
