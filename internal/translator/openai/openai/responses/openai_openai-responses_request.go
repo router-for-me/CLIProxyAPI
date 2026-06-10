@@ -133,10 +133,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "reasoning":
 				// Extract reasoning content to attach to the next assistant message with tool_calls.
 				// Per DeepSeek docs: reasoning_content must be passed back when tool calls occur.
-				if summary := item.Get("summary"); summary.Exists() && summary.IsArray() && summary.Array()[0].Exists() {
-					if summaryText := summary.Array()[0].Get("text"); summaryText.Exists() {
-						pendingReasoningContent = summaryText.String()
-					}
+				if summaryText := item.Get("summary.0.text"); summaryText.Exists() {
+					pendingReasoningContent = summaryText.String()
 				}
 
 			case "message", "":
