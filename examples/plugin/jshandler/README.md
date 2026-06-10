@@ -4,7 +4,7 @@ A CLIProxyAPI plugin that executes external JavaScript scripts to intercept and 
 
 ## Features
 
-- **Request Interception** (`on_before_request`): Modify request payloads and headers before upstream delivery.
+- **Request Interception** (`on_before_request`, `on_after_auth_request`): Modify request payloads and headers before and after credential selection.
 - **Response Interception** (`on_after_nonstream_response`): Modify non-streaming response bodies and headers.
 - **Stream Chunk Interception** (`on_after_stream_response`): Modify individual streaming chunks with read-only `history_chunks` context.
 - **Hot Reload**: Scripts are automatically reloaded when modified on disk.
@@ -40,7 +40,7 @@ Scripts can export these global functions:
 
 ### `on_before_request(ctx)`
 
-Called before the request is sent upstream.
+Called before credential selection. At this point the target upstream protocol is not selected yet.
 
 **ctx structure:**
 ```javascript
@@ -50,7 +50,31 @@ Called before the request is sent upstream.
     "headers": {},        // Request headers
     "url": "",
     "model": "gpt-4",
-    "protocol": "openai"
+    "protocol": "openai",
+    "source_format": "openai",
+    "sourceFormat": "openai",
+    "to_format": "",
+    "toFormat": ""
+}
+```
+
+### `on_after_auth_request(ctx)`
+
+Called after credential selection and before request translation, request normalization, and built-in payload configuration.
+
+**ctx structure:**
+```javascript
+{
+    "id": "request-id",
+    "body": "...",             // Request body string
+    "headers": {},             // Request headers
+    "url": "",
+    "model": "gpt-4",
+    "protocol": "openai",      // Same as source_format
+    "source_format": "openai",
+    "sourceFormat": "openai",
+    "to_format": "codex",
+    "toFormat": "codex"
 }
 ```
 

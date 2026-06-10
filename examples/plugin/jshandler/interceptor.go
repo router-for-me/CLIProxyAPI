@@ -44,11 +44,15 @@ func (p *jsHandlerPlugin) allScriptPaths() []string {
 	return paths
 }
 
-func (p *jsHandlerPlugin) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
-	return p.interceptRequest(ctx, req, "")
+func (p *jsHandlerPlugin) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	return p.interceptRequest(ctx, req, "on_before_request", "")
 }
 
-func (p *jsHandlerPlugin) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, hostCallbackID string) (pluginapi.RequestInterceptResponse, error) {
+func (p *jsHandlerPlugin) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	return p.interceptRequest(ctx, req, "on_after_auth_request", "")
+}
+
+func (p *jsHandlerPlugin) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, hookName, hostCallbackID string) (pluginapi.RequestInterceptResponse, error) {
 	resp := pluginapi.RequestInterceptResponse{}
 	scriptPaths := p.allScriptPaths()
 	if len(scriptPaths) == 0 {
@@ -64,7 +68,7 @@ func (p *jsHandlerPlugin) interceptRequest(ctx context.Context, req pluginapi.Re
 		if scriptPath == "" {
 			continue
 		}
-		processed, cleared, errJS := p.applyJSBeforeRequest(scriptPath, []byte(body), req.Model, req.SourceFormat, headers, hostCallbackID)
+		processed, cleared, errJS := p.applyJSRequestHook(scriptPath, hookName, []byte(body), req.Model, req.SourceFormat, req.ToFormat, headers, hostCallbackID)
 		if errJS != nil {
 			log.Warnf("failed to execute JS request interceptor [%s]: %v", scriptPath, errJS)
 			continue
@@ -197,7 +201,7 @@ func (p *jsHandlerPlugin) interceptStreamChunk(ctx context.Context, req pluginap
 	return resp, nil
 }
 
-func (p *jsHandlerPlugin) applyJSBeforeRequest(scriptPath string, payloadBytes []byte, model, protocol string, headers http.Header, hostCallbackID string) ([]byte, []string, error) {
+func (p *jsHandlerPlugin) applyJSRequestHook(scriptPath, hookName string, payloadBytes []byte, model, sourceFormat, toFormat string, headers http.Header, hostCallbackID string) ([]byte, []string, error) {
 	program, err := getJSProgram(scriptPath)
 	if err != nil {
 		return nil, nil, err
@@ -211,20 +215,24 @@ func (p *jsHandlerPlugin) applyJSBeforeRequest(scriptPath string, payloadBytes [
 	headersMap := headerToAnyMap(headers)
 
 	jsCtx := map[string]any{
-		"id":       generateRequestID(),
-		"body":     string(payloadBytes),
-		"headers":  headersMap,
-		"url":      "",
-		"model":    model,
-		"protocol": protocol,
+		"id":            generateRequestID(),
+		"body":          string(payloadBytes),
+		"headers":       headersMap,
+		"url":           "",
+		"model":         model,
+		"protocol":      sourceFormat,
+		"source_format": sourceFormat,
+		"to_format":     toFormat,
+		"sourceFormat":  sourceFormat,
+		"toFormat":      toFormat,
 	}
 
-	jsVal, errCall := engine.callFunction("on_before_request", p.cfg.Timeout, jsCtx)
+	jsVal, errCall := engine.callFunction(hookName, p.cfg.Timeout, jsCtx)
 	if errCall != nil {
 		if errors.Is(errCall, ErrFunctionNotFound) {
 			return payloadBytes, nil, nil
 		}
-		return nil, nil, fmt.Errorf("on_before_request failed for %s: %w", scriptPath, errCall)
+		return nil, nil, fmt.Errorf("%s failed for %s: %w", hookName, scriptPath, errCall)
 	}
 
 	if jsVal == nil || goja.IsUndefined(jsVal) || goja.IsNull(jsVal) {

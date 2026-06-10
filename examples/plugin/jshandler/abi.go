@@ -218,7 +218,14 @@ func handleJSHandlerABIMethod(ctx context.Context, method string, request []byte
 		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
 			return nil, errDecode
 		}
-		resp, errCall := p.interceptRequest(ctx, req.RequestInterceptRequest, req.HostCallbackID)
+		resp, errCall := p.interceptRequest(ctx, req.RequestInterceptRequest, "on_before_request", req.HostCallbackID)
+		return abiOKEnvelopeWithError(resp, errCall)
+	case pluginabi.MethodRequestInterceptAfter:
+		var req abiRequestInterceptRequest
+		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
+			return nil, errDecode
+		}
+		resp, errCall := p.interceptRequest(ctx, req.RequestInterceptRequest, "on_after_auth_request", req.HostCallbackID)
 		return abiOKEnvelopeWithError(resp, errCall)
 	case pluginabi.MethodResponseInterceptAfter:
 		var req abiResponseInterceptRequest

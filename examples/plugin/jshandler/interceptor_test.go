@@ -25,22 +25,68 @@ function on_before_request(ctx) {
 
 	plugin := &jsHandlerPlugin{cfg: defaultJSHandlerConfig()}
 	headers := http.Header{"X-Plugin": []string{"original"}}
-	processed, _, errApply := plugin.applyJSBeforeRequest(
+	processed, _, errApply := plugin.applyJSRequestHook(
 		scriptPath,
+		"on_before_request",
 		[]byte(`{"messages":[{"role":"user","content":"contains sensitive_word"}]}`),
 		"gpt-test",
 		"openai",
+		"",
 		headers,
 		"",
 	)
 	if errApply != nil {
-		t.Fatalf("applyJSBeforeRequest() error = %v", errApply)
+		t.Fatalf("applyJSRequestHook() error = %v", errApply)
 	}
 	if body := string(processed); !strings.Contains(body, "safe_word") || strings.Contains(body, "sensitive_word") {
 		t.Fatalf("processed body = %q, want sensitive word rewritten", body)
 	}
 	if got := headers.Get("X-Plugin"); got != "updated" {
 		t.Fatalf("header X-Plugin = %q, want updated", got)
+	}
+}
+
+func TestApplyJSAfterAuthRequestReceivesFormats(t *testing.T) {
+	scriptPath := filepath.Join(t.TempDir(), "after_auth.js")
+	script := `
+function on_after_auth_request(ctx) {
+    if (ctx.source_format !== "openai" || ctx.to_format !== "codex") {
+        throw new Error("unexpected formats: " + ctx.source_format + " -> " + ctx.to_format);
+    }
+    if (ctx.sourceFormat !== "openai" || ctx.toFormat !== "codex") {
+        throw new Error("unexpected camel formats: " + ctx.sourceFormat + " -> " + ctx.toFormat);
+    }
+    var req = JSON.parse(ctx.body);
+    req.after_auth = ctx.source_format + "_to_" + ctx.to_format;
+    ctx.headers["X-Protocol"] = req.after_auth;
+    ctx.body = JSON.stringify(req);
+    return ctx;
+}
+`
+	if errWrite := os.WriteFile(scriptPath, []byte(script), 0600); errWrite != nil {
+		t.Fatalf("os.WriteFile() error = %v", errWrite)
+	}
+
+	plugin := &jsHandlerPlugin{cfg: defaultJSHandlerConfig()}
+	headers := http.Header{}
+	processed, _, errApply := plugin.applyJSRequestHook(
+		scriptPath,
+		"on_after_auth_request",
+		[]byte(`{"model":"gpt-test"}`),
+		"gpt-test",
+		"openai",
+		"codex",
+		headers,
+		"",
+	)
+	if errApply != nil {
+		t.Fatalf("applyJSRequestHook() error = %v", errApply)
+	}
+	if body := string(processed); !strings.Contains(body, `"after_auth":"openai_to_codex"`) {
+		t.Fatalf("processed body = %q, want after_auth marker", body)
+	}
+	if got := headers.Get("X-Protocol"); got != "openai_to_codex" {
+		t.Fatalf("header X-Protocol = %q, want openai_to_codex", got)
 	}
 }
 
