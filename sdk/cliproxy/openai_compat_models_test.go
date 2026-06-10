@@ -22,3 +22,20 @@ func TestBuildOpenAICompatibilityConfigModelsIncludesContextLength(t *testing.T)
 		t.Fatalf("ContextLength = %d, want 1000000", got)
 	}
 }
+
+func TestBuildOpenAICompatibilityConfigModelsClampsNegativeContextLength(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{{
+			Name:          "bad-context-model",
+			ContextLength: -1,
+		}},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(models))
+	}
+	if got := models[0].ContextLength; got != 0 {
+		t.Fatalf("ContextLength = %d, want 0", got)
+	}
+}
