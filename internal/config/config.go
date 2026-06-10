@@ -681,7 +681,7 @@ type OpenAICompatibilityModel struct {
 	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
 
 	// ContextLength overrides the advertised model context window.
-	ContextLength int `yaml:"context-length,omitempty" json:"context_length,omitempty"`
+	ContextLength int `yaml:"context-length,omitempty" json:"context-length,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
