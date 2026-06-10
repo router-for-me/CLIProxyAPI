@@ -15,6 +15,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `request-normalizer/`: request normalization capability only.
 - `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.4` requests to the priority service tier when enabled.
 - `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
+- `antigravity-web-search/`: Go-only server tool handler for Claude typed builtin `web_search_*` requests routed through Antigravity.
 - `response-translator/`: response translation capability only.
 - `response-normalizer/`: response normalization capability only.
 - `thinking/`: thinking applier capability only.
@@ -54,6 +55,25 @@ plugins:
 ```
 
 `auth_id` selects a matching candidate when `delegate` is empty. `delegate` accepts `""`, `fill-first`, or `round-robin`; other non-empty values leave the pick unhandled. `deny` returns a scheduler error.
+
+## Antigravity Web Search
+
+`antigravity-web-search` declares the `server_tool_handler` capability. It only handles Claude typed builtin `web_search_20250305` / `web_search_20260209` requests where all tools are typed web search tools, then uses Antigravity Gemini `googleSearch` through the host HTTP callback.
+
+```yaml
+plugins:
+  configs:
+    antigravity-web-search:
+      enabled: true
+      priority: 10
+      backend_model: gemini-3.1-flash-lite
+      max_uses: 8
+      base_urls:
+        - https://daily-cloudcode-pa.googleapis.com
+        - https://cloudcode-pa.googleapis.com
+```
+
+The host injects the selected Antigravity credential and proxy transport; the plugin constructs only the search payload and Claude-compatible `server_tool_use` / `web_search_tool_result` response shape.
 
 ## Build All Examples
 
