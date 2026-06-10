@@ -592,13 +592,21 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// tools
 	var toolsJSON []byte
 	toolDeclCount := 0
+	googleSearchToolCount := 0
+	googleSearchModelName := antigravityNativeGoogleSearchModel(modelName)
 	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
-		toolsJSON = []byte(`[{"functionDeclarations":[]}]`)
+		functionToolNode := []byte(`{"functionDeclarations":[]}`)
+		googleSearchNodes := make([][]byte, 0)
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+			if isClaudeTypedWebSearchToolType(toolResult.Get("type").String()) && googleSearchModelName != "" {
+				googleSearchNodes = append(googleSearchNodes, []byte(`{"googleSearch":{}}`))
+				googleSearchToolCount++
+				continue
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
@@ -612,18 +620,31 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 					tool, _ = sjson.DeleteBytes(tool, toolKey)
 				}
-				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "0.functionDeclarations.-1", tool)
+				functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", tool)
 				toolDeclCount++
+			}
+		}
+		if toolDeclCount > 0 || len(googleSearchNodes) > 0 {
+			toolsJSON = []byte(`[]`)
+			if toolDeclCount > 0 {
+				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", functionToolNode)
+			}
+			for _, googleSearchNode := range googleSearchNodes {
+				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", googleSearchNode)
 			}
 		}
 	}
 
 	// Build output Gemini CLI request JSON
 	out := []byte(`{"model":"","request":{"contents":[]}}`)
-	out, _ = sjson.SetBytes(out, "model", modelName)
+	outputModelName := modelName
+	if googleSearchToolCount > 0 {
+		outputModelName = googleSearchModelName
+	}
+	out, _ = sjson.SetBytes(out, "model", outputModelName)
 
 	// Inject interleaved thinking hint when both tools and thinking are active
-	hasTools := toolDeclCount > 0
+	hasTools := toolDeclCount > 0 || googleSearchToolCount > 0
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
 	thinkingType := thinkingResult.Get("type").String()
 	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && (thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto")
@@ -653,7 +674,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if hasContents {
 		out, _ = sjson.SetRawBytes(out, "request.contents", contentsJSON)
 	}
-	if toolDeclCount > 0 {
+	if toolDeclCount > 0 || googleSearchToolCount > 0 {
 		out, _ = sjson.SetRawBytes(out, "request.tools", toolsJSON)
 	}
 

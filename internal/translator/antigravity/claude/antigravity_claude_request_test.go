@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
@@ -177,6 +178,69 @@ func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserConten
 	}
 	if got := parts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_MapsTypedWebSearchToNativeGoogleSearchForCapableModel(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [{"role": "user", "content": "Search current weather"}],
+		"tools": [
+			{"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+			{"name": "lookup", "description": "Lookup local data", "input_schema": {"type": "object", "properties": {}}}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-flash-lite", inputJSON, true)
+	tools := gjson.GetBytes(output, "request.tools")
+	if !tools.IsArray() {
+		t.Fatalf("request.tools missing: %s", output)
+	}
+	if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Raw; got == "" {
+		t.Fatalf("typed web_search should become native googleSearch for web-search-capable model: %s", output)
+	}
+	if got := gjson.GetBytes(output, `request.tools.#.functionDeclarations.#(name=="lookup")`).Raw; got == "" {
+		t.Fatalf("custom tool declaration should be preserved next to googleSearch: %s", output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_UsesFetchedWebSearchModelForTypedWebSearch(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-route", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.5-flash"},
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch-route") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"messages": [{"role": "user", "content": "Perform a web search"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.5-flash", inputJSON, true)
+	if got := gjson.GetBytes(output, "model").String(); got != "gemini-3.1-flash-lite" {
+		t.Fatalf("web search request model = %q, want fetched web search model: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Raw; got == "" {
+		t.Fatalf("typed web_search should become native googleSearch using fetched web search model: %s", output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchForOtherModels(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Search current weather"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Raw; got != "" {
+		t.Fatalf("model without Antigravity web search capability should not get native googleSearch: %s", output)
 	}
 }
 
