@@ -46,6 +46,11 @@ var (
 	sfGroup             singleflight.Group
 )
 
+func isGitHubReleaseHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "github.com" || host == "api.github.com"
+}
+
 // SetCurrentConfig stores the latest configuration snapshot for management asset decisions.
 func SetCurrentConfig(cfg *config.Config) {
 	if cfg == nil {
@@ -343,9 +348,14 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", httpUserAgent)
-	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
-	if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
+	releaseHost := strings.ToLower(strings.TrimSpace(req.URL.Host))
+	if tok := strings.TrimSpace(os.Getenv("CLIPROXYAPI_PANEL_GITHUB_TOKEN")); tok != "" && isGitHubReleaseHost(releaseHost) {
 		req.Header.Set("Authorization", "Bearer "+tok)
+	} else if isGitHubReleaseHost(releaseHost) {
+		gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
+		if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
 	}
 
 	resp, err := client.Do(req)
