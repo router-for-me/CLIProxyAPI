@@ -2,6 +2,8 @@ package cliproxy
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -131,5 +133,86 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 	if chatModel.Thinking == nil {
 		t.Fatal("expected chat model to keep default thinking support")
+	}
+}
+
+func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
+	var sawFetch bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != antigravityModelsPath {
+			t.Fatalf("path = %q, want %s", r.URL.Path, antigravityModelsPath)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+		sawFetch = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"models": {
+				"gemini-3.1-flash-lite": {
+					"displayName": "Gemini 3.1 Flash Lite",
+					"maxTokens": 1048576,
+					"maxOutputTokens": 65535
+				},
+				"gemini-3-flash-agent": {
+					"displayName": "Gemini 3 Flash Agent"
+				}
+			},
+			"webSearchModelIds": ["gemini-3.1-flash-lite"]
+		}`))
+	}))
+	defer server.Close()
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-antigravity-fetch-models",
+		Provider: "antigravity",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+		},
+	}
+
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+	if !sawFetch {
+		t.Fatal("expected fetchAvailableModels request")
+	}
+
+	models := registry.GetModelsForClient(auth.ID)
+	var webSearchModel, agentModel *internalregistry.ModelInfo
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch strings.TrimSpace(model.ID) {
+		case "gemini-3.1-flash-lite":
+			webSearchModel = model
+		case "gemini-3-flash-agent":
+			agentModel = model
+		}
+	}
+	if webSearchModel == nil {
+		t.Fatal("expected gemini-3.1-flash-lite to be registered")
+	}
+	if !webSearchModel.SupportsWebSearch {
+		t.Fatal("expected gemini-3.1-flash-lite to support web search")
+	}
+	if webSearchModel.ContextLength != 1048576 || webSearchModel.MaxCompletionTokens != 65535 {
+		t.Fatalf("token limits not preserved: %#v", webSearchModel)
+	}
+	if agentModel == nil {
+		t.Fatal("expected gemini-3-flash-agent to be registered")
+	}
+	if agentModel.SupportsWebSearch {
+		t.Fatal("gemini-3-flash-agent should not support web search")
 	}
 }

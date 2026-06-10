@@ -63,6 +63,7 @@ type modelEntry struct {
 	DisplayName         string `json:"display_name"`
 	Name                string `json:"name"`
 	Description         string `json:"description"`
+	SupportsWebSearch   bool   `json:"supports_web_search,omitempty"`
 	ContextLength       int    `json:"context_length,omitempty"`
 	MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
 }
@@ -239,53 +240,63 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 			continue
 		}
 
-		result := gjson.GetBytes(bodyBytes, "models")
-		if !result.Exists() {
+		models := buildModelEntries(bodyBytes)
+		if len(models) == 0 {
 			continue
 		}
-
-		var models []modelEntry
-
-		for originalName, modelData := range result.Map() {
-			modelID := strings.TrimSpace(originalName)
-			if modelID == "" {
-				continue
-			}
-			// Skip internal/experimental models
-			switch modelID {
-			case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
-				continue
-			}
-
-			displayName := modelData.Get("displayName").String()
-			if displayName == "" {
-				displayName = modelID
-			}
-
-			entry := modelEntry{
-				ID:          modelID,
-				Object:      "model",
-				OwnedBy:     "antigravity",
-				Type:        "antigravity",
-				DisplayName: displayName,
-				Name:        modelID,
-				Description: displayName,
-			}
-
-			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
-				entry.ContextLength = int(maxTok)
-			}
-			if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
-				entry.MaxCompletionTokens = int(maxOut)
-			}
-
-			models = append(models, entry)
-		}
-
 		return models
 	}
 
 	return nil
+}
+
+func buildModelEntries(bodyBytes []byte) []modelEntry {
+	result := gjson.GetBytes(bodyBytes, "models")
+	if !result.Exists() {
+		return nil
+	}
+
+	models := make([]modelEntry, 0, len(result.Map()))
+	webSearchModelIDs := gjsonStringSet(gjson.GetBytes(bodyBytes, "webSearchModelIds"))
+
+	for originalName, modelData := range result.Map() {
+		modelID := strings.TrimSpace(originalName)
+		if modelID == "" {
+			continue
+		}
+		// Skip internal/experimental models.
+		switch modelID {
+		case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+			continue
+		}
+
+		displayName := modelData.Get("displayName").String()
+		if displayName == "" {
+			displayName = modelID
+		}
+
+		entry := modelEntry{
+			ID:                modelID,
+			Object:            "model",
+			OwnedBy:           "antigravity",
+			Type:              "antigravity",
+			DisplayName:       displayName,
+			Name:              modelID,
+			Description:       displayName,
+			SupportsWebSearch: hasGJSONSetValue(webSearchModelIDs, modelID),
+		}
+
+		if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
+			entry.ContextLength = int(maxTok)
+		}
+		if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
+			entry.MaxCompletionTokens = int(maxOut)
+		}
+
+		models = append(models, entry)
+	}
+
+	return models
 }
 
 func metaStringValue(m map[string]interface{}, key string) string {
@@ -302,4 +313,26 @@ func metaStringValue(m map[string]interface{}, key string) string {
 	default:
 		return ""
 	}
+}
+
+func gjsonStringSet(result gjson.Result) map[string]struct{} {
+	if !result.IsArray() {
+		return nil
+	}
+	out := make(map[string]struct{}, len(result.Array()))
+	for _, item := range result.Array() {
+		value := strings.ToLower(strings.TrimSpace(item.String()))
+		if value != "" {
+			out[value] = struct{}{}
+		}
+	}
+	return out
+}
+
+func hasGJSONSetValue(set map[string]struct{}, value string) bool {
+	if len(set) == 0 {
+		return false
+	}
+	_, ok := set[strings.ToLower(strings.TrimSpace(value))]
+	return ok
 }

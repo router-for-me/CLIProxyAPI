@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -13,6 +14,123 @@ import (
 // ============================================================================
 // Signature Caching Tests
 // ============================================================================
+
+func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGrounding(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	responseJSON := testAntigravityGroundingResponse()
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, responseJSON, nil)
+
+	if got := gjson.GetBytes(output, "content.0.type").String(); got != "server_tool_use" {
+		t.Fatalf("first content block = %q, want server_tool_use: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.1.type").String(); got != "web_search_tool_result" {
+		t.Fatalf("second content block = %q, want web_search_tool_result: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "usage.server_tool_use.web_search_requests").Int(); got != 1 {
+		t.Fatalf("web_search_requests = %d, want 1: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.1.content.0.url").String(); got != "https://example.com/weather" {
+		t.Fatalf("search result url = %q: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.2.citations.0.url").String(); got != "https://example.com/weather" {
+		t.Fatalf("citation url = %q: %s", got, output)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRequiresNativeGoogleSearch(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3-flash-agent",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3-flash-agent","request":{"contents":[]}}`)
+	responseJSON := testAntigravityGroundingResponse()
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, translatedRequestJSON, responseJSON, nil)
+
+	if got := gjson.GetBytes(output, "content.0.type").String(); got == "server_tool_use" {
+		t.Fatalf("non-native translated request should not synthesize server_tool_use: %s", output)
+	}
+	if got := gjson.GetBytes(output, "usage.server_tool_use.web_search_requests").Int(); got != 0 {
+		t.Fatalf("web_search_requests = %d, want 0: %s", got, output)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_WebSearchGrounding(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+
+	var param any
+	output := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, testAntigravityGroundingResponse(), &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	for _, needle := range []string{
+		`"type":"server_tool_use"`,
+		`"type":"web_search_tool_result"`,
+		`"web_search_requests":1`,
+		`"type":"citations_delta"`,
+		`event: message_stop`,
+	} {
+		if !strings.Contains(outputText, needle) {
+			t.Fatalf("stream output missing %s:\n%s", needle, outputText)
+		}
+	}
+}
+
+func testAntigravityGroundingResponse() []byte {
+	resp := map[string]any{
+		"response": map[string]any{
+			"responseId":   "resp-web-search",
+			"modelVersion": "gemini-3.1-flash-lite",
+			"candidates": []any{
+				map[string]any{
+					"content": map[string]any{
+						"parts": []any{
+							map[string]any{"text": "Beijing weather is clear today."},
+						},
+					},
+					"groundingMetadata": map[string]any{
+						"webSearchQueries": []any{"Beijing weather June 10 2026"},
+						"groundingChunks": []any{
+							map[string]any{
+								"web": map[string]any{
+									"uri":   "https://example.com/weather",
+									"title": "Beijing Weather",
+								},
+							},
+						},
+						"groundingSupports": []any{
+							map[string]any{
+								"segment": map[string]any{
+									"startIndex": int64(0),
+									"endIndex":   int64(31),
+									"text":       "Beijing weather is clear today.",
+								},
+								"groundingChunkIndices": []any{0},
+							},
+						},
+					},
+					"finishReason": "STOP",
+				},
+			},
+			"usageMetadata": map[string]any{
+				"promptTokenCount":     10,
+				"candidatesTokenCount": 6,
+				"totalTokenCount":      16,
+			},
+		},
+	}
+	raw, _ := json.Marshal(resp)
+	return raw
+}
 
 func TestConvertAntigravityResponseToClaude_ParamsInitialized(t *testing.T) {
 	cache.ClearSignatureCache("")

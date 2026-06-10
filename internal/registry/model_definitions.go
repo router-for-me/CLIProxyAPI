@@ -3,6 +3,7 @@
 package registry
 
 import (
+	"sort"
 	"strings"
 )
 
@@ -85,6 +86,41 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// AntigravityWebSearchModels returns models listed by
+// fetchAvailableModels.webSearchModelIds.
+func AntigravityWebSearchModels() []string {
+	out := make([]string, 0)
+	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if model == nil || !model.SupportsWebSearch {
+			continue
+		}
+		modelID := normalizeAntigravityCapabilityModelID(model.ID)
+		if modelID != "" {
+			out = append(out, modelID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// IsAntigravityWebSearchModel reports whether an Antigravity model is listed by
+// fetchAvailableModels.webSearchModelIds and can run the native googleSearch tool.
+func IsAntigravityWebSearchModel(modelID string) bool {
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if modelID == "" {
+		return false
+	}
+	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if model == nil {
+			continue
+		}
+		if normalizeAntigravityCapabilityModelID(model.ID) == modelID {
+			return model.SupportsWebSearch
+		}
+	}
+	return false
+}
+
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
@@ -101,6 +137,14 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+}
+
+func normalizeAntigravityCapabilityModelID(modelID string) string {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if open := strings.LastIndex(modelID, "("); open >= 0 && strings.HasSuffix(modelID, ")") {
+		modelID = strings.TrimSpace(modelID[:open])
+	}
+	return modelID
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
