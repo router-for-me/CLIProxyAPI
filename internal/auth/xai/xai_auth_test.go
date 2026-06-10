@@ -7,8 +7,17 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 )
+
+func resetXAIRefreshGroupForTest() {
+	xaiRefreshGroup = singleflight.Group{}
+}
 
 func TestBuildAuthorizeURLIncludesXAIRequiredParameters(t *testing.T) {
 	authURL, err := BuildAuthorizeURL(AuthorizeURLParams{
@@ -101,5 +110,67 @@ func TestRefreshTokensPostsClientIDAndRefreshToken(t *testing.T) {
 	}
 	if gotForm.Get("refresh_token") != "old-refresh" {
 		t.Fatalf("refresh_token = %q, want old-refresh", gotForm.Get("refresh_token"))
+	}
+}
+
+func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
+	resetXAIRefreshGroupForTest()
+	t.Cleanup(resetXAIRefreshGroupForTest)
+
+	var calls int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		once.Do(func() { close(started) })
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "new-access",
+			"refresh_token": "new-refresh",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer server.Close()
+
+	authA := NewXAIAuth(nil)
+	authB := NewXAIAuth(nil)
+	results := make(chan *TokenData, 2)
+	errs := make(chan error, 2)
+	runRefresh := func(auth *XAIAuth, launched chan<- struct{}) {
+		if launched != nil {
+			close(launched)
+		}
+		tokenData, errRefresh := auth.RefreshTokens(context.Background(), "shared-refresh-token", server.URL)
+		results <- tokenData
+		errs <- errRefresh
+	}
+
+	go runRefresh(authA, nil)
+	<-started
+
+	secondLaunched := make(chan struct{})
+	go runRefresh(authB, secondLaunched)
+	<-secondLaunched
+	time.Sleep(20 * time.Millisecond)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected concurrent refresh to share a single upstream call, got %d", got)
+	}
+	close(release)
+
+	for i := 0; i < 2; i++ {
+		if errRefresh := <-errs; errRefresh != nil {
+			t.Fatalf("expected refresh to succeed, got %v", errRefresh)
+		}
+		tokenData := <-results
+		if tokenData == nil || tokenData.AccessToken != "new-access" || tokenData.RefreshToken != "new-refresh" {
+			t.Fatalf("unexpected token data: %#v", tokenData)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected both refresh callers to share a single upstream call, got %d", got)
 	}
 }
