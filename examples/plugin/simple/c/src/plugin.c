@@ -84,8 +84,8 @@ static const char* CLI_REGISTER_RESPONSE =
 static const char* CLI_EXECUTE_RESPONSE =
     "{\"ok\":true,\"result\":{\"Stdout\":\"cGx1Z2luIGV4YW1wbGUgYyBjb21tYW5kCg==\",\"ExitCode\":0}}";
 static const char* MANAGEMENT_REGISTER_RESPONSE =
-    "{\"ok\":true,\"result\":{\"Routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/example-c/status\","
-    "\"Menu\":\"Example C Plugin\",\"Description\":\"Shows example C plugin status.\"}]}}";
+    "{\"ok\":true,\"result\":{\"Resources\":[{\"Path\":\"/status\","
+    "\"Menu\":\"Example C Plugin\",\"Description\":\"CPA exposes this menu resource under /v0/resource/plugins/example-c/status.\"}]}}";
 static const char* UNKNOWN_METHOD_RESPONSE =
     "{\"ok\":false,\"error\":{\"code\":\"unknown_method\",\"message\":\"unknown method\"}}";
 static const char* INVALID_METHOD_RESPONSE =
@@ -421,7 +421,7 @@ static char* make_http_response(const uint8_t* request, size_t request_len) {
     char* url = extract_json_string(json, "URL");
     char* path = extract_json_string(json, "Path");
     char* method_escaped = json_escape(method == NULL ? "GET" : method);
-    char* target_escaped = json_escape(url != NULL ? url : (path == NULL ? "/plugins/example-c/status" : path));
+    char* target_escaped = json_escape(url != NULL ? url : (path == NULL ? "/v0/resource/plugins/example-c/status" : path));
     char* body_json = format_string(
         "{\"plugin\":\"example-c\",\"method\":\"%s\",\"target\":\"%s\"}",
         method_escaped == NULL ? "" : method_escaped,

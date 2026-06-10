@@ -8,18 +8,20 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `model/`: model capability only.
 - `auth/`: auth provider capability only.
 - `frontend-auth/`: frontend auth provider capability only.
+- `frontend-auth-exclusive/`: frontend auth provider that becomes the only request authentication provider when selected.
 - `executor/`: executor capability only.
 - `protocol-format/`: minimal executor focused on input/output format declarations.
 - `request-translator/`: request translation capability only.
 - `request-normalizer/`: request normalization capability only.
 - `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.4` requests to the priority service tier when enabled.
+- `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
 - `response-translator/`: response translation capability only.
 - `response-normalizer/`: response normalization capability only.
 - `thinking/`: thinking applier capability only.
 - `usage/`: usage observer capability only.
 - `cli/`: command-line capability only.
-- `management-api/`: Management API capability only.
-- `host-callback/`: minimal Management API route that demonstrates host callbacks.
+- `management-api/`: Management API and resource capability only.
+- `host-callback/`: minimal plugin resource that demonstrates host callbacks.
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
 
@@ -36,6 +38,23 @@ plugins:
       fast: false
 ```
 
+## Scheduler
+
+`scheduler` declares the scheduler capability. It can select a configured auth ID from the candidate list, delegate to the built-in `fill-first` or `round-robin` scheduler, or reject picks when `deny` is `true`.
+
+```yaml
+plugins:
+  configs:
+    scheduler:
+      enabled: true
+      priority: 1
+      auth_id: ""
+      delegate: ""
+      deny: false
+```
+
+`auth_id` selects a matching candidate when `delegate` is empty. `delegate` accepts `""`, `fill-first`, or `round-robin`; other non-empty values leave the pick unhandled. `deny` returns a scheduler error.
+
 ## Build All Examples
 
 ```bash
@@ -49,4 +68,6 @@ Artifacts are written to `examples/plugin/bin`.
 
 `protocol-format` uses a minimal executor because format declarations belong to executor capabilities.
 
-`host-callback` uses a minimal Management API route because host callbacks are invoked from plugin methods and are not standalone capabilities.
+`host-callback` uses a minimal plugin resource because host callbacks are invoked from plugin methods and are not standalone capabilities.
+
+Menu resources returned by `management.register` through the `resources` field are exposed by CPA under `/v0/resource/plugins/<pluginID>/...`. Authenticated plugin Management API routes remain under `/v0/management/...`.

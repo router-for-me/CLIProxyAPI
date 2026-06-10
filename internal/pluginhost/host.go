@@ -37,6 +37,7 @@ type Host struct {
 	commandLineFlags       map[string]commandLineFlagRecord
 	commandLineHits        map[string]struct{}
 	managementRoutes       map[string]managementRouteRecord
+	resourceRoutes         map[string]resourceRouteRecord
 	streams                *streamBridge
 	httpStreams            *hostHTTPStreamBridge
 	callbackContexts       *callbackContextRegistry
@@ -58,6 +59,7 @@ func New() *Host {
 		commandLineFlags:       make(map[string]commandLineFlagRecord),
 		commandLineHits:        make(map[string]struct{}),
 		managementRoutes:       make(map[string]managementRouteRecord),
+		resourceRoutes:         make(map[string]resourceRouteRecord),
 		streams:                newStreamBridge(),
 		httpStreams:            newHostHTTPStreamBridge(),
 		callbackContexts:       newCallbackContextRegistry(),
@@ -93,6 +95,8 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	h.runtimeConfig = cfg
 
 	if !rc.Enabled {
+		h.managementRoutes = make(map[string]managementRouteRecord)
+		h.resourceRoutes = make(map[string]resourceRouteRecord)
 		h.snapshot.Store(emptySnapshot())
 		h.mu.Unlock()
 		h.refreshThinkingProviders(nil)
@@ -102,6 +106,8 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	files, errSelect := selectPluginFiles(rc.Dir)
 	if errSelect != nil {
 		log.Warnf("pluginhost: failed to select plugin files: %v", errSelect)
+		h.managementRoutes = make(map[string]managementRouteRecord)
+		h.resourceRoutes = make(map[string]resourceRouteRecord)
 		h.snapshot.Store(emptySnapshot())
 		h.mu.Unlock()
 		h.refreshThinkingProviders(nil)
@@ -187,6 +193,7 @@ func (h *Host) ShutdownAll() {
 	h.commandLineFlags = make(map[string]commandLineFlagRecord)
 	h.commandLineHits = make(map[string]struct{})
 	h.managementRoutes = make(map[string]managementRouteRecord)
+	h.resourceRoutes = make(map[string]resourceRouteRecord)
 	h.snapshot.Store(emptySnapshot())
 	h.mu.Unlock()
 
@@ -264,12 +271,16 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.ModelProvider != nil ||
 		caps.AuthProvider != nil ||
 		caps.FrontendAuthProvider != nil ||
+		caps.Scheduler != nil ||
 		caps.Executor != nil ||
 		caps.RequestTranslator != nil ||
 		caps.RequestNormalizer != nil ||
+		caps.RequestInterceptor != nil ||
 		caps.ResponseTranslator != nil ||
 		caps.ResponseBeforeTranslator != nil ||
 		caps.ResponseAfterTranslator != nil ||
+		caps.ResponseInterceptor != nil ||
+		caps.StreamChunkInterceptor != nil ||
 		caps.ThinkingApplier != nil ||
 		caps.UsagePlugin != nil ||
 		caps.CommandLinePlugin != nil ||

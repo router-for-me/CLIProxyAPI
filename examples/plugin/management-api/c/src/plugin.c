@@ -84,11 +84,11 @@ static int plugin_call(const char* method, const uint8_t* request, size_t reques
 		return 0;
 	}
 	if (strcmp(method, "management.register") == 0) {
-		write_response(response, "{\"ok\":true,\"result\":{\"routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/example-management-api-c/status\",\"Menu\":\"Management API\",\"Description\":\"Management API capability example.\"}]}}");
+		write_response(response, "{\"ok\":true,\"result\":{\"resources\":[{\"Path\":\"/status\",\"Menu\":\"Management API\",\"Description\":\"CPA exposes this menu resource under /v0/resource/plugins/example-management-api-c/status.\"}]}}");
 		return 0;
 	}
 	if (strcmp(method, "management.handle") == 0) {
-		write_response(response, "{\"ok\":true,\"result\":{\"StatusCode\":200,\"Headers\":{\"content-type\":[\"application/json\"]},\"Body\":\"eyJwbHVnaW4iOiJleGFtcGxlLW1hbmFnZW1lbnQtYXBpLWMifQ==\"}}");
+		write_response(response, "{\"ok\":true,\"result\":{\"StatusCode\":200,\"Headers\":{\"content-type\":[\"text/html; charset=utf-8\"]},\"Body\":\"PCFkb2N0eXBlIGh0bWw+PHRpdGxlPk1hbmFnZW1lbnQgQVBJPC90aXRsZT48bWFpbj5NYW5hZ2VtZW50IEFQSSByZXNvdXJjZTwvbWFpbj4=\"}}");
 		return 0;
 	}
 	write_response(response, "{\"ok\":false,\"error\":{\"code\":\"unknown_method\",\"message\":\"unknown method\"}}");

@@ -30,6 +30,15 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodPluginRegister != "plugin.register" {
 		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)
 	}
+	if MethodRequestInterceptBefore != "request.intercept_before" {
+		t.Fatalf("MethodRequestInterceptBefore = %q", MethodRequestInterceptBefore)
+	}
+	if MethodResponseInterceptAfter != "response.intercept_after" {
+		t.Fatalf("MethodResponseInterceptAfter = %q", MethodResponseInterceptAfter)
+	}
+	if MethodResponseInterceptStreamChunk != "response.intercept_stream_chunk" {
+		t.Fatalf("MethodResponseInterceptStreamChunk = %q", MethodResponseInterceptStreamChunk)
+	}
 	if MethodHostHTTPDo != "host.http.do" {
 		t.Fatalf("MethodHostHTTPDo = %q", MethodHostHTTPDo)
 	}
@@ -38,5 +47,11 @@ func TestMethodNamesAreStable(t *testing.T) {
 	}
 	if MethodExecutorExecuteStream != "executor.execute_stream" {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
+	}
+}
+
+func TestSchedulerPickMethodName(t *testing.T) {
+	if MethodSchedulerPick != "scheduler.pick" {
+		t.Fatalf("MethodSchedulerPick = %q", MethodSchedulerPick)
 	}
 }

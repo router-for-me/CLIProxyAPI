@@ -25,18 +25,24 @@ const (
 	MethodFrontendAuthIdentifier   = "frontend_auth.identifier"
 	MethodFrontendAuthAuthenticate = "frontend_auth.authenticate"
 
+	// MethodSchedulerPick asks a scheduler plugin to select an auth candidate.
+	MethodSchedulerPick = "scheduler.pick"
+
 	MethodExecutorIdentifier    = "executor.identifier"
 	MethodExecutorExecute       = "executor.execute"
 	MethodExecutorExecuteStream = "executor.execute_stream"
 	MethodExecutorCountTokens   = "executor.count_tokens"
 	MethodExecutorHTTPRequest   = "executor.http_request"
 
-	MethodRequestTranslate = "request.translate"
-	MethodRequestNormalize = "request.normalize"
+	MethodRequestTranslate       = "request.translate"
+	MethodRequestNormalize       = "request.normalize"
+	MethodRequestInterceptBefore = "request.intercept_before"
 
-	MethodResponseTranslate       = "response.translate"
-	MethodResponseNormalizeBefore = "response.normalize_before"
-	MethodResponseNormalizeAfter  = "response.normalize_after"
+	MethodResponseTranslate            = "response.translate"
+	MethodResponseNormalizeBefore      = "response.normalize_before"
+	MethodResponseNormalizeAfter       = "response.normalize_after"
+	MethodResponseInterceptAfter       = "response.intercept_after"
+	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
 
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"

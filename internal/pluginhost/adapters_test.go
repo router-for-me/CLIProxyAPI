@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -1237,6 +1238,638 @@ func TestTranslateResponseStopsAtFirstSuccessfulCandidate(t *testing.T) {
 	}
 }
 
+func TestInterceptRequestChainsByPriorityAndHeaders(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "high",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					if req.SourceFormat != "openai" || req.Model != "normalized" || req.RequestedModel != "requested" {
+						t.Fatalf("unexpected request context: %#v", req)
+					}
+					return pluginapi.RequestInterceptResponse{
+						Headers: http.Header{"X-Plugin": []string{"high"}},
+						Body:    append(req.Body, []byte("|high")...),
+					}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "low",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					return pluginapi.RequestInterceptResponse{
+						Headers:      http.Header{"X-Plugin": []string{"low"}, "X-Low": []string{"1"}},
+						Body:         append(req.Body, []byte("|low")...),
+						ClearHeaders: []string{"X-Remove"},
+					}, nil
+				}),
+			}},
+		},
+	)
+	headers := http.Header{"X-Remove": []string{"yes"}}
+
+	got := host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "normalized",
+		RequestedModel: "requested",
+		Stream:         false,
+		Headers:        headers,
+		Body:           []byte("start"),
+	})
+
+	if string(got.Body) != "start|high|low" {
+		t.Fatalf("body = %q, want %q", got.Body, "start|high|low")
+	}
+	if got.Headers.Get("X-Plugin") != "low" || got.Headers.Get("X-Low") != "1" || got.Headers.Get("X-Remove") != "" {
+		t.Fatalf("headers = %#v", got.Headers)
+	}
+	if headers.Get("X-Plugin") != "" {
+		t.Fatalf("input headers were mutated: %#v", headers)
+	}
+}
+
+func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
+	var seenHistory [][]byte
+	var sawSecondResponse bool
+	var sawSecondStream bool
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "high",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				ResponseInterceptor: responseInterceptorFunc{
+					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						return pluginapi.ResponseInterceptResponse{
+							Headers: http.Header{"X-Response": []string{"high"}},
+							Body:    append(req.Body, []byte("|high")...),
+						}, nil
+					},
+				},
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						seenHistory = req.HistoryChunks
+						return pluginapi.StreamChunkInterceptResponse{
+							Headers: http.Header{"X-Stream": []string{"high"}},
+							Body:    append(req.Body, []byte("|high")...),
+						}, nil
+					},
+				},
+			}},
+		},
+		capabilityRecord{
+			id:       "low",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				ResponseInterceptor: responseInterceptorFunc{
+					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						if string(req.Body) != "body|high" {
+							t.Fatalf("second response interceptor body = %q, want body|high", req.Body)
+						}
+						if req.ResponseHeaders.Get("X-Response") != "high" {
+							t.Fatalf("second response interceptor headers = %#v, want high header", req.ResponseHeaders)
+						}
+						sawSecondResponse = true
+						return pluginapi.ResponseInterceptResponse{
+							Headers:      http.Header{"X-Response": []string{"low"}, "X-Low": []string{"1"}},
+							ClearHeaders: []string{"X-Remove"},
+							Body:         append(req.Body, []byte("|low")...),
+						}, nil
+					},
+				},
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						if string(req.Body) != "chunk|high" {
+							t.Fatalf("second stream interceptor body = %q, want chunk|high", req.Body)
+						}
+						if req.ResponseHeaders.Get("X-Stream") != "high" {
+							t.Fatalf("second stream interceptor headers = %#v, want high header", req.ResponseHeaders)
+						}
+						if len(req.HistoryChunks) != 1 || string(req.HistoryChunks[0]) != "first" {
+							t.Fatalf("second stream interceptor history = %#v", req.HistoryChunks)
+						}
+						seenHistory = req.HistoryChunks
+						sawSecondStream = true
+						return pluginapi.StreamChunkInterceptResponse{
+							Headers:      http.Header{"X-Stream": []string{"low"}, "X-Low": []string{"1"}},
+							ClearHeaders: []string{"X-Remove"},
+							Body:         append(req.Body, []byte("|low")...),
+						}, nil
+					},
+				},
+			}},
+		},
+	)
+
+	nonStream := host.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{
+		SourceFormat:    "openai",
+		Model:           "normalized",
+		RequestedModel:  "requested",
+		ResponseHeaders: http.Header{"Content-Type": []string{"application/json"}, "X-Remove": []string{"yes"}},
+		Body:            []byte("body"),
+		StatusCode:      http.StatusOK,
+	})
+	if string(nonStream.Body) != "body|high|low" || nonStream.Headers.Get("X-Response") != "low" || nonStream.Headers.Get("X-Low") != "1" {
+		t.Fatalf("non-stream result = %#v", nonStream)
+	}
+	if nonStream.Headers.Get("X-Remove") != "" {
+		t.Fatalf("non-stream headers kept cleared value: %#v", nonStream.Headers)
+	}
+	if !sawSecondResponse {
+		t.Fatal("second response interceptor was not called")
+	}
+
+	stream := host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		SourceFormat:    "openai",
+		Model:           "normalized",
+		RequestedModel:  "requested",
+		ResponseHeaders: http.Header{"Content-Type": []string{"text/event-stream"}, "X-Remove": []string{"yes"}},
+		Body:            []byte("chunk"),
+		HistoryChunks:   [][]byte{[]byte("first")},
+		ChunkIndex:      1,
+	})
+	if string(stream.Body) != "chunk|high|low" || stream.Headers.Get("X-Stream") != "low" || stream.Headers.Get("X-Low") != "1" {
+		t.Fatalf("stream result = %#v", stream)
+	}
+	if stream.Headers.Get("X-Remove") != "" {
+		t.Fatalf("stream headers kept cleared value: %#v", stream.Headers)
+	}
+	if len(seenHistory) != 1 || string(seenHistory[0]) != "first" {
+		t.Fatalf("history = %#v", seenHistory)
+	}
+	if !sawSecondStream {
+		t.Fatal("second stream interceptor was not called")
+	}
+}
+
+func TestInterceptorsSkipErrorsAndFusePanics(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "error",
+			priority: 30,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					return pluginapi.RequestInterceptResponse{}, fmt.Errorf("request failed")
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "panic",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					panic("request panic")
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "success",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|success")...)}, nil
+				}),
+			}},
+		},
+	)
+
+	got := host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("body")})
+	if string(got.Body) != "body|success" {
+		t.Fatalf("body = %q, want body|success", got.Body)
+	}
+	if !host.isPluginFused("panic") {
+		t.Fatal("panic plugin was not fused")
+	}
+}
+
+func TestStreamInterceptorsDropChunkStopsChain(t *testing.T) {
+	var lowCalled bool
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "high",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						return pluginapi.StreamChunkInterceptResponse{
+							Headers:      http.Header{"X-Stream": []string{"high"}},
+							Body:         append(req.Body, []byte("|high")...),
+							DropChunk:    true,
+							ClearHeaders: nil,
+						}, nil
+					},
+				},
+			}},
+		},
+		capabilityRecord{
+			id:       "low",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						lowCalled = true
+						return pluginapi.StreamChunkInterceptResponse{
+							Headers: http.Header{"X-Stream": []string{"low"}},
+							Body:    append(req.Body, []byte("|low")...),
+						}, nil
+					},
+				},
+			}},
+		},
+	)
+
+	got := host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "normalized",
+		RequestedModel: "requested",
+		Body:           []byte("chunk"),
+	})
+	if lowCalled {
+		t.Fatal("low-priority stream interceptor should not be called after DropChunk")
+	}
+	if !got.DropChunk {
+		t.Fatal("DropChunk = false, want true")
+	}
+	if string(got.Body) != "chunk|high" {
+		t.Fatalf("body = %q, want chunk|high", got.Body)
+	}
+	if got.Headers.Get("X-Stream") != "high" {
+		t.Fatalf("headers = %#v, want high header", got.Headers)
+	}
+}
+
+func TestHasStreamInterceptorsReflectsActiveStreamInterceptors(t *testing.T) {
+	requestOnly := newHostWithRecords(capabilityRecord{
+		id: "request",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{Body: req.Body}, nil
+			}),
+		}},
+	})
+	if requestOnly.HasStreamInterceptors() {
+		t.Fatal("HasStreamInterceptors() = true, want false for request-only plugins")
+	}
+
+	responseOnly := newHostWithRecords(capabilityRecord{
+		id: "response",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ResponseInterceptor: responseInterceptorFunc{
+				interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+					return pluginapi.ResponseInterceptResponse{Body: req.Body}, nil
+				},
+			},
+		}},
+	})
+	if responseOnly.HasStreamInterceptors() {
+		t.Fatal("HasStreamInterceptors() = true, want false for response-only plugins")
+	}
+
+	streamHost := newHostWithRecords(capabilityRecord{
+		id: "stream",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			StreamChunkInterceptor: responseInterceptorFunc{
+				interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			},
+		}},
+	})
+	if !streamHost.HasStreamInterceptors() {
+		t.Fatal("HasStreamInterceptors() = false, want true for stream interceptors")
+	}
+	streamHost.mu.Lock()
+	streamHost.fused["stream"] = "test fused"
+	streamHost.mu.Unlock()
+	if streamHost.HasStreamInterceptors() {
+		t.Fatal("HasStreamInterceptors() = true, want false after interceptor plugin is fused")
+	}
+}
+
+func TestInterceptorsDoNotMutateInputs(t *testing.T) {
+	t.Run("request", func(t *testing.T) {
+		headers := http.Header{"X-Request": []string{"input"}}
+		metadata := map[string]any{
+			"nested":    map[string]any{"value": "original"},
+			"items":     []any{map[string]any{"value": "original"}},
+			"strings":   []string{"original"},
+			"bytes":     []byte("original"),
+			"labels":    map[string]string{"name": "original"},
+			"values":    url.Values{"name": []string{"original"}},
+			"mapSlice":  map[string][]string{"name": []string{"original"}},
+			"sliceMap":  []map[string]string{{"name": "original"}},
+			"aliasMap":  stringSliceAlias{"original"},
+			"aliasList": mapSliceAlias{{"name": "original"}},
+			"key":       "value",
+		}
+		body := []byte("request-body")
+		host := newHostWithRecords(capabilityRecord{
+			id: "request",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					req.Headers.Set("X-Request", "mutated")
+					req.Body[0] = 'R'
+					req.Metadata["key"] = "mutated"
+					req.Metadata["nested"].(map[string]any)["value"] = "mutated"
+					req.Metadata["items"].([]any)[0].(map[string]any)["value"] = "mutated"
+					req.Metadata["strings"].([]string)[0] = "mutated"
+					req.Metadata["bytes"].([]byte)[0] = 'M'
+					req.Metadata["labels"].(map[string]string)["name"] = "mutated"
+					req.Metadata["values"].(url.Values)["name"][0] = "mutated"
+					req.Metadata["mapSlice"].(map[string][]string)["name"][0] = "mutated"
+					req.Metadata["sliceMap"].([]map[string]string)[0]["name"] = "mutated"
+					req.Metadata["aliasMap"].(stringSliceAlias)[0] = "mutated"
+					req.Metadata["aliasList"].(mapSliceAlias)[0]["name"] = "mutated"
+					return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|ok")...)}, nil
+				}),
+			}},
+		})
+
+		got := host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{
+			Headers:  headers,
+			Body:     body,
+			Metadata: metadata,
+		})
+		if headers.Get("X-Request") != "input" {
+			t.Fatalf("request headers mutated: %#v", headers)
+		}
+		if string(body) != "request-body" {
+			t.Fatalf("request body mutated: %q", body)
+		}
+		if metadata["key"] != "value" {
+			t.Fatalf("request metadata mutated: %#v", metadata)
+		}
+		if metadata["nested"].(map[string]any)["value"] != "original" || metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
+			t.Fatalf("request nested metadata mutated: %#v", metadata)
+		}
+		if metadata["strings"].([]string)[0] != "original" || string(metadata["bytes"].([]byte)) != "original" || metadata["labels"].(map[string]string)["name"] != "original" {
+			t.Fatalf("request nested metadata aliases mutated: %#v", metadata)
+		}
+		if metadata["values"].(url.Values)["name"][0] != "original" || metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
+			t.Fatalf("request map/slice metadata mutated: %#v", metadata)
+		}
+		if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" || metadata["aliasMap"].(stringSliceAlias)[0] != "original" || metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
+			t.Fatalf("request alias metadata mutated: %#v", metadata)
+		}
+		if !strings.HasSuffix(string(got.Body), "|ok") {
+			t.Fatalf("request result body = %q", got.Body)
+		}
+	})
+
+	t.Run("response", func(t *testing.T) {
+		requestHeaders := http.Header{"X-Request": []string{"input"}}
+		responseHeaders := http.Header{"X-Response": []string{"input"}}
+		originalRequest := []byte("original")
+		requestBody := []byte("request")
+		body := []byte("body")
+		metadata := map[string]any{
+			"nested":    map[string]any{"value": "original"},
+			"items":     []any{map[string]any{"value": "original"}},
+			"strings":   []string{"original"},
+			"bytes":     []byte("original"),
+			"labels":    map[string]string{"name": "original"},
+			"values":    url.Values{"name": []string{"original"}},
+			"mapSlice":  map[string][]string{"name": []string{"original"}},
+			"sliceMap":  []map[string]string{{"name": "original"}},
+			"aliasMap":  stringSliceAlias{"original"},
+			"aliasList": mapSliceAlias{{"name": "original"}},
+			"key":       "value",
+		}
+		host := newHostWithRecords(capabilityRecord{
+			id: "response",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				ResponseInterceptor: responseInterceptorFunc{
+					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						req.RequestHeaders.Set("X-Request", "mutated")
+						req.ResponseHeaders.Set("X-Response", "mutated")
+						req.OriginalRequest[0] = 'O'
+						req.RequestBody[0] = 'R'
+						req.Body[0] = 'B'
+						req.Metadata["key"] = "mutated"
+						req.Metadata["nested"].(map[string]any)["value"] = "mutated"
+						req.Metadata["items"].([]any)[0].(map[string]any)["value"] = "mutated"
+						req.Metadata["strings"].([]string)[0] = "mutated"
+						req.Metadata["bytes"].([]byte)[0] = 'M'
+						req.Metadata["labels"].(map[string]string)["name"] = "mutated"
+						req.Metadata["values"].(url.Values)["name"][0] = "mutated"
+						req.Metadata["mapSlice"].(map[string][]string)["name"][0] = "mutated"
+						req.Metadata["sliceMap"].([]map[string]string)[0]["name"] = "mutated"
+						req.Metadata["aliasMap"].(stringSliceAlias)[0] = "mutated"
+						req.Metadata["aliasList"].(mapSliceAlias)[0]["name"] = "mutated"
+						return pluginapi.ResponseInterceptResponse{Body: append(req.Body, []byte("|ok")...)}, nil
+					},
+				},
+			}},
+		})
+
+		got := host.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{
+			RequestHeaders:  requestHeaders,
+			ResponseHeaders: responseHeaders,
+			OriginalRequest: originalRequest,
+			RequestBody:     requestBody,
+			Body:            body,
+			Metadata:        metadata,
+		})
+		if requestHeaders.Get("X-Request") != "input" {
+			t.Fatalf("request headers mutated: %#v", requestHeaders)
+		}
+		if responseHeaders.Get("X-Response") != "input" {
+			t.Fatalf("response headers mutated: %#v", responseHeaders)
+		}
+		if string(originalRequest) != "original" {
+			t.Fatalf("original request mutated: %q", originalRequest)
+		}
+		if string(requestBody) != "request" {
+			t.Fatalf("request body mutated: %q", requestBody)
+		}
+		if string(body) != "body" {
+			t.Fatalf("response body mutated: %q", body)
+		}
+		if metadata["key"] != "value" {
+			t.Fatalf("response metadata mutated: %#v", metadata)
+		}
+		if metadata["nested"].(map[string]any)["value"] != "original" || metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
+			t.Fatalf("response nested metadata mutated: %#v", metadata)
+		}
+		if metadata["strings"].([]string)[0] != "original" || string(metadata["bytes"].([]byte)) != "original" || metadata["labels"].(map[string]string)["name"] != "original" {
+			t.Fatalf("response nested metadata aliases mutated: %#v", metadata)
+		}
+		if metadata["values"].(url.Values)["name"][0] != "original" || metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
+			t.Fatalf("response map/slice metadata mutated: %#v", metadata)
+		}
+		if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" || metadata["aliasMap"].(stringSliceAlias)[0] != "original" || metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
+			t.Fatalf("response alias metadata mutated: %#v", metadata)
+		}
+		if !strings.HasSuffix(string(got.Body), "|ok") {
+			t.Fatalf("response result body = %q", got.Body)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		requestHeaders := http.Header{"X-Request": []string{"input"}}
+		responseHeaders := http.Header{"X-Response": []string{"input"}}
+		originalRequest := []byte("original")
+		requestBody := []byte("request")
+		body := []byte("chunk")
+		history := [][]byte{[]byte("first")}
+		metadata := map[string]any{
+			"nested":    map[string]any{"value": "original"},
+			"items":     []any{map[string]any{"value": "original"}},
+			"strings":   []string{"original"},
+			"bytes":     []byte("original"),
+			"labels":    map[string]string{"name": "original"},
+			"values":    url.Values{"name": []string{"original"}},
+			"mapSlice":  map[string][]string{"name": []string{"original"}},
+			"sliceMap":  []map[string]string{{"name": "original"}},
+			"aliasMap":  stringSliceAlias{"original"},
+			"aliasList": mapSliceAlias{{"name": "original"}},
+			"key":       "value",
+		}
+		host := newHostWithRecords(capabilityRecord{
+			id: "stream",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						req.RequestHeaders.Set("X-Request", "mutated")
+						req.ResponseHeaders.Set("X-Response", "mutated")
+						req.OriginalRequest[0] = 'O'
+						req.RequestBody[0] = 'R'
+						req.Body[0] = 'C'
+						req.HistoryChunks[0][0] = 'F'
+						req.Metadata["key"] = "mutated"
+						req.Metadata["nested"].(map[string]any)["value"] = "mutated"
+						req.Metadata["items"].([]any)[0].(map[string]any)["value"] = "mutated"
+						req.Metadata["strings"].([]string)[0] = "mutated"
+						req.Metadata["bytes"].([]byte)[0] = 'M'
+						req.Metadata["labels"].(map[string]string)["name"] = "mutated"
+						req.Metadata["values"].(url.Values)["name"][0] = "mutated"
+						req.Metadata["mapSlice"].(map[string][]string)["name"][0] = "mutated"
+						req.Metadata["sliceMap"].([]map[string]string)[0]["name"] = "mutated"
+						req.Metadata["aliasMap"].(stringSliceAlias)[0] = "mutated"
+						req.Metadata["aliasList"].(mapSliceAlias)[0]["name"] = "mutated"
+						return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|ok")...)}, nil
+					},
+				},
+			}},
+		})
+
+		got := host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+			RequestHeaders:  requestHeaders,
+			ResponseHeaders: responseHeaders,
+			OriginalRequest: originalRequest,
+			RequestBody:     requestBody,
+			Body:            body,
+			HistoryChunks:   history,
+			Metadata:        metadata,
+		})
+		if requestHeaders.Get("X-Request") != "input" {
+			t.Fatalf("request headers mutated: %#v", requestHeaders)
+		}
+		if responseHeaders.Get("X-Response") != "input" {
+			t.Fatalf("response headers mutated: %#v", responseHeaders)
+		}
+		if string(originalRequest) != "original" {
+			t.Fatalf("original request mutated: %q", originalRequest)
+		}
+		if string(requestBody) != "request" {
+			t.Fatalf("request body mutated: %q", requestBody)
+		}
+		if string(body) != "chunk" {
+			t.Fatalf("stream body mutated: %q", body)
+		}
+		if string(history[0]) != "first" {
+			t.Fatalf("history mutated: %#v", history)
+		}
+		if metadata["key"] != "value" {
+			t.Fatalf("stream metadata mutated: %#v", metadata)
+		}
+		if metadata["nested"].(map[string]any)["value"] != "original" || metadata["items"].([]any)[0].(map[string]any)["value"] != "original" {
+			t.Fatalf("stream nested metadata mutated: %#v", metadata)
+		}
+		if metadata["strings"].([]string)[0] != "original" || string(metadata["bytes"].([]byte)) != "original" || metadata["labels"].(map[string]string)["name"] != "original" {
+			t.Fatalf("stream nested metadata aliases mutated: %#v", metadata)
+		}
+		if metadata["values"].(url.Values)["name"][0] != "original" || metadata["mapSlice"].(map[string][]string)["name"][0] != "original" {
+			t.Fatalf("stream map/slice metadata mutated: %#v", metadata)
+		}
+		if metadata["sliceMap"].([]map[string]string)[0]["name"] != "original" || metadata["aliasMap"].(stringSliceAlias)[0] != "original" || metadata["aliasList"].(mapSliceAlias)[0]["name"] != "original" {
+			t.Fatalf("stream alias metadata mutated: %#v", metadata)
+		}
+		if !strings.HasSuffix(string(got.Body), "|ok") {
+			t.Fatalf("stream result body = %q", got.Body)
+		}
+	})
+
+	t.Run("pointers-and-cycle", func(t *testing.T) {
+		type pointerMetadata struct {
+			Value string
+			Items []string
+		}
+
+		structValue := &pointerMetadata{Value: "original", Items: []string{"original"}}
+		mapValue := &map[string][]string{"names": []string{"original"}}
+		sliceValue := &[]string{"original"}
+		aliasMapValue := &mapSliceAlias{{"name": "original"}}
+		var ifaceValue any = &pointerMetadata{Value: "original", Items: []string{"original"}}
+		cycle := map[string]any{}
+		cycle["self"] = cycle
+
+		metadata := map[string]any{
+			"struct_ptr": structValue,
+			"map_ptr":    mapValue,
+			"slice_ptr":  sliceValue,
+			"alias_ptr":  aliasMapValue,
+			"iface_ptr":  ifaceValue,
+			"cycle":      cycle,
+		}
+
+		host := newHostWithRecords(capabilityRecord{
+			id: "pointer",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					req.Metadata["struct_ptr"].(*pointerMetadata).Value = "mutated"
+					req.Metadata["struct_ptr"].(*pointerMetadata).Items[0] = "mutated"
+					(*req.Metadata["map_ptr"].(*map[string][]string))["names"][0] = "mutated"
+					(*req.Metadata["slice_ptr"].(*[]string))[0] = "mutated"
+					(*req.Metadata["alias_ptr"].(*mapSliceAlias))[0]["name"] = "mutated"
+					req.Metadata["iface_ptr"].(*pointerMetadata).Value = "mutated"
+					if clonedCycle, ok := req.Metadata["cycle"].(map[string]any); ok {
+						clonedCycle["marker"] = "mutated"
+						clonedCycle["self"] = "mutated"
+					}
+					return pluginapi.RequestInterceptResponse{Body: []byte("ok")}, nil
+				}),
+			}},
+		})
+
+		_ = host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{Metadata: metadata})
+
+		if structValue.Value != "original" || structValue.Items[0] != "original" {
+			t.Fatalf("struct pointer metadata mutated: %#v", structValue)
+		}
+		if (*mapValue)["names"][0] != "original" {
+			t.Fatalf("map pointer metadata mutated: %#v", mapValue)
+		}
+		if (*sliceValue)[0] != "original" {
+			t.Fatalf("slice pointer metadata mutated: %#v", sliceValue)
+		}
+		if (*aliasMapValue)[0]["name"] != "original" {
+			t.Fatalf("alias pointer metadata mutated: %#v", aliasMapValue)
+		}
+		if ifaceStruct, ok := ifaceValue.(*pointerMetadata); !ok || ifaceStruct.Value != "original" || ifaceStruct.Items[0] != "original" {
+			t.Fatalf("interface pointer metadata mutated: %#v", ifaceValue)
+		}
+		if _, ok := cycle["self"].(map[string]any); !ok {
+			t.Fatalf("cycle metadata structure changed unexpectedly: %#v", cycle)
+		}
+		if _, ok := cycle["marker"]; ok {
+			t.Fatalf("cycle metadata mutated: %#v", cycle)
+		}
+	})
+}
+
 func TestResponseHooksKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	normalizerHost := newHostWithRecords(
 		capabilityRecord{
@@ -1415,6 +2048,177 @@ func TestRegisterFrontendAuthProvidersIdentifierPanicFusesPlugin(t *testing.T) {
 
 	if !host.isPluginFused("auth-identifier-panic") {
 		t.Fatal("auth-identifier-panic was not fused")
+	}
+}
+
+func TestRegisterFrontendAuthProvidersSelectsHighestPriorityExclusiveProvider(t *testing.T) {
+	lowKey := "plugin:exclusive-low:custom-auth"
+	highKey := "plugin:exclusive-high:custom-auth"
+	normalKey := "plugin:normal-auth:custom-auth"
+	for _, key := range []string{lowKey, highKey, normalKey} {
+		sdkaccess.UnregisterProvider(key)
+		defer sdkaccess.UnregisterProvider(key)
+	}
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "exclusive-low",
+			priority: 1,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "exclusive-high",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "normal-auth",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != highKey {
+		t.Fatalf("exclusive provider = %q, want %q", providers[0].Identifier(), highKey)
+	}
+}
+
+func TestRegisterFrontendAuthProvidersSelectsExclusiveProviderByPluginIDWhenPriorityTies(t *testing.T) {
+	alphaKey := "plugin:alpha-auth:custom-auth"
+	betaKey := "plugin:beta-auth:custom-auth"
+	for _, key := range []string{alphaKey, betaKey} {
+		sdkaccess.UnregisterProvider(key)
+		defer sdkaccess.UnregisterProvider(key)
+	}
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "beta-auth",
+			priority: 5,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id:       "alpha-auth",
+			priority: 5,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != alphaKey {
+		t.Fatalf("exclusive provider = %q, want %q", providers[0].Identifier(), alphaKey)
+	}
+}
+
+func TestRegisterFrontendAuthProvidersClearsExclusiveProviderWhenExclusivePluginRemoved(t *testing.T) {
+	exclusiveKey := "plugin:exclusive-auth:custom-auth"
+	normalKey := "plugin:normal-auth:custom-auth"
+	for _, key := range []string{exclusiveKey, normalKey} {
+		sdkaccess.UnregisterProvider(key)
+		defer sdkaccess.UnregisterProvider(key)
+	}
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "exclusive-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider:          frontendAuthProviderFunc{identifier: "custom-auth"},
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id: "normal-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+	if got := sdkaccess.RegisteredProviders(); len(got) != 1 || got[0].Identifier() != exclusiveKey {
+		t.Fatalf("exclusive RegisteredProviders() = %#v, want only %q", got, exclusiveKey)
+	}
+
+	host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{
+		{
+			id: "normal-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	}})
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != normalKey {
+		t.Fatalf("restored provider = %q, want %q", providers[0].Identifier(), normalKey)
+	}
+}
+
+func TestRegisterFrontendAuthProvidersIgnoresExclusiveWithoutFrontendAuthProvider(t *testing.T) {
+	normalKey := "plugin:normal-auth:custom-auth"
+	sdkaccess.UnregisterProvider(normalKey)
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.UnregisterProvider(normalKey)
+	defer sdkaccess.ClearExclusiveProvider()
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "exclusive-without-provider",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProviderExclusive: true,
+			}},
+		},
+		capabilityRecord{
+			id: "normal-auth",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+			}},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != normalKey {
+		t.Fatalf("provider = %q, want %q", providers[0].Identifier(), normalKey)
 	}
 }
 
@@ -1677,10 +2481,12 @@ func TestExecutorAdapterMethods(t *testing.T) {
 		},
 	}
 	adapter := &executorAdapter{
-		host:     host,
-		pluginID: "executor-plugin",
-		provider: "plugin-provider",
-		executor: exec,
+		host:          host,
+		pluginID:      "executor-plugin",
+		provider:      "plugin-provider",
+		executor:      exec,
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
 	}
 	auth := &coreauth.Auth{
 		ID:       "auth-1",
@@ -1700,7 +2506,7 @@ func TestExecutorAdapterMethods(t *testing.T) {
 		Alt:             "alt",
 		Headers:         http.Header{"X-Request": []string{"yes"}},
 		OriginalRequest: []byte("original"),
-		SourceFormat:    sdktranslator.FormatClaude,
+		SourceFormat:    sdktranslator.FormatOpenAI,
 		Metadata: map[string]any{
 			"opt": "metadata",
 		},
@@ -1849,9 +2655,11 @@ func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 	host := New()
 	calls := 0
 	adapter := &executorAdapter{
-		host:     host,
-		pluginID: "executor-panic",
-		provider: "plugin-provider",
+		host:          host,
+		pluginID:      "executor-panic",
+		provider:      "plugin-provider",
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
 		executor: &fakeExecutor{
 			execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
 				calls++
@@ -1925,6 +2733,10 @@ func newHostWithRecords(records ...capabilityRecord) *Host {
 	host.snapshot.Store(&Snapshot{enabled: true, records: records})
 	return host
 }
+
+type stringSliceAlias []string
+
+type mapSliceAlias []map[string]string
 
 type requestNormalizerFunc func(context.Context, pluginapi.RequestTransformRequest) (pluginapi.PayloadResponse, error)
 
@@ -2216,7 +3028,7 @@ func assertExecutorRequest(t *testing.T, req pluginapi.ExecutorRequest) {
 	t.Helper()
 	if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" || req.Model != "model-1" || req.Format != sdktranslator.FormatOpenAI.String() ||
 		!req.Stream || req.Alt != "alt" || req.Headers.Get("X-Request") != "yes" || string(req.OriginalRequest) != "original" ||
-		req.SourceFormat != sdktranslator.FormatClaude.String() || string(req.Payload) != "payload" ||
+		req.SourceFormat != sdktranslator.FormatOpenAI.String() || string(req.Payload) != "payload" ||
 		req.Metadata["req"] != "metadata" || req.Metadata["opt"] != "metadata" {
 		t.Fatalf("executor request = %#v, want mapped request", req)
 	}

@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
@@ -211,5 +214,46 @@ func TestHostStreamCallbacksEmitAndClose(t *testing.T) {
 	}
 	if _, ok = <-chunks; ok {
 		t.Fatalf("stream remains open after close")
+	}
+}
+
+func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {
+	host := New()
+	ctx := logging.WithRequestID(context.Background(), "request-123")
+	callbackID, closeCallback := host.openCallbackContext(ctx)
+	defer closeCallback()
+
+	var out bytes.Buffer
+	logger := log.StandardLogger()
+	originalOut := logger.Out
+	originalFormatter := logger.Formatter
+	originalLevel := logger.Level
+	log.SetOutput(&out)
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors:    true,
+		DisableTimestamp: true,
+	})
+	log.SetLevel(log.InfoLevel)
+	defer func() {
+		log.SetOutput(originalOut)
+		log.SetFormatter(originalFormatter)
+		log.SetLevel(originalLevel)
+	}()
+
+	rawReq, errMarshal := json.Marshal(rpcHostLogRequest{
+		HostCallbackID: callbackID,
+		Level:          "info",
+		Message:        "plugin callback message",
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal log request: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostLog, rawReq); errCall != nil {
+		t.Fatalf("log callback error = %v", errCall)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "plugin callback message") || !strings.Contains(got, "request_id=request-123") {
+		t.Fatalf("log output = %q, want message and request_id field", got)
 	}
 }
