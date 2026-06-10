@@ -17,6 +17,14 @@ function on_before_request(ctx) {
     return ctx;
 }
 
+function on_after_auth_request(ctx) {
+    console.log("[" + ctx.id + "] Selected request protocol: " + ctx.source_format + " -> " + ctx.to_format);
+    if (ctx.source_format === "openai" && ctx.to_format === "codex") {
+        ctx.headers["X-JS-Handler-Protocol"] = "openai-to-codex";
+    }
+    return ctx;
+}
+
 function parse_stream_chunk(chunk) {
     var leading = "";
     var payload = chunk.trim();

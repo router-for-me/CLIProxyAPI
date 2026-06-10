@@ -71,7 +71,20 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 			return nil, errUnmarshal
 		}
-		resp, errIntercept := l.active.Capabilities.RequestInterceptor.InterceptRequest(ctx, req)
+		resp, errIntercept := l.active.Capabilities.RequestInterceptor.InterceptRequestBeforeAuth(ctx, req)
+		if errIntercept != nil {
+			return nil, errIntercept
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodRequestInterceptAfter:
+		if l.active.Capabilities.RequestInterceptor == nil {
+			return nil, fmt.Errorf("missing request interceptor")
+		}
+		var req pluginapi.RequestInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errIntercept := l.active.Capabilities.RequestInterceptor.InterceptRequestAfterAuth(ctx, req)
 		if errIntercept != nil {
 			return nil, errIntercept
 		}
@@ -231,7 +244,14 @@ func (c testThinkingCapability) ApplyThinking(ctx context.Context, req pluginapi
 
 type requestInterceptorFunc func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error)
 
-func (f requestInterceptorFunc) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+func (f requestInterceptorFunc) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	if f == nil {
+		return pluginapi.RequestInterceptResponse{}, fmt.Errorf("missing request interceptor callback")
+	}
+	return f(ctx, req)
+}
+
+func (f requestInterceptorFunc) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 	if f == nil {
 		return pluginapi.RequestInterceptResponse{}, fmt.Errorf("missing request interceptor callback")
 	}

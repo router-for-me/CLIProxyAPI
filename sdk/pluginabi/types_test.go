@@ -33,6 +33,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodRequestInterceptBefore != "request.intercept_before" {
 		t.Fatalf("MethodRequestInterceptBefore = %q", MethodRequestInterceptBefore)
 	}
+	if MethodRequestInterceptAfter != "request.intercept_after" {
+		t.Fatalf("MethodRequestInterceptAfter = %q", MethodRequestInterceptAfter)
+	}
 	if MethodResponseInterceptAfter != "response.intercept_after" {
 		t.Fatalf("MethodResponseInterceptAfter = %q", MethodResponseInterceptAfter)
 	}

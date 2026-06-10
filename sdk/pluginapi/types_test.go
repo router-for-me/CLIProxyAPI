@@ -256,7 +256,11 @@ func (compileTimePlugin) NormalizeResponse(context.Context, ResponseTransformReq
 	return PayloadResponse{}, nil
 }
 
-func (compileTimePlugin) InterceptRequest(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error) {
+func (compileTimePlugin) InterceptRequestBeforeAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error) {
+	return RequestInterceptResponse{}, nil
+}
+
+func (compileTimePlugin) InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error) {
 	return RequestInterceptResponse{}, nil
 }
 

@@ -511,18 +511,18 @@ func (h *Host) callModelsForAuth(ctx context.Context, record capabilityRecord, p
 	})
 }
 
-func (h *Host) callRequestInterceptor(ctx context.Context, pluginID string, interceptor pluginapi.RequestInterceptor, req pluginapi.RequestInterceptRequest) (out pluginapi.RequestInterceptResponse, ok bool) {
-	if h == nil || interceptor == nil || h.isPluginFused(pluginID) {
+func (h *Host) callRequestInterceptor(ctx context.Context, pluginID, method string, call func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), req pluginapi.RequestInterceptRequest) (out pluginapi.RequestInterceptResponse, ok bool) {
+	if h == nil || call == nil || h.isPluginFused(pluginID) {
 		return pluginapi.RequestInterceptResponse{}, false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "RequestInterceptor.InterceptRequest", recovered)
+			h.fusePlugin(pluginID, method, recovered)
 			out = pluginapi.RequestInterceptResponse{}
 			ok = false
 		}
 	}()
-	resp, errIntercept := interceptor.InterceptRequest(ctx, req)
+	resp, errIntercept := call(ctx, req)
 	if errIntercept != nil {
 		log.Warnf("pluginhost: request interceptor %s failed: %v", pluginID, errIntercept)
 		return pluginapi.RequestInterceptResponse{}, false
@@ -568,7 +568,19 @@ func (h *Host) callStreamChunkInterceptor(ctx context.Context, pluginID string, 
 	return resp, true
 }
 
-func (h *Host) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+func (h *Host) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestBeforeAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return interceptor.InterceptRequestBeforeAuth(ctx, req)
+	})
+}
+
+func (h *Host) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestAfterAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return interceptor.InterceptRequestAfterAuth(ctx, req)
+	})
+}
+
+func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error)) pluginapi.RequestInterceptResponse {
 	current := pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
 		Body:    bytes.Clone(req.Body),
@@ -582,7 +594,9 @@ func (h *Host) InterceptRequest(ctx context.Context, req pluginapi.RequestInterc
 		nextReq.Headers = cloneHeader(current.Headers)
 		nextReq.Body = bytes.Clone(current.Body)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
-		if resp, ok := h.callRequestInterceptor(ctx, record.id, interceptor, nextReq); ok {
+		if resp, ok := h.callRequestInterceptor(ctx, record.id, method, func(callCtx context.Context, callReq pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+			return invoke(interceptor, callCtx, callReq)
+		}, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
 			if len(resp.Body) > 0 {
 				current.Body = bytes.Clone(resp.Body)
@@ -659,6 +673,21 @@ func (h *Host) HasStreamInterceptors() bool {
 			continue
 		}
 		if record.plugin.Capabilities.StreamChunkInterceptor != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) HasRequestInterceptors() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.Snapshot().records {
+		if h.isPluginFused(record.id) {
+			continue
+		}
+		if record.plugin.Capabilities.RequestInterceptor != nil {
 			return true
 		}
 	}
@@ -1309,6 +1338,18 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		inputFormat:     inputFormat,
 		outputFormat:    outputFormat,
 	}, nil
+}
+
+func (a *executorAdapter) RequestToFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
+	if a == nil {
+		return ""
+	}
+	requestedFormat := executorRequestedFormat(req, opts)
+	inputFormat, errInput := a.selectExecutorInputFormat(requestedFormat)
+	if errInput != nil {
+		return ""
+	}
+	return inputFormat
 }
 
 func executorRequestedFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
