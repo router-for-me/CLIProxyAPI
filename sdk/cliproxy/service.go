@@ -2197,14 +2197,15 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
 		models = append(models, &ModelInfo{
-			ID:          modelID,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     compat.Name,
-			Type:        modelType,
-			DisplayName: modelID,
-			UserDefined: false,
-			Thinking:    thinking,
+			ID:            modelID,
+			Object:        "model",
+			Created:       now,
+			OwnedBy:       compat.Name,
+			Type:          modelType,
+			DisplayName:   modelID,
+			ContextLength: model.ContextLength,
+			UserDefined:   false,
+			Thinking:      thinking,
 		})
 	}
 	return models
