@@ -78,6 +78,8 @@ type Capabilities struct {
 	FrontendAuthProviderExclusive bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// ServerToolHandler handles provider-native typed server tool requests before native executors run.
+	ServerToolHandler ServerToolHandler
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -654,6 +656,80 @@ type ExecutorStreamResponse struct {
 
 // ExecutorStreamChunk carries one streaming payload chunk or an error.
 type ExecutorStreamChunk struct {
+	// Payload contains the raw stream chunk bytes.
+	Payload []byte
+	// Err reports a stream error associated with this chunk.
+	Err error
+}
+
+// ServerToolHandler handles provider-native typed server tool requests before native executors run.
+type ServerToolHandler interface {
+	HandleServerTool(context.Context, ServerToolRequest) (ServerToolResponse, error)
+	HandleServerToolStream(context.Context, ServerToolRequest) (ServerToolStreamResponse, error)
+}
+
+// ServerToolRequest describes a selected-auth execution request offered to a server-tool plugin.
+type ServerToolRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata
+	// Provider is the route provider selected by the host.
+	Provider string
+	// AuthID identifies the selected credential.
+	AuthID string
+	// AuthProvider identifies the credential provider.
+	AuthProvider string
+	// RouteModel is the host-facing model requested by the client.
+	RouteModel string
+	// UpstreamModel is the provider-native model selected by routing.
+	UpstreamModel string
+	// SourceFormat is the original client protocol format.
+	SourceFormat string
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Headers contains request headers passed to the executor.
+	Headers http.Header
+	// OriginalRequest contains the raw client request body.
+	OriginalRequest []byte
+	// Payload contains the translated provider payload.
+	Payload []byte
+	// Metadata is an extension bag for host and plugin coordination data.
+	Metadata map[string]any
+	// StorageJSON contains provider-owned auth storage for this concrete auth.
+	StorageJSON []byte
+	// AuthMetadata contains mutable host-managed auth metadata.
+	AuthMetadata map[string]any
+	// AuthAttributes contains immutable routing and provider attributes.
+	AuthAttributes map[string]string
+	// HTTPClient executes upstream HTTP requests through host transport policy and request-log capture.
+	HTTPClient HostHTTPClient `json:"-"`
+}
+
+// ServerToolResponse returns a non-streaming server-tool result.
+type ServerToolResponse struct {
+	// Handled reports whether the plugin fully handled the server-tool request.
+	Handled bool
+	// Headers contains response headers to forward or inspect.
+	Headers http.Header
+	// Payload contains the raw response body.
+	Payload []byte
+	// Metadata is an extension bag for server-tool-specific response data.
+	Metadata map[string]any
+}
+
+// ServerToolStreamResponse returns a streaming server-tool result.
+type ServerToolStreamResponse struct {
+	// Handled reports whether the plugin fully handled the server-tool request.
+	Handled bool
+	// Headers contains response headers available before stream chunks.
+	Headers http.Header
+	// Chunks yields streaming payload chunks until the channel closes.
+	Chunks <-chan ServerToolStreamChunk
+	// Metadata is an extension bag for server-tool-specific response data.
+	Metadata map[string]any
+}
+
+// ServerToolStreamChunk carries one server-tool stream chunk or an error.
+type ServerToolStreamChunk struct {
 	// Payload contains the raw stream chunk bytes.
 	Payload []byte
 	// Err reports a stream error associated with this chunk.

@@ -72,6 +72,41 @@ func TestRPCCapabilitiesIncludeScheduler(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeServerToolHandler(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			ServerToolHandler: serverToolHandlerFunc{
+				handle: func(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolResponse, error) {
+					return pluginapi.ServerToolResponse{}, nil
+				},
+				handleStream: func(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolStreamResponse, error) {
+					return pluginapi.ServerToolStreamResponse{}, nil
+				},
+			},
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.ServerToolHandler {
+		t.Fatal("ServerToolHandler = false, want true")
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	if !json.Valid(raw) {
+		t.Fatalf("marshaled capabilities are invalid JSON: %s", raw)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["server_tool_handler"] != true {
+		t.Fatalf("server_tool_handler = %#v, want true", decoded["server_tool_handler"])
+	}
+}
+
 func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 	var pickCalls int
 	var gotReq pluginapi.SchedulerPickRequest
@@ -162,6 +197,139 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 	}
 }
 
+func TestRPCServerToolHandleUsesAdapter(t *testing.T) {
+	var calls int
+	var gotReq pluginapi.ServerToolRequest
+	lookup := newTestSymbolLookup(&testPlugin{
+		registerResult: pluginapi.Plugin{
+			Metadata: pluginapi.Metadata{
+				Name:             "server-tool",
+				Version:          "1.0.0",
+				Author:           "test",
+				GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			},
+			Capabilities: pluginapi.Capabilities{
+				ServerToolHandler: serverToolHandlerFunc{
+					handle: func(ctx context.Context, req pluginapi.ServerToolRequest) (pluginapi.ServerToolResponse, error) {
+						calls++
+						gotReq = req
+						return pluginapi.ServerToolResponse{
+							Handled: true,
+							Headers: map[string][]string{"Content-Type": {"application/json"}},
+							Payload: []byte(`{"ok":true}`),
+							Metadata: map[string]any{
+								"handled_by": "rpc-test",
+							},
+						}, nil
+					},
+					handleStream: func(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolStreamResponse, error) {
+						return pluginapi.ServerToolStreamResponse{}, nil
+					},
+				},
+			},
+		},
+	})
+
+	plugin, errRegister := registerRPCPlugin(context.Background(), New(), "server-tool", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	if plugin.Capabilities.ServerToolHandler == nil {
+		t.Fatal("ServerToolHandler = nil, want adapter")
+	}
+
+	req := pluginapi.ServerToolRequest{
+		Provider:        "antigravity",
+		AuthID:          "auth-1",
+		AuthProvider:    "antigravity",
+		RouteModel:      "gemini-3.5-flash",
+		UpstreamModel:   "gemini-3.5-flash",
+		SourceFormat:    "anthropic",
+		Stream:          true,
+		Headers:         map[string][]string{"Anthropic-Version": {"2023-06-01"}},
+		OriginalRequest: []byte(`{"tools":[{"type":"web_search_20250305"}]}`),
+		Payload:         []byte(`{"tools":[{"type":"web_search_20250305"}]}`),
+		Metadata:        map[string]any{"request_id": "req-1"},
+	}
+	resp, errHandle := plugin.Capabilities.ServerToolHandler.HandleServerTool(context.Background(), req)
+	if errHandle != nil {
+		t.Fatalf("HandleServerTool() error = %v", errHandle)
+	}
+	if !resp.Handled || string(resp.Payload) != `{"ok":true}` || resp.Metadata["handled_by"] != "rpc-test" {
+		t.Fatalf("HandleServerTool() response = %#v", resp)
+	}
+	if calls != 1 {
+		t.Fatalf("server tool calls = %d, want 1", calls)
+	}
+	if gotReq.Provider != req.Provider || gotReq.AuthID != req.AuthID || gotReq.RouteModel != req.RouteModel ||
+		gotReq.UpstreamModel != req.UpstreamModel || gotReq.SourceFormat != req.SourceFormat || !gotReq.Stream {
+		t.Fatalf("server tool request main fields = %#v, want %#v", gotReq, req)
+	}
+	if !reflect.DeepEqual(gotReq.Headers, req.Headers) {
+		t.Fatalf("server tool request headers = %#v, want %#v", gotReq.Headers, req.Headers)
+	}
+}
+
+func TestRPCServerToolHandleStreamUsesAdapter(t *testing.T) {
+	lookup := newTestSymbolLookup(&testPlugin{
+		registerResult: pluginapi.Plugin{
+			Metadata: pluginapi.Metadata{
+				Name:             "server-tool",
+				Version:          "1.0.0",
+				Author:           "test",
+				GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			},
+			Capabilities: pluginapi.Capabilities{
+				ServerToolHandler: serverToolHandlerFunc{
+					handle: func(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolResponse, error) {
+						return pluginapi.ServerToolResponse{}, nil
+					},
+					handleStream: func(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolStreamResponse, error) {
+						chunks := make(chan pluginapi.ServerToolStreamChunk, 2)
+						chunks <- pluginapi.ServerToolStreamChunk{Payload: []byte("event: message_start\n\n")}
+						chunks <- pluginapi.ServerToolStreamChunk{Payload: []byte("event: message_stop\n\n")}
+						close(chunks)
+						return pluginapi.ServerToolStreamResponse{
+							Handled: true,
+							Headers: map[string][]string{"Content-Type": {"text/event-stream"}},
+							Chunks:  chunks,
+							Metadata: map[string]any{
+								"streamed": true,
+							},
+						}, nil
+					},
+				},
+			},
+		},
+	})
+
+	plugin, errRegister := registerRPCPlugin(context.Background(), New(), "server-tool", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	resp, errHandle := plugin.Capabilities.ServerToolHandler.HandleServerToolStream(context.Background(), pluginapi.ServerToolRequest{
+		Provider:     "antigravity",
+		SourceFormat: "anthropic",
+		Stream:       true,
+	})
+	if errHandle != nil {
+		t.Fatalf("HandleServerToolStream() error = %v", errHandle)
+	}
+	if !resp.Handled || resp.Headers.Get("Content-Type") != "text/event-stream" || resp.Metadata["streamed"] != true {
+		t.Fatalf("HandleServerToolStream() response = %#v", resp)
+	}
+	var payload string
+	for chunk := range resp.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		payload += string(chunk.Payload)
+	}
+	if payload != "event: message_start\n\nevent: message_stop\n\n" {
+		t.Fatalf("stream payload = %q", payload)
+	}
+}
+
 func TestSanitizePluginRequestScheduler(t *testing.T) {
 	req := pluginapi.SchedulerPickRequest{
 		Provider:  "openai",
@@ -230,4 +398,72 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 	if _, ok := gotCandidate.Metadata["drop"]; ok {
 		t.Fatalf("scheduler candidate metadata drop survived sanitize: %#v", gotCandidate.Metadata)
 	}
+}
+
+func TestSanitizePluginRequestServerTool(t *testing.T) {
+	req := pluginapi.ServerToolRequest{
+		Provider:      "antigravity",
+		AuthID:        "auth-1",
+		RouteModel:    "gemini-3.5-flash",
+		UpstreamModel: "gemini-3.5-flash",
+		SourceFormat:  "anthropic",
+		Stream:        true,
+		Metadata: map[string]any{
+			"keep": "request",
+			"drop": make(chan struct{}),
+		},
+		AuthMetadata: map[string]any{
+			"project_id": "project-1",
+			"drop":       make(chan struct{}),
+		},
+		HTTPClient: noOpHostHTTPClient{},
+	}
+
+	raw, errMarshal := json.Marshal(sanitizePluginRequest(req))
+	if errMarshal != nil {
+		t.Fatalf("Marshal(sanitized server tool request) error = %v", errMarshal)
+	}
+	if string(raw) == "" || jsonContains(raw, "HTTPClient") || jsonContains(raw, "http_client") {
+		t.Fatalf("sanitized server tool request leaked HTTP client: %s", raw)
+	}
+	var decoded pluginapi.ServerToolRequest
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal(sanitized server tool request) error = %v", errUnmarshal)
+	}
+	if decoded.Provider != req.Provider || decoded.AuthID != req.AuthID ||
+		decoded.RouteModel != req.RouteModel || decoded.UpstreamModel != req.UpstreamModel ||
+		decoded.SourceFormat != req.SourceFormat || !decoded.Stream {
+		t.Fatalf("server tool request main fields = %#v, want %#v", decoded, req)
+	}
+	if decoded.Metadata["keep"] != "request" {
+		t.Fatalf("server tool metadata keep = %#v, want request", decoded.Metadata["keep"])
+	}
+	if _, ok := decoded.Metadata["drop"]; ok {
+		t.Fatalf("server tool metadata drop survived sanitize: %#v", decoded.Metadata)
+	}
+	if decoded.AuthMetadata["project_id"] != "project-1" {
+		t.Fatalf("server tool auth metadata project_id = %#v, want project-1", decoded.AuthMetadata["project_id"])
+	}
+	if _, ok := decoded.AuthMetadata["drop"]; ok {
+		t.Fatalf("server tool auth metadata drop survived sanitize: %#v", decoded.AuthMetadata)
+	}
+}
+
+func jsonContains(raw []byte, needle string) bool {
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		return false
+	}
+	_, ok := decoded[needle]
+	return ok
+}
+
+type noOpHostHTTPClient struct{}
+
+func (noOpHostHTTPClient) Do(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	return pluginapi.HTTPResponse{}, nil
+}
+
+func (noOpHostHTTPClient) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	return pluginapi.HTTPStreamResponse{}, nil
 }

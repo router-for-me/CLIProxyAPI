@@ -34,6 +34,9 @@ const (
 	MethodExecutorCountTokens   = "executor.count_tokens"
 	MethodExecutorHTTPRequest   = "executor.http_request"
 
+	MethodServerToolHandle       = "server_tool.handle"
+	MethodServerToolHandleStream = "server_tool.handle_stream"
+
 	MethodRequestTranslate       = "request.translate"
 	MethodRequestNormalize       = "request.normalize"
 	MethodRequestInterceptBefore = "request.intercept_before"

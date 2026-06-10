@@ -51,6 +51,12 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodExecutorExecuteStream != "executor.execute_stream" {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
 	}
+	if MethodServerToolHandle != "server_tool.handle" {
+		t.Fatalf("MethodServerToolHandle = %q", MethodServerToolHandle)
+	}
+	if MethodServerToolHandleStream != "server_tool.handle_stream" {
+		t.Fatalf("MethodServerToolHandleStream = %q", MethodServerToolHandleStream)
+	}
 }
 
 func TestSchedulerPickMethodName(t *testing.T) {

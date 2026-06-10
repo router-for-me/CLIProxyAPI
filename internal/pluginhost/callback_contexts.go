@@ -5,7 +5,29 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+type hostHTTPClientContextKey struct{}
+
+func contextWithHostHTTPClient(ctx context.Context, client pluginapi.HostHTTPClient) context.Context {
+	if client == nil {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, hostHTTPClientContextKey{}, client)
+}
+
+func hostHTTPClientFromContext(ctx context.Context) pluginapi.HostHTTPClient {
+	if ctx == nil {
+		return nil
+	}
+	client, _ := ctx.Value(hostHTTPClientContextKey{}).(pluginapi.HostHTTPClient)
+	return client
+}
 
 type callbackContextRegistry struct {
 	next     atomic.Uint64

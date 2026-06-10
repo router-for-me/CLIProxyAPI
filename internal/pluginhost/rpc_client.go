@@ -73,6 +73,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.Scheduler {
 		plugin.Capabilities.Scheduler = adapter
 	}
+	if resp.Capabilities.ServerToolHandler {
+		plugin.Capabilities.ServerToolHandler = adapter
+	}
 	if resp.Capabilities.Executor {
 		plugin.Capabilities.Executor = rpcProviderExecutor{rpcPluginAdapter: adapter}
 	}
@@ -160,6 +163,11 @@ func sanitizePluginRequest(request any) any {
 		req.HTTPClient = nil
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case pluginapi.ServerToolRequest:
+		req.HTTPClient = nil
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		req.AuthMetadata = sanitizePluginMetadata(req.AuthMetadata)
+		return req
 	case pluginapi.RequestInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
@@ -184,6 +192,11 @@ func sanitizePluginRequest(request any) any {
 	case rpcExecutorRequest:
 		req.HTTPClient = nil
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcServerToolRequest:
+		req.HTTPClient = nil
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		req.AuthMetadata = sanitizePluginMetadata(req.AuthMetadata)
 		return req
 	default:
 		return request
@@ -307,6 +320,44 @@ func (a *rpcPluginAdapter) ModelsForAuth(ctx context.Context, req pluginapi.Auth
 
 func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
 	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
+}
+
+func (a *rpcPluginAdapter) HandleServerTool(ctx context.Context, req pluginapi.ServerToolRequest) (pluginapi.ServerToolResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(contextWithHostHTTPClient(ctx, req.HTTPClient))
+	defer closeCallback()
+	return callPlugin[pluginapi.ServerToolResponse](ctx, a.client, pluginabi.MethodServerToolHandle, rpcServerToolRequest{
+		ServerToolRequest: req,
+		HostCallbackID:    callbackID,
+	})
+}
+
+func (a *rpcPluginAdapter) HandleServerToolStream(ctx context.Context, req pluginapi.ServerToolRequest) (pluginapi.ServerToolStreamResponse, error) {
+	if a == nil || a.host == nil || a.host.streams == nil {
+		return pluginapi.ServerToolStreamResponse{}, fmt.Errorf("plugin stream bridge is unavailable")
+	}
+	streamID, chunks, cleanup := a.host.streams.openServerTool(ctx)
+	callbackID, closeCallback := a.openHostCallbackContext(contextWithHostHTTPClient(ctx, req.HTTPClient))
+	defer closeCallback()
+	rpcReq := rpcServerToolRequest{
+		ServerToolRequest: req,
+		StreamID:          streamID,
+		HostCallbackID:    callbackID,
+	}
+	resp, errCall := callPlugin[rpcServerToolStreamResponse](ctx, a.client, pluginabi.MethodServerToolHandleStream, rpcReq)
+	if errCall != nil {
+		cleanup()
+		return pluginapi.ServerToolStreamResponse{}, errCall
+	}
+	if len(resp.Chunks) > 0 {
+		cleanup()
+		out := make(chan pluginapi.ServerToolStreamChunk, len(resp.Chunks))
+		for _, chunk := range resp.Chunks {
+			out <- chunk
+		}
+		close(out)
+		return pluginapi.ServerToolStreamResponse{Handled: resp.Handled, Headers: resp.Headers, Chunks: out, Metadata: resp.Metadata}, nil
+	}
+	return pluginapi.ServerToolStreamResponse{Handled: resp.Handled, Headers: resp.Headers, Chunks: chunks, Metadata: resp.Metadata}, nil
 }
 
 func callPluginIdentifier(client pluginClient, method string) string {

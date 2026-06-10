@@ -272,6 +272,7 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.AuthProvider != nil ||
 		caps.FrontendAuthProvider != nil ||
 		caps.Scheduler != nil ||
+		caps.ServerToolHandler != nil ||
 		caps.Executor != nil ||
 		caps.RequestTranslator != nil ||
 		caps.RequestNormalizer != nil ||

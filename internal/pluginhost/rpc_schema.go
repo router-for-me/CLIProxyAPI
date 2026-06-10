@@ -24,6 +24,7 @@ type rpcCapabilities struct {
 	FrontendAuthProvider          bool                         `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool                         `json:"frontend_auth_provider_exclusive"`
 	Scheduler                     bool                         `json:"scheduler"`
+	ServerToolHandler             bool                         `json:"server_tool_handler"`
 	Executor                      bool                         `json:"executor"`
 	ExecutorModelScope            pluginapi.ExecutorModelScope `json:"executor_model_scope"`
 	ExecutorInputFormats          []string                     `json:"executor_input_formats,omitempty"`
@@ -51,6 +52,13 @@ type rpcExecutorStreamResponse struct {
 	Chunks  []pluginapi.ExecutorStreamChunk `json:"chunks,omitempty"`
 }
 
+type rpcServerToolStreamResponse struct {
+	Handled  bool                              `json:"handled"`
+	Headers  http.Header                       `json:"headers,omitempty"`
+	Chunks   []pluginapi.ServerToolStreamChunk `json:"chunks,omitempty"`
+	Metadata map[string]any                    `json:"metadata,omitempty"`
+}
+
 type rpcAuthLoginStartRequest struct {
 	pluginapi.AuthLoginStartRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`
@@ -73,6 +81,12 @@ type rpcAuthModelRequest struct {
 
 type rpcExecutorRequest struct {
 	pluginapi.ExecutorRequest
+	StreamID       string `json:"stream_id,omitempty"`
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type rpcServerToolRequest struct {
+	pluginapi.ServerToolRequest
 	StreamID       string `json:"stream_id,omitempty"`
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
@@ -118,6 +132,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		FrontendAuthProvider:          caps.FrontendAuthProvider != nil,
 		FrontendAuthProviderExclusive: caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
 		Scheduler:                     caps.Scheduler != nil,
+		ServerToolHandler:             caps.ServerToolHandler != nil,
 		Executor:                      caps.Executor != nil,
 		ExecutorModelScope:            normalizedExecutorModelScope(caps),
 		ExecutorInputFormats:          append([]string(nil), caps.ExecutorInputFormats...),

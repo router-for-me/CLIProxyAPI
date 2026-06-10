@@ -16,6 +16,7 @@ var _ FrontendAuthProvider = (*compileTimePlugin)(nil)
 var _ Scheduler = (*compileTimePlugin)(nil)
 var _ ProviderExecutor = (*compileTimePlugin)(nil)
 var _ HostHTTPClient = (*compileTimePlugin)(nil)
+var _ ServerToolHandler = (*compileTimePlugin)(nil)
 var _ RequestTranslator = (*compileTimePlugin)(nil)
 var _ RequestNormalizer = (*compileTimePlugin)(nil)
 var _ ResponseTranslator = (*compileTimePlugin)(nil)
@@ -90,6 +91,11 @@ func TestHostInjectedHTTPClientIsNotEncodedInPluginJSON(t *testing.T) {
 			name: "executor request",
 			req:  ExecutorRequest{Model: "model-1", HTTPClient: compileTimePlugin{}},
 			dst:  &ExecutorRequest{},
+		},
+		{
+			name: "server tool request",
+			req:  ServerToolRequest{Provider: "antigravity", RouteModel: "claude-opus", UpstreamModel: "claude-opus-thinking", HTTPClient: compileTimePlugin{}},
+			dst:  &ServerToolRequest{},
 		},
 		{
 			name: "executor http request",
@@ -178,6 +184,60 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	}
 }
 
+func TestServerToolTypesExposeExecutionContext(t *testing.T) {
+	request := ServerToolRequest{
+		Plugin:          Metadata{Name: "server-tool-plugin"},
+		Provider:        "antigravity",
+		AuthID:          "auth-1",
+		AuthProvider:    "antigravity",
+		RouteModel:      "gemini-3.5-flash",
+		UpstreamModel:   "gemini-3.5-flash",
+		SourceFormat:    "anthropic",
+		Stream:          true,
+		Headers:         map[string][]string{"Anthropic-Version": {"2023-06-01"}},
+		OriginalRequest: []byte(`{"tools":[{"type":"web_search_20250305"}]}`),
+		Payload:         []byte(`{"tools":[{"type":"web_search_20250305"}]}`),
+		Metadata:        map[string]any{"request_id": "req-1"},
+		StorageJSON:     []byte(`{"access_token":"token"}`),
+		AuthMetadata:    map[string]any{"project_id": "project-1"},
+		AuthAttributes:  map[string]string{"source": "auth.json"},
+		HTTPClient:      compileTimePlugin{},
+	}
+	response := ServerToolResponse{
+		Handled: true,
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
+		Payload: []byte(`{"type":"message"}`),
+		Metadata: map[string]any{
+			"handled_by": "test",
+		},
+	}
+
+	if request.Plugin.Name != "server-tool-plugin" ||
+		request.Provider != "antigravity" ||
+		request.AuthID != "auth-1" ||
+		request.AuthProvider != "antigravity" ||
+		request.RouteModel != "gemini-3.5-flash" ||
+		request.UpstreamModel != "gemini-3.5-flash" ||
+		request.SourceFormat != "anthropic" ||
+		!request.Stream {
+		t.Fatalf("ServerToolRequest main fields = %#v", request)
+	}
+	if got := request.Headers["Anthropic-Version"]; len(got) != 1 || got[0] != "2023-06-01" {
+		t.Fatalf("ServerToolRequest.Headers = %#v", request.Headers)
+	}
+	if string(request.OriginalRequest) == "" || string(request.Payload) == "" {
+		t.Fatalf("ServerToolRequest missing request bodies: %#v", request)
+	}
+	if request.Metadata["request_id"] != "req-1" ||
+		request.AuthMetadata["project_id"] != "project-1" ||
+		request.AuthAttributes["source"] != "auth.json" {
+		t.Fatalf("ServerToolRequest metadata = %#v", request)
+	}
+	if !response.Handled || string(response.Payload) == "" || response.Metadata["handled_by"] != "test" {
+		t.Fatalf("ServerToolResponse = %#v", response)
+	}
+}
+
 func (compileTimePlugin) RegisterModels(context.Context, ModelRegistrationRequest) (ModelRegistrationResponse, error) {
 	return ModelRegistrationResponse{}, nil
 }
@@ -238,6 +298,14 @@ func (compileTimePlugin) Do(context.Context, HTTPRequest) (HTTPResponse, error) 
 
 func (compileTimePlugin) DoStream(context.Context, HTTPRequest) (HTTPStreamResponse, error) {
 	return HTTPStreamResponse{}, nil
+}
+
+func (compileTimePlugin) HandleServerTool(context.Context, ServerToolRequest) (ServerToolResponse, error) {
+	return ServerToolResponse{}, nil
+}
+
+func (compileTimePlugin) HandleServerToolStream(context.Context, ServerToolRequest) (ServerToolStreamResponse, error) {
+	return ServerToolStreamResponse{}, nil
 }
 
 func (compileTimePlugin) TranslateRequest(context.Context, RequestTransformRequest) (PayloadResponse, error) {

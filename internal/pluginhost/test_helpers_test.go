@@ -133,6 +133,38 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errPick
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodServerToolHandle:
+		if l.active.Capabilities.ServerToolHandler == nil {
+			return nil, fmt.Errorf("missing server tool handler")
+		}
+		var req pluginapi.ServerToolRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errHandle := l.active.Capabilities.ServerToolHandler.HandleServerTool(ctx, req)
+		if errHandle != nil {
+			return nil, errHandle
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodServerToolHandleStream:
+		if l.active.Capabilities.ServerToolHandler == nil {
+			return nil, fmt.Errorf("missing server tool handler")
+		}
+		var req pluginapi.ServerToolRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errHandle := l.active.Capabilities.ServerToolHandler.HandleServerToolStream(ctx, req)
+		if errHandle != nil {
+			return nil, errHandle
+		}
+		var chunks []pluginapi.ServerToolStreamChunk
+		if resp.Chunks != nil {
+			for chunk := range resp.Chunks {
+				chunks = append(chunks, chunk)
+			}
+		}
+		return marshalRPCResult(rpcServerToolStreamResponse{Handled: resp.Handled, Headers: resp.Headers, Chunks: chunks, Metadata: resp.Metadata})
 	case pluginabi.MethodUsageHandle:
 		if l.active.Capabilities.UsagePlugin == nil {
 			return marshalRPCResult(rpcEmptyResponse{})
@@ -265,6 +297,25 @@ func (f schedulerFunc) Pick(ctx context.Context, req pluginapi.SchedulerPickRequ
 		return pluginapi.SchedulerPickResponse{}, fmt.Errorf("missing scheduler callback")
 	}
 	return f(ctx, req)
+}
+
+type serverToolHandlerFunc struct {
+	handle       func(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolResponse, error)
+	handleStream func(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolStreamResponse, error)
+}
+
+func (f serverToolHandlerFunc) HandleServerTool(ctx context.Context, req pluginapi.ServerToolRequest) (pluginapi.ServerToolResponse, error) {
+	if f.handle == nil {
+		return pluginapi.ServerToolResponse{}, fmt.Errorf("missing server tool handler callback")
+	}
+	return f.handle(ctx, req)
+}
+
+func (f serverToolHandlerFunc) HandleServerToolStream(ctx context.Context, req pluginapi.ServerToolRequest) (pluginapi.ServerToolStreamResponse, error) {
+	if f.handleStream == nil {
+		return pluginapi.ServerToolStreamResponse{}, fmt.Errorf("missing server tool stream callback")
+	}
+	return f.handleStream(ctx, req)
 }
 
 type responseInterceptorFunc struct {

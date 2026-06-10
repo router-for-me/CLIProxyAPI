@@ -108,6 +108,47 @@ func TestHostHTTPDoCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	}
 }
 
+func TestHostHTTPDoCallbackUsesContextHostHTTPClient(t *testing.T) {
+	host := New()
+	client := &capturingHostHTTPClient{
+		resp: pluginapi.HTTPResponse{
+			StatusCode: http.StatusAccepted,
+			Headers:    http.Header{"X-Provider-Aware": {"yes"}},
+			Body:       []byte("provider-aware"),
+		},
+	}
+	callbackID, closeCallback := host.openCallbackContext(contextWithHostHTTPClient(context.Background(), client))
+	defer closeCallback()
+
+	rawReq, errMarshal := json.Marshal(rpcHostHTTPRequest{
+		HostCallbackID: callbackID,
+		Method:         http.MethodPost,
+		URL:            "https://example.invalid/v1internal:generateContent",
+		Headers:        httpHeader{"Content-Type": {"application/json"}},
+		Body:           []byte(`{"request":true}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, rawReq)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if client.calls != 1 {
+		t.Fatalf("context host HTTP client calls = %d, want 1", client.calls)
+	}
+	if client.lastReq.URL != "https://example.invalid/v1internal:generateContent" {
+		t.Fatalf("context host HTTP request URL = %q", client.lastReq.URL)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HTTPResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if resp.StatusCode != http.StatusAccepted || string(resp.Body) != "provider-aware" || resp.Headers.Get("X-Provider-Aware") != "yes" {
+		t.Fatalf("response = %#v, want context host HTTP response", resp)
+	}
+}
+
 func TestHostHTTPDoStreamCallbackReturnsBeforeUpstreamCompletes(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -256,4 +297,21 @@ func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	if !strings.Contains(got, "plugin callback message") || !strings.Contains(got, "request_id=request-123") {
 		t.Fatalf("log output = %q, want message and request_id field", got)
 	}
+}
+
+type capturingHostHTTPClient struct {
+	calls   int
+	lastReq pluginapi.HTTPRequest
+	resp    pluginapi.HTTPResponse
+	err     error
+}
+
+func (c *capturingHostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	c.calls++
+	c.lastReq = req
+	return c.resp, c.err
+}
+
+func (c *capturingHostHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	return pluginapi.HTTPStreamResponse{}, c.err
 }

@@ -54,6 +54,29 @@ func (b *streamBridge) open(ctx context.Context) (string, <-chan pluginapi.Execu
 	return id, chunks, cleanup
 }
 
+func (b *streamBridge) openServerTool(ctx context.Context) (string, <-chan pluginapi.ServerToolStreamChunk, func()) {
+	id, executorChunks, cleanup := b.open(ctx)
+	chunks := make(chan pluginapi.ServerToolStreamChunk, 16)
+	go func() {
+		defer close(chunks)
+		for chunk := range executorChunks {
+			select {
+			case <-ctxDone(ctx):
+				return
+			case chunks <- pluginapi.ServerToolStreamChunk{Payload: append([]byte(nil), chunk.Payload...), Err: chunk.Err}:
+			}
+		}
+	}()
+	return id, chunks, cleanup
+}
+
+func ctxDone(ctx context.Context) <-chan struct{} {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Done()
+}
+
 func (b *streamBridge) emit(ctx context.Context, id string, chunk pluginapi.ExecutorStreamChunk) error {
 	if b == nil || id == "" {
 		return fmt.Errorf("stream id is required")
