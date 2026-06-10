@@ -2,6 +2,8 @@ package cliproxy
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -131,5 +133,108 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 	if chatModel.Thinking == nil {
 		t.Fatal("expected chat model to keep default thinking support")
+	}
+}
+
+func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
+	var sawFetch bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != antigravityModelsPath {
+			t.Fatalf("path = %q, want %s", r.URL.Path, antigravityModelsPath)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+		sawFetch = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+				"models": {
+					"gemini-3.1-flash-lite": {
+						"displayName": "Gemini 3.1 Flash Lite",
+						"maxTokens": 1,
+						"maxOutputTokens": 2
+					},
+					"fetched-only-search-model": {
+						"displayName": "Fetched Only Search Model"
+					}
+				},
+				"webSearchModelIds": ["gemini-3.1-flash-lite", "fetched-only-search-model"]
+			}`))
+	}))
+	defer server.Close()
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-antigravity-fetch-models",
+		Provider: "antigravity",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+		},
+	}
+
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+	if !sawFetch {
+		t.Fatal("expected fetchAvailableModels request")
+	}
+
+	models := registry.GetModelsForClient(auth.ID)
+	staticModels := internalregistry.GetAntigravityModels()
+	staticByID := make(map[string]*internalregistry.ModelInfo, len(staticModels))
+	for _, model := range staticModels {
+		if model != nil {
+			staticByID[model.ID] = model
+		}
+	}
+
+	var webSearchModel, agentModel, staticOnlyModel, fetchedOnlyModel *internalregistry.ModelInfo
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch strings.TrimSpace(model.ID) {
+		case "gemini-3.1-flash-lite":
+			webSearchModel = model
+		case "gemini-3-flash-agent":
+			agentModel = model
+		case "gpt-oss-120b-medium":
+			staticOnlyModel = model
+		case "fetched-only-search-model":
+			fetchedOnlyModel = model
+		}
+	}
+	if webSearchModel == nil {
+		t.Fatal("expected gemini-3.1-flash-lite to be registered")
+	}
+	if !webSearchModel.SupportsWebSearch {
+		t.Fatal("expected gemini-3.1-flash-lite to support web search")
+	}
+	staticWebSearchModel := staticByID["gemini-3.1-flash-lite"]
+	if staticWebSearchModel == nil {
+		t.Fatal("expected static gemini-3.1-flash-lite definition")
+	}
+	if webSearchModel.ContextLength != staticWebSearchModel.ContextLength || webSearchModel.MaxCompletionTokens != staticWebSearchModel.MaxCompletionTokens {
+		t.Fatalf("static token limits should be preserved, got=%#v static=%#v", webSearchModel, staticWebSearchModel)
+	}
+	if agentModel == nil {
+		t.Fatal("expected gemini-3-flash-agent to be registered")
+	}
+	if agentModel.SupportsWebSearch {
+		t.Fatal("gemini-3-flash-agent should not support web search")
+	}
+	if staticOnlyModel == nil {
+		t.Fatal("expected static-only Antigravity model to remain registered")
+	}
+	if fetchedOnlyModel != nil {
+		t.Fatalf("fetched-only model should not be registered: %#v", fetchedOnlyModel)
 	}
 }

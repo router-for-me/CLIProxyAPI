@@ -69,6 +69,9 @@ type Params struct {
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
+	HasWebSearchTool     bool
+	WebSearchRequests    int64
+	WebSearchTextBuffer  strings.Builder
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
@@ -125,6 +128,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
+	webSearchStreamMode := shouldTranslateWebSearchGrounding(originalRequestRawJSON, requestRawJSON)
 	appendThinkingSignature := func(signature string) {
 		if signature == "" || params.ResponseType != 2 {
 			return
@@ -150,7 +154,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		if promptTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.promptTokenCount"); promptTokenCount.Exists() {
 			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.usage.input_tokens", promptTokenCount.Int())
 		}
-		if candidatesTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.candidatesTokenCount"); candidatesTokenCount.Exists() {
+		if candidatesTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.candidatesTokenCount"); candidatesTokenCount.Exists() && !webSearchStreamMode {
 			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.usage.output_tokens", candidatesTokenCount.Int())
 		}
 
@@ -166,10 +170,28 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		params.HasFirstResponse = true
 	}
 
+	handledWebSearchGrounding := false
+	if webSearchStreamMode && !params.HasWebSearchTool {
+		root := gjson.ParseBytes(rawJSON)
+		if groundingMetadata := antigravityGroundingMetadata(root); groundingMetadata.Exists() {
+			toolUseID := newClaudeWebSearchToolUseID()
+			textContent := params.WebSearchTextBuffer.String() + antigravityTextContent(root)
+			params.WebSearchTextBuffer.Reset()
+			params.ResponseIndex = appendClaudeWebSearchStreamBlocks(appendEvent, params.ResponseIndex, toolUseID, textContent, groundingMetadata)
+			params.HasWebSearchTool = true
+			params.WebSearchRequests = 1
+			params.HasContent = true
+			params.ResponseType = 0
+			handledWebSearchGrounding = true
+		}
+	}
+
 	// Process the response parts array from the backend client
 	// Each part can contain text content, thinking content, or function calls
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
-	if partsResult.IsArray() {
+	if partsResult.IsArray() && webSearchStreamMode && !params.HasWebSearchTool && !handledWebSearchGrounding {
+		appendWebSearchBufferedText(partsResult, &params.WebSearchTextBuffer)
+	} else if partsResult.IsArray() && !handledWebSearchGrounding {
 		partResults := partsResult.Array()
 		for i := 0; i < len(partResults); i++ {
 			partResult := partResults[i]
@@ -337,11 +359,39 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		}
 	}
 
+	if webSearchStreamMode && !params.HasWebSearchTool && params.HasFinishReason && params.WebSearchTextBuffer.Len() > 0 {
+		appendBufferedWebSearchTextBlock(params, appendEvent)
+	}
+
 	if params.HasUsageMetadata && params.HasFinishReason {
 		appendFinalEvents(params, &output, false)
 	}
 
 	return [][]byte{output}
+}
+
+func appendWebSearchBufferedText(partsResult gjson.Result, buffer *strings.Builder) {
+	for _, partResult := range partsResult.Array() {
+		if partResult.Get("thought").Bool() || partResult.Get("functionCall").Exists() {
+			continue
+		}
+		if partTextResult := partResult.Get("text"); partTextResult.Exists() {
+			buffer.WriteString(partTextResult.String())
+		}
+	}
+}
+
+func appendBufferedWebSearchTextBlock(params *Params, appendEvent func(string, string)) {
+	text := params.WebSearchTextBuffer.String()
+	params.WebSearchTextBuffer.Reset()
+	if text == "" {
+		return
+	}
+	appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex))
+	data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", text)
+	appendEvent("content_block_delta", string(data))
+	params.ResponseType = 1
+	params.HasContent = true
 }
 
 func appendFinalEvents(params *Params, output *[]byte, force bool) {
@@ -373,6 +423,9 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 	}
 
 	delta := []byte(fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"%s","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`, stopReason, params.PromptTokenCount, usageOutputTokens))
+	if params.WebSearchRequests > 0 {
+		delta, _ = sjson.SetBytes(delta, "usage.server_tool_use.web_search_requests", params.WebSearchRequests)
+	}
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
 	if params.CachedTokenCount > 0 {
 		var err error
@@ -440,6 +493,16 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		responseJSON, err = sjson.SetBytes(responseJSON, "usage.cache_read_input_tokens", cachedTokens)
 		if err != nil {
 			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
+		}
+	}
+
+	if shouldTranslateWebSearchGrounding(originalRequestRawJSON, requestRawJSON) {
+		if groundingMetadata := antigravityGroundingMetadata(root); groundingMetadata.Exists() {
+			toolUseID := newClaudeWebSearchToolUseID()
+			responseJSON, _ = sjson.SetRawBytes(responseJSON, "content", buildClaudeWebSearchContent(toolUseID, antigravityTextContent(root), groundingMetadata))
+			responseJSON, _ = sjson.SetBytes(responseJSON, "stop_reason", "end_turn")
+			responseJSON, _ = sjson.SetBytes(responseJSON, "usage.server_tool_use.web_search_requests", 1)
+			return responseJSON
 		}
 	}
 
