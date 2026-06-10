@@ -48,16 +48,15 @@ func TestMetadataConfigFieldsExposePluginSchema(t *testing.T) {
 	}
 }
 
-func TestManagementRouteMenuFieldsExposeManagementUIHints(t *testing.T) {
-	route := ManagementRoute{
-		Method:      "GET",
-		Path:        "/plugins/example/status",
+func TestResourceRouteMenuFieldsExposeManagementUIHints(t *testing.T) {
+	route := ResourceRoute{
+		Path:        "/status",
 		Menu:        "Example Status",
 		Description: "Shows example plugin status.",
 		Handler:     compileTimePlugin{},
 	}
 	if route.Menu == "" || route.Description == "" {
-		t.Fatalf("management route missing menu fields: %#v", route)
+		t.Fatalf("resource route missing menu fields: %#v", route)
 	}
 }
 

@@ -131,9 +131,9 @@ func handleMethod(method string) ([]byte, error) {
 	case "plugin.reconfigure":
 		return okEnvelopeJSON("{\"schema_version\":1,\"metadata\":{\"Name\":\"example-management-api-go\",\"Version\":\"0.1.0\",\"Author\":\"router-for-me\",\"GitHubRepository\":\"https://github.com/router-for-me/CLIProxyAPI\",\"Logo\":\"https://example.invalid/example-management-api-go.png\",\"ConfigFields\":[]},\"capabilities\":{\"management_api\":true}}")
 	case "management.register":
-		return okEnvelopeJSON("{\"routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/example-management-api-go/status\",\"Menu\":\"Management API\",\"Description\":\"Management API capability example.\"}]}")
+		return okEnvelopeJSON("{\"resources\":[{\"Path\":\"/status\",\"Menu\":\"Management API\",\"Description\":\"CPA exposes this menu resource under /v0/resource/plugins/example-management-api-go/status.\"}]}")
 	case "management.handle":
-		return okEnvelopeJSON("{\"StatusCode\":200,\"Headers\":{\"content-type\":[\"application/json\"]},\"Body\":\"eyJwbHVnaW4iOiJleGFtcGxlLW1hbmFnZW1lbnQtYXBpLWdvIn0=\"}")
+		return okEnvelopeJSON("{\"StatusCode\":200,\"Headers\":{\"content-type\":[\"text/html; charset=utf-8\"]},\"Body\":\"PCFkb2N0eXBlIGh0bWw+PHRpdGxlPk1hbmFnZW1lbnQgQVBJPC90aXRsZT48bWFpbj5NYW5hZ2VtZW50IEFQSSByZXNvdXJjZTwvbWFpbj4=\"}")
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}

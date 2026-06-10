@@ -14,12 +14,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // XAIAuth performs xAI OAuth discovery, token exchange, and refresh.
 type XAIAuth struct {
 	httpClient *http.Client
 }
+
+var xaiRefreshGroup singleflight.Group
 
 // NewXAIAuth creates an xAI OAuth helper using config proxy settings.
 func NewXAIAuth(cfg *config.Config) *XAIAuth {
@@ -180,6 +183,10 @@ func (a *XAIAuth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint
 	if strings.TrimSpace(refreshToken) == "" {
 		return nil, fmt.Errorf("xai token refresh: refresh token is required")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	refreshToken = strings.TrimSpace(refreshToken)
 	if strings.TrimSpace(tokenEndpoint) == "" {
 		discovery, errDiscover := a.Discover(ctx)
 		if errDiscover != nil {
@@ -187,10 +194,26 @@ func (a *XAIAuth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint
 		}
 		tokenEndpoint = discovery.TokenEndpoint
 	}
+	tokenEndpoint = strings.TrimSpace(tokenEndpoint)
+
+	result, err, _ := xaiRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+		return a.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken, tokenEndpoint)
+	})
+	if err != nil {
+		return nil, err
+	}
+	tokenData, ok := result.(*TokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("xai token refresh failed: invalid single-flight result")
+	}
+	return tokenData, nil
+}
+
+func (a *XAIAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken, tokenEndpoint string) (*TokenData, error) {
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"client_id":     {ClientID},
-		"refresh_token": {strings.TrimSpace(refreshToken)},
+		"refresh_token": {refreshToken},
 	}
 	return a.postTokenForm(ctx, tokenEndpoint, form)
 }

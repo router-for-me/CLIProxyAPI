@@ -1,7 +1,6 @@
 package pluginhost
 
 import (
-	"net/http"
 	"sort"
 	"strings"
 
@@ -29,7 +28,7 @@ type RegisteredPluginInfo struct {
 	Menus         []RegisteredPluginMenu
 }
 
-// RegisteredPluginMenu describes a plugin-owned GET Management API menu entry.
+// RegisteredPluginMenu describes a plugin-owned resource menu entry.
 type RegisteredPluginMenu struct {
 	Path        string
 	Menu        string
@@ -67,10 +66,7 @@ func (h *Host) registeredPluginMenus() map[string][]RegisteredPluginMenu {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, record := range h.managementRoutes {
-		if !strings.EqualFold(strings.TrimSpace(record.route.Method), http.MethodGet) {
-			continue
-		}
+	for _, record := range h.resourceRoutes {
 		menu := strings.TrimSpace(record.route.Menu)
 		if menu == "" {
 			continue

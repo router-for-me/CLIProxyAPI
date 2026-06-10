@@ -20,8 +20,8 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `thinking/`: thinking applier capability only.
 - `usage/`: usage observer capability only.
 - `cli/`: command-line capability only.
-- `management-api/`: Management API capability only.
-- `host-callback/`: minimal Management API route that demonstrates host callbacks.
+- `management-api/`: Management API and resource capability only.
+- `host-callback/`: minimal plugin resource that demonstrates host callbacks.
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
 
@@ -68,4 +68,6 @@ Artifacts are written to `examples/plugin/bin`.
 
 `protocol-format` uses a minimal executor because format declarations belong to executor capabilities.
 
-`host-callback` uses a minimal Management API route because host callbacks are invoked from plugin methods and are not standalone capabilities.
+`host-callback` uses a minimal plugin resource because host callbacks are invoked from plugin methods and are not standalone capabilities.
+
+Menu resources returned by `management.register` through the `resources` field are exposed by CPA under `/v0/resource/plugins/<pluginID>/...`. Authenticated plugin Management API routes remain under `/v0/management/...`.
