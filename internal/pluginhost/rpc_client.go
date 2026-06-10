@@ -432,10 +432,19 @@ func (a *rpcPluginAdapter) NormalizeRequest(ctx context.Context, req pluginapi.R
 	return callPlugin[pluginapi.PayloadResponse](ctx, a.client, pluginabi.MethodRequestNormalize, req)
 }
 
-func (a *rpcPluginAdapter) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+func (a *rpcPluginAdapter) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
 	defer closeCallback()
 	return callPlugin[pluginapi.RequestInterceptResponse](ctx, a.client, pluginabi.MethodRequestInterceptBefore, rpcRequestInterceptRequest{
+		RequestInterceptRequest: req,
+		HostCallbackID:          callbackID,
+	})
+}
+
+func (a *rpcPluginAdapter) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.RequestInterceptResponse](ctx, a.client, pluginabi.MethodRequestInterceptAfter, rpcRequestInterceptRequest{
 		RequestInterceptRequest: req,
 		HostCallbackID:          callbackID,
 	})

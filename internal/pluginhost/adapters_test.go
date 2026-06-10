@@ -1271,7 +1271,7 @@ func TestInterceptRequestChainsByPriorityAndHeaders(t *testing.T) {
 	)
 	headers := http.Header{"X-Remove": []string{"yes"}}
 
-	got := host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
 		SourceFormat:   "openai",
 		Model:          "normalized",
 		RequestedModel: "requested",
@@ -1288,6 +1288,31 @@ func TestInterceptRequestChainsByPriorityAndHeaders(t *testing.T) {
 	}
 	if headers.Get("X-Plugin") != "" {
 		t.Fatalf("input headers were mutated: %#v", headers)
+	}
+}
+
+func TestInterceptRequestAfterAuthPassesTargetFormat(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "after",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				if req.SourceFormat != "openai" || req.ToFormat != "codex" {
+					t.Fatalf("request formats = %q -> %q, want openai -> codex", req.SourceFormat, req.ToFormat)
+				}
+				return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|after")...)}, nil
+			}),
+		}},
+	})
+
+	got := host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		SourceFormat: "openai",
+		ToFormat:     "codex",
+		Model:        "gpt-5.4",
+		Body:         []byte("body"),
+	})
+
+	if string(got.Body) != "body|after" {
+		t.Fatalf("body = %q, want body|after", got.Body)
 	}
 }
 
@@ -1435,7 +1460,7 @@ func TestInterceptorsSkipErrorsAndFusePanics(t *testing.T) {
 		},
 	)
 
-	got := host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("body")})
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("body")})
 	if string(got.Body) != "body|success" {
 		t.Fatalf("body = %q, want body|success", got.Body)
 	}
@@ -1548,6 +1573,40 @@ func TestHasStreamInterceptorsReflectsActiveStreamInterceptors(t *testing.T) {
 	}
 }
 
+func TestHasRequestInterceptorsReflectsActiveRequestInterceptors(t *testing.T) {
+	responseOnly := newHostWithRecords(capabilityRecord{
+		id: "response",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ResponseInterceptor: responseInterceptorFunc{
+				interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+					return pluginapi.ResponseInterceptResponse{Body: req.Body}, nil
+				},
+			},
+		}},
+	})
+	if responseOnly.HasRequestInterceptors() {
+		t.Fatal("HasRequestInterceptors() = true, want false for response-only plugins")
+	}
+
+	requestHost := newHostWithRecords(capabilityRecord{
+		id: "request",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{Body: req.Body}, nil
+			}),
+		}},
+	})
+	if !requestHost.HasRequestInterceptors() {
+		t.Fatal("HasRequestInterceptors() = false, want true for request interceptors")
+	}
+	requestHost.mu.Lock()
+	requestHost.fused["request"] = "test fused"
+	requestHost.mu.Unlock()
+	if requestHost.HasRequestInterceptors() {
+		t.Fatal("HasRequestInterceptors() = true, want false after request plugin is fused")
+	}
+}
+
 func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 	t.Run("request", func(t *testing.T) {
 		headers := http.Header{"X-Request": []string{"input"}}
@@ -1587,7 +1646,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			}},
 		})
 
-		got := host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{
+		got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
 			Headers:  headers,
 			Body:     body,
 			Metadata: metadata,
@@ -1844,7 +1903,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			}},
 		})
 
-		_ = host.InterceptRequest(context.Background(), pluginapi.RequestInterceptRequest{Metadata: metadata})
+		_ = host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Metadata: metadata})
 
 		if structValue.Value != "original" || structValue.Items[0] != "original" {
 			t.Fatalf("struct pointer metadata mutated: %#v", structValue)

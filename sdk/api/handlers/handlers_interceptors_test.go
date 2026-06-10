@@ -18,9 +18,10 @@ import (
 )
 
 type handlerInterceptorTestHost struct {
-	interceptRequest     func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	interceptResponse    func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
-	interceptStreamChunk func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+	interceptRequestBeforeAuth func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	interceptRequestAfterAuth  func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	interceptResponse          func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
+	interceptStreamChunk       func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
 }
 
 type handlerInterceptorNoStreamTestHost struct {
@@ -31,9 +32,19 @@ func (h *handlerInterceptorNoStreamTestHost) HasStreamInterceptors() bool {
 	return false
 }
 
-func (h *handlerInterceptorTestHost) InterceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
-	if h != nil && h.interceptRequest != nil {
-		return h.interceptRequest(ctx, req)
+func (h *handlerInterceptorTestHost) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	if h != nil && h.interceptRequestBeforeAuth != nil {
+		return h.interceptRequestBeforeAuth(ctx, req)
+	}
+	return pluginapi.RequestInterceptResponse{
+		Headers: cloneHeader(req.Headers),
+		Body:    cloneBytes(req.Body),
+	}
+}
+
+func (h *handlerInterceptorTestHost) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	if h != nil && h.interceptRequestAfterAuth != nil {
+		return h.interceptRequestAfterAuth(ctx, req)
 	}
 	return pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
@@ -177,7 +188,7 @@ func TestHandlerRequestInterceptorRewritesExecutorRequest(t *testing.T) {
 	executor := &interceptorCaptureExecutor{}
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
 	handler.SetPluginHost(&handlerInterceptorTestHost{
-		interceptRequest: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 			if req.SourceFormat != "openai" || req.Model != model || req.RequestedModel != model {
 				t.Fatalf("unexpected request context: %#v", req)
 			}
@@ -233,7 +244,7 @@ func TestHandlerRequestInterceptorEmptyBodyKeepsOriginalPayload(t *testing.T) {
 	executor := &interceptorCaptureExecutor{}
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
 	handler.SetPluginHost(&handlerInterceptorTestHost{
-		interceptRequest: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 			return pluginapi.RequestInterceptResponse{
 				Headers: http.Header{"X-Plugin": []string{"empty-body"}},
 				Body:    []byte{},
@@ -255,6 +266,89 @@ func TestHandlerRequestInterceptorEmptyBodyKeepsOriginalPayload(t *testing.T) {
 	}
 	if gotOpts.Headers.Get("X-Plugin") != "empty-body" {
 		t.Fatalf("executor headers = %#v, want plugin header", gotOpts.Headers)
+	}
+}
+
+func TestHandlerRequestInterceptorAfterAuthRewritesExecutorRequest(t *testing.T) {
+	model := "handler-interceptor-after-auth-model"
+	executor := &interceptorCaptureExecutor{}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	var calls []string
+	var responseChecked bool
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			calls = append(calls, "before")
+			headers := cloneHeader(req.Headers)
+			if headers == nil {
+				headers = http.Header{}
+			}
+			headers.Set("X-Stage", "before")
+			return pluginapi.RequestInterceptResponse{
+				Headers: headers,
+				Body:    []byte(`{"stage":"before"}`),
+			}
+		},
+		interceptRequestAfterAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			calls = append(calls, "after")
+			if req.SourceFormat != "openai" || req.ToFormat != "codex" {
+				t.Fatalf("request formats = %q -> %q, want openai -> codex", req.SourceFormat, req.ToFormat)
+			}
+			if req.Model != model || req.RequestedModel != model {
+				t.Fatalf("request models = %q/%q, want %q/%q", req.Model, req.RequestedModel, model, model)
+			}
+			if string(req.Body) != `{"stage":"before"}` {
+				t.Fatalf("after-auth body = %q, want before-auth rewrite", req.Body)
+			}
+			headers := cloneHeader(req.Headers)
+			if headers == nil {
+				headers = http.Header{}
+			}
+			headers.Set("X-Stage", "after")
+			return pluginapi.RequestInterceptResponse{
+				Headers: headers,
+				Body:    []byte(`{"stage":"after"}`),
+			}
+		},
+		interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			responseChecked = true
+			if req.RequestHeaders.Get("X-Stage") != "after" {
+				t.Fatalf("response request headers = %#v, want after-auth header", req.RequestHeaders)
+			}
+			if string(req.OriginalRequest) != `{"stage":"after"}` {
+				t.Fatalf("response original request = %q, want after-auth body", req.OriginalRequest)
+			}
+			if string(req.RequestBody) != `{"stage":"after"}` {
+				t.Fatalf("response request body = %q, want after-auth body", req.RequestBody)
+			}
+			return pluginapi.ResponseInterceptResponse{
+				Headers: cloneHeader(req.ResponseHeaders),
+				Body:    cloneBytes(req.Body),
+			}
+		},
+	})
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q, want ok", body)
+	}
+	if fmt.Sprint(calls) != "[before after]" {
+		t.Fatalf("interceptor calls = %v, want [before after]", calls)
+	}
+	gotReq, gotOpts := executor.captured()
+	if string(gotReq.Payload) != `{"stage":"after"}` {
+		t.Fatalf("executor payload = %q, want after-auth body", gotReq.Payload)
+	}
+	if string(gotOpts.OriginalRequest) != `{"stage":"after"}` {
+		t.Fatalf("executor original request = %q, want after-auth body", gotOpts.OriginalRequest)
+	}
+	if gotOpts.Headers.Get("X-Stage") != "after" {
+		t.Fatalf("executor headers = %#v, want after-auth header", gotOpts.Headers)
+	}
+	if !responseChecked {
+		t.Fatal("response interceptor was not called")
 	}
 }
 
@@ -465,8 +559,42 @@ func TestHandlerStreamInterceptorRewritesAndDropsChunks(t *testing.T) {
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
 	var streamCalls int
 	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			headers := cloneHeader(req.Headers)
+			if headers == nil {
+				headers = http.Header{}
+			}
+			headers.Set("X-Stage", "before")
+			return pluginapi.RequestInterceptResponse{
+				Headers: headers,
+				Body:    []byte(`{"stage":"before-stream"}`),
+			}
+		},
+		interceptRequestAfterAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			if string(req.Body) != `{"stage":"before-stream"}` {
+				t.Fatalf("after-auth stream body = %q, want before-auth rewrite", req.Body)
+			}
+			headers := cloneHeader(req.Headers)
+			if headers == nil {
+				headers = http.Header{}
+			}
+			headers.Set("X-Stage", "after")
+			return pluginapi.RequestInterceptResponse{
+				Headers: headers,
+				Body:    []byte(`{"stage":"after-stream"}`),
+			}
+		},
 		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
 			streamCalls++
+			if req.RequestHeaders.Get("X-Stage") != "after" {
+				t.Fatalf("stream request headers = %#v, want after-auth header", req.RequestHeaders)
+			}
+			if string(req.OriginalRequest) != `{"stage":"after-stream"}` {
+				t.Fatalf("stream original request = %q, want after-auth body", req.OriginalRequest)
+			}
+			if string(req.RequestBody) != `{"stage":"after-stream"}` {
+				t.Fatalf("stream request body = %q, want after-auth body", req.RequestBody)
+			}
 			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
 				headers := cloneHeader(req.ResponseHeaders)
 				headers.Set("X-Stream", "plugin")

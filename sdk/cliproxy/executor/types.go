@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 
@@ -46,6 +47,39 @@ type Request struct {
 	Metadata map[string]any
 }
 
+// RequestAfterAuthInterceptor rewrites a request after credential selection and before executor translation.
+type RequestAfterAuthInterceptor func(context.Context, RequestAfterAuthInterceptRequest) RequestAfterAuthInterceptResponse
+
+// RequestAfterAuthInterceptRequest describes a selected-auth request before executor translation.
+type RequestAfterAuthInterceptRequest struct {
+	// SourceFormat is the original client protocol format.
+	SourceFormat sdktranslator.Format
+	// ToFormat is the selected upstream protocol format.
+	ToFormat sdktranslator.Format
+	// Model is the selected upstream model for this attempt.
+	Model string
+	// RequestedModel is the client-requested model before alias/model-pool rewriting.
+	RequestedModel string
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Headers contains the current upstream request headers.
+	Headers http.Header
+	// Body contains the current request payload.
+	Body []byte
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
+	Metadata map[string]any
+}
+
+// RequestAfterAuthInterceptResponse returns selected-auth request modifications.
+type RequestAfterAuthInterceptResponse struct {
+	// Headers replaces matching current request headers and preserves headers not mentioned here.
+	Headers http.Header
+	// Body replaces the current request body only when non-empty.
+	Body []byte
+	// ClearHeaders explicitly removes current request headers before Headers is applied.
+	ClearHeaders []string
+}
+
 // Options controls execution behavior for both streaming and non-streaming calls.
 type Options struct {
 	// Stream toggles streaming mode.
@@ -62,6 +96,8 @@ type Options struct {
 	SourceFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
+	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
+	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
 }
 
 // Response wraps either a full provider response or metadata for streaming flows.
