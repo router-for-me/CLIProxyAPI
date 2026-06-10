@@ -26,6 +26,10 @@ func TestBuilderBuildInjectsPluginHostScheduler(t *testing.T) {
 	if got != host {
 		t.Fatalf("plugin scheduler = %p, want host %p", got, host)
 	}
+	gotServerToolHandler := pluginServerToolHandlerFromManager(t, service.coreManager)
+	if gotServerToolHandler != host {
+		t.Fatalf("plugin server tool handler = %p, want host %p", gotServerToolHandler, host)
+	}
 }
 
 func TestServiceSyncPluginRuntimeConfigInjectsPluginHostScheduler(t *testing.T) {
@@ -43,6 +47,10 @@ func TestServiceSyncPluginRuntimeConfigInjectsPluginHostScheduler(t *testing.T) 
 	got := pluginSchedulerFromManager(t, service.coreManager)
 	if got != host {
 		t.Fatalf("plugin scheduler = %p, want host %p", got, host)
+	}
+	gotServerToolHandler := pluginServerToolHandlerFromManager(t, service.coreManager)
+	if gotServerToolHandler != host {
+		t.Fatalf("plugin server tool handler = %p, want host %p", gotServerToolHandler, host)
 	}
 }
 
@@ -64,6 +72,10 @@ func TestServiceSyncPluginRuntimeConfigClearsPluginSchedulerWithoutHost(t *testi
 	if got != nil {
 		t.Fatalf("plugin scheduler = %p, want nil", got)
 	}
+	gotServerToolHandler := pluginServerToolHandlerFromManager(t, service.coreManager)
+	if gotServerToolHandler != nil {
+		t.Fatalf("plugin server tool handler = %p, want nil", gotServerToolHandler)
+	}
 }
 
 func pluginSchedulerFromManager(t *testing.T, manager *coreauth.Manager) *pluginhost.Host {
@@ -82,6 +94,26 @@ func pluginSchedulerFromManager(t *testing.T, manager *coreauth.Manager) *plugin
 	host, ok := scheduler.(*pluginhost.Host)
 	if !ok {
 		t.Fatalf("pluginScheduler type = %T, want *pluginhost.Host", scheduler)
+	}
+	return host
+}
+
+func pluginServerToolHandlerFromManager(t *testing.T, manager *coreauth.Manager) *pluginhost.Host {
+	t.Helper()
+	if manager == nil {
+		t.Fatal("manager = nil")
+	}
+	value := reflect.ValueOf(manager).Elem().FieldByName("pluginServerToolHandler")
+	if !value.IsValid() {
+		t.Fatal("pluginServerToolHandler field not found")
+	}
+	handler := reflect.NewAt(value.Type(), unsafe.Pointer(value.UnsafeAddr())).Elem().Interface()
+	if handler == nil {
+		return nil
+	}
+	host, ok := handler.(*pluginhost.Host)
+	if !ok {
+		t.Fatalf("pluginServerToolHandler type = %T, want *pluginhost.Host", handler)
 	}
 	return host
 }

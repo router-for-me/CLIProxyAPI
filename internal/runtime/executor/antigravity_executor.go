@@ -363,7 +363,78 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       httpReq.URL.String(),
+		Method:    httpReq.Method,
+		Headers:   httpReq.Header.Clone(),
+		Body:      antigravityRequestBodyForLog(httpReq),
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		return nil, errDo
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.Body != nil {
+		httpResp.Body = &antigravityRequestLogReadCloser{ctx: ctx, cfg: e.cfg, body: httpResp.Body}
+	}
+	return httpResp, nil
+}
+
+func antigravityRequestBodyForLog(req *http.Request) []byte {
+	if req == nil || req.GetBody == nil {
+		return nil
+	}
+	body, errBody := req.GetBody()
+	if errBody != nil || body == nil {
+		return nil
+	}
+	defer func() {
+		if errClose := body.Close(); errClose != nil {
+			log.WithError(errClose).Debug("antigravity executor: close request log body")
+		}
+	}()
+	raw, errRead := io.ReadAll(body)
+	if errRead != nil {
+		return nil
+	}
+	return raw
+}
+
+type antigravityRequestLogReadCloser struct {
+	ctx  context.Context
+	cfg  *config.Config
+	body io.ReadCloser
+}
+
+func (r *antigravityRequestLogReadCloser) Read(p []byte) (int, error) {
+	n, errRead := r.body.Read(p)
+	if n > 0 {
+		helps.AppendAPIResponseChunk(r.ctx, r.cfg, bytes.Clone(p[:n]))
+	}
+	if errRead != nil && !errors.Is(errRead, io.EOF) {
+		helps.RecordAPIResponseError(r.ctx, r.cfg, errRead)
+	}
+	return n, errRead
+}
+
+func (r *antigravityRequestLogReadCloser) Close() error {
+	if r == nil || r.body == nil {
+		return nil
+	}
+	return r.body.Close()
 }
 
 func injectEnabledCreditTypes(payload []byte) []byte {

@@ -131,6 +131,15 @@ type pluginSchedulerState interface {
 	HasScheduler() bool
 }
 
+type PluginServerToolHandler interface {
+	HandleServerTool(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolResponse, bool, error)
+	HandleServerToolStream(context.Context, pluginapi.ServerToolRequest) (pluginapi.ServerToolStreamResponse, bool, error)
+}
+
+type pluginServerToolHandlerState interface {
+	HasServerToolHandler() bool
+}
+
 // StoppableSelector is an optional interface for selectors that hold resources.
 // Selectors that implement this interface will have Stop called during shutdown.
 type StoppableSelector interface {
@@ -171,6 +180,8 @@ type Manager struct {
 	scheduler *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
+	// pluginServerToolHandler runs outside m.mu after auth preparation and before native execution.
+	pluginServerToolHandler PluginServerToolHandler
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth
@@ -240,6 +251,15 @@ func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) SetPluginServerToolHandler(handler PluginServerToolHandler) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.pluginServerToolHandler = handler
+	m.mu.Unlock()
+}
+
 func (m *Manager) hasPluginScheduler() bool {
 	if m == nil {
 		return false
@@ -254,6 +274,22 @@ func (m *Manager) hasPluginScheduler() bool {
 		return state.HasScheduler()
 	}
 	return true
+}
+
+func (m *Manager) pluginServerTool() PluginServerToolHandler {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	handler := m.pluginServerToolHandler
+	m.mu.RUnlock()
+	if handler == nil {
+		return nil
+	}
+	if state, ok := handler.(pluginServerToolHandlerState); ok && !state.HasServerToolHandler() {
+		return nil
+	}
+	return handler
 }
 
 func isBuiltInSelector(selector Selector) bool {
@@ -1130,19 +1166,276 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
+func (m *Manager) handlePluginServerTool(ctx context.Context, handler PluginServerToolHandler, executor ProviderExecutor, auth *Auth, provider, routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool, error) {
+	if handler == nil {
+		return cliproxyexecutor.Response{}, false, nil
+	}
+	pluginReq := buildServerToolRequest(executor, auth, provider, routeModel, req, opts)
+	resp, handled, errHandle := handler.HandleServerTool(ctx, pluginReq)
+	if errHandle != nil {
+		return cliproxyexecutor.Response{}, handled, errHandle
+	}
+	if !handled || !resp.Handled {
+		return cliproxyexecutor.Response{}, false, nil
+	}
+	return cliproxyexecutor.Response{
+		Payload:  bytes.Clone(resp.Payload),
+		Headers:  cloneHTTPHeader(resp.Headers),
+		Metadata: cloneSchedulerAnyMap(resp.Metadata),
+	}, true, nil
+}
+
+func (m *Manager) handlePluginServerToolStream(ctx context.Context, handler PluginServerToolHandler, executor ProviderExecutor, auth *Auth, provider, routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool, error) {
+	if handler == nil {
+		return nil, false, nil
+	}
+	pluginReq := buildServerToolRequest(executor, auth, provider, routeModel, req, opts)
+	resp, handled, errHandle := handler.HandleServerToolStream(ctx, pluginReq)
+	if errHandle != nil {
+		return nil, handled, errHandle
+	}
+	if !handled || !resp.Handled {
+		return nil, false, nil
+	}
+	return &cliproxyexecutor.StreamResult{
+		Headers: cloneHTTPHeader(resp.Headers),
+		Chunks:  mapServerToolStreamChunks(ctx, resp.Chunks),
+	}, true, nil
+}
+
+func buildServerToolRequest(executor ProviderExecutor, auth *Auth, provider, routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) pluginapi.ServerToolRequest {
+	authID := ""
+	authProvider := ""
+	if auth != nil {
+		authID = auth.ID
+		authProvider = auth.Provider
+	}
+	metadata := mergeServerToolMetadata(req.Metadata, opts.Metadata)
+	if strings.EqualFold(strings.TrimSpace(provider), "antigravity") {
+		webSearchModelIDs := registry.AntigravityWebSearchModels()
+		if len(webSearchModelIDs) > 0 {
+			if metadata == nil {
+				metadata = make(map[string]any, 2)
+			}
+			metadata["antigravity_web_search_model_ids"] = append([]string(nil), webSearchModelIDs...)
+			metadata["antigravity_web_search_backend_model"] = webSearchModelIDs[0]
+		}
+	}
+	return pluginapi.ServerToolRequest{
+		Provider:        strings.ToLower(strings.TrimSpace(provider)),
+		AuthID:          authID,
+		AuthProvider:    authProvider,
+		RouteModel:      routeModel,
+		UpstreamModel:   req.Model,
+		SourceFormat:    opts.SourceFormat.String(),
+		Stream:          opts.Stream,
+		Headers:         cloneHTTPHeader(opts.Headers),
+		OriginalRequest: bytes.Clone(opts.OriginalRequest),
+		Payload:         bytes.Clone(req.Payload),
+		Metadata:        metadata,
+		StorageJSON:     serverToolStorageJSONFromAuth(auth),
+		AuthMetadata:    cloneSchedulerAnyMap(authMetadataForServerTool(auth)),
+		AuthAttributes:  cloneStringMapForServerTool(authAttributesForServerTool(auth)),
+		HTTPClient:      executorServerToolHTTPClient{executor: executor, auth: auth},
+	}
+}
+
+func mergeServerToolMetadata(reqMetadata, optsMetadata map[string]any) map[string]any {
+	if len(reqMetadata) == 0 && len(optsMetadata) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(reqMetadata)+len(optsMetadata))
+	for key, value := range reqMetadata {
+		out[key] = value
+	}
+	for key, value := range optsMetadata {
+		out[key] = value
+	}
+	return out
+}
+
+func serverToolStorageJSONFromAuth(auth *Auth) []byte {
+	if auth == nil {
+		return nil
+	}
+	if rawProvider, okRaw := auth.Storage.(interface{ RawJSON() []byte }); okRaw {
+		return bytes.Clone(rawProvider.RawJSON())
+	}
+	if len(auth.Metadata) == 0 {
+		return nil
+	}
+	data, errMarshal := json.Marshal(auth.Metadata)
+	if errMarshal != nil {
+		return nil
+	}
+	return data
+}
+
+func authMetadataForServerTool(auth *Auth) map[string]any {
+	if auth == nil {
+		return nil
+	}
+	return auth.Metadata
+}
+
+func authAttributesForServerTool(auth *Auth) map[string]string {
+	if auth == nil {
+		return nil
+	}
+	return auth.Attributes
+}
+
+func cloneStringMapForServerTool(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func mapServerToolStreamChunks(ctx context.Context, in <-chan pluginapi.ServerToolStreamChunk) <-chan cliproxyexecutor.StreamChunk {
+	out := make(chan cliproxyexecutor.StreamChunk)
+	if in == nil {
+		close(out)
+		return out
+	}
+	go func() {
+		defer close(out)
+		for {
+			var chunk pluginapi.ServerToolStreamChunk
+			var ok bool
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case chunk, ok = <-in:
+				}
+			} else {
+				chunk, ok = <-in
+			}
+			if !ok {
+				return
+			}
+			mapped := cliproxyexecutor.StreamChunk{Payload: bytes.Clone(chunk.Payload), Err: chunk.Err}
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case out <- mapped:
+				}
+			} else {
+				out <- mapped
+			}
+		}
+	}()
+	return out
+}
+
+type executorServerToolHTTPClient struct {
+	executor ProviderExecutor
+	auth     *Auth
+}
+
+func (c executorServerToolHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	if c.executor == nil {
+		return pluginapi.HTTPResponse{}, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	httpReq, errBuild := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(req.Body))
+	if errBuild != nil {
+		return pluginapi.HTTPResponse{}, errBuild
+	}
+	httpReq.Header = cloneHTTPHeader(req.Headers)
+	resp, errDo := c.executor.HttpRequest(ctx, c.auth, httpReq)
+	if errDo != nil {
+		return pluginapi.HTTPResponse{}, errDo
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Debug("failed to close plugin server tool HTTP response")
+		}
+	}()
+	body, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return pluginapi.HTTPResponse{}, errRead
+	}
+	return pluginapi.HTTPResponse{
+		StatusCode: resp.StatusCode,
+		Headers:    cloneHTTPHeader(resp.Header),
+		Body:       body,
+	}, nil
+}
+
+func (c executorServerToolHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	if c.executor == nil {
+		return pluginapi.HTTPStreamResponse{}, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	httpReq, errBuild := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(req.Body))
+	if errBuild != nil {
+		return pluginapi.HTTPStreamResponse{}, errBuild
+	}
+	httpReq.Header = cloneHTTPHeader(req.Headers)
+	resp, errDo := c.executor.HttpRequest(ctx, c.auth, httpReq)
+	if errDo != nil {
+		return pluginapi.HTTPStreamResponse{}, errDo
+	}
+	chunks := make(chan pluginapi.HTTPStreamChunk)
+	go func() {
+		defer close(chunks)
+		defer func() {
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.WithError(errClose).Debug("failed to close plugin server tool HTTP stream response")
+			}
+		}()
+		buf := make([]byte, 32*1024)
+		for {
+			n, errRead := resp.Body.Read(buf)
+			if n > 0 {
+				payload := bytes.Clone(buf[:n])
+				if ctx != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case chunks <- pluginapi.HTTPStreamChunk{Payload: payload}:
+					}
+				} else {
+					chunks <- pluginapi.HTTPStreamChunk{Payload: payload}
+				}
+			}
+			if errRead != nil {
+				if errRead != io.EOF {
+					chunks <- pluginapi.HTTPStreamChunk{Err: errRead}
+				}
+				return
+			}
+		}
+	}()
+	return pluginapi.HTTPStreamResponse{
+		StatusCode: resp.StatusCode,
+		Headers:    cloneHTTPHeader(resp.Header),
+		Chunks:     chunks,
+	}, nil
+}
+
 func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, execModels []string, pooled bool) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	var lastErr error
+	serverToolHandler := m.pluginServerTool()
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
 		execOpts := opts
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+		streamResult, handledByPlugin, errStream := m.handlePluginServerToolStream(ctx, serverToolHandler, executor, auth, provider, routeModel, execReq, execOpts)
+		if !handledByPlugin && errStream == nil {
+			streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
+		}
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1808,6 +2101,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = errPrepare
 			continue
 		}
+		serverToolHandler := m.pluginServerTool()
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
@@ -1815,6 +2109,33 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq.Model = upstreamModel
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			if serverToolHandler != nil {
+				resp, handled, errPlugin := m.handlePluginServerTool(execCtx, serverToolHandler, executor, auth, provider, routeModel, execReq, execOpts)
+				if errPlugin != nil {
+					if errCtx := execCtx.Err(); errCtx != nil {
+						return cliproxyexecutor.Response{}, errCtx
+					}
+					if handled {
+						result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: &Error{Message: errPlugin.Error()}}
+						if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPlugin); ok && se != nil {
+							result.Error.HTTPStatus = se.StatusCode()
+						}
+						if ra := retryAfterFromError(errPlugin); ra != nil {
+							result.RetryAfter = ra
+						}
+						m.MarkResult(execCtx, result)
+						if isRequestInvalidError(errPlugin) {
+							return cliproxyexecutor.Response{}, errPlugin
+						}
+						authErr = errPlugin
+						continue
+					}
+				}
+				if handled {
+					m.MarkResult(execCtx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+					return resp, nil
+				}
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {

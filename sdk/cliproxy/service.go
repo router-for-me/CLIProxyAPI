@@ -191,6 +191,7 @@ func (s *Service) syncPluginRuntimeConfig(ctx context.Context) bool {
 	}
 	if s.coreManager != nil {
 		s.coreManager.SetPluginScheduler(s.pluginHost)
+		s.coreManager.SetPluginServerToolHandler(s.pluginHost)
 	}
 	s.registerPluginAuthParser()
 	if s.pluginHost == nil {

@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -149,6 +152,86 @@ func TestAntigravityPrepareRequestAuth_FetchesMissingProjectID(t *testing.T) {
 	}
 	if got, ok := updated.Metadata["project_id"].(string); !ok || got != "fetched-project" {
 		t.Fatalf("updated auth metadata project_id = %v, want fetched-project", updated.Metadata["project_id"])
+	}
+}
+
+func TestAntigravityHttpRequestCapturesRequestLog(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	ctx = context.WithValue(ctx, "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q, want Bearer token", got)
+		}
+		raw, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		if !strings.Contains(string(raw), `"googleSearch":{}`) {
+			t.Fatalf("request body missing googleSearch: %s", string(raw))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"response":{"ok":true}}`)),
+		}, nil
+	}))
+
+	executor := NewAntigravityExecutor(&config.Config{SDKConfig: config.SDKConfig{RequestLog: true}})
+	auth := &cliproxyauth.Auth{
+		ID:       "antigravity-auth",
+		Provider: "antigravity",
+		Label:    "label@example.com",
+		Metadata: map[string]any{
+			"access_token": "token",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent", strings.NewReader(`{"tools":[{"googleSearch":{}}]}`))
+	if errReq != nil {
+		t.Fatalf("new request: %v", errReq)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, errDo := executor.HttpRequest(ctx, auth, req)
+	if errDo != nil {
+		t.Fatalf("HttpRequest error: %v", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Fatalf("close response body: %v", errClose)
+		}
+	}()
+	body, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		t.Fatalf("read response body: %v", errRead)
+	}
+	if string(body) != `{"response":{"ok":true}}` {
+		t.Fatalf("response body = %s", string(body))
+	}
+
+	reqLog, _ := ginCtx.Get("API_REQUEST")
+	reqLogBytes, ok := reqLog.([]byte)
+	if !ok {
+		t.Fatalf("API_REQUEST log = %T, want []byte", reqLog)
+	}
+	if !strings.Contains(string(reqLogBytes), `/v1internal:generateContent`) {
+		t.Fatalf("request log missing upstream URL: %s", string(reqLogBytes))
+	}
+	if !strings.Contains(string(reqLogBytes), `"googleSearch":{}`) {
+		t.Fatalf("request log missing request body: %s", string(reqLogBytes))
+	}
+	respLog, _ := ginCtx.Get("API_RESPONSE")
+	respLogBytes, ok := respLog.([]byte)
+	if !ok {
+		t.Fatalf("API_RESPONSE log = %T, want []byte", respLog)
+	}
+	if !strings.Contains(string(respLogBytes), `Status: 200`) {
+		t.Fatalf("response log missing status: %s", string(respLogBytes))
+	}
+	if !strings.Contains(string(respLogBytes), `{"response":{"ok":true}}`) {
+		t.Fatalf("response log missing body: %s", string(respLogBytes))
 	}
 }
 
