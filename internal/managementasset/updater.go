@@ -81,16 +81,8 @@ func runAutoUpdater(ctx context.Context) {
 
 	runOnce := func() {
 		cfg := currentConfigPtr.Load()
-		if cfg == nil {
-			log.Debug("management asset auto-updater skipped: config not yet available")
-			return
-		}
-		if cfg.RemoteManagement.DisableControlPanel {
-			log.Debug("management asset auto-updater skipped: control panel disabled")
-			return
-		}
-		if cfg.RemoteManagement.DisableAutoUpdatePanel {
-			log.Debug("management asset auto-updater skipped: disable-auto-update-panel is enabled")
+		if reason, skip := autoUpdateSkipReason(cfg); skip {
+			log.Debugf("management asset auto-updater skipped: %s", reason)
 			return
 		}
 
@@ -109,6 +101,22 @@ func runAutoUpdater(ctx context.Context) {
 			runOnce()
 		}
 	}
+}
+
+func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
+	if cfg == nil {
+		return "config not yet available", true
+	}
+	if cfg.Home.Enabled {
+		return "cluster mode enabled", true
+	}
+	if cfg.RemoteManagement.DisableControlPanel {
+		return "control panel disabled", true
+	}
+	if cfg.RemoteManagement.DisableAutoUpdatePanel {
+		return "disable-auto-update-panel is enabled", true
+	}
+	return "", false
 }
 
 func newHTTPClient(proxyURL string) *http.Client {
