@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 type oauthCallbackRequest struct {
@@ -79,7 +80,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 	if sessionStatus != "" {
-		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": sessionStatus})
 		return
 	}
 	if !strings.EqualFold(sessionProvider, canonicalProvider) {
@@ -89,9 +90,15 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 
 	if _, errWrite := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, canonicalProvider, state, code, errMsg); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
+			_, status, okSession := GetOAuthSession(state)
+			if okSession && status != "" {
+				c.JSON(http.StatusConflict, gin.H{"status": "error", "error": status})
+				return
+			}
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 			return
 		}
+		log.WithError(errWrite).Error("failed to persist oauth callback")
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to persist oauth callback"})
 		return
 	}

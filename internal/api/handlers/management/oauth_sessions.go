@@ -16,15 +16,23 @@ const (
 	maxOAuthStateLength = 128
 )
 
+const (
+	oauthSessionSourceBuiltin = "builtin"
+	oauthSessionSourcePlugin  = "plugin"
+)
+
 var (
 	errInvalidOAuthState      = errors.New("invalid oauth state")
 	errUnsupportedOAuthFlow   = errors.New("unsupported oauth provider")
 	errOAuthSessionNotPending = errors.New("oauth session is not pending")
+	errOAuthSessionExists     = errors.New("oauth session already exists")
 )
 
 type oauthSession struct {
 	Provider  string
 	Status    string
+	Source    string
+	Metadata  map[string]any
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -68,9 +76,39 @@ func (s *oauthSessionStore) Register(state, provider string) {
 	s.sessions[state] = oauthSession{
 		Provider:  provider,
 		Status:    "",
+		Source:    oauthSessionSourceBuiltin,
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
+}
+
+func (s *oauthSessionStore) RegisterPlugin(state, provider string, metadata map[string]any) error {
+	state = strings.TrimSpace(state)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if state == "" || provider == "" {
+		return fmt.Errorf("%w: empty state or provider", errInvalidOAuthState)
+	}
+	if errState := ValidateOAuthState(state); errState != nil {
+		return errState
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	if _, ok := s.sessions[state]; ok {
+		return errOAuthSessionExists
+	}
+	s.sessions[state] = oauthSession{
+		Provider:  provider,
+		Status:    "",
+		Source:    oauthSessionSourcePlugin,
+		Metadata:  cloneOAuthSessionMetadata(metadata),
+		CreatedAt: now,
+		ExpiresAt: now.Add(s.ttl),
+	}
+	return nil
 }
 
 func (s *oauthSessionStore) SetError(state, message string) {
@@ -111,11 +149,12 @@ func (s *oauthSessionStore) Complete(state string) {
 	delete(s.sessions, state)
 }
 
-func (s *oauthSessionStore) CompleteProvider(provider string) int {
+func (s *oauthSessionStore) CompleteProvider(provider string, source string) int {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
 		return 0
 	}
+	source = strings.TrimSpace(source)
 	now := time.Now()
 
 	s.mu.Lock()
@@ -124,7 +163,7 @@ func (s *oauthSessionStore) CompleteProvider(provider string) int {
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if strings.EqualFold(session.Provider, provider) {
+		if strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
 			delete(s.sessions, state)
 			removed++
 		}
@@ -141,6 +180,7 @@ func (s *oauthSessionStore) Get(state string) (oauthSession, bool) {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
+	session.Metadata = cloneOAuthSessionMetadata(session.Metadata)
 	return session, ok
 }
 
@@ -160,22 +200,44 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	if session.Status != "" {
 		return false
 	}
+	if session.Source == oauthSessionSourcePlugin {
+		return false
+	}
 	if provider == "" {
 		return true
 	}
 	return strings.EqualFold(session.Provider, provider)
 }
 
+func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
+
+func RegisterPluginOAuthSession(state, provider string, metadata map[string]any) error {
+	return oauthSessions.RegisterPlugin(state, provider, metadata)
+}
 
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
 
 func CompleteOAuthSessionsByProvider(provider string) int {
-	return oauthSessions.CompleteProvider(provider)
+	return oauthSessions.CompleteProvider(provider, oauthSessionSourceBuiltin)
+}
+
+func CompletePluginOAuthSessionsByProvider(provider string) int {
+	return oauthSessions.CompleteProvider(provider, oauthSessionSourcePlugin)
 }
 
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
@@ -186,8 +248,31 @@ func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	return session.Provider, session.Status, true
 }
 
+func GetOAuthSessionDetails(state string) (provider string, status string, isPlugin bool, metadata map[string]any, ok bool) {
+	session, ok := oauthSessions.Get(state)
+	if !ok {
+		return "", "", false, nil, false
+	}
+	return session.Provider, session.Status, session.Source == oauthSessionSourcePlugin, cloneOAuthSessionMetadata(session.Metadata), true
+}
+
 func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)
+}
+
+func oauthSessionErrorWithCause(message string, cause error) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "Authentication failed"
+	}
+	if cause == nil {
+		return message
+	}
+	detail := strings.TrimSpace(cause.Error())
+	if detail == "" {
+		return message
+	}
+	return message + ": " + detail
 }
 
 func ValidateOAuthState(state string) error {
@@ -227,6 +312,8 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "gemini", nil
 	case "antigravity", "anti-gravity":
 		return "antigravity", nil
+	case "xai", "x-ai", "x.ai", "grok":
+		return "xai", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
@@ -252,6 +339,9 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
 	filePath := filepath.Join(authDir, fileName)
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		return "", fmt.Errorf("create oauth callback dir: %w", err)
+	}
 	payload := oauthCallbackFilePayload{
 		Code:  strings.TrimSpace(code),
 		State: strings.TrimSpace(state),

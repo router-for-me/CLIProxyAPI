@@ -8,7 +8,8 @@
 //
 // Flags:
 //
-//	--auths-dir <path>  Directory containing auth JSON files (default: "auths")
+//	--auths-dir <path>  Directory containing auth JSON files (default: config auth-dir)
+//	--config    <path>  Config file path                 (default: "config.yaml")
 //	--output    <path>  Output JSON file path             (default: "antigravity_models.json")
 //	--pretty            Pretty-print the output JSON      (default: true)
 package main
@@ -25,11 +26,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -66,22 +69,48 @@ type modelEntry struct {
 
 func main() {
 	var authsDir string
+	var configPath string
 	var outputPath string
 	var pretty bool
 
-	flag.StringVar(&authsDir, "auths-dir", "auths", "Directory containing auth JSON files")
+	flag.StringVar(&authsDir, "auths-dir", "", "Directory containing auth JSON files (overrides config auth-dir)")
+	flag.StringVar(&configPath, "config", "", "Configure File Path")
 	flag.StringVar(&outputPath, "output", "antigravity_models.json", "Output JSON file path")
 	flag.BoolVar(&pretty, "pretty", true, "Pretty-print the output JSON")
 	flag.Parse()
+	authsDirOverridden := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "auths-dir" {
+			authsDirOverridden = true
+		}
+	})
 
-	// Resolve relative paths against the working directory.
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
 		os.Exit(1)
 	}
-	if !filepath.IsAbs(authsDir) {
+
+	if strings.TrimSpace(configPath) == "" {
+		configPath = filepath.Join(wd, "config.yaml")
+	}
+	cfg, err := config.LoadConfigOptional(configPath, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to load config file %s: %v\n", configPath, err)
+		os.Exit(1)
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	if !authsDirOverridden {
+		authsDir = cfg.AuthDir
+	} else if strings.TrimSpace(authsDir) != "" && !strings.HasPrefix(strings.TrimSpace(authsDir), "~") && !filepath.IsAbs(authsDir) {
 		authsDir = filepath.Join(wd, authsDir)
+	}
+	if authsDir, err = util.ResolveAuthDir(authsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
+		os.Exit(1)
 	}
 	if !filepath.IsAbs(outputPath) {
 		outputPath = filepath.Join(wd, outputPath)

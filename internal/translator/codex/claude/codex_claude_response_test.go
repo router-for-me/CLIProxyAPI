@@ -68,6 +68,55 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamCyberPolicyError(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null},"sequence_number":3}`), &param)
+	if len(outputs) != 1 {
+		t.Fatalf("expected one error chunk, got %d: %q", len(outputs), outputs)
+	}
+	out := string(outputs[0])
+	if !strings.Contains(out, "event: error\n") {
+		t.Fatalf("expected Claude SSE error event, got: %q", out)
+	}
+
+	payload, ok := firstClaudeStreamPayloadForEvent(out, "error")
+	if !ok {
+		t.Fatalf("missing error event payload: %q", out)
+	}
+	if got := payload.Get("type").String(); got != "error" {
+		t.Fatalf("type = %q, want error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.message").String(); got != "This content was flagged for possible cybersecurity risk." {
+		t.Fatalf("error.message = %q. Payload: %s", got, payload.Raw)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamErrorTypeFallbackMessage(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{},"error_type":"overloaded_error"}`), &param)
+	if len(outputs) != 1 {
+		t.Fatalf("expected one error chunk, got %d: %q", len(outputs), outputs)
+	}
+
+	payload, ok := firstClaudeStreamPayloadForEvent(string(outputs[0]), "error")
+	if !ok {
+		t.Fatalf("missing error event payload: %q", outputs[0])
+	}
+	if got := payload.Get("error.type").String(); got != "overloaded_error" {
+		t.Fatalf("error.type = %q, want overloaded_error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.message").String(); got != "overloaded_error" {
+		t.Fatalf("error.message = %q, want overloaded_error. Payload: %s", got, payload.Raw)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillIncludesSignatureField(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
@@ -459,6 +508,70 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 	}
 }
 
+func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
+	longCallID := "call_" + strings.Repeat("a", 62)
+	if len(longCallID) <= 64 {
+		t.Fatalf("test setup error: longCallID length = %d, want > 64", len(longCallID))
+	}
+
+	t.Run("stream", func(t *testing.T) {
+		ctx := context.Background()
+		originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+		var param any
+
+		outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"`+longCallID+`","name":"lookup"}}`), &param)
+
+		toolID := ""
+		for _, out := range outputs {
+			for _, line := range strings.Split(string(out), "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+				if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "tool_use" {
+					toolID = data.Get("content_block.id").String()
+				}
+			}
+		}
+
+		if toolID == "" {
+			t.Fatalf("missing stream tool_use block. Outputs=%q", outputs)
+		}
+		if len(toolID) > 64 {
+			t.Fatalf("stream tool_use id length = %d, want <= 64: %q", len(toolID), toolID)
+		}
+		if toolID == longCallID {
+			t.Fatalf("stream tool_use id was not shortened: %q", toolID)
+		}
+	})
+
+	t.Run("nonstream", func(t *testing.T) {
+		ctx := context.Background()
+		originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+		response := []byte(`{
+			"type":"response.completed",
+			"response":{
+				"id":"resp_1",
+				"model":"gpt-5",
+				"usage":{"input_tokens":1,"output_tokens":1},
+				"output":[{"type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{}"}]
+			}
+		}`)
+
+		out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+		toolID := gjson.GetBytes(out, "content.0.id").String()
+		if toolID == "" {
+			t.Fatalf("missing nonstream tool_use id. Output: %s", string(out))
+		}
+		if len(toolID) > 64 {
+			t.Fatalf("nonstream tool_use id length = %d, want <= 64: %q", len(toolID), toolID)
+		}
+		if toolID == longCallID {
+			t.Fatalf("nonstream tool_use id was not shortened: %q", toolID)
+		}
+	})
+}
+
 func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -659,6 +772,21 @@ func findClaudeStreamMessageDelta(outputs [][]byte) (gjson.Result, bool) {
 				return data, true
 			}
 		}
+	}
+	return gjson.Result{}, false
+}
+
+func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool) {
+	var currentEvent string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if currentEvent != event || !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		return gjson.Parse(strings.TrimPrefix(line, "data: ")), true
 	}
 	return gjson.Result{}, false
 }

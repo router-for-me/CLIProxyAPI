@@ -12,6 +12,8 @@ logs/*
 conv/*
 temp/*
 refs/*
+plugins/*
+examples/plugin/bin/*
 
 # Storage backends
 pgstore/*
@@ -50,3 +52,4 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+.gocache/

@@ -6,11 +6,13 @@
 package gemini
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -98,42 +100,211 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
-	// Gemini-specific handling for non-Claude models:
-	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
-	// - Also mark thinking parts with the same sentinel when present (we keep the parts; we only annotate them).
-	if !strings.Contains(modelName, "claude") {
-		const skipSentinel = "skip_thought_signature_validator"
-
-		gjson.GetBytes(rawJSON, "request.contents").ForEach(func(contentIdx, content gjson.Result) bool {
-			if content.Get("role").String() == "model" {
-				// First pass: collect indices of thinking parts to mark with skip sentinel
-				var thinkingIndicesToSkipSignature []int64
-				content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
-					// Collect indices of thinking blocks to mark with skip sentinel
-					if part.Get("thought").Bool() {
-						thinkingIndicesToSkipSignature = append(thinkingIndicesToSkipSignature, partIdx.Int())
-					}
-					// Add skip sentinel to functionCall parts
-					if part.Get("functionCall").Exists() {
-						existingSig := part.Get("thoughtSignature").String()
-						if existingSig == "" || len(existingSig) < 50 {
-							rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), partIdx.Int()), skipSentinel)
-						}
-					}
-					return true
-				})
-
-				// Add skip_thought_signature_validator sentinel to thinking blocks in reverse order to preserve indices
-				for i := len(thinkingIndicesToSkipSignature) - 1; i >= 0; i-- {
-					idx := thinkingIndicesToSkipSignature[i]
-					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), idx), skipSentinel)
-				}
-			}
-			return true
-		})
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		rawJSON = sanitizeAntigravityClaudeGeminiRequestSignatures(modelName, rawJSON)
+	} else {
+		rawJSON = signature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
 	}
 
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
+}
+
+func sanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
+	var root map[string]any
+	if err := json.Unmarshal(rawJSON, &root); err != nil {
+		log.WithError(err).Debug("antigravity gemini translator: failed to parse request for Claude signature sanitize")
+		return rawJSON
+	}
+
+	request, ok := root["request"].(map[string]any)
+	if !ok {
+		return rawJSON
+	}
+	contents, ok := request["contents"].([]any)
+	if !ok {
+		return rawJSON
+	}
+
+	changed := false
+	rewrittenContents := make([]any, 0, len(contents))
+	for contentIndex, contentValue := range contents {
+		content, ok := contentValue.(map[string]any)
+		if !ok {
+			rewrittenContents = append(rewrittenContents, contentValue)
+			continue
+		}
+
+		parts, ok := content["parts"].([]any)
+		if !ok {
+			rewrittenContents = append(rewrittenContents, content)
+			continue
+		}
+
+		isModelTurn := content["role"] == "model"
+		rewrittenParts := make([]any, 0, len(parts))
+		for partIndex, partValue := range parts {
+			part, ok := partValue.(map[string]any)
+			if !ok {
+				rewrittenParts = append(rewrittenParts, partValue)
+				continue
+			}
+
+			rawSignature, hasSignature := antigravityClaudeGeminiPartThoughtSignature(part)
+			if hasFunctionResponsePart(part) {
+				if hasSignature {
+					changed = true
+					deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
+					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_signature", "functionResponse parts cannot replay Claude thinking signatures", contentIndex, partIndex, rawSignature)
+				}
+				rewrittenParts = append(rewrittenParts, part)
+				continue
+			}
+			if !isModelTurn {
+				if hasSignature {
+					changed = true
+					deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
+					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_signature", "non-model parts cannot replay Claude thinking signatures", contentIndex, partIndex, rawSignature)
+				}
+				rewrittenParts = append(rewrittenParts, part)
+				continue
+			}
+
+			if part["thought"] == true {
+				normalized, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(rawSignature)
+				if !compatible {
+					changed = true
+					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_thinking_block", "missing_or_incompatible_signature", contentIndex, partIndex, rawSignature)
+					continue
+				}
+				if text, _ := part["text"].(string); strings.TrimSpace(text) == "" {
+					changed = true
+					logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_thinking_block", "empty_thinking_text", contentIndex, partIndex, rawSignature)
+					continue
+				}
+				if normalized != rawSignature {
+					changed = true
+					logAntigravityClaudeGeminiSignatureSanitize(modelName, "normalize_signature", "compatible_claude_signature", contentIndex, partIndex, rawSignature)
+				}
+				deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
+				part["thoughtSignature"] = normalized
+				rewrittenParts = append(rewrittenParts, part)
+				continue
+			}
+
+			if hasSignature {
+				changed = true
+				deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part)
+				logAntigravityClaudeGeminiSignatureSanitize(modelName, "drop_signature", "non-thinking parts should not carry Claude thinking signatures", contentIndex, partIndex, rawSignature)
+			}
+			rewrittenParts = append(rewrittenParts, part)
+		}
+
+		if len(rewrittenParts) == 0 {
+			changed = true
+			continue
+		}
+		content["parts"] = rewrittenParts
+		rewrittenContents = append(rewrittenContents, content)
+	}
+
+	if !changed {
+		return rawJSON
+	}
+	request["contents"] = rewrittenContents
+	out, err := json.Marshal(root)
+	if err != nil {
+		log.WithError(err).Debug("antigravity gemini translator: failed to marshal Claude signature sanitize")
+		return rawJSON
+	}
+	return out
+}
+
+func antigravityClaudeGeminiPartThoughtSignature(part map[string]any) (string, bool) {
+	for _, path := range [][]string{
+		{"thoughtSignature"},
+		{"thought_signature"},
+		{"functionCall", "thoughtSignature"},
+		{"functionCall", "thought_signature"},
+		{"functionResponse", "thoughtSignature"},
+		{"functionResponse", "thought_signature"},
+		{"extra_content", "google", "thought_signature"},
+	} {
+		if value, ok := stringAtPath(part, path...); ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func deleteAntigravityClaudeGeminiPartThoughtSignatureFields(part map[string]any) {
+	for _, path := range [][]string{
+		{"thoughtSignature"},
+		{"thought_signature"},
+		{"functionCall", "thoughtSignature"},
+		{"functionCall", "thought_signature"},
+		{"functionResponse", "thoughtSignature"},
+		{"functionResponse", "thought_signature"},
+		{"extra_content", "google", "thought_signature"},
+	} {
+		deleteAtPath(part, path...)
+	}
+}
+
+func hasFunctionResponsePart(part map[string]any) bool {
+	_, ok := part["functionResponse"]
+	if ok {
+		return true
+	}
+	_, ok = part["function_response"]
+	return ok
+}
+
+func stringAtPath(value map[string]any, path ...string) (string, bool) {
+	var current any = value
+	for _, key := range path {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		current, ok = m[key]
+		if !ok {
+			return "", false
+		}
+	}
+	s, ok := current.(string)
+	return s, ok
+}
+
+func deleteAtPath(value map[string]any, path ...string) {
+	if len(path) == 0 {
+		return
+	}
+	current := value
+	for _, key := range path[:len(path)-1] {
+		next, ok := current[key].(map[string]any)
+		if !ok {
+			return
+		}
+		current = next
+	}
+	delete(current, path[len(path)-1])
+}
+
+func logAntigravityClaudeGeminiSignatureSanitize(modelName, action, reason string, contentIndex, partIndex int, rawSignature string) {
+	fields := log.Fields{
+		"component":         "signature_sanitizer",
+		"translator":        "antigravity_gemini",
+		"target_provider":   string(signature.SignatureProviderClaude),
+		"action":            action,
+		"reason":            reason,
+		"model":             modelName,
+		"content_index":     contentIndex,
+		"part_index":        partIndex,
+		"has_signature":     strings.TrimSpace(rawSignature) != "",
+		"signature_length":  len(strings.TrimSpace(rawSignature)),
+		"detected_provider": string(signature.DetectSignatureProviderForBlock(rawSignature, signature.SignatureBlockKindClaudeThinking)),
+	}
+	log.WithFields(fields).Debug("antigravity gemini translator: sanitized Claude target thoughtSignature before upstream")
 }
 
 // FunctionCallGroup represents a group of function calls and their responses
