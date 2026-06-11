@@ -823,10 +823,10 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "user-defined-model(64000)",
 			inputJSON:   `{"model":"user-defined-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning_effort",
-			expectValue: "xhigh",
+			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 69: Budget 0 → passthrough logic → none
+		// Case 69: Budget 0 → none → converted to high
 		{
 			name:        "69",
 			from:        "gemini",
@@ -834,18 +834,17 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "user-defined-model(0)",
 			inputJSON:   `{"model":"user-defined-model(0)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning_effort",
-			expectValue: "none",
+			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 70: Budget -1 → passthrough logic → auto
+		// Case 70: Budget -1 → passthrough logic → field deleted (auto is internal)
 		{
 			name:        "70",
 			from:        "gemini",
 			to:          "openai",
 			model:       "user-defined-model(-1)",
 			inputJSON:   `{"model":"user-defined-model(-1)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField: "reasoning_effort",
-			expectValue: "auto",
+			expectField: "",
 			expectErr:   false,
 		},
 		// Case 71: Claude to Codex no suffix → injected default → medium
@@ -1929,10 +1928,10 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
 			expectField: "reasoning_effort",
-			expectValue: "xhigh",
+			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 69: thinkingBudget=0 → none
+		// Case 69: thinkingBudget=0 → none → converted to high
 		{
 			name:        "69",
 			from:        "gemini",
@@ -1940,18 +1939,17 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
 			expectField: "reasoning_effort",
-			expectValue: "none",
+			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 70: thinkingBudget=-1 → auto
+		// Case 70: thinkingBudget=-1 → field deleted (auto is internal)
 		{
 			name:        "70",
 			from:        "gemini",
 			to:          "openai",
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":-1}}}`,
-			expectField: "reasoning_effort",
-			expectValue: "auto",
+			expectField: "",
 			expectErr:   false,
 		},
 		// Case 71: Claude no param → injected default → medium

@@ -317,7 +317,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			if effort != "" {
 				reasoningEffort = effort
 			} else {
-				reasoningEffort = string(thinking.LevelXHigh)
+				reasoningEffort = string(thinking.LevelHigh)
 			}
 		case "disabled":
 			if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {

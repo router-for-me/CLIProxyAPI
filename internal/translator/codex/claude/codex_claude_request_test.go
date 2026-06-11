@@ -466,6 +466,70 @@ func countRequestInputItemsByType(result []byte, itemType string) int {
 	return count
 }
 
+func TestConvertClaudeRequestToCodex_ThinkingEffortFallback(t *testing.T) {
+	tests := []struct {
+		name                string
+		inputJSON           string
+		wantReasoningEffort string
+	}{
+		{
+			name: "Adaptive thinking without output_config.effort defaults to high",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "adaptive"},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "high",
+		},
+		{
+			name: "Auto thinking without output_config.effort defaults to high",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "auto"},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "high",
+		},
+		{
+			name: "Adaptive thinking with explicit output_config.effort passes through",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "adaptive"},
+				"output_config": {"effort": "low"},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "low",
+		},
+		{
+			name: "Enabled thinking with budget_tokens maps to converted level",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "enabled", "budget_tokens": 5000},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "medium",
+		},
+		{
+			name: "No thinking config defaults to medium",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "medium",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToCodex("test-model", []byte(tt.inputJSON), false)
+			got := gjson.GetBytes(result, "reasoning.effort").String()
+			if got != tt.wantReasoningEffort {
+				t.Fatalf("reasoning.effort = %q, want %q. Output: %s", got, tt.wantReasoningEffort, string(result))
+			}
+		})
+	}
+}
+
 func validCodexReasoningSignature() string {
 	raw := make([]byte, 1+8+16+16+32)
 	raw[0] = 0x80

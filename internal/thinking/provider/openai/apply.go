@@ -94,13 +94,13 @@ func applyCompatibleOpenAI(body []byte, config thinking.ThinkingConfig) ([]byte,
 		}
 		effort = string(config.Level)
 	case thinking.ModeNone:
-		effort = string(thinking.LevelNone)
-		if config.Level != "" {
-			effort = string(config.Level)
-		}
+		// "none" is an internal value; upstream APIs don't accept it.
+		// Convert to "high" to ensure thinking is always enabled.
+		effort = string(thinking.LevelHigh)
 	case thinking.ModeAuto:
-		// Auto mode for user-defined models: pass through as "auto"
-		effort = string(thinking.LevelAuto)
+		// "auto" is an internal value; delete the field to let upstream decide.
+		result, _ := sjson.DeleteBytes(body, "reasoning_effort")
+		return result, nil
 	case thinking.ModeBudget:
 		// Budget mode: convert budget to level using threshold mapping
 		level, ok := thinking.ConvertBudgetToLevel(config.Budget)
@@ -110,6 +110,11 @@ func applyCompatibleOpenAI(body []byte, config thinking.ThinkingConfig) ([]byte,
 		effort = level
 	default:
 		return body, nil
+	}
+
+	// Clamp internal-only levels to the highest standard OpenAI level.
+	if effort == string(thinking.LevelXHigh) || effort == string(thinking.LevelMax) {
+		effort = string(thinking.LevelHigh)
 	}
 
 	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)

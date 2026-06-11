@@ -783,3 +783,86 @@ func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T) 
 		t.Fatalf("Unexpected system content: %q", got)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_ThinkingEffortFallback(t *testing.T) {
+	tests := []struct {
+		name                string
+		inputJSON           string
+		wantReasoningEffort string
+		wantFieldExists     bool
+	}{
+		{
+			name: "Adaptive thinking without output_config.effort defaults to high",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "adaptive"},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "high",
+			wantFieldExists:     true,
+		},
+		{
+			name: "Auto thinking without output_config.effort defaults to high",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "auto"},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "high",
+			wantFieldExists:     true,
+		},
+		{
+			name: "Adaptive thinking with explicit output_config.effort passes through",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "adaptive"},
+				"output_config": {"effort": "low"},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "low",
+			wantFieldExists:     true,
+		},
+		{
+			name: "Enabled thinking with budget_tokens maps to converted level",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "enabled", "budget_tokens": 5000},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "medium",
+			wantFieldExists:     true,
+		},
+		{
+			name: "Enabled thinking without budget_tokens defaults to auto",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "enabled"},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantReasoningEffort: "auto",
+			wantFieldExists:     true,
+		},
+		{
+			name: "No thinking config omits reasoning_effort",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantFieldExists: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			resultJSON := gjson.ParseBytes(result)
+			field := resultJSON.Get("reasoning_effort")
+			if field.Exists() != tt.wantFieldExists {
+				t.Fatalf("reasoning_effort exists = %v, want %v. Output: %s", field.Exists(), tt.wantFieldExists, string(result))
+			}
+			if tt.wantFieldExists && field.String() != tt.wantReasoningEffort {
+				t.Fatalf("reasoning_effort = %q, want %q. Output: %s", field.String(), tt.wantReasoningEffort, string(result))
+			}
+		})
+	}
+}
