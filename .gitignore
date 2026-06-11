@@ -49,6 +49,10 @@ GEMINI.md
 .bmad/*
 _bmad/*
 _bmad-output/*
+.codegraph/*
+.mimocode/*
+.reasonix/*
+reasonix.toml
 
 # macOS
 .DS_Store
