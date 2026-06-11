@@ -44,7 +44,12 @@ var (
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	// Some OpenAI-compatible clients (notably Cursor in agent/tool mode) send
+	// Anthropic-native content blocks (tool_use / tool_result) and bare tool
+	// definitions to the OpenAI Chat Completions endpoint. Those payloads are not
+	// valid OpenAI format, so normalize them to standard OpenAI shape before the
+	// regular translation below runs.
+	rawJSON := normalizeAnthropicRequestBlocks(inputRawJSON)
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -328,6 +333,222 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+// normalizeAnthropicRequestBlocks rewrites Anthropic-native message and tool
+// shapes into standard OpenAI Chat Completions shapes. It is a no-op for
+// already-valid OpenAI payloads.
+//
+// Conversions:
+//  1. user message content with tool_result blocks -> separate role:"tool"
+//     messages ({tool_call_id, content}). Any sibling text blocks are kept as a
+//     trailing role:"user" message.
+//  2. assistant message content with tool_use blocks -> assistant message with
+//     tool_calls[].function (and text blocks merged into content).
+//  3. bare tool definitions ({name, description, input_schema}) -> wrapped
+//     {type:"function", function:{name, description, parameters}}.
+func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
+	root := gjson.ParseBytes(rawJSON)
+
+	if !anthropicBlocksPresent(root) {
+		return rawJSON
+	}
+
+	out := rawJSON
+
+	// Rebuild messages array if any message carries Anthropic content blocks.
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		newMessages := []byte("[]")
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := message.Get("role").String()
+			content := message.Get("content")
+
+			if !content.IsArray() || !messageHasAnthropicBlocks(content) {
+				newMessages, _ = sjson.SetRawBytes(newMessages, "-1", []byte(message.Raw))
+				return true
+			}
+
+			switch role {
+			case "user":
+				textParts := make([]string, 0)
+				toolResults := make([]gjson.Result, 0)
+				passthrough := make([]gjson.Result, 0)
+				content.ForEach(func(_, block gjson.Result) bool {
+					switch block.Get("type").String() {
+					case "tool_result":
+						toolResults = append(toolResults, block)
+					case "text":
+						if t := block.Get("text").String(); t != "" {
+							textParts = append(textParts, t)
+						}
+					default:
+						passthrough = append(passthrough, block)
+					}
+					return true
+				})
+
+				// tool_result blocks become standalone role:"tool" messages so
+				// the downstream translator pairs them with the prior tool_calls.
+				for _, tr := range toolResults {
+					toolMsg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+					toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", tr.Get("tool_use_id").String())
+					trContent := tr.Get("content")
+					if trContent.IsArray() {
+						toolMsg, _ = sjson.SetRawBytes(toolMsg, "content", []byte(trContent.Raw))
+					} else {
+						toolMsg, _ = sjson.SetBytes(toolMsg, "content", flattenAnthropicToolResultText(trContent))
+					}
+					newMessages, _ = sjson.SetRawBytes(newMessages, "-1", toolMsg)
+				}
+
+				// Remaining text / passthrough parts stay as a user message.
+				if len(textParts) > 0 || len(passthrough) > 0 {
+					userMsg := []byte(`{"role":"user","content":[]}`)
+					for _, t := range textParts {
+						textPart := []byte(`{"type":"text","text":""}`)
+						textPart, _ = sjson.SetBytes(textPart, "text", t)
+						userMsg, _ = sjson.SetRawBytes(userMsg, "content.-1", textPart)
+					}
+					for _, p := range passthrough {
+						userMsg, _ = sjson.SetRawBytes(userMsg, "content.-1", []byte(p.Raw))
+					}
+					newMessages, _ = sjson.SetRawBytes(newMessages, "-1", userMsg)
+				}
+
+			case "assistant":
+				textParts := make([]string, 0)
+				toolUses := make([]gjson.Result, 0)
+				content.ForEach(func(_, block gjson.Result) bool {
+					switch block.Get("type").String() {
+					case "tool_use":
+						toolUses = append(toolUses, block)
+					case "text":
+						if t := block.Get("text").String(); t != "" {
+							textParts = append(textParts, t)
+						}
+					}
+					return true
+				})
+
+				asstMsg := []byte(`{"role":"assistant","content":""}`)
+				asstMsg, _ = sjson.SetBytes(asstMsg, "content", strings.Join(textParts, ""))
+				if len(toolUses) > 0 {
+					asstMsg, _ = sjson.SetRawBytes(asstMsg, "tool_calls", []byte("[]"))
+					for _, tu := range toolUses {
+						toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
+						toolCall, _ = sjson.SetBytes(toolCall, "id", tu.Get("id").String())
+						toolCall, _ = sjson.SetBytes(toolCall, "function.name", tu.Get("name").String())
+						if input := tu.Get("input"); input.Exists() && input.IsObject() {
+							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", input.Raw)
+						}
+						asstMsg, _ = sjson.SetRawBytes(asstMsg, "tool_calls.-1", toolCall)
+					}
+				}
+				newMessages, _ = sjson.SetRawBytes(newMessages, "-1", asstMsg)
+
+			default:
+				newMessages, _ = sjson.SetRawBytes(newMessages, "-1", []byte(message.Raw))
+			}
+			return true
+		})
+		out, _ = sjson.SetRawBytes(out, "messages", newMessages)
+	}
+
+	// Wrap bare Anthropic tool definitions into OpenAI function tools.
+	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
+		needsWrap := false
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if tool.Get("type").String() != "function" && tool.Get("name").Exists() {
+				needsWrap = true
+				return false
+			}
+			return true
+		})
+
+		if needsWrap {
+			newTools := []byte("[]")
+			tools.ForEach(func(_, tool gjson.Result) bool {
+				if tool.Get("type").String() == "function" {
+					newTools, _ = sjson.SetRawBytes(newTools, "-1", []byte(tool.Raw))
+					return true
+				}
+				wrapped := []byte(`{"type":"function","function":{"name":"","description":""}}`)
+				wrapped, _ = sjson.SetBytes(wrapped, "function.name", tool.Get("name").String())
+				wrapped, _ = sjson.SetBytes(wrapped, "function.description", tool.Get("description").String())
+				if schema := tool.Get("input_schema"); schema.Exists() {
+					wrapped, _ = sjson.SetRawBytes(wrapped, "function.parameters", []byte(schema.Raw))
+				} else if schema := tool.Get("parameters"); schema.Exists() {
+					wrapped, _ = sjson.SetRawBytes(wrapped, "function.parameters", []byte(schema.Raw))
+				}
+				newTools, _ = sjson.SetRawBytes(newTools, "-1", wrapped)
+				return true
+			})
+			out, _ = sjson.SetRawBytes(out, "tools", newTools)
+		}
+	}
+
+	return out
+}
+
+// anthropicBlocksPresent reports whether the request carries any Anthropic-native
+// message content blocks or bare tool definitions.
+func anthropicBlocksPresent(root gjson.Result) bool {
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		found := false
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if messageHasAnthropicBlocks(message.Get("content")) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+
+	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
+		found := false
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if tool.Get("type").String() != "function" && tool.Get("name").Exists() {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+
+	return false
+}
+
+// messageHasAnthropicBlocks reports whether a message content array contains
+// tool_use or tool_result blocks.
+func messageHasAnthropicBlocks(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	found := false
+	content.ForEach(func(_, block gjson.Result) bool {
+		switch block.Get("type").String() {
+		case "tool_use", "tool_result":
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// flattenAnthropicToolResultText reduces a tool_result content value to a plain
+// string for the non-array case.
+func flattenAnthropicToolResultText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	return content.Raw
 }
 
 func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
