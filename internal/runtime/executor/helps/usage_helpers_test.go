@@ -51,6 +51,52 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageDeepSeekPromptCacheFields(t *testing.T) {
+	data := []byte(`{"usage":{"prompt_tokens":1222504,"completion_tokens":12287,"total_tokens":1234791,"prompt_cache_hit_tokens":1056256,"prompt_cache_miss_tokens":166248,"completion_tokens_details":{"reasoning_tokens":3544}}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 1222504 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 1222504)
+	}
+	if detail.OutputTokens != 12287 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 12287)
+	}
+	if detail.CacheHitInputTokens != 1056256 {
+		t.Fatalf("cache hit input tokens = %d, want %d", detail.CacheHitInputTokens, 1056256)
+	}
+	if detail.CacheMissInputTokens != 166248 {
+		t.Fatalf("cache miss input tokens = %d, want %d", detail.CacheMissInputTokens, 166248)
+	}
+	if detail.CachedTokens != 1056256 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 1056256)
+	}
+	if detail.ReasoningTokens != 3544 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3544)
+	}
+	if detail.TotalTokens != 1234791 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 1234791)
+	}
+}
+
+func TestParseOpenAIUsageDeepSeekInfersInputFromCacheSplit(t *testing.T) {
+	data := []byte(`{"usage":{"completion_tokens":7,"prompt_cache_hit_tokens":11,"prompt_cache_miss_tokens":13}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 24 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 24)
+	}
+	if detail.OutputTokens != 7 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 7)
+	}
+	if detail.CacheHitInputTokens != 11 {
+		t.Fatalf("cache hit input tokens = %d, want %d", detail.CacheHitInputTokens, 11)
+	}
+	if detail.CacheMissInputTokens != 13 {
+		t.Fatalf("cache miss input tokens = %d, want %d", detail.CacheMissInputTokens, 13)
+	}
+	if detail.CachedTokens != 11 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 11)
+	}
+}
+
 func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
 	data := []byte(`{"usage":null}`)
 	detail := ParseOpenAIUsage(data)
