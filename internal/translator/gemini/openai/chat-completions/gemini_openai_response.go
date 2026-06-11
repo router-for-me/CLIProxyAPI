@@ -23,8 +23,10 @@ import (
 type convertGeminiResponseToOpenAIChatParams struct {
 	UnixTimestamp int64
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
-	FunctionIndex    map[int]int
-	SanitizedNameMap map[string]string
+	FunctionIndex        map[int]int
+	SawToolCall          map[int]bool
+	UpstreamFinishReason map[int]string
+	SanitizedNameMap     map[string]string
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -48,9 +50,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	// Initialize parameters if nil.
 	if *param == nil {
 		*param = &convertGeminiResponseToOpenAIChatParams{
-			UnixTimestamp:    0,
-			FunctionIndex:    make(map[int]int),
-			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
+			UnixTimestamp:        0,
+			FunctionIndex:        make(map[int]int),
+			SawToolCall:          make(map[int]bool),
+			UpstreamFinishReason: make(map[int]string),
+			SanitizedNameMap:     util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 
@@ -58,6 +62,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	p := (*param).(*convertGeminiResponseToOpenAIChatParams)
 	if p.FunctionIndex == nil {
 		p.FunctionIndex = make(map[int]int)
+	}
+	if p.SawToolCall == nil {
+		p.SawToolCall = make(map[int]bool)
+	}
+	if p.UpstreamFinishReason == nil {
+		p.UpstreamFinishReason = make(map[int]string)
 	}
 	if p.SanitizedNameMap == nil {
 		p.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
@@ -135,19 +145,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			candidateIndex := int(candidate.Get("index").Int())
 			template, _ = sjson.SetBytes(template, "choices.0.index", candidateIndex)
 
-			finishReason := ""
-			if stopReasonResult := gjson.GetBytes(rawJSON, "stop_reason"); stopReasonResult.Exists() {
-				finishReason = stopReasonResult.String()
+			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
+				p.UpstreamFinishReason[candidateIndex] = strings.ToUpper(finishReasonResult.String())
 			}
-			if finishReason == "" {
-				if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
-					finishReason = finishReasonResult.String()
-				}
-			}
-			finishReason = strings.ToLower(finishReason)
 
 			partsResult := candidate.Get("content.parts")
-			hasFunctionCall := false
 
 			if partsResult.IsArray() {
 				partResults := partsResult.Array()
@@ -183,7 +185,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 					} else if functionCallResult.Exists() {
 						// Handle function call content.
-						hasFunctionCall = true
+						p.SawToolCall[candidateIndex] = true
 						toolCallsResult := gjson.GetBytes(template, "choices.0.delta.tool_calls")
 
 						// Retrieve the function index for this specific candidate.
@@ -233,15 +235,22 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				}
 			}
 
-			if hasFunctionCall {
-				template, _ = sjson.SetBytes(template, "choices.0.finish_reason", "tool_calls")
-				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", "tool_calls")
-			} else if finishReason != "" {
-				// Only pass through specific finish reasons
-				if finishReason == "max_tokens" || finishReason == "stop" {
-					template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-					template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
+			upstreamFinishReason := p.UpstreamFinishReason[candidateIndex]
+			sawToolCall := p.SawToolCall[candidateIndex]
+			usageExists := gjson.GetBytes(rawJSON, "usageMetadata").Exists()
+			isFinalChunk := upstreamFinishReason != "" && usageExists
+
+			if isFinalChunk {
+				var finishReason string
+				if sawToolCall {
+					finishReason = "tool_calls"
+				} else if upstreamFinishReason == "MAX_TOKENS" {
+					finishReason = "max_tokens"
+				} else {
+					finishReason = "stop"
 				}
+				template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
 			}
 
 			responseStrings = append(responseStrings, template)
