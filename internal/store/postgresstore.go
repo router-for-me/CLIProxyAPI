@@ -224,6 +224,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
+		cliproxyauth.ReloadMetadataFromFile(auth, path)
 	case auth.Metadata != nil:
 		auth.Metadata["disabled"] = auth.Disabled
 		raw, errMarshal := json.Marshal(auth.Metadata)
