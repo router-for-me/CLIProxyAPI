@@ -186,6 +186,48 @@ func TestNormalizeAnthropicRequestBlocks_TypedToolNotWrapped(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_TypedServerToolPreserved(t *testing.T) {
+	// End-to-end guard: a typed Anthropic server tool sent alongside a bare
+	// custom tool must survive the FULL conversion, not just the normalizer.
+	// The downstream tool mapper previously emitted only type=="function"
+	// tools, silently dropping typed server tools like web_search_20250305.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "search the web"}],
+		"tools": [
+			{"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+			{"name": "read_file", "description": "Read a file", "input_schema": {"type": "object"}}
+		]
+	}`
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	outJSON := gjson.ParseBytes(out)
+	tools := outJSON.Get("tools").Array()
+
+	if len(tools) != 2 {
+		t.Fatalf("Expected 2 tools after full conversion, got %d: %s", len(tools), outJSON.Get("tools").Raw)
+	}
+
+	typed := outJSON.Get(`tools.#(name=="web_search")`)
+	if !typed.Exists() {
+		t.Fatalf("Expected typed server tool web_search to survive conversion, got: %s", outJSON.Get("tools").Raw)
+	}
+	if got := typed.Get("type").String(); got != "web_search_20250305" {
+		t.Fatalf("Expected typed tool type preserved as web_search_20250305, got %q (%s)", got, typed.Raw)
+	}
+	if got := typed.Get("max_uses").Int(); got != 5 {
+		t.Fatalf("Expected typed tool fields preserved (max_uses=5), got %d", got)
+	}
+
+	bare := outJSON.Get(`tools.#(name=="read_file")`)
+	if !bare.Exists() {
+		t.Fatalf("Expected bare custom tool read_file mapped to Claude tool, got: %s", outJSON.Get("tools").Raw)
+	}
+	if !bare.Get("input_schema").Exists() {
+		t.Fatalf("Expected read_file mapped with input_schema, got: %s", bare.Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_StandardOpenAIUnchanged(t *testing.T) {
 	// A normal OpenAI payload must pass through normalization untouched.
 	inputJSON := `{

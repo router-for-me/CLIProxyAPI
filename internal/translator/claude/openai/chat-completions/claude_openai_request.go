@@ -298,6 +298,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
 				hasAnthropicTools = true
+			} else if t := tool.Get("type").String(); t != "" {
+				// Typed Anthropic server tools (e.g. {"type":"web_search_20250305",...})
+				// are already in Claude's native shape. Pass them through unchanged
+				// instead of dropping them, so they survive the full conversion.
+				out, _ = sjson.SetRawBytes(out, "tools.-1", []byte(tool.Raw))
+				hasAnthropicTools = true
 			}
 			return true
 		})
