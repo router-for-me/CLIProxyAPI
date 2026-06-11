@@ -164,6 +164,70 @@ func TestHasRequestTransformer(t *testing.T) {
 	}
 }
 
+func TestHasResponseTransformerIgnoresEmptyRegistration(t *testing.T) {
+	r := NewRegistry()
+	from := Format("from")
+	to := Format("to")
+
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
+		return rawJSON
+	}, ResponseTransform{})
+
+	if r.HasResponseTransformer(from, to) {
+		t.Fatal("empty response transform was reported as a response transformer")
+	}
+	if r.HasStreamResponseTransformer(from, to) {
+		t.Fatal("empty response transform was reported as a stream response transformer")
+	}
+	if r.HasNonStreamResponseTransformer(from, to) {
+		t.Fatal("empty response transform was reported as a non-stream response transformer")
+	}
+}
+
+func TestHasResponseTransformerChecksConcreteResponseKinds(t *testing.T) {
+	ctx := context.Background()
+	r := NewRegistry()
+	from := Format("from")
+	streamOnlyTo := Format("stream-to")
+	nonStreamOnlyTo := Format("non-stream-to")
+
+	r.Register(from, streamOnlyTo, nil, ResponseTransform{
+		Stream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+			return [][]byte{rawJSON}
+		},
+	})
+	r.Register(from, nonStreamOnlyTo, nil, ResponseTransform{
+		NonStream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+			return rawJSON
+		},
+	})
+
+	if !r.HasResponseTransformer(from, streamOnlyTo) {
+		t.Fatal("stream response transform was not reported as a response transformer")
+	}
+	if !r.HasStreamResponseTransformer(from, streamOnlyTo) {
+		t.Fatal("stream response transform was not reported as a stream response transformer")
+	}
+	if r.HasNonStreamResponseTransformer(from, streamOnlyTo) {
+		t.Fatal("stream-only transform was reported as a non-stream response transformer")
+	}
+
+	if !r.HasResponseTransformer(from, nonStreamOnlyTo) {
+		t.Fatal("non-stream response transform was not reported as a response transformer")
+	}
+	if r.HasStreamResponseTransformer(from, nonStreamOnlyTo) {
+		t.Fatal("non-stream-only transform was reported as a stream response transformer")
+	}
+	if !r.HasNonStreamResponseTransformer(from, nonStreamOnlyTo) {
+		t.Fatal("non-stream response transform was not reported as a non-stream response transformer")
+	}
+
+	got := r.TranslateStream(ctx, streamOnlyTo, from, "model", nil, nil, []byte(`data: {"ok":true}`), nil)
+	if len(got) != 1 || string(got[0]) != `data: {"ok":true}` {
+		t.Fatalf("stream transform output = %q", got)
+	}
+}
+
 func TestTranslateRequest_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) {
 	from := Format("from")
 	to := Format("to")
@@ -240,6 +304,50 @@ func TestTranslateNonStream_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) 
 	}
 	if hasCall(nativeHooks.calls, "translate-response") {
 		t.Fatal("plugin response translator was called despite native transformer")
+	}
+}
+
+func TestTranslateStream_NativeEmptyOutputSuppressesRawFallback(t *testing.T) {
+	ctx := context.Background()
+	from := Format("client")
+	to := Format("upstream")
+
+	r := NewRegistry()
+	r.Register(to, from, nil, ResponseTransform{
+		Stream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+			return nil
+		},
+	})
+
+	got := r.TranslateStream(ctx, from, to, "model", nil, nil, []byte(`data: {"raw":true}`), nil)
+	if len(got) != 0 {
+		t.Fatalf("native stream transformer returned empty output, got raw fallback %q", got)
+	}
+}
+
+func TestTranslateStream_PluginTranslatorUsedWhenNativeStreamMissing(t *testing.T) {
+	ctx := context.Background()
+	from := Format("client")
+	to := Format("upstream")
+
+	r := NewRegistry()
+	hooks := &fakePluginHooks{
+		responseTranslateBody: []byte(`data: {"plugin":true}`),
+		responseTranslateOK:   true,
+	}
+	r.SetPluginHooks(hooks)
+	r.Register(to, from, nil, ResponseTransform{
+		NonStream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+			return []byte(`{"native-non-stream":true}`)
+		},
+	})
+
+	got := r.TranslateStream(ctx, from, to, "model", nil, nil, []byte(`data: {"raw":true}`), nil)
+	if len(got) != 1 || string(got[0]) != `data: {"plugin":true}` {
+		t.Fatalf("plugin stream translator was not used, got %q", got)
+	}
+	if !hasCall(hooks.calls, "translate-response") {
+		t.Fatal("plugin response translator was not called when native stream transformer was missing")
 	}
 }
 

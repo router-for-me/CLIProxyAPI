@@ -107,7 +107,33 @@ func (r *Registry) HasResponseTransformer(from, to Format) bool {
 	defer r.mu.RUnlock()
 
 	if byTarget, ok := r.responses[from]; ok {
-		if _, isOk := byTarget[to]; isOk {
+		if fn, isOk := byTarget[to]; isOk && hasAnyResponseTransform(fn) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasStreamResponseTransformer indicates whether a streaming response translator exists.
+func (r *Registry) HasStreamResponseTransformer(from, to Format) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if byTarget, ok := r.responses[from]; ok {
+		if fn, isOk := byTarget[to]; isOk && fn.Stream != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// HasNonStreamResponseTransformer indicates whether a non-streaming response translator exists.
+func (r *Registry) HasNonStreamResponseTransformer(from, to Format) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if byTarget, ok := r.responses[from]; ok {
+		if fn, isOk := byTarget[to]; isOk && fn.NonStream != nil {
 			return true
 		}
 	}
@@ -117,9 +143,9 @@ func (r *Registry) HasResponseTransformer(from, to Format) bool {
 // TranslateStream applies the registered streaming response translator.
 func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	r.mu.RLock()
-	var fn ResponseTransform
+	var stream ResponseStreamTransform
 	if byTarget, ok := r.responses[to]; ok {
-		fn = byTarget[from]
+		stream = byTarget[from].Stream
 	}
 	hooks := r.hooks
 	r.mu.RUnlock()
@@ -130,14 +156,16 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 	}
 
 	var outputs [][]byte
-	if fn.Stream != nil {
-		outputs = fn.Stream(ctx, model, originalRequestRawJSON, requestRawJSON, body, param)
+	usedNativeTransform := false
+	if stream != nil {
+		usedNativeTransform = true
+		outputs = stream(ctx, model, originalRequestRawJSON, requestRawJSON, body, param)
 	} else if hooks != nil {
 		if translated, ok := hooks.TranslateResponse(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, true); ok {
 			outputs = [][]byte{translated}
 		}
 	}
-	if outputs == nil {
+	if outputs == nil && !usedNativeTransform {
 		outputs = [][]byte{body}
 	}
 	if hooks != nil {
@@ -220,6 +248,16 @@ func HasResponseTransformer(from, to Format) bool {
 	return defaultRegistry.HasResponseTransformer(from, to)
 }
 
+// HasStreamResponseTransformer inspects the default registry for a streaming response translator.
+func HasStreamResponseTransformer(from, to Format) bool {
+	return defaultRegistry.HasStreamResponseTransformer(from, to)
+}
+
+// HasNonStreamResponseTransformer inspects the default registry for a non-streaming response translator.
+func HasNonStreamResponseTransformer(from, to Format) bool {
+	return defaultRegistry.HasNonStreamResponseTransformer(from, to)
+}
+
 // TranslateStream is a helper on the default registry.
 func TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	return defaultRegistry.TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
@@ -233,4 +271,8 @@ func TranslateNonStream(ctx context.Context, from, to Format, model string, orig
 // TranslateTokenCount is a helper on the default registry.
 func TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) []byte {
 	return defaultRegistry.TranslateTokenCount(ctx, from, to, count, rawJSON)
+}
+
+func hasAnyResponseTransform(fn ResponseTransform) bool {
+	return fn.Stream != nil || fn.NonStream != nil || fn.TokenCount != nil
 }
