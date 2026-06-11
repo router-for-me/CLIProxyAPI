@@ -47,36 +47,49 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "model", modelName)
 
 	// Process system messages and convert them to input content format.
-	systemsResult := rootResult.Get("system")
-	if systemsResult.Exists() {
-		message := []byte(`{"type":"message","role":"developer","content":[]}`)
-		contentIndex := 0
+	developerMessage := []byte(`{"type":"message","role":"developer","content":[]}`)
+	developerContentIndex := 0
 
-		appendSystemText := func(text string) {
-			if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
-				return
-			}
-
-			message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.type", contentIndex), "input_text")
-			message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.text", contentIndex), text)
-			contentIndex++
+	appendDeveloperText := func(text string) {
+		if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
+			return
 		}
 
-		if systemsResult.Type == gjson.String {
-			appendSystemText(systemsResult.String())
-		} else if systemsResult.IsArray() {
-			systemResults := systemsResult.Array()
-			for i := 0; i < len(systemResults); i++ {
-				systemResult := systemResults[i]
-				if systemResult.Get("type").String() == "text" {
-					appendSystemText(systemResult.Get("text").String())
+		developerMessage, _ = sjson.SetBytes(developerMessage, fmt.Sprintf("content.%d.type", developerContentIndex), "input_text")
+		developerMessage, _ = sjson.SetBytes(developerMessage, fmt.Sprintf("content.%d.text", developerContentIndex), text)
+		developerContentIndex++
+	}
+
+	appendDeveloperContent := func(content gjson.Result) {
+		if content.Type == gjson.String {
+			appendDeveloperText(content.String())
+			return
+		}
+		if content.IsArray() {
+			contentResults := content.Array()
+			for i := 0; i < len(contentResults); i++ {
+				contentResult := contentResults[i]
+				if contentResult.Get("type").String() == "text" {
+					appendDeveloperText(contentResult.Get("text").String())
 				}
 			}
 		}
+	}
 
-		if contentIndex > 0 {
-			template, _ = sjson.SetRawBytes(template, "input.-1", message)
+	if systemsResult := rootResult.Get("system"); systemsResult.Exists() {
+		appendDeveloperContent(systemsResult)
+	}
+	if messagesResult := rootResult.Get("messages"); messagesResult.IsArray() {
+		messageResults := messagesResult.Array()
+		for i := 0; i < len(messageResults); i++ {
+			messageResult := messageResults[i]
+			if messageResult.Get("role").String() == "system" {
+				appendDeveloperContent(messageResult.Get("content"))
+			}
 		}
+	}
+	if developerContentIndex > 0 {
+		template, _ = sjson.SetRawBytes(template, "input.-1", developerMessage)
 	}
 
 	// Process messages and transform their contents to appropriate formats.
@@ -88,7 +101,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
 			if messageRole == "system" {
-				messageRole = "developer"
+				continue
 			}
 
 			newMessage := func() []byte {

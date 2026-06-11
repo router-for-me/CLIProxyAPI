@@ -68,6 +68,19 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 			wantHasDeveloper: true,
 			wantTexts:        []string{"Block 1", "Block 2"},
 		},
+		{
+			name: "Top-level and message system fields are merged",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"system": "Top system",
+				"messages": [
+					{"role": "system", "content": [{"type":"text","text":"Message system"}]},
+					{"role": "user", "content": "hello"}
+				]
+			}`,
+			wantHasDeveloper: true,
+			wantTexts:        []string{"Top system", "Message system"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -79,6 +92,11 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 			hasDeveloper := len(inputs) > 0 && inputs[0].Get("role").String() == "developer"
 			if hasDeveloper != tt.wantHasDeveloper {
 				t.Fatalf("got hasDeveloper = %v, want %v. Output: %s", hasDeveloper, tt.wantHasDeveloper, resultJSON.Get("input").Raw)
+			}
+			for i, input := range inputs {
+				if got := input.Get("role").String(); got == "system" {
+					t.Fatalf("input[%d] role = system, want no system roles. Output: %s", i, resultJSON.Get("input").Raw)
+				}
 			}
 
 			if !tt.wantHasDeveloper {

@@ -100,38 +100,78 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	// Process messages and system
 	messagesJSON := []byte(`[]`)
 
-	// Handle system message first
-	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
-	hasSystemContent := false
-	if system := root.Get("system"); system.Exists() {
-		if system.Type == gjson.String {
-			if system.String() != "" && !util.IsClaudeCodeAttributionSystemText(system.String()) {
-				oldSystem := []byte(`{"type":"text","text":""}`)
-				oldSystem, _ = sjson.SetBytes(oldSystem, "text", system.String())
-				systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", oldSystem)
-				hasSystemContent = true
+	// Collect Claude system content so it can be folded into the emitted
+	// conversation flow without sending OpenAI role:"system" messages.
+	systemContentItems := make([][]byte, 0)
+	appendSystemContent := func(content gjson.Result) {
+		if !content.Exists() {
+			return
+		}
+		if content.Type == gjson.String {
+			text := content.String()
+			if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
+				return
 			}
-		} else if system.Type == gjson.JSON {
-			if system.IsArray() {
-				systemResults := system.Array()
-				for i := 0; i < len(systemResults); i++ {
-					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
-						systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", []byte(contentItem))
-						hasSystemContent = true
-					}
+			oldSystem := []byte(`{"type":"text","text":""}`)
+			oldSystem, _ = sjson.SetBytes(oldSystem, "text", text)
+			systemContentItems = append(systemContentItems, oldSystem)
+			return
+		}
+		if content.IsArray() {
+			content.ForEach(func(_, item gjson.Result) bool {
+				if item.Get("type").String() == "text" && util.IsClaudeCodeAttributionSystemText(item.Get("text").String()) {
+					return true
 				}
-			}
+				if contentItem, ok := convertClaudeContentPart(item); ok {
+					systemContentItems = append(systemContentItems, []byte(contentItem))
+				}
+				return true
+			})
 		}
 	}
-	// Only add system message if it has content
-	if hasSystemContent {
-		messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", systemMsgJSON)
+	emitPendingSystemAsUser := func() {
+		if len(systemContentItems) == 0 {
+			return
+		}
+		msgJSON := []byte(`{"role":"user","content":[]}`)
+		for _, contentItem := range systemContentItems {
+			msgJSON, _ = sjson.SetRawBytes(msgJSON, "content.-1", contentItem)
+		}
+		messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+		systemContentItems = nil
+	}
+	prependPendingSystemContent := func(contentItems [][]byte) [][]byte {
+		if len(systemContentItems) == 0 {
+			return contentItems
+		}
+		merged := make([][]byte, 0, len(systemContentItems)+len(contentItems))
+		merged = append(merged, systemContentItems...)
+		merged = append(merged, contentItems...)
+		systemContentItems = nil
+		return merged
+	}
+	if system := root.Get("system"); system.Exists() {
+		appendSystemContent(system)
+	}
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if message.Get("role").String() == "system" {
+				appendSystemContent(message.Get("content"))
+			}
+			return true
+		})
 	}
 
 	// Process Anthropic messages
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
+			if role == "system" {
+				return true
+			}
+			if role != "user" {
+				emitPendingSystemAsUser()
+			}
 			contentResult := message.Get("content")
 
 			// Handle content
@@ -205,6 +245,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					reasoningContent = strings.Join(reasoningParts, "\n\n")
 				}
 
+				if role == "user" {
+					contentItems = prependPendingSystemContent(contentItems)
+				}
+
 				hasContent := len(contentItems) > 0
 				hasReasoning := reasoningContent != ""
 				hasToolCalls := len(toolCalls) > 0
@@ -268,15 +312,29 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 			} else if contentResult.Exists() && contentResult.Type == gjson.String {
 				// Simple string content
-				msgJSON := []byte(`{"role":"","content":""}`)
-				msgJSON, _ = sjson.SetBytes(msgJSON, "role", role)
-				msgJSON, _ = sjson.SetBytes(msgJSON, "content", contentResult.String())
-				messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+				if role == "user" && len(systemContentItems) > 0 {
+					msgJSON := []byte(`{"role":"user","content":[]}`)
+					for _, contentItem := range systemContentItems {
+						msgJSON, _ = sjson.SetRawBytes(msgJSON, "content.-1", contentItem)
+					}
+					textItem := []byte(`{"type":"text","text":""}`)
+					textItem, _ = sjson.SetBytes(textItem, "text", contentResult.String())
+					msgJSON, _ = sjson.SetRawBytes(msgJSON, "content.-1", textItem)
+					messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+					systemContentItems = nil
+				} else {
+					msgJSON := []byte(`{"role":"","content":""}`)
+					msgJSON, _ = sjson.SetBytes(msgJSON, "role", role)
+					msgJSON, _ = sjson.SetBytes(msgJSON, "content", contentResult.String())
+					messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+				}
 			}
 
 			return true
 		})
 	}
+
+	emitPendingSystemAsUser()
 
 	// Set messages
 	if msgs := gjson.ParseBytes(messagesJSON); msgs.IsArray() && len(msgs.Array()) > 0 {
