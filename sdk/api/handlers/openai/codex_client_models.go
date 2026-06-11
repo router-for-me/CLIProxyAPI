@@ -101,11 +101,6 @@ func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any,
 func applyCodexClientContextWindowOverride(entry map[string]any, id string, model map[string]any) {
 	contextWindow := intModelValue(model, "context_length")
 	if contextWindow <= 0 {
-		if info := registry.LookupModelInfo(id); info != nil {
-			contextWindow = info.ContextLength
-		}
-	}
-	if contextWindow <= 0 {
 		return
 	}
 	entry["context_window"] = contextWindow
@@ -126,7 +121,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if info.Description != "" {
 			description = info.Description
 		}
-		if info.ContextLength > 0 {
+		if info.ContextLength > 0 && contextWindow <= 0 {
 			contextWindow = info.ContextLength
 		}
 		if info.Type == registry.OpenAIImageModelType {
