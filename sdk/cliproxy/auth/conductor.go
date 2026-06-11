@@ -2669,6 +2669,19 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 	return false
 }
 
+func isTransientTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(lower, "unexpected eof") ||
+		strings.Contains(lower, `: eof`) ||
+		strings.Contains(lower, "transport connection broken")
+}
+
 func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
@@ -2682,6 +2695,12 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	}
 	if isRequestInvalidError(err) {
 		return 0, false
+	}
+	if isTransientTransportError(err) {
+		if !m.retryAllowed(attempt, providers) {
+			return 0, false
+		}
+		return 0, true
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
