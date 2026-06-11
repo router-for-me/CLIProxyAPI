@@ -358,13 +358,13 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 
 	// Rebuild messages array if any message carries Anthropic content blocks.
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
-		newMessages := []byte("[]")
+		newMessages := "[]"
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			content := message.Get("content")
 
 			if !content.IsArray() || !messageHasAnthropicBlocks(content) {
-				newMessages, _ = sjson.SetRawBytes(newMessages, "-1", []byte(message.Raw))
+				newMessages, _ = sjson.SetRaw(newMessages, "-1", message.Raw)
 				return true
 			}
 
@@ -390,29 +390,29 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 				// tool_result blocks become standalone role:"tool" messages so
 				// the downstream translator pairs them with the prior tool_calls.
 				for _, tr := range toolResults {
-					toolMsg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-					toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", tr.Get("tool_use_id").String())
+					toolMsg := `{"role":"tool","tool_call_id":"","content":""}`
+					toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", tr.Get("tool_use_id").String())
 					trContent := tr.Get("content")
 					if trContent.IsArray() {
-						toolMsg, _ = sjson.SetRawBytes(toolMsg, "content", []byte(trContent.Raw))
+						toolMsg, _ = sjson.SetRaw(toolMsg, "content", trContent.Raw)
 					} else {
-						toolMsg, _ = sjson.SetBytes(toolMsg, "content", flattenAnthropicToolResultText(trContent))
+						toolMsg, _ = sjson.Set(toolMsg, "content", flattenAnthropicToolResultText(trContent))
 					}
-					newMessages, _ = sjson.SetRawBytes(newMessages, "-1", toolMsg)
+					newMessages, _ = sjson.SetRaw(newMessages, "-1", toolMsg)
 				}
 
 				// Remaining text / passthrough parts stay as a user message.
 				if len(textParts) > 0 || len(passthrough) > 0 {
-					userMsg := []byte(`{"role":"user","content":[]}`)
+					userMsg := `{"role":"user","content":[]}`
 					for _, t := range textParts {
-						textPart := []byte(`{"type":"text","text":""}`)
-						textPart, _ = sjson.SetBytes(textPart, "text", t)
-						userMsg, _ = sjson.SetRawBytes(userMsg, "content.-1", textPart)
+						textPart := `{"type":"text","text":""}`
+						textPart, _ = sjson.Set(textPart, "text", t)
+						userMsg, _ = sjson.SetRaw(userMsg, "content.-1", textPart)
 					}
 					for _, p := range passthrough {
-						userMsg, _ = sjson.SetRawBytes(userMsg, "content.-1", []byte(p.Raw))
+						userMsg, _ = sjson.SetRaw(userMsg, "content.-1", p.Raw)
 					}
-					newMessages, _ = sjson.SetRawBytes(newMessages, "-1", userMsg)
+					newMessages, _ = sjson.SetRaw(newMessages, "-1", userMsg)
 				}
 
 			case "assistant":
@@ -430,35 +430,38 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 					return true
 				})
 
-				asstMsg := []byte(`{"role":"assistant","content":""}`)
-				asstMsg, _ = sjson.SetBytes(asstMsg, "content", strings.Join(textParts, ""))
+				asstMsg := `{"role":"assistant","content":""}`
+				asstMsg, _ = sjson.Set(asstMsg, "content", strings.Join(textParts, ""))
 				if len(toolUses) > 0 {
-					asstMsg, _ = sjson.SetRawBytes(asstMsg, "tool_calls", []byte("[]"))
+					asstMsg, _ = sjson.SetRaw(asstMsg, "tool_calls", "[]")
 					for _, tu := range toolUses {
-						toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
-						toolCall, _ = sjson.SetBytes(toolCall, "id", tu.Get("id").String())
-						toolCall, _ = sjson.SetBytes(toolCall, "function.name", tu.Get("name").String())
+						toolCall := `{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`
+						toolCall, _ = sjson.Set(toolCall, "id", tu.Get("id").String())
+						toolCall, _ = sjson.Set(toolCall, "function.name", tu.Get("name").String())
 						if input := tu.Get("input"); input.Exists() && input.IsObject() {
-							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", input.Raw)
+							toolCall, _ = sjson.Set(toolCall, "function.arguments", input.Raw)
 						}
-						asstMsg, _ = sjson.SetRawBytes(asstMsg, "tool_calls.-1", toolCall)
+						asstMsg, _ = sjson.SetRaw(asstMsg, "tool_calls.-1", toolCall)
 					}
 				}
-				newMessages, _ = sjson.SetRawBytes(newMessages, "-1", asstMsg)
+				newMessages, _ = sjson.SetRaw(newMessages, "-1", asstMsg)
 
 			default:
-				newMessages, _ = sjson.SetRawBytes(newMessages, "-1", []byte(message.Raw))
+				newMessages, _ = sjson.SetRaw(newMessages, "-1", message.Raw)
 			}
 			return true
 		})
-		out, _ = sjson.SetRawBytes(out, "messages", newMessages)
+		out, _ = sjson.SetRawBytes(out, "messages", []byte(newMessages))
 	}
 
 	// Wrap bare Anthropic tool definitions into OpenAI function tools.
+	// Only tools with NO "type" field are treated as bare custom tools. Typed
+	// Anthropic server tools (e.g. {"type":"web_search_20250305","name":...})
+	// are left untouched so the downstream mapper can handle them correctly.
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		needsWrap := false
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() != "function" && tool.Get("name").Exists() {
+			if !tool.Get("type").Exists() && tool.Get("name").Exists() {
 				needsWrap = true
 				return false
 			}
@@ -466,24 +469,26 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 		})
 
 		if needsWrap {
-			newTools := []byte("[]")
+			newTools := "[]"
 			tools.ForEach(func(_, tool gjson.Result) bool {
-				if tool.Get("type").String() == "function" {
-					newTools, _ = sjson.SetRawBytes(newTools, "-1", []byte(tool.Raw))
+				// Pass through anything that already has a type (OpenAI function
+				// tools and typed Anthropic server tools) unchanged.
+				if tool.Get("type").Exists() {
+					newTools, _ = sjson.SetRaw(newTools, "-1", tool.Raw)
 					return true
 				}
-				wrapped := []byte(`{"type":"function","function":{"name":"","description":""}}`)
-				wrapped, _ = sjson.SetBytes(wrapped, "function.name", tool.Get("name").String())
-				wrapped, _ = sjson.SetBytes(wrapped, "function.description", tool.Get("description").String())
+				wrapped := `{"type":"function","function":{"name":"","description":""}}`
+				wrapped, _ = sjson.Set(wrapped, "function.name", tool.Get("name").String())
+				wrapped, _ = sjson.Set(wrapped, "function.description", tool.Get("description").String())
 				if schema := tool.Get("input_schema"); schema.Exists() {
-					wrapped, _ = sjson.SetRawBytes(wrapped, "function.parameters", []byte(schema.Raw))
+					wrapped, _ = sjson.SetRaw(wrapped, "function.parameters", schema.Raw)
 				} else if schema := tool.Get("parameters"); schema.Exists() {
-					wrapped, _ = sjson.SetRawBytes(wrapped, "function.parameters", []byte(schema.Raw))
+					wrapped, _ = sjson.SetRaw(wrapped, "function.parameters", schema.Raw)
 				}
-				newTools, _ = sjson.SetRawBytes(newTools, "-1", wrapped)
+				newTools, _ = sjson.SetRaw(newTools, "-1", wrapped)
 				return true
 			})
-			out, _ = sjson.SetRawBytes(out, "tools", newTools)
+			out, _ = sjson.SetRawBytes(out, "tools", []byte(newTools))
 		}
 	}
 
@@ -510,7 +515,7 @@ func anthropicBlocksPresent(root gjson.Result) bool {
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		found := false
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() != "function" && tool.Get("name").Exists() {
+			if !tool.Get("type").Exists() && tool.Get("name").Exists() {
 				found = true
 				return false
 			}

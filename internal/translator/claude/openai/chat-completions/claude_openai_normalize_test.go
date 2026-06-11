@@ -139,6 +139,53 @@ func TestConvertOpenAIRequestToClaude_BareAnthropicTools(t *testing.T) {
 	}
 }
 
+func TestNormalizeAnthropicRequestBlocks_TypedToolNotWrapped(t *testing.T) {
+	// Typed Anthropic server tools (type present, not "function") must NOT be
+	// rewritten into OpenAI function tools by the normalizer; only bare tools
+	// (no "type") are wrapped. This guards against corrupting server tools like
+	// web_search_20250305 into a wrong custom tool with no schema.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "search"}],
+		"tools": [
+			{"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+			{"name": "read_file", "description": "Read a file", "input_schema": {"type": "object"}}
+		]
+	}`
+
+	normalized := normalizeAnthropicRequestBlocks([]byte(inputJSON))
+	normJSON := gjson.ParseBytes(normalized)
+	tools := normJSON.Get("tools").Array()
+
+	if len(tools) != 2 {
+		t.Fatalf("Expected 2 tools after normalize, got %d: %s", len(tools), normJSON.Get("tools").Raw)
+	}
+
+	// Typed server tool kept verbatim (still its original type, not "function").
+	typed := normJSON.Get(`tools.#(name=="web_search")`)
+	if !typed.Exists() {
+		t.Fatalf("Expected web_search tool preserved, got: %s", normJSON.Get("tools").Raw)
+	}
+	if got := typed.Get("type").String(); got != "web_search_20250305" {
+		t.Fatalf("Expected typed tool type preserved as web_search_20250305, got %q (%s)", got, typed.Raw)
+	}
+	if got := typed.Get("max_uses").Int(); got != 5 {
+		t.Fatalf("Expected typed tool fields preserved (max_uses=5), got %d", got)
+	}
+
+	// Bare tool wrapped into OpenAI function shape.
+	bare := normJSON.Get(`tools.#(function.name=="read_file")`)
+	if !bare.Exists() {
+		t.Fatalf("Expected read_file wrapped into function tool, got: %s", normJSON.Get("tools").Raw)
+	}
+	if got := bare.Get("type").String(); got != "function" {
+		t.Fatalf("Expected wrapped tool type function, got %q", got)
+	}
+	if !bare.Get("function.parameters").Exists() {
+		t.Fatalf("Expected wrapped tool parameters, got: %s", bare.Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_StandardOpenAIUnchanged(t *testing.T) {
 	// A normal OpenAI payload must pass through normalization untouched.
 	inputJSON := `{
