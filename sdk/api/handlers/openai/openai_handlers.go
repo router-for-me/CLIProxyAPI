@@ -67,31 +67,33 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
+	c.JSON(http.StatusOK, gin.H{
+		"object": "list",
+		"data":   filterOpenAIModelsResponse(allModels),
+	})
+}
+
+func filterOpenAIModelsResponse(models []map[string]any) []map[string]any {
+	filteredModels := make([]map[string]any, len(models))
+	for i, model := range models {
 		filteredModel := map[string]any{
 			"id":     model["id"],
 			"object": model["object"],
 		}
 
-		// Add created field if it exists
 		if created, exists := model["created"]; exists {
 			filteredModel["created"] = created
 		}
-
-		// Add owned_by field if it exists
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
+		}
+		if contextLength, exists := model["context_length"]; exists {
+			filteredModel["context_length"] = contextLength
 		}
 
 		filteredModels[i] = filteredModel
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"object": "list",
-		"data":   filteredModels,
-	})
+	return filteredModels
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.
