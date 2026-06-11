@@ -1307,14 +1307,16 @@ func (a *executorAdapter) Identifier() string {
 type preparedExecutorCall struct {
 	req             coreexecutor.Request
 	opts            coreexecutor.Options
+	inputRequested  sdktranslator.Format
 	requestedFormat sdktranslator.Format
 	inputFormat     sdktranslator.Format
 	outputFormat    sdktranslator.Format
 }
 
 func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
+	inputRequested := executorInputFormat(req, opts)
 	requestedFormat := executorRequestedFormat(req, opts)
-	inputFormat, errInput := a.selectExecutorInputFormat(requestedFormat)
+	inputFormat, errInput := a.selectExecutorInputFormat(inputRequested)
 	if errInput != nil {
 		return preparedExecutorCall{}, errInput
 	}
@@ -1325,15 +1327,17 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 
 	nativeReq := req
 	nativeOpts := opts
-	if requestedFormat != "" && requestedFormat != inputFormat {
-		nativeReq.Payload = sdktranslator.TranslateRequest(requestedFormat, inputFormat, req.Model, req.Payload, opts.Stream)
+	if inputRequested != "" && inputRequested != inputFormat {
+		nativeReq.Payload = sdktranslator.TranslateRequest(inputRequested, inputFormat, req.Model, req.Payload, opts.Stream)
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
+	nativeOpts.ResponseFormat = outputFormat
 
 	return preparedExecutorCall{
 		req:             nativeReq,
 		opts:            nativeOpts,
+		inputRequested:  inputRequested,
 		requestedFormat: requestedFormat,
 		inputFormat:     inputFormat,
 		outputFormat:    outputFormat,
@@ -1344,17 +1348,27 @@ func (a *executorAdapter) RequestToFormat(req coreexecutor.Request, opts coreexe
 	if a == nil {
 		return ""
 	}
-	requestedFormat := executorRequestedFormat(req, opts)
-	inputFormat, errInput := a.selectExecutorInputFormat(requestedFormat)
+	inputRequested := executorInputFormat(req, opts)
+	inputFormat, errInput := a.selectExecutorInputFormat(inputRequested)
 	if errInput != nil {
 		return ""
 	}
 	return inputFormat
 }
 
-func executorRequestedFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
+func executorInputFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
 	if opts.SourceFormat != "" {
 		return normalizeExecutorFormatName(opts.SourceFormat.String())
+	}
+	if req.Format != "" {
+		return normalizeExecutorFormatName(req.Format.String())
+	}
+	return sdktranslator.FormatOpenAI
+}
+
+func executorRequestedFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
+	if format := coreexecutor.ResponseFormatOrSource(opts); format != "" {
+		return normalizeExecutorFormatName(format.String())
 	}
 	if req.Format != "" {
 		return normalizeExecutorFormatName(req.Format.String())
@@ -1384,18 +1398,38 @@ func (a *executorAdapter) selectExecutorOutputFormat(requested, inputFormat sdkt
 	if executorFormatContains(a.outputFormats, requested) {
 		return requested, nil
 	}
-	if executorFormatContains(a.outputFormats, inputFormat) && executorResponseTranslatorExists(inputFormat, requested) {
+	if executorFormatContains(a.outputFormats, inputFormat) && a.executorResponseTranslationAvailable(inputFormat, requested) {
 		return inputFormat, nil
 	}
 	for _, format := range a.outputFormats {
-		if requested == "" || executorResponseTranslatorExists(format, requested) {
+		if requested == "" || a.executorResponseTranslationAvailable(format, requested) {
 			return format, nil
 		}
 	}
 	return "", fmt.Errorf("plugin executor %s does not support output format %q", a.Identifier(), requested)
 }
 
-func executorResponseTranslatorExists(from, to sdktranslator.Format) bool {
+func (a *executorAdapter) executorResponseTranslationAvailable(from, to sdktranslator.Format) bool {
+	if from == "" || to == "" || from == to {
+		return true
+	}
+	if sdktranslator.HasResponseTransformer(to, from) {
+		return true
+	}
+	return a != nil && a.host.hasResponseTranslator()
+}
+
+func (h *Host) hasResponseTranslator() bool {
+	for _, record := range h.Snapshot().records {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.ResponseTranslator == nil {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func executorNativeStreamResponseTranslatorExists(from, to sdktranslator.Format) bool {
 	if from == "" || to == "" || from == to {
 		return true
 	}
@@ -1484,7 +1518,7 @@ func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []
 	// A plugin executor only reaches this path after host-side response translation
 	// has been selected. An unchanged single frame is the SDK registry fallback,
 	// not a valid translated frame to send to the client.
-	return executorResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat)
+	return executorNativeStreamResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat)
 }
 
 func (a *executorAdapter) emitTranslatedExecutorStreamTail(ctx context.Context, prepared preparedExecutorCall, out chan<- pluginapi.ExecutorStreamChunk, param *any) {

@@ -628,13 +628,19 @@ func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, allowImageModel, modelExecutionOptions{})
+}
+
+func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
+	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -649,12 +655,14 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		Stream:                      false,
 		Alt:                         alt,
 		OriginalRequest:             rawJSON,
-		SourceFormat:                sdktranslator.FromString(handlerType),
-		Headers:                     headersFromContext(ctx),
+		SourceFormat:                sdktranslator.FromString(entryProtocol),
+		ResponseFormat:              sdktranslator.FromString(responseProtocol),
+		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
+		Query:                       cloneURLValues(execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture),
 	}
 	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, modelName, req, opts)
+	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, modelName, req, opts)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -675,7 +683,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	body, responseHeaders := h.applyResponseInterceptors(ctx, handlerType, normalizedModel, modelName, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK)
+	body, responseHeaders := h.applyResponseInterceptors(ctx, responseProtocol, normalizedModel, modelName, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK)
 	return body, responseHeaders, nil
 }
 
@@ -746,6 +754,11 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	return h.executeStreamWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, allowImageModel, modelExecutionOptions{})
+}
+
+func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -755,7 +768,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
+	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -770,12 +784,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		Stream:                      true,
 		Alt:                         alt,
 		OriginalRequest:             rawJSON,
-		SourceFormat:                sdktranslator.FromString(handlerType),
-		Headers:                     headersFromContext(ctx),
+		SourceFormat:                sdktranslator.FromString(entryProtocol),
+		ResponseFormat:              sdktranslator.FromString(responseProtocol),
+		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
+		Query:                       cloneURLValues(execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture),
 	}
 	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, modelName, req, opts)
+	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, modelName, req, opts)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -831,7 +847,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		}
 		executedReq, executedOpts := executedRequest()
 		intercepted := interceptorHost.InterceptStreamChunk(ctx, pluginapi.StreamChunkInterceptRequest{
-			SourceFormat:    handlerType,
+			SourceFormat:    responseProtocol,
 			Model:           normalizedModel,
 			RequestedModel:  modelName,
 			RequestHeaders:  cloneHeader(executedOpts.Headers),
@@ -986,7 +1002,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					if streamInterceptorsActive {
 						executedReq, executedOpts := executedRequest()
 						intercepted := interceptorHost.InterceptStreamChunk(ctx, pluginapi.StreamChunkInterceptRequest{
-							SourceFormat:    handlerType,
+							SourceFormat:    responseProtocol,
 							Model:           normalizedModel,
 							RequestedModel:  modelName,
 							RequestHeaders:  cloneHeader(executedOpts.Headers),
@@ -1009,7 +1025,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 					} else {
 						chunkIndex++
 					}
-					if handlerType == "openai-response" {
+					if responseProtocol == "openai-response" {
 						if errValidate := validateSSEDataJSON(payload); errValidate != nil {
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate})
 							return

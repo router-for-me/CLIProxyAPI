@@ -13,7 +13,7 @@
 - `protocol-format/`：使用最小执行器重点演示输入和输出格式声明。
 - `request-translator/`：只演示请求转换能力。
 - `request-normalizer/`：只演示请求规整能力。
-- `codex-service-tier/`：仅 Go 实现的请求规整插件，启用后会将 Codex `gpt-5.4` 请求设置为 priority service tier。
+- `codex-service-tier/`：仅 Go 实现的请求规整插件，启用后会将 Codex `gpt-5.5` 请求设置为 priority service tier。
 - `scheduler/`：仅 Go 实现的调度插件，可选择指定 auth ID、委托内置调度器或拒绝调度。
 - `response-translator/`：只演示响应转换能力。
 - `response-normalizer/`：只演示响应规整能力。
@@ -22,12 +22,13 @@
 - `cli/`：只演示命令行扩展能力。
 - `management-api/`：只演示 Management API 和资源扩展能力。
 - `host-callback/`：使用最小插件资源演示宿主回调。
+- `host-model-callback/`：仅 Go 实现的插件资源，演示调用宿主模型执行回调。
 
 多数标准能力示例都包含 `go/`、`c/` 和 `rust/` 三个子目录。专用示例可能只提供所需的实现语言。
 
 ## Codex Service Tier
 
-`codex-service-tier` 声明请求规整能力。当 `fast` 为 `true` 时，如果 `req.ToFormat` 为 `codex` 且 `req.Model` 为 `gpt-5.4`，它会将 `service_tier` 设置为 `priority`。
+`codex-service-tier` 声明请求规整能力。当 `fast` 为 `true` 时，如果 `req.ToFormat` 为 `codex` 且 `req.Model` 为 `gpt-5.5`，它会将 `service_tier` 设置为 `priority`。
 
 ```yaml
 plugins:
@@ -37,6 +38,20 @@ plugins:
       priority: 1
       fast: false
 ```
+
+## Host Model Callback
+
+`host-model-callback` 声明 Management API 能力，并暴露名为 `Host Model Callback` 的浏览器资源。该资源在非流式请求中调用 `host.model.execute`，在流式请求中调用 `host.model.execute_stream` 和 `host.model.stream_read`。它演示了通过 `host.model.stream_close` 显式关闭流，也提供 `implicit_close=true` 用于演示 RPC 作用域结束时的宿主隐式清理。
+
+```yaml
+plugins:
+  configs:
+    host-model-callback:
+      enabled: true
+      priority: 1
+```
+
+默认示例模型是 `gpt-5.5`，但请求能否成功取决于当前 CPA 模型和认证配置是否可以路由该模型。
 
 ## Scheduler
 

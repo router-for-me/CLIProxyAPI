@@ -78,7 +78,7 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 	}
 }
 
-func TestExecutorResponseTranslatorExistsRequiresStreamTransform(t *testing.T) {
+func TestExecutorNativeStreamResponseTranslatorExistsRequiresStreamTransform(t *testing.T) {
 	outputFormat := sdktranslator.Format("plugin-output-non-stream-only")
 	requestedFormat := sdktranslator.Format("client-output-non-stream-only")
 	sdktranslator.Register(requestedFormat, outputFormat, nil, sdktranslator.ResponseTransform{
@@ -87,7 +87,7 @@ func TestExecutorResponseTranslatorExistsRequiresStreamTransform(t *testing.T) {
 		},
 	})
 
-	if executorResponseTranslatorExists(outputFormat, requestedFormat) {
+	if executorNativeStreamResponseTranslatorExists(outputFormat, requestedFormat) {
 		t.Fatal("non-stream-only response transformer was accepted for stream executor output")
 	}
 
@@ -99,7 +99,7 @@ func TestExecutorResponseTranslatorExistsRequiresStreamTransform(t *testing.T) {
 		},
 	})
 
-	if !executorResponseTranslatorExists(streamOutputFormat, streamRequestedFormat) {
+	if !executorNativeStreamResponseTranslatorExists(streamOutputFormat, streamRequestedFormat) {
 		t.Fatal("stream response transformer was not accepted for stream executor output")
 	}
 }
@@ -2684,6 +2684,112 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	}
 }
 
+func TestExecutorAdapterUsesResponseFormatForOutputTranslation(t *testing.T) {
+	claudeResponse := []byte(`{"id":"msg_1","type":"message","model":"claude-test","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	openAIRequest := []byte(`{"model":"model-1","messages":[{"role":"user","content":"hi"}]}`)
+
+	var captured pluginapi.ExecutorRequest
+	adapter := &executorAdapter{
+		host:          New(),
+		pluginID:      "executor-plugin",
+		provider:      "plugin-provider",
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatClaude},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatClaude},
+		executor: &fakeExecutor{
+			execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				captured = req
+				return pluginapi.ExecutorResponse{Payload: claudeResponse}, nil
+			},
+		},
+	}
+
+	resp, errExecute := adapter.Execute(context.Background(), &coreauth.Auth{}, coreexecutor.Request{
+		Model:   "model-1",
+		Format:  sdktranslator.FormatOpenAI,
+		Payload: openAIRequest,
+	}, coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatClaude,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if captured.SourceFormat != sdktranslator.FormatClaude.String() {
+		t.Fatalf("executor SourceFormat = %q, want %q", captured.SourceFormat, sdktranslator.FormatClaude)
+	}
+	if captured.Format != sdktranslator.FormatClaude.String() {
+		t.Fatalf("executor Format = %q, want %q", captured.Format, sdktranslator.FormatClaude)
+	}
+	if bytes.Equal(captured.Payload, openAIRequest) || !bytes.Contains(captured.Payload, []byte(`"max_tokens":32000`)) {
+		t.Fatalf("executor payload = %s, want translated Claude request", captured.Payload)
+	}
+	if !bytes.Equal(resp.Payload, claudeResponse) {
+		t.Fatalf("Execute() payload = %s, want Claude response payload %s", resp.Payload, claudeResponse)
+	}
+}
+
+func TestExecutorAdapterSelectsCustomOutputWithHostResponseTranslator(t *testing.T) {
+	customOutputFormat := sdktranslator.Format("plugin-custom-output")
+	requestedFormat := sdktranslator.FormatOpenAI
+	body := []byte("plugin-body")
+	translatedBody := []byte("translated-body")
+	var captured pluginapi.ResponseTransformRequest
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "response-translator",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ResponseTranslator: responseTranslatorFunc(func(ctx context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+				captured = req
+				return pluginapi.PayloadResponse{Body: translatedBody}, nil
+			}),
+		}},
+	})
+	sdktranslator.SetPluginHooks(host)
+	t.Cleanup(func() {
+		sdktranslator.SetPluginHooks(nil)
+	})
+
+	adapter := &executorAdapter{
+		host:          host,
+		pluginID:      "executor-plugin",
+		provider:      "plugin-provider",
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
+		outputFormats: []sdktranslator.Format{customOutputFormat},
+		executor: &fakeExecutor{
+			execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				if req.Format != customOutputFormat.String() {
+					t.Fatalf("executor Format = %q, want %q", req.Format, customOutputFormat)
+				}
+				return pluginapi.ExecutorResponse{Payload: body}, nil
+			},
+		},
+	}
+
+	resp, errExecute := adapter.Execute(context.Background(), &coreauth.Auth{}, coreexecutor.Request{
+		Model:   "model-1",
+		Format:  sdktranslator.FormatOpenAI,
+		Payload: []byte(`{"model":"model-1"}`),
+	}, coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: requestedFormat,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if !bytes.Equal(resp.Payload, translatedBody) {
+		t.Fatalf("Execute() payload = %q, want %q", resp.Payload, translatedBody)
+	}
+	if captured.FromFormat != customOutputFormat.String() || captured.ToFormat != requestedFormat.String() {
+		t.Fatalf("translator formats = %q -> %q, want %q -> %q", captured.FromFormat, captured.ToFormat, customOutputFormat, requestedFormat)
+	}
+	if captured.Stream {
+		t.Fatal("translator Stream = true, want false")
+	}
+	if !bytes.Equal(captured.Body, body) {
+		t.Fatalf("translator body = %q, want %q", captured.Body, body)
+	}
+}
+
 func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T) {
 	adapter := &executorAdapter{}
 	request := []byte(`{"model":"qmodel_latest","stream":true,"tool_choice":"auto","parallel_tool_calls":true}`)
@@ -2733,6 +2839,47 @@ func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T
 		!bytes.Contains(doneFrames[0], []byte(`"reasoning_tokens":121`)) ||
 		!bytes.Contains(doneFrames[0], []byte(`"total_tokens":510`)) {
 		t.Fatalf("completed payload did not preserve usage: %q", doneFrames[0])
+	}
+}
+
+func TestExecutorAdapterKeepsRawStreamFallbackWithOnlyHostResponseTranslator(t *testing.T) {
+	customOutputFormat := sdktranslator.Format("plugin-custom-stream-output")
+	requestedFormat := sdktranslator.FormatOpenAI
+	payload := []byte(`{"custom":"chunk"}`)
+	host := newHostWithRecords(capabilityRecord{
+		id: "empty-response-translator",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ResponseTranslator: responseTranslatorFunc(func(ctx context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+				return pluginapi.PayloadResponse{}, nil
+			}),
+		}},
+	})
+	sdktranslator.SetPluginHooks(host)
+	t.Cleanup(func() {
+		sdktranslator.SetPluginHooks(nil)
+	})
+	adapter := &executorAdapter{
+		host: host,
+	}
+	prepared := preparedExecutorCall{
+		req: coreexecutor.Request{
+			Model:   "model-1",
+			Payload: []byte(`{"model":"model-1"}`),
+		},
+		opts: coreexecutor.Options{
+			OriginalRequest: []byte(`{"model":"model-1","stream":true}`),
+		},
+		requestedFormat: requestedFormat,
+		outputFormat:    customOutputFormat,
+	}
+	var param any
+
+	frames := adapter.translateExecutorStreamPayload(context.Background(), prepared, payload, &param)
+	if len(frames) != 1 {
+		t.Fatalf("translated stream frame count = %d, want 1", len(frames))
+	}
+	if !bytes.Equal(frames[0], payload) {
+		t.Fatalf("translated stream frame = %q, want raw payload %q", frames[0], payload)
 	}
 }
 
