@@ -293,6 +293,38 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 }
 
+func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
+	host := New()
+	var got handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			got = req
+			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
+		},
+	})
+	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "origin-plugin")
+	defer closeCallback()
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         "model-1",
+			Body:          []byte(`{"request":true}`),
+		},
+		HostCallbackID: callbackID,
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq); errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if got.SkipInterceptorPluginID != "origin-plugin" {
+		t.Fatalf("SkipInterceptorPluginID = %q, want origin-plugin", got.SkipInterceptorPluginID)
+	}
+}
+
 func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {
 	host := New()
 	ctxSeen := make(chan context.Context, 1)

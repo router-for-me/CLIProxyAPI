@@ -569,25 +569,34 @@ func (h *Host) callStreamChunkInterceptor(ctx context.Context, pluginID string, 
 }
 
 func (h *Host) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return h.InterceptRequestBeforeAuthExcept(ctx, req, "")
+}
+
+func (h *Host) InterceptRequestBeforeAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
 	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestBeforeAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 		return interceptor.InterceptRequestBeforeAuth(ctx, req)
-	})
+	}, skipPluginID)
 }
 
 func (h *Host) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
-	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestAfterAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
-		return interceptor.InterceptRequestAfterAuth(ctx, req)
-	})
+	return h.InterceptRequestAfterAuthExcept(ctx, req, "")
 }
 
-func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error)) pluginapi.RequestInterceptResponse {
+func (h *Host) InterceptRequestAfterAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
+	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestAfterAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return interceptor.InterceptRequestAfterAuth(ctx, req)
+	}, skipPluginID)
+}
+
+func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), skipPluginID string) pluginapi.RequestInterceptResponse {
 	current := pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
 		Body:    bytes.Clone(req.Body),
 	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
 	for _, record := range h.Snapshot().records {
 		interceptor := record.plugin.Capabilities.RequestInterceptor
-		if h.isPluginFused(record.id) || interceptor == nil {
+		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
 		}
 		nextReq := req
@@ -607,13 +616,18 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 }
 
 func (h *Host) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	return h.InterceptResponseExcept(ctx, req, "")
+}
+
+func (h *Host) InterceptResponseExcept(ctx context.Context, req pluginapi.ResponseInterceptRequest, skipPluginID string) pluginapi.ResponseInterceptResponse {
 	current := pluginapi.ResponseInterceptResponse{
 		Headers: cloneHeader(req.ResponseHeaders),
 		Body:    bytes.Clone(req.Body),
 	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
 	for _, record := range h.Snapshot().records {
 		interceptor := record.plugin.Capabilities.ResponseInterceptor
-		if h.isPluginFused(record.id) || interceptor == nil {
+		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
 		}
 		nextReq := req
@@ -634,13 +648,18 @@ func (h *Host) InterceptResponse(ctx context.Context, req pluginapi.ResponseInte
 }
 
 func (h *Host) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	return h.InterceptStreamChunkExcept(ctx, req, "")
+}
+
+func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.StreamChunkInterceptRequest, skipPluginID string) pluginapi.StreamChunkInterceptResponse {
 	current := pluginapi.StreamChunkInterceptResponse{
 		Headers: cloneHeader(req.ResponseHeaders),
 		Body:    bytes.Clone(req.Body),
 	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
 	for _, record := range h.Snapshot().records {
 		interceptor := record.plugin.Capabilities.StreamChunkInterceptor
-		if h.isPluginFused(record.id) || interceptor == nil || current.DropChunk {
+		if h.isPluginFused(record.id) || interceptor == nil || current.DropChunk || record.id == skipPluginID {
 			continue
 		}
 		nextReq := req

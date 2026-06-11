@@ -14,6 +14,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -31,6 +32,61 @@ type modelExecutionStatusHeaderError struct {
 	statusCode int
 	message    string
 	headers    http.Header
+}
+
+type modelExecutionSkipHost struct {
+	beforeSkip string
+	afterSkip  string
+	respSkip   string
+	streamSkip []string
+}
+
+func (h *modelExecutionSkipHost) InterceptRequestBeforeAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	panic("InterceptRequestBeforeAuth called without skip")
+}
+
+func (h *modelExecutionSkipHost) InterceptRequestAfterAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	panic("InterceptRequestAfterAuth called without skip")
+}
+
+func (h *modelExecutionSkipHost) InterceptResponse(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	panic("InterceptResponse called without skip")
+}
+
+func (h *modelExecutionSkipHost) InterceptStreamChunk(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	panic("InterceptStreamChunk called without skip")
+}
+
+func (h *modelExecutionSkipHost) InterceptRequestBeforeAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
+	h.beforeSkip = skipPluginID
+	return pluginapi.RequestInterceptResponse{
+		Headers: cloneHeader(req.Headers),
+		Body:    cloneBytes(req.Body),
+	}
+}
+
+func (h *modelExecutionSkipHost) InterceptRequestAfterAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
+	h.afterSkip = skipPluginID
+	return pluginapi.RequestInterceptResponse{
+		Headers: cloneHeader(req.Headers),
+		Body:    cloneBytes(req.Body),
+	}
+}
+
+func (h *modelExecutionSkipHost) InterceptResponseExcept(ctx context.Context, req pluginapi.ResponseInterceptRequest, skipPluginID string) pluginapi.ResponseInterceptResponse {
+	h.respSkip = skipPluginID
+	return pluginapi.ResponseInterceptResponse{
+		Headers: cloneHeader(req.ResponseHeaders),
+		Body:    cloneBytes(req.Body),
+	}
+}
+
+func (h *modelExecutionSkipHost) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.StreamChunkInterceptRequest, skipPluginID string) pluginapi.StreamChunkInterceptResponse {
+	h.streamSkip = append(h.streamSkip, skipPluginID)
+	return pluginapi.StreamChunkInterceptResponse{
+		Headers: cloneHeader(req.ResponseHeaders),
+		Body:    cloneBytes(req.Body),
+	}
 }
 
 func (e modelExecutionStatusHeaderError) Error() string {
@@ -195,6 +251,32 @@ func TestExecuteModelCarriesEntryAndExitProtocols(t *testing.T) {
 	}
 }
 
+func TestExecuteModelSkipsOriginatingPluginInterceptors(t *testing.T) {
+	model := "model-execution-skip-origin-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	executor := &modelExecutionCaptureExecutor{}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	skipHost := &modelExecutionSkipHost{}
+	handler.SetPluginHost(skipHost)
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:           "openai",
+		ExitProtocol:            "openai",
+		Model:                   model,
+		Body:                    requestBody,
+		SkipInterceptorPluginID: "origin-plugin",
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if string(resp.Body) != "model-execution-ok" {
+		t.Fatalf("body = %q, want executor response", resp.Body)
+	}
+	if skipHost.beforeSkip != "origin-plugin" || skipHost.afterSkip != "origin-plugin" || skipHost.respSkip != "origin-plugin" {
+		t.Fatalf("skip ids = before:%q after:%q response:%q, want origin-plugin", skipHost.beforeSkip, skipHost.afterSkip, skipHost.respSkip)
+	}
+}
+
 func TestExecuteModelStream(t *testing.T) {
 	model := "model-execution-stream-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, model))
@@ -266,6 +348,52 @@ func TestExecuteModelStream(t *testing.T) {
 	}
 	if gotOpts.Headers.Get("X-Callback") != "stream" {
 		t.Fatalf("executor headers = %#v, want callback header", gotOpts.Headers)
+	}
+}
+
+func TestExecuteModelStreamSkipsOriginatingPluginInterceptors(t *testing.T) {
+	model := "model-execution-stream-skip-origin-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, model))
+	executor := &modelExecutionCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("stream-one")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	skipHost := &modelExecutionSkipHost{}
+	handler.SetPluginHost(skipHost)
+
+	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol:           "openai",
+		ExitProtocol:            "openai",
+		Model:                   model,
+		Stream:                  true,
+		Body:                    requestBody,
+		SkipInterceptorPluginID: "origin-plugin",
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModelStream() error = %+v", errMsg)
+	}
+	chunk, ok := <-stream.Chunks
+	if !ok {
+		t.Fatal("stream chunks closed before payload")
+	}
+	if string(chunk.Payload) != "stream-one" {
+		t.Fatalf("stream chunk payload = %q, want stream-one", chunk.Payload)
+	}
+	if skipHost.beforeSkip != "origin-plugin" || skipHost.afterSkip != "origin-plugin" {
+		t.Fatalf("request skip ids = before:%q after:%q, want origin-plugin", skipHost.beforeSkip, skipHost.afterSkip)
+	}
+	if len(skipHost.streamSkip) == 0 {
+		t.Fatal("stream interceptor was not called with skip")
+	}
+	for _, skipID := range skipHost.streamSkip {
+		if skipID != "origin-plugin" {
+			t.Fatalf("stream skip id = %q, want origin-plugin", skipID)
+		}
 	}
 }
 

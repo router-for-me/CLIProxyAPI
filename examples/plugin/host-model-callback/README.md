@@ -115,6 +115,12 @@ By default, streaming mode explicitly closes the host-owned stream with `host.mo
 
 When `implicit_close=true` is set, the plugin intentionally skips the explicit close call. CPA injects `host_callback_id` into the `management.handle` request, and this example forwards that callback ID to `host.model.execute_stream` so the host can close the stream when the `management.handle` RPC callback scope returns. This mode exists only to demonstrate host cleanup behavior; normal plugin code should explicitly close streams it opens.
 
+## Recursion Guard
+
+This example forwards the `host_callback_id` received from `management.handle` when it calls `host.model.execute` or `host.model.execute_stream`. CPA uses that callback scope to identify the plugin that initiated the host model callback and skips that same plugin's request, response, and stream interceptors for the nested model execution.
+
+Host model callbacks are therefore not recursive for the caller. Other enabled plugins can still intercept the nested request.
+
 ## Billing and Usage
 
 The callback uses the existing CPA model executor path. Usage collection, request accounting, and billing metadata are handled by the same executor and usage reporter path as normal proxied requests. The callback layer does not bill twice and does not create an additional usage record by itself.

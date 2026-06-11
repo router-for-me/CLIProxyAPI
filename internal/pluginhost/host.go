@@ -186,7 +186,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 }
 
 func (h *Host) loadLocked(file pluginFile) (*loadedPlugin, error) {
-	client, errOpen := h.loader.Open(file.Path, h)
+	client, errOpen := h.loader.Open(file, h)
 	if errOpen != nil {
 		return nil, errOpen
 	}

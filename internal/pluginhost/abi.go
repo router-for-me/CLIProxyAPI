@@ -14,5 +14,5 @@ type pluginClient interface {
 }
 
 type pluginLoader interface {
-	Open(path string, host *Host) (pluginClient, error)
+	Open(file pluginFile, host *Host) (pluginClient, error)
 }

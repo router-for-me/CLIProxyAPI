@@ -1342,6 +1342,81 @@ func TestInterceptRequestAfterAuthPassesTargetFormat(t *testing.T) {
 	}
 }
 
+func TestInterceptorsSkipExceptedPlugin(t *testing.T) {
+	originCalls := 0
+	otherCalls := 0
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "origin",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					originCalls++
+					return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|origin-request")...)}, nil
+				}),
+				ResponseInterceptor: responseInterceptorFunc{
+					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						originCalls++
+						return pluginapi.ResponseInterceptResponse{Body: append(req.Body, []byte("|origin-response")...)}, nil
+					},
+				},
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						originCalls++
+						return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|origin-stream")...)}, nil
+					},
+				},
+			}},
+		},
+		capabilityRecord{
+			id:       "other",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					otherCalls++
+					return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|other-request")...)}, nil
+				}),
+				ResponseInterceptor: responseInterceptorFunc{
+					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						otherCalls++
+						return pluginapi.ResponseInterceptResponse{Body: append(req.Body, []byte("|other-response")...)}, nil
+					},
+				},
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						otherCalls++
+						return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|other-stream")...)}, nil
+					},
+				},
+			}},
+		},
+	)
+
+	reqOut := host.InterceptRequestBeforeAuthExcept(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("body")}, "origin")
+	afterOut := host.InterceptRequestAfterAuthExcept(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("body")}, "origin")
+	respOut := host.InterceptResponseExcept(context.Background(), pluginapi.ResponseInterceptRequest{Body: []byte("body")}, "origin")
+	streamOut := host.InterceptStreamChunkExcept(context.Background(), pluginapi.StreamChunkInterceptRequest{Body: []byte("body")}, "origin")
+
+	if originCalls != 0 {
+		t.Fatalf("origin plugin calls = %d, want 0", originCalls)
+	}
+	if otherCalls != 4 {
+		t.Fatalf("other plugin calls = %d, want 4", otherCalls)
+	}
+	if string(reqOut.Body) != "body|other-request" {
+		t.Fatalf("request body = %q, want body|other-request", reqOut.Body)
+	}
+	if string(afterOut.Body) != "body|other-request" {
+		t.Fatalf("after-auth request body = %q, want body|other-request", afterOut.Body)
+	}
+	if string(respOut.Body) != "body|other-response" {
+		t.Fatalf("response body = %q, want body|other-response", respOut.Body)
+	}
+	if string(streamOut.Body) != "body|other-stream" {
+		t.Fatalf("stream body = %q, want body|other-stream", streamOut.Body)
+	}
+}
+
 func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 	var seenHistory [][]byte
 	var sawSecondResponse bool

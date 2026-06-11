@@ -66,6 +66,35 @@ type rpcHostModelExecutionRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type dynamicHostCallbackEntry struct {
+	host     *Host
+	pluginID string
+}
+
+type hostCallbackPluginIDKey struct{}
+
+func withHostCallbackPluginID(ctx context.Context, pluginID string) context.Context {
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		if ctx == nil {
+			return context.Background()
+		}
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, hostCallbackPluginIDKey{}, pluginID)
+}
+
+func hostCallbackPluginIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	pluginID, _ := ctx.Value(hostCallbackPluginIDKey{}).(string)
+	return strings.TrimSpace(pluginID)
+}
+
 func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodHostModelExecute:
@@ -93,6 +122,13 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}
+}
+
+func (h *Host) callbackCallerPluginID(ctx context.Context, callbackID string) string {
+	if pluginID := hostCallbackPluginIDFromContext(ctx); pluginID != "" {
+		return pluginID
+	}
+	return h.callbackContextPluginID(callbackID)
 }
 
 func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, error) {
@@ -234,8 +270,9 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")
 	}
+	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
 	ctx = h.resolveCallbackContext(req.HostCallbackID, ctx)
-	resp, errMsg := executor.ExecuteModel(ctx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest))
+	resp, errMsg := executor.ExecuteModel(ctx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
 	if errMsg != nil {
 		return nil, modelExecutionError(errMsg)
 	}
@@ -258,12 +295,13 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")
 	}
+	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
 	ctx = h.resolveCallbackContext(req.HostCallbackID, ctx)
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	streamCtx, cancel := context.WithCancel(ctx)
-	stream, errMsg := executor.ExecuteModelStream(streamCtx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest))
+	stream, errMsg := executor.ExecuteModelStream(streamCtx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
 	if errMsg != nil {
 		cancel()
 		return nil, modelExecutionError(errMsg)
@@ -322,16 +360,17 @@ func (h *Host) callHostModelStreamClose(request []byte) ([]byte, error) {
 	return marshalRPCResult(rpcEmptyResponse{})
 }
 
-func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest) handlers.ModelExecutionRequest {
+func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, skipPluginID string) handlers.ModelExecutionRequest {
 	return handlers.ModelExecutionRequest{
-		EntryProtocol: req.EntryProtocol,
-		ExitProtocol:  req.ExitProtocol,
-		Model:         req.Model,
-		Stream:        req.Stream,
-		Body:          append([]byte(nil), req.Body...),
-		Headers:       cloneHeader(req.Headers),
-		Query:         cloneValues(req.Query),
-		Alt:           req.Alt,
+		EntryProtocol:           req.EntryProtocol,
+		ExitProtocol:            req.ExitProtocol,
+		Model:                   req.Model,
+		Stream:                  req.Stream,
+		Body:                    append([]byte(nil), req.Body...),
+		Headers:                 cloneHeader(req.Headers),
+		Query:                   cloneValues(req.Query),
+		Alt:                     req.Alt,
+		SkipInterceptorPluginID: skipPluginID,
 	}
 }
 
