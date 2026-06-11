@@ -521,9 +521,6 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if cacheMiss.Exists() {
 		detail.CacheMissInputTokens = cacheMiss.Int()
 	}
-	if detail.InputTokens == 0 && (detail.CacheHitInputTokens > 0 || detail.CacheMissInputTokens > 0) {
-		detail.InputTokens = detail.CacheHitInputTokens + detail.CacheMissInputTokens
-	}
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
@@ -534,6 +531,9 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		if detail.InputTokens > detail.CacheHitInputTokens {
 			detail.CacheMissInputTokens = detail.InputTokens - detail.CacheHitInputTokens
 		}
+	}
+	if detail.InputTokens == 0 && (detail.CacheHitInputTokens > 0 || detail.CacheMissInputTokens > 0) {
+		detail.InputTokens = detail.CacheHitInputTokens + detail.CacheMissInputTokens
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {

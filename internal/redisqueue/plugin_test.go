@@ -102,6 +102,62 @@ func TestUsageQueuePluginPayloadIncludesDeepSeekCacheSplit(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginPayloadInfersInputFromCachedTokensOnly(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "cached-only-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "openai",
+			Model:       "gpt-5.4",
+			APIKey:      "test-key",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				CachedTokens: 11,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireIntField(t, payload, "tokens.input_tokens", 11)
+		requireIntField(t, payload, "tokens.cached_tokens", 11)
+		requireIntField(t, payload, "tokens.cache_hit_input_tokens", 11)
+		requireIntField(t, payload, "tokens.cache_miss_input_tokens", 0)
+	})
+}
+
+func TestUsageQueuePluginPayloadDoesNotInferCacheMissWithoutCacheFields(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "plain-usage-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "openai",
+			Model:       "gpt-5.4",
+			APIKey:      "test-key",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:  42,
+				OutputTokens: 7,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireIntField(t, payload, "tokens.input_tokens", 42)
+		requireIntField(t, payload, "tokens.cache_hit_input_tokens", 0)
+		requireIntField(t, payload, "tokens.cache_miss_input_tokens", 0)
+	})
+}
+
 func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")

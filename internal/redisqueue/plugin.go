@@ -72,10 +72,14 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheCreationTokens:  record.Detail.CacheCreationTokens,
 		TotalTokens:          record.Detail.TotalTokens,
 	}
+	hasInputCacheStats := tokens.CachedTokens > 0 || tokens.CacheHitInputTokens > 0 || tokens.CacheMissInputTokens > 0
 	if tokens.CacheHitInputTokens == 0 && tokens.CachedTokens > 0 {
 		tokens.CacheHitInputTokens = tokens.CachedTokens
 	}
-	if tokens.CacheMissInputTokens == 0 && tokens.InputTokens > tokens.CacheHitInputTokens {
+	if tokens.InputTokens == 0 && hasInputCacheStats {
+		tokens.InputTokens = tokens.CacheHitInputTokens + tokens.CacheMissInputTokens
+	}
+	if tokens.CacheMissInputTokens == 0 && hasInputCacheStats && tokens.InputTokens > tokens.CacheHitInputTokens {
 		tokens.CacheMissInputTokens = tokens.InputTokens - tokens.CacheHitInputTokens
 	}
 	if tokens.TotalTokens == 0 {

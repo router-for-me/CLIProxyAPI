@@ -97,6 +97,23 @@ func TestParseOpenAIUsageDeepSeekInfersInputFromCacheSplit(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageInfersInputFromCachedTokensDetails(t *testing.T) {
+	data := []byte(`{"usage":{"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":11}}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.CacheHitInputTokens != 11 {
+		t.Fatalf("cache hit input tokens = %d, want %d", detail.CacheHitInputTokens, 11)
+	}
+	if detail.CacheMissInputTokens != 0 {
+		t.Fatalf("cache miss input tokens = %d, want %d", detail.CacheMissInputTokens, 0)
+	}
+	if detail.CachedTokens != 11 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 11)
+	}
+}
+
 func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
 	data := []byte(`{"usage":null}`)
 	detail := ParseOpenAIUsage(data)
