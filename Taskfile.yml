@@ -627,3 +627,30 @@ tasks:
     desc: "Sync GitHub sources and regenerate planning board/import artifacts (Go tool)"
     cmds:
       - go run ./cmd/boardsync
+
+  grade:
+    desc: Full grade (strictest — no caching)
+    cmds:
+      - ./grade.sh
+
+  grade-fast:
+    desc: Fast grade (skips heavy checks)
+    cmds:
+      - ./grade.sh --fast
+
+  grade-json:
+    desc: Grade with JSON output
+    cmds:
+      - ./grade.sh --json
+
+  grade-html:
+    desc: Grade with HTML report
+    cmds:
+      - ./grade.sh --html
+
+  install-lefthook:
+    desc: Install lefthook git hooks
+    cmds:
+      - lefthook install
+    status:
+      - test -f .git/hooks/lefthook
