@@ -205,7 +205,9 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
+	h.mu.Lock()
 	cfg := h.cfg
+	h.mu.Unlock()
 	var (
 		allowRemote bool
 		secretHash  string
