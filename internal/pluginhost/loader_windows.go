@@ -52,8 +52,8 @@ func defaultPluginLoader() pluginLoader {
 	return dynamicLibraryLoader{}
 }
 
-func (dynamicLibraryLoader) Open(path string, host *Host) (pluginClient, error) {
-	dll, errLoad := syscall.LoadDLL(path)
+func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
+	dll, errLoad := syscall.LoadDLL(file.Path)
 	if errLoad != nil {
 		return nil, errLoad
 	}
@@ -65,7 +65,7 @@ func (dynamicLibraryLoader) Open(path string, host *Host) (pluginClient, error) 
 	id := windowsHostCallbackID.Add(1)
 	hostCtx := new(uintptr)
 	*hostCtx = id
-	windowsHostCallbackEntries.Store(id, host)
+	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID})
 	client := &dynamicLibraryClient{
 		dll:     dll,
 		hostCtx: hostCtx,
@@ -165,8 +165,8 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 	if !okHost {
 		return 1
 	}
-	host, okHost := rawHost.(*Host)
-	if !okHost || host == nil {
+	entry, okHost := rawHost.(dynamicHostCallbackEntry)
+	if !okHost || entry.host == nil {
 		return 1
 	}
 	var request []byte
@@ -174,7 +174,8 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 		request = unsafe.Slice((*byte)(unsafe.Pointer(requestPtr)), requestLen)
 		request = append([]byte(nil), request...)
 	}
-	resp, errCall := host.callFromPlugin(context.Background(), windowsString(methodPtr), request)
+	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
+	resp, errCall := entry.host.callFromPlugin(ctx, windowsString(methodPtr), request)
 	if errCall != nil {
 		resp = marshalRPCError("host_call_failed", errCall.Error())
 	}

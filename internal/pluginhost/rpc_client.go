@@ -285,7 +285,7 @@ func (a *rpcPluginAdapter) openHostCallbackContext(ctx context.Context) (string,
 	if a == nil || a.host == nil {
 		return "", func() {}
 	}
-	return a.host.openCallbackContext(ctx)
+	return a.host.openCallbackContextForPlugin(ctx, a.id)
 }
 
 func (a *rpcPluginAdapter) RegisterModels(ctx context.Context, req pluginapi.ModelRegistrationRequest) (pluginapi.ModelRegistrationResponse, error) {
@@ -516,7 +516,12 @@ func (a *rpcPluginAdapter) RegisterManagement(ctx context.Context, req pluginapi
 }
 
 func (a *rpcPluginAdapter) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
-	return callPlugin[pluginapi.ManagementResponse](ctx, a.client, pluginabi.MethodManagementHandle, req)
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.ManagementResponse](ctx, a.client, pluginabi.MethodManagementHandle, rpcManagementRequest{
+		ManagementRequest: req,
+		HostCallbackID:    callbackID,
+	})
 }
 
 func httpResponseFromPlugin(resp pluginapi.ExecutorHTTPResponse, req *http.Request) *http.Response {

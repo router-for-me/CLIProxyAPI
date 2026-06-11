@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -265,6 +266,40 @@ func TestRPCInterceptorsIncludeHostCallbackID(t *testing.T) {
 	}
 	if chunk.HostCallbackID == "" {
 		t.Fatal("stream chunk interceptor host_callback_id is empty")
+	}
+}
+
+func TestRPCManagementIncludesHostCallbackID(t *testing.T) {
+	client := &capturePluginClient{}
+	host := New()
+	adapter := &rpcPluginAdapter{
+		host:   host,
+		client: client,
+	}
+
+	if _, errHandle := adapter.HandleManagement(context.Background(), pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/plugins/test/status",
+		Body:   []byte("request"),
+	}); errHandle != nil {
+		t.Fatalf("HandleManagement() error = %v", errHandle)
+	}
+	var req rpcManagementRequest
+	if errDecode := json.Unmarshal(client.requests[pluginabi.MethodManagementHandle], &req); errDecode != nil {
+		t.Fatalf("decode management request: %v", errDecode)
+	}
+	if req.HostCallbackID == "" {
+		t.Fatal("management handle host_callback_id is empty")
+	}
+	if req.Method != http.MethodGet || req.Path != "/v0/management/plugins/test/status" || string(req.Body) != "request" {
+		t.Fatalf("management request = %#v, want forwarded request fields", req.ManagementRequest)
+	}
+
+	host.callbackContexts.mu.RLock()
+	_, exists := host.callbackContexts.contexts[req.HostCallbackID]
+	host.callbackContexts.mu.RUnlock()
+	if exists {
+		t.Fatal("management host_callback_id scope was not closed")
 	}
 }
 

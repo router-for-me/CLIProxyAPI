@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -21,12 +23,18 @@ type loadedPlugin struct {
 	client     pluginClient
 }
 
+type modelExecutor interface {
+	ExecuteModel(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage)
+	ExecuteModelStream(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage)
+}
+
 type Host struct {
 	mu                     sync.Mutex
 	loader                 pluginLoader
 	loaded                 map[string]*loadedPlugin
 	fused                  map[string]string
 	runtimeConfig          *config.Config
+	modelExecutor          modelExecutor
 	modelClientIDs         map[string]struct{}
 	executorModelClientIDs map[string]struct{}
 	modelProviders         map[string]string
@@ -40,6 +48,7 @@ type Host struct {
 	resourceRoutes         map[string]resourceRouteRecord
 	streams                *streamBridge
 	httpStreams            *hostHTTPStreamBridge
+	modelStreams           *modelStreamBridge
 	callbackContexts       *callbackContextRegistry
 	snapshot               atomic.Value
 }
@@ -62,6 +71,7 @@ func New() *Host {
 		resourceRoutes:         make(map[string]resourceRouteRecord),
 		streams:                newStreamBridge(),
 		httpStreams:            newHostHTTPStreamBridge(),
+		modelStreams:           newModelStreamBridge(),
 		callbackContexts:       newCallbackContextRegistry(),
 	}
 	h.snapshot.Store(emptySnapshot())
@@ -72,6 +82,25 @@ func NewForTest(loader pluginLoader) *Host {
 	h := New()
 	h.loader = loader
 	return h
+}
+
+func (h *Host) SetModelExecutor(executor modelExecutor) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.modelExecutor = executor
+	h.mu.Unlock()
+}
+
+func (h *Host) currentModelExecutor() modelExecutor {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	executor := h.modelExecutor
+	h.mu.Unlock()
+	return executor
 }
 
 func (h *Host) Snapshot() *Snapshot {
@@ -157,7 +186,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 }
 
 func (h *Host) loadLocked(file pluginFile) (*loadedPlugin, error) {
-	client, errOpen := h.loader.Open(file.Path, h)
+	client, errOpen := h.loader.Open(file, h)
 	if errOpen != nil {
 		return nil, errOpen
 	}

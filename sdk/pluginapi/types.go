@@ -524,6 +524,68 @@ type HostHTTPClient interface {
 	DoStream(context.Context, HTTPRequest) (HTTPStreamResponse, error)
 }
 
+// HostModelExecutionRequest describes a model execution request issued through the host.
+type HostModelExecutionRequest struct {
+	// EntryProtocol is the inbound client protocol format.
+	EntryProtocol string `json:"entry_protocol"`
+	// ExitProtocol is the target provider protocol format.
+	ExitProtocol string `json:"exit_protocol"`
+	// Model is the requested model identifier.
+	Model string `json:"model"`
+	// Stream reports whether the request expects streaming output.
+	Stream bool `json:"stream"`
+	// Body contains the raw request body.
+	Body []byte `json:"body"`
+	// Headers contains request headers.
+	Headers http.Header `json:"headers"`
+	// Query contains request query parameters.
+	Query url.Values `json:"query"`
+	// Alt carries an alternate route or mode suffix when present.
+	Alt string `json:"alt"`
+}
+
+// HostModelExecutionResponse describes a non-streaming host model execution response.
+type HostModelExecutionResponse struct {
+	// StatusCode is the model execution HTTP status code.
+	StatusCode int `json:"status_code"`
+	// Headers contains response headers.
+	Headers http.Header `json:"headers"`
+	// Body contains the raw response body.
+	Body []byte `json:"body"`
+}
+
+// HostModelStreamResponse describes a streaming host model execution response.
+type HostModelStreamResponse struct {
+	// StatusCode is the model execution HTTP status code.
+	StatusCode int `json:"status_code"`
+	// Headers contains response headers.
+	Headers http.Header `json:"headers"`
+	// StreamID identifies the host-owned stream for later reads.
+	StreamID string `json:"stream_id"`
+}
+
+// HostModelStreamReadRequest asks the host to read the next model stream chunk.
+type HostModelStreamReadRequest struct {
+	// StreamID identifies the host-owned stream.
+	StreamID string `json:"stream_id"`
+}
+
+// HostModelStreamReadResponse returns one model stream chunk or terminal state.
+type HostModelStreamReadResponse struct {
+	// Payload contains the raw stream chunk bytes.
+	Payload []byte `json:"payload"`
+	// Error reports a stream error associated with this read.
+	Error string `json:"error"`
+	// Done reports whether the stream has ended.
+	Done bool `json:"done"`
+}
+
+// HostModelStreamCloseRequest asks the host to close a model stream.
+type HostModelStreamCloseRequest struct {
+	// StreamID identifies the host-owned stream.
+	StreamID string `json:"stream_id"`
+}
+
 // HTTPRequest describes an upstream HTTP request issued through the host.
 type HTTPRequest struct {
 	// Method is the HTTP method.

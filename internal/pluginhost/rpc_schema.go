@@ -102,6 +102,11 @@ type rpcThinkingApplyRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type rpcManagementRequest struct {
+	pluginapi.ManagementRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcManagementRegistrationResponse struct {
 	Routes    []pluginapi.ManagementRoute `json:"routes,omitempty"`
 	Resources []pluginapi.ResourceRoute   `json:"resources,omitempty"`

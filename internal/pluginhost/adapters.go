@@ -569,25 +569,34 @@ func (h *Host) callStreamChunkInterceptor(ctx context.Context, pluginID string, 
 }
 
 func (h *Host) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return h.InterceptRequestBeforeAuthExcept(ctx, req, "")
+}
+
+func (h *Host) InterceptRequestBeforeAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
 	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestBeforeAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 		return interceptor.InterceptRequestBeforeAuth(ctx, req)
-	})
+	}, skipPluginID)
 }
 
 func (h *Host) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
-	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestAfterAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
-		return interceptor.InterceptRequestAfterAuth(ctx, req)
-	})
+	return h.InterceptRequestAfterAuthExcept(ctx, req, "")
 }
 
-func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error)) pluginapi.RequestInterceptResponse {
+func (h *Host) InterceptRequestAfterAuthExcept(ctx context.Context, req pluginapi.RequestInterceptRequest, skipPluginID string) pluginapi.RequestInterceptResponse {
+	return h.interceptRequest(ctx, req, "RequestInterceptor.InterceptRequestAfterAuth", func(interceptor pluginapi.RequestInterceptor, ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return interceptor.InterceptRequestAfterAuth(ctx, req)
+	}, skipPluginID)
+}
+
+func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest, method string, invoke func(pluginapi.RequestInterceptor, context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), skipPluginID string) pluginapi.RequestInterceptResponse {
 	current := pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
 		Body:    bytes.Clone(req.Body),
 	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
 	for _, record := range h.Snapshot().records {
 		interceptor := record.plugin.Capabilities.RequestInterceptor
-		if h.isPluginFused(record.id) || interceptor == nil {
+		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
 		}
 		nextReq := req
@@ -607,13 +616,18 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 }
 
 func (h *Host) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	return h.InterceptResponseExcept(ctx, req, "")
+}
+
+func (h *Host) InterceptResponseExcept(ctx context.Context, req pluginapi.ResponseInterceptRequest, skipPluginID string) pluginapi.ResponseInterceptResponse {
 	current := pluginapi.ResponseInterceptResponse{
 		Headers: cloneHeader(req.ResponseHeaders),
 		Body:    bytes.Clone(req.Body),
 	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
 	for _, record := range h.Snapshot().records {
 		interceptor := record.plugin.Capabilities.ResponseInterceptor
-		if h.isPluginFused(record.id) || interceptor == nil {
+		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
 		}
 		nextReq := req
@@ -634,13 +648,18 @@ func (h *Host) InterceptResponse(ctx context.Context, req pluginapi.ResponseInte
 }
 
 func (h *Host) InterceptStreamChunk(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	return h.InterceptStreamChunkExcept(ctx, req, "")
+}
+
+func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.StreamChunkInterceptRequest, skipPluginID string) pluginapi.StreamChunkInterceptResponse {
 	current := pluginapi.StreamChunkInterceptResponse{
 		Headers: cloneHeader(req.ResponseHeaders),
 		Body:    bytes.Clone(req.Body),
 	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
 	for _, record := range h.Snapshot().records {
 		interceptor := record.plugin.Capabilities.StreamChunkInterceptor
-		if h.isPluginFused(record.id) || interceptor == nil || current.DropChunk {
+		if h.isPluginFused(record.id) || interceptor == nil || current.DropChunk || record.id == skipPluginID {
 			continue
 		}
 		nextReq := req
@@ -1307,14 +1326,16 @@ func (a *executorAdapter) Identifier() string {
 type preparedExecutorCall struct {
 	req             coreexecutor.Request
 	opts            coreexecutor.Options
+	inputRequested  sdktranslator.Format
 	requestedFormat sdktranslator.Format
 	inputFormat     sdktranslator.Format
 	outputFormat    sdktranslator.Format
 }
 
 func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts coreexecutor.Options) (preparedExecutorCall, error) {
+	inputRequested := executorInputFormat(req, opts)
 	requestedFormat := executorRequestedFormat(req, opts)
-	inputFormat, errInput := a.selectExecutorInputFormat(requestedFormat)
+	inputFormat, errInput := a.selectExecutorInputFormat(inputRequested)
 	if errInput != nil {
 		return preparedExecutorCall{}, errInput
 	}
@@ -1325,15 +1346,17 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 
 	nativeReq := req
 	nativeOpts := opts
-	if requestedFormat != "" && requestedFormat != inputFormat {
-		nativeReq.Payload = sdktranslator.TranslateRequest(requestedFormat, inputFormat, req.Model, req.Payload, opts.Stream)
+	if inputRequested != "" && inputRequested != inputFormat {
+		nativeReq.Payload = sdktranslator.TranslateRequest(inputRequested, inputFormat, req.Model, req.Payload, opts.Stream)
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
+	nativeOpts.ResponseFormat = outputFormat
 
 	return preparedExecutorCall{
 		req:             nativeReq,
 		opts:            nativeOpts,
+		inputRequested:  inputRequested,
 		requestedFormat: requestedFormat,
 		inputFormat:     inputFormat,
 		outputFormat:    outputFormat,
@@ -1344,17 +1367,27 @@ func (a *executorAdapter) RequestToFormat(req coreexecutor.Request, opts coreexe
 	if a == nil {
 		return ""
 	}
-	requestedFormat := executorRequestedFormat(req, opts)
-	inputFormat, errInput := a.selectExecutorInputFormat(requestedFormat)
+	inputRequested := executorInputFormat(req, opts)
+	inputFormat, errInput := a.selectExecutorInputFormat(inputRequested)
 	if errInput != nil {
 		return ""
 	}
 	return inputFormat
 }
 
-func executorRequestedFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
+func executorInputFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
 	if opts.SourceFormat != "" {
 		return normalizeExecutorFormatName(opts.SourceFormat.String())
+	}
+	if req.Format != "" {
+		return normalizeExecutorFormatName(req.Format.String())
+	}
+	return sdktranslator.FormatOpenAI
+}
+
+func executorRequestedFormat(req coreexecutor.Request, opts coreexecutor.Options) sdktranslator.Format {
+	if format := coreexecutor.ResponseFormatOrSource(opts); format != "" {
+		return normalizeExecutorFormatName(format.String())
 	}
 	if req.Format != "" {
 		return normalizeExecutorFormatName(req.Format.String())
@@ -1384,18 +1417,38 @@ func (a *executorAdapter) selectExecutorOutputFormat(requested, inputFormat sdkt
 	if executorFormatContains(a.outputFormats, requested) {
 		return requested, nil
 	}
-	if executorFormatContains(a.outputFormats, inputFormat) && executorResponseTranslatorExists(inputFormat, requested) {
+	if executorFormatContains(a.outputFormats, inputFormat) && a.executorResponseTranslationAvailable(inputFormat, requested) {
 		return inputFormat, nil
 	}
 	for _, format := range a.outputFormats {
-		if requested == "" || executorResponseTranslatorExists(format, requested) {
+		if requested == "" || a.executorResponseTranslationAvailable(format, requested) {
 			return format, nil
 		}
 	}
 	return "", fmt.Errorf("plugin executor %s does not support output format %q", a.Identifier(), requested)
 }
 
-func executorResponseTranslatorExists(from, to sdktranslator.Format) bool {
+func (a *executorAdapter) executorResponseTranslationAvailable(from, to sdktranslator.Format) bool {
+	if from == "" || to == "" || from == to {
+		return true
+	}
+	if sdktranslator.HasResponseTransformer(to, from) {
+		return true
+	}
+	return a != nil && a.host.hasResponseTranslator()
+}
+
+func (h *Host) hasResponseTranslator() bool {
+	for _, record := range h.Snapshot().records {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.ResponseTranslator == nil {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func executorNativeStreamResponseTranslatorExists(from, to sdktranslator.Format) bool {
 	if from == "" || to == "" || from == to {
 		return true
 	}
@@ -1484,7 +1537,7 @@ func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []
 	// A plugin executor only reaches this path after host-side response translation
 	// has been selected. An unchanged single frame is the SDK registry fallback,
 	// not a valid translated frame to send to the client.
-	return executorResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat)
+	return executorNativeStreamResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat)
 }
 
 func (a *executorAdapter) emitTranslatedExecutorStreamTail(ctx context.Context, prepared preparedExecutorCall, out chan<- pluginapi.ExecutorStreamChunk, param *any) {
