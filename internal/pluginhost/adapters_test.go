@@ -78,6 +78,32 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 	}
 }
 
+func TestExecutorResponseTranslatorExistsRequiresStreamTransform(t *testing.T) {
+	outputFormat := sdktranslator.Format("plugin-output-non-stream-only")
+	requestedFormat := sdktranslator.Format("client-output-non-stream-only")
+	sdktranslator.Register(requestedFormat, outputFormat, nil, sdktranslator.ResponseTransform{
+		NonStream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+			return rawJSON
+		},
+	})
+
+	if executorResponseTranslatorExists(outputFormat, requestedFormat) {
+		t.Fatal("non-stream-only response transformer was accepted for stream executor output")
+	}
+
+	streamOutputFormat := sdktranslator.Format("plugin-output-stream")
+	streamRequestedFormat := sdktranslator.Format("client-output-stream")
+	sdktranslator.Register(streamRequestedFormat, streamOutputFormat, nil, sdktranslator.ResponseTransform{
+		Stream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+			return [][]byte{rawJSON}
+		},
+	})
+
+	if !executorResponseTranslatorExists(streamOutputFormat, streamRequestedFormat) {
+		t.Fatal("stream response transformer was not accepted for stream executor output")
+	}
+}
+
 func TestRegisterModelsRegistersProviderModelsAndClientID(t *testing.T) {
 	modelRegistry := newFakeModelRegistry()
 	host := newHostWithRecords(capabilityRecord{

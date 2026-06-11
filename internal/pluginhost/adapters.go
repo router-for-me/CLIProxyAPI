@@ -1399,7 +1399,7 @@ func executorResponseTranslatorExists(from, to sdktranslator.Format) bool {
 	if from == "" || to == "" || from == to {
 		return true
 	}
-	return sdktranslator.HasResponseTransformer(to, from)
+	return sdktranslator.HasStreamResponseTransformer(to, from)
 }
 
 func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepared preparedExecutorCall, payload []byte, stream bool, param *any) []byte {
