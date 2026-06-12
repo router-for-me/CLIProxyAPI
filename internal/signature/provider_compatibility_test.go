@@ -317,6 +317,46 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_DropsInvalidThinkingAndCleansTo
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstream_DropsSignedThinkingWithEmptyText(t *testing.T) {
+	nativeSig := testClaudeThinkingSignature()
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"` + nativeSig + `"},{"type":"text","text":"answer"}]}]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4-5")
+	if report.DroppedBlocks != 1 {
+		t.Fatalf("DroppedBlocks = %d, want 1; report=%+v", report.DroppedBlocks, report)
+	}
+	if report.Preserved != 0 {
+		t.Fatalf("Preserved = %d, want 0; report=%+v", report.Preserved, report)
+	}
+	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	if len(parts) != 1 {
+		t.Fatalf("content length = %d, want 1: %s", len(parts), output)
+	}
+	if got := parts[0].Get("type").String(); got != "text" {
+		t.Fatalf("remaining part type = %q, want text: %s", got, parts[0].Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "answer" {
+		t.Fatalf("remaining text = %q, want answer", got)
+	}
+}
+
+func TestSanitizeClaudeMessagesSignaturesForModel_PreservesGPTSignatureOnlyReasoningForGPT(t *testing.T) {
+	sig := testGPTReasoningSignature()
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"` + sig + `"},{"type":"text","text":"answer"}]}]}`)
+
+	output, report := SanitizeClaudeMessagesSignaturesForModel(input, "gpt-5.2")
+	if report.Preserved != 1 || report.DroppedBlocks != 0 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("content length = %d, want 2: %s", len(parts), output)
+	}
+	if got := parts[0].Get("signature").String(); got != sig {
+		t.Fatalf("signature = %q, want preserved %q", got, sig)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstream_NormalizesValidThinkingAndDropsEmptyMessage(t *testing.T) {
 	nativeSig := testClaudeThinkingSignature()
 	doubleEncoded := base64.StdEncoding.EncodeToString([]byte(nativeSig))
