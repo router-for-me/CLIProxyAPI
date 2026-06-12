@@ -345,6 +345,58 @@ func TestConvertOpenAIRequestToClaude_CursorThinkingBlocksPreserved(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_CursorServerToolHistoryPreserved(t *testing.T) {
+	// After a server tool (e.g. web_search_20250305) runs, Claude returns
+	// server_tool_use and web_search_tool_result blocks in the assistant turn.
+	// On the next request these must survive instead of being stripped to text.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{"role": "user", "content": "search the web"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "Searching"},
+					{"type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": {"query": "golang"}},
+					{"type": "web_search_tool_result", "tool_use_id": "srv_1", "content": [{"type": "web_search_result", "title": "Go", "url": "https://go.dev"}]}
+				]
+			},
+			{"role": "user", "content": "thanks"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	asst := messages[1]
+	stu := asst.Get(`content.#(type=="server_tool_use")`)
+	if !stu.Exists() {
+		t.Fatalf("Expected server_tool_use preserved in assistant content: %s", asst.Raw)
+	}
+	if got := stu.Get("name").String(); got != "web_search" {
+		t.Fatalf("Expected server_tool_use name web_search, got %q", got)
+	}
+	wstr := asst.Get(`content.#(type=="web_search_tool_result")`)
+	if !wstr.Exists() {
+		t.Fatalf("Expected web_search_tool_result preserved in assistant content: %s", asst.Raw)
+	}
+	if got := wstr.Get("tool_use_id").String(); got != "srv_1" {
+		t.Fatalf("Expected web_search_tool_result tool_use_id srv_1, got %q", got)
+	}
+	if got := wstr.Get("content.0.title").String(); got != "Go" {
+		t.Fatalf("Expected nested web_search_result preserved, got %q (%s)", got, wstr.Raw)
+	}
+	// Internal marker must not leak.
+	if asst.Get("_anthropic_server_tools").Exists() {
+		t.Fatalf("Internal marker _anthropic_server_tools leaked into output: %s", asst.Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_BareAnthropicTools(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-5",

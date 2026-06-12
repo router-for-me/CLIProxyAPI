@@ -223,6 +223,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					})
 				}
 
+				// Server-tool history blocks (server_tool_use, *_tool_result) are
+				// already Claude-native; re-emit them verbatim so prior server-tool
+				// context survives into the next turn.
+				if role == "assistant" {
+					if serverTools := message.Get("_anthropic_server_tools"); serverTools.Exists() && serverTools.IsArray() {
+						serverTools.ForEach(func(_, block gjson.Result) bool {
+							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(block.Raw))
+							return true
+						})
+					}
+				}
+
 				// Handle tool calls (for assistant messages)
 				if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && role == "assistant" {
 					toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
@@ -486,8 +498,10 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 				textParts := make([]string, 0)
 				toolUses := make([]gjson.Result, 0)
 				thinkingBlocks := make([]gjson.Result, 0)
+				serverToolBlocks := make([]gjson.Result, 0)
 				content.ForEach(func(_, block gjson.Result) bool {
-					switch block.Get("type").String() {
+					blockType := block.Get("type").String()
+					switch blockType {
 					case "tool_use":
 						toolUses = append(toolUses, block)
 					case "text":
@@ -496,6 +510,15 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 						}
 					case "thinking", "redacted_thinking":
 						thinkingBlocks = append(thinkingBlocks, block)
+					case "server_tool_use":
+						serverToolBlocks = append(serverToolBlocks, block)
+					default:
+						// Server-tool result history (e.g. web_search_tool_result)
+						// is already Claude-native and would be dropped by the
+						// OpenAI content converter, so carry it through verbatim.
+						if strings.HasSuffix(blockType, "_tool_result") {
+							serverToolBlocks = append(serverToolBlocks, block)
+						}
 					}
 					return true
 				})
@@ -510,6 +533,15 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 					asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_thinking", "[]")
 					for _, tb := range thinkingBlocks {
 						asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_thinking.-1", tb.Raw)
+					}
+				}
+				// Carry server-tool history blocks (server_tool_use and
+				// *_tool_result) through verbatim so a follow-up turn that includes
+				// prior server-tool context is not stripped to text only.
+				if len(serverToolBlocks) > 0 {
+					asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_server_tools", "[]")
+					for _, sb := range serverToolBlocks {
+						asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_server_tools.-1", sb.Raw)
 					}
 				}
 				if len(toolUses) > 0 {
@@ -610,21 +642,35 @@ func anthropicBlocksPresent(root gjson.Result) bool {
 }
 
 // messageHasAnthropicBlocks reports whether a message content array contains
-// tool_use or tool_result blocks.
+// Anthropic-native blocks that require normalization: tool_use / tool_result,
+// or server-tool history blocks (server_tool_use, *_tool_result such as
+// web_search_tool_result) that the OpenAI content converter would otherwise
+// drop.
 func messageHasAnthropicBlocks(content gjson.Result) bool {
 	if !content.IsArray() {
 		return false
 	}
 	found := false
 	content.ForEach(func(_, block gjson.Result) bool {
-		switch block.Get("type").String() {
-		case "tool_use", "tool_result":
+		if isAnthropicNativeBlockType(block.Get("type").String()) {
 			found = true
 			return false
 		}
 		return true
 	})
 	return found
+}
+
+// isAnthropicNativeBlockType reports whether a content block type is an
+// Anthropic-native shape that the OpenAI content-part converter cannot map and
+// would silently drop (tool_use / tool_result, server_tool_use, and server-tool
+// result blocks like web_search_tool_result).
+func isAnthropicNativeBlockType(t string) bool {
+	switch t {
+	case "tool_use", "tool_result", "server_tool_use":
+		return true
+	}
+	return strings.HasSuffix(t, "_tool_result")
 }
 
 // claudeNativeServerToolTypeRe matches Anthropic's versioned server-tool type
