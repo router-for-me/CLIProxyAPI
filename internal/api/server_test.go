@@ -182,6 +182,10 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	server := newTestServer(t)
+	enabled := true
+	server.cfg.Plugins.Configs = map[string]proxyconfig.PluginInstanceConfig{
+		"sample": {Enabled: &enabled, Priority: 4},
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
 	req.Header.Set("Authorization", "Bearer test-management-key")
@@ -201,6 +205,24 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	}
 	if payload.Plugins == nil {
 		t.Fatalf("plugins field = nil, want array; body=%s", rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/sample/config", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var configPayload struct {
+		Enabled  bool `json:"enabled"`
+		Priority int  `json:"priority"`
+	}
+	if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &configPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal config response: %v body=%s", errUnmarshal, rr.Body.String())
+	}
+	if !configPayload.Enabled || configPayload.Priority != 4 {
+		t.Fatalf("plugin config = %#v, want enabled true priority 4", configPayload)
 	}
 }
 

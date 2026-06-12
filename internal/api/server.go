@@ -615,6 +615,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
 		mgmt.POST("/plugin-store/:id/install", s.mgmt.InstallPluginFromStore)
 		mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
+		mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
 		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
 		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
 
