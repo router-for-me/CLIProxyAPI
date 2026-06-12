@@ -5,6 +5,7 @@ package management
 import (
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -172,7 +173,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 
-		clientIP := c.ClientIP()
+		clientIP := directClientIP(c.Request.RemoteAddr)
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
 
 		// Accept either Authorization: Bearer <key> or X-Management-Key
@@ -196,6 +197,14 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func directClientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 // AuthenticateManagementKey verifies the provided management key for the given client.

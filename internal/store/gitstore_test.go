@@ -1,10 +1,12 @@
 package store
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +45,41 @@ func TestEnsureRepositoryUsesRemoteDefaultBranchWhenBranchNotConfigured(t *testi
 
 	assertRepositoryBranchAndContents(t, filepath.Join(root, "workspace"), "trunk", "remote default branch updated\n")
 	assertRemoteHeadBranch(t, remoteDir, "trunk")
+}
+
+func TestGitTokenStoreListReturnsAuthFileErrors(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "main",
+		testBranchSpec{name: "main", contents: "remote default branch\n"},
+	)
+
+	authDir := filepath.Join(root, "workspace", "auths")
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(authDir)
+
+	if err := store.EnsureRepository(); err != nil {
+		t.Fatalf("EnsureRepository: %v", err)
+	}
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "valid.json"), []byte(`{"type":"custom"}`), 0o600); err != nil {
+		t.Fatalf("write valid auth: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "broken.json"), []byte(`{"type":`), 0o600); err != nil {
+		t.Fatalf("write broken auth: %v", err)
+	}
+
+	entries, err := store.List(context.Background())
+	if err == nil {
+		t.Fatal("List succeeded, want error for broken auth file")
+	}
+	if entries != nil {
+		t.Fatalf("entries = %#v, want nil on error", entries)
+	}
+	if !strings.Contains(err.Error(), "broken.json") {
+		t.Fatalf("error = %q, want broken file path", err.Error())
+	}
 }
 
 func TestEnsureRepositoryUsesConfiguredBranchWhenExplicitlySet(t *testing.T) {

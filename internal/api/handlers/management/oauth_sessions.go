@@ -367,3 +367,7 @@ func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, err
 	}
 	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
 }
+
+func IsOAuthSessionNotPending(err error) bool {
+	return errors.Is(err, errOAuthSessionNotPending)
+}

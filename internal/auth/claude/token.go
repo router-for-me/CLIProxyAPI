@@ -57,7 +57,7 @@ func (ts *ClaudeTokenStorage) SetMetadata(meta map[string]any) {
 //
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
-func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
+func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) (err error) {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "claude"
 
@@ -67,13 +67,18 @@ func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 
 	// Create the token file
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
 	defer func() {
-		_ = f.Close()
+		if errClose := f.Close(); errClose != nil && err == nil {
+			err = fmt.Errorf("failed to close token file: %w", errClose)
+		}
 	}()
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("failed to set token file permissions: %w", err)
+	}
 
 	// Merge metadata using helper
 	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
