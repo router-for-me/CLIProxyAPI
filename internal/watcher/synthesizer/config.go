@@ -234,6 +234,20 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		for j := range compat.APIKeyEntries {
 			entry := &compat.APIKeyEntries[j]
 			key := strings.TrimSpace(entry.APIKey)
+			label := strings.TrimSpace(entry.Label)
+			email := strings.TrimSpace(entry.Email)
+			if label == "" {
+				label = email
+			}
+			if label == "" {
+				label = findAuthFileEmail(ctx.AuthDir, providerName)
+			}
+			if label == "" {
+				label = compat.Name
+			}
+			if email == "" && label != "" && label != compat.Name {
+				email = label
+			}
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, key, base, proxyURL)
@@ -246,6 +260,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			metadata := map[string]any{}
 			if disableCooling {
 				metadata["disable_cooling"] = true
+			}
+			if email != "" {
+				metadata["email"] = email
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
@@ -260,7 +277,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
-				Label:      compat.Name,
+				Label:      label,
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,

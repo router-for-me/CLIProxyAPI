@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -20,5 +21,33 @@ func TestRecordAPIResponseMetadataStoresHeadersWhenRequestLogDisabled(t *testing
 	got := logging.GetResponseHeaders(ctx)
 	if got.Get("X-Upstream-Request-Id") != "upstream-req-1" {
 		t.Fatalf("response header = %q, want %q", got.Get("X-Upstream-Request-Id"), "upstream-req-1")
+	}
+}
+
+func TestFormatAuthInfoDoesNotUseAPIKeyAsAccount(t *testing.T) {
+	out := formatAuthInfo(UpstreamRequestLog{
+		Provider:  "deepseek",
+		AuthID:    "openai-compatibility:deepseek:123",
+		AuthLabel: "deepseek",
+		AuthType:  "api_key",
+		AuthValue: "sk-1234567890abcdef",
+	})
+
+	if strings.Contains(out, "account=sk-") || strings.Contains(out, "account=sk-1...cdef") {
+		t.Fatalf("formatAuthInfo() = %q, account must not contain API key", out)
+	}
+}
+
+func TestFormatAuthInfoPrefersEmailLabelForAccount(t *testing.T) {
+	out := formatAuthInfo(UpstreamRequestLog{
+		Provider:  "deepseek",
+		AuthID:    "openai-compatibility:deepseek:123",
+		AuthLabel: "account@example.com",
+		AuthType:  "api_key",
+		AuthValue: "sk-1234567890abcdef",
+	})
+
+	if !strings.Contains(out, "account=account@example.com") {
+		t.Fatalf("formatAuthInfo() = %q, want email account", out)
 	}
 }

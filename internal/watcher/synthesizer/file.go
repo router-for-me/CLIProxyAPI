@@ -208,6 +208,44 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 
 // SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.
 // It disables the primary auth and creates one virtual auth per project.
+// findAuthFileEmail searches the auth directory for a JSON auth file whose
+// "type" matches the given provider and returns the "email" field if present.
+// It returns an empty string if no matching file or email is found.
+func findAuthFileEmail(authDir string, provider string) string {
+	if strings.TrimSpace(authDir) == "" || strings.TrimSpace(provider) == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".json") {
+			continue
+		}
+		fullPath := filepath.Join(authDir, name)
+		data, errRead := os.ReadFile(fullPath)
+		if errRead != nil || len(data) == 0 {
+			continue
+		}
+		var metadata map[string]any
+		if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+			continue
+		}
+		t, _ := metadata["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(t), provider) {
+			if email, _ := metadata["email"].(string); strings.TrimSpace(email) != "" {
+				return strings.TrimSpace(email)
+			}
+		}
+	}
+	return ""
+}
+
 func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]any, now time.Time) []*coreauth.Auth {
 	if primary == nil || metadata == nil {
 		return nil
