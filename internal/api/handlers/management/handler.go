@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -50,6 +51,7 @@ type Handler struct {
 	postAuthHook           coreauth.PostAuthHook
 	postAuthPersistHook    coreauth.PostAuthHook
 	pluginHost             *pluginhost.Host
+	configReloadHook       func(context.Context, *config.Config)
 	pluginStoreRegistryURL string
 	pluginStoreHTTPClient  pluginstore.HTTPDoer
 }
@@ -135,6 +137,33 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	h.mu.Lock()
 	h.pluginHost = host
 	h.mu.Unlock()
+}
+
+// SetConfigReloadHook updates the callback used after management saves config changes.
+func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.configReloadHook = hook
+	h.mu.Unlock()
+}
+
+func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, cfg *config.Config) {
+	if h == nil || cfg == nil {
+		return
+	}
+	h.mu.Lock()
+	hook := h.configReloadHook
+	host := h.pluginHost
+	h.mu.Unlock()
+	if hook != nil {
+		hook(ctx, cfg)
+		return
+	}
+	if host != nil {
+		host.ApplyConfig(ctx, cfg)
+	}
 }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.

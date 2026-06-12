@@ -62,6 +62,7 @@ type serverOptionConfig struct {
 	postAuthHook         auth.PostAuthHook
 	postAuthPersistHook  auth.PostAuthHook
 	pluginHost           *pluginhost.Host
+	configReloadHook     func(context.Context, *config.Config)
 }
 
 // ServerOption customises HTTP server construction.
@@ -151,6 +152,13 @@ func WithPostAuthPersistHook(hook auth.PostAuthHook) ServerOption {
 func WithPluginHost(host *pluginhost.Host) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.pluginHost = host
+	}
+}
+
+// WithConfigReloadHook registers a callback used after management saves config changes.
+func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.configReloadHook = hook
 	}
 }
 
@@ -316,6 +324,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
+	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}

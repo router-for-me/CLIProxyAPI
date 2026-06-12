@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 type pluginStoreListResponse struct {
@@ -131,17 +132,41 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 
 	pluginIsLoaded := func() bool { return pluginLoaded(host, id) }
+	unloadedBeforeWrite := false
 	result, errInstall := client.Install(c.Request.Context(), plugin, pluginstore.InstallOptions{
 		PluginsDir:   pluginsDir,
 		GOOS:         goos,
 		GOARCH:       goarch,
 		PluginLoaded: pluginIsLoaded,
+		BeforeWrite: func() error {
+			if !pluginIsLoaded() {
+				return nil
+			}
+			if host == nil {
+				return pluginstore.ErrLoadedPluginLocked
+			}
+			log.WithFields(log.Fields{
+				"plugin_id": id,
+				"version":   plugin.Version,
+			}).Info("pluginstore: unloading loaded plugin before install")
+			if !host.UnloadPlugin(id) && pluginIsLoaded() {
+				return pluginstore.ErrLoadedPluginLocked
+			}
+			unloadedBeforeWrite = true
+			return nil
+		},
 	})
 	if errInstall != nil {
+		if unloadedBeforeWrite {
+			h.mu.Lock()
+			reloadCfg := h.cfg
+			h.mu.Unlock()
+			h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
+		}
 		if errors.Is(errInstall, pluginstore.ErrLoadedPluginLocked) {
 			c.JSON(http.StatusConflict, gin.H{
 				"error":            "plugin_update_requires_restart",
-				"message":          "loaded Windows plugins cannot be overwritten while the server is running",
+				"message":          "loaded plugin cannot be overwritten while the server is running",
 				"restart_required": true,
 			})
 			return
@@ -149,13 +174,11 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_install_failed", "message": errInstall.Error()})
 		return
 	}
-	// Sample after the install so the response reflects the library state at
-	// the time the new file landed on disk.
-	restartRequired := pluginIsLoaded()
+	restartRequired := false
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.cfg == nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_unavailable",
 			"message": fmt.Sprintf("plugin file installed at %s but config is unavailable to enable it", result.Path),
@@ -164,6 +187,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errEnable := h.enablePluginConfigLocked(id); errEnable != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_update_failed",
 			"message": fmt.Sprintf("plugin file installed at %s but enabling it in config failed: %s", result.Path, errEnable.Error()),
@@ -172,6 +196,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_save_failed",
 			"message": fmt.Sprintf("plugin file installed at %s but saving config failed: %s", result.Path, errSave.Error()),
@@ -179,6 +204,16 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		})
 		return
 	}
+	reloadCfg := h.cfg
+	h.mu.Unlock()
+
+	h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
+	log.WithFields(log.Fields{
+		"plugin_id":   result.ID,
+		"version":     result.Version,
+		"path":        result.Path,
+		"overwritten": result.Overwritten,
+	}).Info("pluginstore: plugin installed")
 
 	c.JSON(http.StatusOK, pluginInstallResponse{
 		Status:          "installed",

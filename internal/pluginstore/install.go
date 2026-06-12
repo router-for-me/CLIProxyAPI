@@ -22,9 +22,12 @@ type InstallOptions struct {
 	GOOS       string
 	GOARCH     string
 	// PluginLoaded reports whether the plugin's dynamic library is currently
-	// loaded by the running host. Loaded libraries cannot be overwritten on
-	// Windows, so installs targeting Windows are rejected while it returns true.
+	// loaded by the running host. Windows installs are rejected while it returns
+	// true unless BeforeWrite can unload the plugin before replacement.
 	PluginLoaded func() bool
+	// BeforeWrite runs after the archive has been downloaded and verified, but
+	// before the target plugin file is replaced.
+	BeforeWrite func() error
 }
 
 // ErrLoadedPluginLocked is returned when an install would overwrite a plugin
@@ -43,7 +46,7 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
-	if loadedPluginInstallBlocked(options) {
+	if loadedPluginInstallBlocked(options) && options.BeforeWrite == nil {
 		return InstallResult{}, ErrLoadedPluginLocked
 	}
 	release, errRelease := c.FetchRelease(ctx, plugin)
@@ -100,6 +103,11 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	}
 	// Re-check immediately before writing: the plugin may have been loaded
 	// while the archive was being downloaded and verified.
+	if options.BeforeWrite != nil {
+		if errBeforeWrite := options.BeforeWrite(); errBeforeWrite != nil {
+			return InstallResult{}, fmt.Errorf("prepare plugin write: %w", errBeforeWrite)
+		}
+	}
 	if loadedPluginInstallBlocked(options) {
 		return InstallResult{}, ErrLoadedPluginLocked
 	}
@@ -250,6 +258,17 @@ func writeFileAtomic(targetPath string, data []byte, mode os.FileMode) error {
 	}
 	closed = true
 	if errRename := os.Rename(tempPath, targetPath); errRename != nil {
+		if runtime.GOOS == "windows" {
+			if errRemove := os.Remove(targetPath); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+				return fmt.Errorf("remove old plugin file: %w", errRemove)
+			}
+			if errRenameRetry := os.Rename(tempPath, targetPath); errRenameRetry == nil {
+				removeTemp = false
+				return nil
+			} else {
+				return fmt.Errorf("install plugin file: %w", errRenameRetry)
+			}
+		}
 		return fmt.Errorf("install plugin file: %w", errRename)
 	}
 	removeTemp = false

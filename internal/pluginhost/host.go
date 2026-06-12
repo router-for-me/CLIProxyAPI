@@ -28,6 +28,12 @@ type modelExecutor interface {
 	ExecuteModelStream(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage)
 }
 
+type pluginUnloadTarget struct {
+	id     string
+	path   string
+	client pluginClient
+}
+
 type Host struct {
 	mu                     sync.Mutex
 	loader                 pluginLoader
@@ -180,6 +186,10 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			}
 			lp = loaded
 			h.loaded[file.ID] = lp
+			log.WithFields(log.Fields{
+				"plugin_id": file.ID,
+				"path":      file.Path,
+			}).Info("pluginhost: plugin loaded")
 		}
 
 		plugin, okCall := h.callRegisterLocked(ctx, lp, item)
@@ -213,19 +223,60 @@ func (h *Host) loadLocked(file pluginFile) (*loadedPlugin, error) {
 	}, nil
 }
 
+// UnloadPlugin removes one plugin from the active runtime and closes its dynamic library.
+func (h *Host) UnloadPlugin(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+
+	var target pluginUnloadTarget
+	h.mu.Lock()
+	lp := h.loaded[id]
+	if lp == nil {
+		h.mu.Unlock()
+		return false
+	}
+	target = pluginUnloadTarget{id: lp.id, path: lp.path, client: lp.client}
+	delete(h.loaded, id)
+	delete(h.fused, id)
+	records, enabled := h.snapshotWithoutPluginLocked(id)
+	h.removePluginRuntimeStateLocked(id)
+	h.snapshot.Store(&Snapshot{enabled: enabled, records: records})
+	h.mu.Unlock()
+
+	h.refreshThinkingProviders(records)
+	h.RegisterFrontendAuthProviders()
+	if target.client != nil {
+		target.client.Shutdown()
+	}
+	log.WithFields(log.Fields{
+		"plugin_id": target.id,
+		"path":      target.path,
+	}).Info("pluginhost: plugin unloaded")
+	return true
+}
+
 // ShutdownAll removes active plugin capabilities and closes all loaded dynamic libraries.
 func (h *Host) ShutdownAll() {
 	if h == nil {
 		return
 	}
 
-	clients := make([]pluginClient, 0)
+	targets := make([]pluginUnloadTarget, 0)
 	h.mu.Lock()
 	for _, lp := range h.loaded {
 		if lp == nil || lp.client == nil {
 			continue
 		}
-		clients = append(clients, lp.client)
+		targets = append(targets, pluginUnloadTarget{
+			id:     lp.id,
+			path:   lp.path,
+			client: lp.client,
+		})
 	}
 	h.loaded = make(map[string]*loadedPlugin)
 	h.modelClientIDs = make(map[string]struct{})
@@ -243,9 +294,53 @@ func (h *Host) ShutdownAll() {
 
 	h.refreshThinkingProviders(nil)
 	h.RegisterFrontendAuthProviders()
-	for _, client := range clients {
-		client.Shutdown()
+	for _, target := range targets {
+		target.client.Shutdown()
+		log.WithFields(log.Fields{
+			"plugin_id": target.id,
+			"path":      target.path,
+		}).Info("pluginhost: plugin unloaded")
 	}
+}
+
+func (h *Host) snapshotWithoutPluginLocked(id string) ([]capabilityRecord, bool) {
+	raw := h.snapshot.Load()
+	snap, _ := raw.(*Snapshot)
+	if snap == nil || len(snap.records) == 0 {
+		return nil, snap != nil && snap.enabled
+	}
+	records := make([]capabilityRecord, 0, len(snap.records))
+	for _, record := range snap.records {
+		if record.id == id {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records, snap.enabled
+}
+
+func (h *Host) removePluginRuntimeStateLocked(id string) {
+	for key, record := range h.managementRoutes {
+		if record.pluginID == id {
+			delete(h.managementRoutes, key)
+		}
+	}
+	for key, record := range h.resourceRoutes {
+		if record.pluginID == id {
+			delete(h.resourceRoutes, key)
+		}
+	}
+	for name, record := range h.commandLineFlags {
+		if record.pluginID == id {
+			delete(h.commandLineFlags, name)
+			delete(h.commandLineHits, name)
+		}
+	}
+	if registration, ok := h.modelRegistrations[id]; ok {
+		delete(h.providerModels, registration.provider)
+	}
+	delete(h.modelProviders, id)
+	delete(h.modelRegistrations, id)
 }
 
 func (h *Host) callRegisterLocked(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {

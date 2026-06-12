@@ -113,6 +113,67 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	}
 }
 
+func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
+	loader := newTestSymbolLoader()
+	alpha := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	bravo := &testPlugin{
+		registerResult:    validTestPlugin("bravo"),
+		reconfigureResult: validTestPlugin("bravo"),
+	}
+	alphaLookup := newTestSymbolLookup(alpha)
+	bravoLookup := newTestSymbolLookup(bravo)
+	loader.lookups["alpha"] = alphaLookup
+	loader.lookups["bravo"] = bravoLookup
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha", "bravo"),
+		},
+	}
+
+	h.ApplyConfig(context.Background(), cfg)
+
+	if !h.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false after targeted unload")
+	}
+	if !h.PluginLoaded("bravo") {
+		t.Fatal("PluginLoaded(bravo) = false, want true after alpha unload")
+	}
+	if alphaLookup.shutdownCalls != 1 {
+		t.Fatalf("alpha shutdown calls = %d, want 1", alphaLookup.shutdownCalls)
+	}
+	if bravoLookup.shutdownCalls != 0 {
+		t.Fatalf("bravo shutdown calls = %d, want 0", bravoLookup.shutdownCalls)
+	}
+	plugins := h.RegisteredPlugins()
+	if len(plugins) != 1 || plugins[0].ID != "bravo" {
+		t.Fatalf("RegisteredPlugins() = %#v, want only bravo", plugins)
+	}
+
+	h.ApplyConfig(context.Background(), cfg)
+
+	if loader.openCalls != 3 {
+		t.Fatalf("Open calls = %d, want 3", loader.openCalls)
+	}
+	if alpha.registerCalls != 2 {
+		t.Fatalf("alpha register calls = %d, want 2", alpha.registerCalls)
+	}
+	if bravo.registerCalls != 1 {
+		t.Fatalf("bravo register calls = %d, want 1", bravo.registerCalls)
+	}
+	if bravo.reconfigureCalls != 1 {
+		t.Fatalf("bravo reconfigure calls = %d, want 1", bravo.reconfigureCalls)
+	}
+}
+
 func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 	loader := newTestSymbolLoader()
 	plugin := &testPlugin{

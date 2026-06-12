@@ -65,6 +65,52 @@ func TestInstallArchiveBlocksLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "windows", "amd64")
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	targetPath := filepath.Join(targetDir, "sample-provider.dll")
+	if errWrite := os.WriteFile(targetPath, []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	loaded := true
+	prepared := false
+
+	result, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider.dll": "new",
+	}), testPlugin(), InstallOptions{
+		PluginsDir:   root,
+		GOOS:         "windows",
+		GOARCH:       "amd64",
+		PluginLoaded: func() bool { return loaded },
+		BeforeWrite: func() error {
+			prepared = true
+			loaded = false
+			return nil
+		},
+	})
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if !prepared {
+		t.Fatal("BeforeWrite was not called")
+	}
+	if !result.Overwritten {
+		t.Fatal("Overwritten = false, want true")
+	}
+	data, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "new" {
+		t.Fatalf("installed data = %q, want new", data)
+	}
+}
+
 func TestInstallArchiveWritesPlatformPlugin(t *testing.T) {
 	t.Parallel()
 

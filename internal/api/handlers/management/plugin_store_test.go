@@ -3,6 +3,7 @@ package management
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -153,6 +154,84 @@ func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
 	raw := marshalPluginRaw(t, item)
 	if !strings.Contains(raw, "mode: fast") {
 		t.Fatalf("plugin raw config lost custom field:\n%s", raw)
+	}
+}
+
+func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	pluginsDir := t.TempDir()
+	existingPath := filepath.Join(pluginsDir, "sample-provider"+managementPluginExtension(runtime.GOOS))
+	if errWrite := os.WriteFile(existingPath, []byte("old-library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", existingPath, errWrite)
+	}
+	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "new-library-data")
+	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	checksum := sha256.Sum256(archiveData)
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: false\npriority: 5\nmode: fast\nextra: keep\n"),
+				},
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": registryJSON(t),
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/tags/v0.1.0": []byte(`{
+				"tag_name": "v0.1.0",
+				"assets": [
+					{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+					{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+				]
+			}`),
+			"https://downloads.example/" + archiveName: archiveData,
+			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+		},
+	}
+	reloads := 0
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+		reloads++
+		if cfg != h.cfg {
+			t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
+		}
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if reloads != 1 {
+		t.Fatalf("reloads = %d, want 1", reloads)
+	}
+	data, errRead := os.ReadFile(existingPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", existingPath, errRead)
+	}
+	if string(data) != "new-library-data" {
+		t.Fatalf("installed file = %q, want new-library-data", data)
+	}
+	item := h.cfg.Plugins.Configs["sample-provider"]
+	if item.Enabled == nil || !*item.Enabled {
+		t.Fatalf("plugin enabled = %#v, want true", item.Enabled)
+	}
+	if item.Priority != 5 {
+		t.Fatalf("plugin priority = %d, want 5", item.Priority)
+	}
+	raw := marshalPluginRaw(t, item)
+	if !strings.Contains(raw, "mode: fast") || !strings.Contains(raw, "extra: keep") {
+		t.Fatalf("plugin raw config lost custom fields:\n%s", raw)
 	}
 }
 
