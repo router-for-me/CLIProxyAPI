@@ -49,10 +49,15 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 	if loadedPluginInstallBlocked(options) && options.BeforeWrite == nil {
 		return InstallResult{}, ErrLoadedPluginLocked
 	}
-	release, errRelease := c.FetchRelease(ctx, plugin)
+	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
 		return InstallResult{}, errRelease
 	}
+	latestVersion, errVersion := ReleaseVersion(release)
+	if errVersion != nil {
+		return InstallResult{}, errVersion
+	}
+	plugin.Version = latestVersion
 	archiveAsset, checksumAsset, errAssets := SelectReleaseAssets(release, plugin.ID, plugin.Version, options.GOOS, options.GOARCH)
 	if errAssets != nil {
 		return InstallResult{}, errAssets
