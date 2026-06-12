@@ -1,11 +1,3 @@
-
-// isTruncatedKey checks if a string looks like a truncated/masked API key.
-// Returns true if the key contains literal "..." (three dots) which indicates
-// the management panel UI saved a masked display value instead of the real key.
-func isTruncatedKey(key string) bool {
-	return strings.Contains(key, "...")
-}
-
 package management
 
 import (
@@ -16,6 +8,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+// isTruncatedKey checks if a string looks like a truncated/masked API key.
+// Returns true if the key contains literal "..." (three dots), which indicates
+// the management panel UI saved a masked display value instead of the real key.
+func isTruncatedKey(key string) bool {
+	return strings.Contains(key, "...")
+}
+
+
 
 // Generic helpers for list[string]
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
@@ -309,9 +309,8 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// Protect truncated API keys: match incoming keys to current config by
-	// (prefix + baseUrl) identity instead of list index, so reordering or
-	// deletion in the management panel doesn't map to wrong original keys.
+	// Protect truncated API keys: match by (prefix + baseUrl) identity
+	// instead of list index, so reordering/deletion doesn't corrupt keys.
 	for i := range arr {
 		if !isTruncatedKey(arr[i].APIKey) {
 			continue
