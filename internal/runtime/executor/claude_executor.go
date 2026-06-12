@@ -195,6 +195,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = stripSDKOriginMarkers(e.cfg, body)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -377,6 +378,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = stripSDKOriginMarkers(e.cfg, body)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -980,6 +982,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	r.Header.Set("Content-Type", "application/json")
 
+	// Strip the opt-in X-CPA-Force-Fast-Mode header before forwarding upstream.
+	// This header is a private contract between a downstream gateway and CPA's
+	// Fast Mode spoof; Anthropic must never see it. Deletion is unconditional
+	// (regardless of cfg.ClaudeFastModeSpoof) so the header cannot leak even
+	// when the flag is off.
+	r.Header.Del("X-CPA-Force-Fast-Mode")
+
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
@@ -1033,6 +1042,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	// Fast Mode spoof: force the session id so a leaking SDK client cannot
+	// override CPA's deterministic value via gin-forwarded headers.
+	if cfg != nil && cfg.ClaudeFastModeSpoof != nil && *cfg.ClaudeFastModeSpoof {
+		r.Header.Set("X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	if isAnthropicBase {
 		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
@@ -1564,6 +1578,20 @@ func getWorkloadFromContext(ctx context.Context) string {
 	return ""
 }
 
+// isForceFastModeFromContext reports whether the inbound gin request carries
+// the opt-in X-CPA-Force-Fast-Mode header set to a truthy value. Used by the
+// Fast Mode spoof in applyCloaking as a per-request activation path that
+// complements UA-based detection: a downstream gateway can stamp the header
+// to force the spoof bundle regardless of the inbound User-Agent shape. The
+// header is stripped before forwarding upstream in applyClaudeHeaders so
+// Anthropic never sees it.
+func isForceFastModeFromContext(ctx context.Context) bool {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return util.IsForceFastModeHeader(ginCtx.Request.Header)
+	}
+	return false
+}
+
 // getCloakConfigFromAuth extracts cloak configuration from auth attributes.
 // Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
 func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
@@ -1828,6 +1856,24 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 	return payload
 }
 
+// stripSDKOriginMarkers removes SDK-origin markers Anthropic may use for Fast
+// Mode gating (top-level source, metadata.source, client_source, metadata.client).
+// No-op unless cfg.ClaudeFastModeSpoof is enabled. Sibling to applyCloaking;
+// kept separate so the strip applies regardless of which cloaking branch ran.
+func stripSDKOriginMarkers(cfg *config.Config, body []byte) []byte {
+	if cfg == nil || cfg.ClaudeFastModeSpoof == nil || !*cfg.ClaudeFastModeSpoof {
+		return body
+	}
+	for _, p := range []string{"source", "metadata.source", "client_source", "metadata.client"} {
+		if gjson.GetBytes(body, p).Exists() {
+			if updated, err := sjson.DeleteBytes(body, p); err == nil {
+				body = updated
+			}
+		}
+	}
+	return body
+}
+
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
@@ -1870,6 +1916,25 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
+		// Fast Mode spoof: rewrite SDK-shaped entrypoints to a TTY-style value
+		// when the upstream client leaked sdk-* (Anthropic gates Fast Mode on
+		// entrypoint). Opt-in via config.claude-fast-mode-spoof; default off.
+		//
+		// A second activation path is the inbound X-CPA-Force-Fast-Mode header:
+		// when present and truthy it forces the rewrite regardless of UA shape,
+		// so a downstream gateway can opt requests in per-request. The header
+		// alone does NOTHING without the config flag also being on; the flag
+		// remains the master opt-in switch.
+		if cfg != nil && cfg.ClaudeFastModeSpoof != nil && *cfg.ClaudeFastModeSpoof {
+			forceFastMode := isForceFastModeFromContext(ctx)
+			if util.IsSDKEntrypoint(entrypoint) || forceFastMode {
+				if forced := strings.TrimSpace(cfg.ClaudeFastModeSpoofEntrypoint); forced != "" {
+					entrypoint = forced
+				} else {
+					entrypoint = "cli"
+				}
+			}
+		}
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
 	}

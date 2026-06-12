@@ -128,6 +128,18 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// ClaudeFastModeSpoof enables aggressive cc_entrypoint and body rewriting so
+	// claude-code SDK-mode clients can request Fast Mode. Anthropic gates Fast Mode
+	// on the entrypoint marker; when this flag is true and the client User-Agent
+	// resolves to an SDK-shaped entrypoint, applyCloaking substitutes a TTY-style
+	// value and strips SDK-origin markers from the request body. Disabled by
+	// default so upstream client telemetry is preserved.
+	ClaudeFastModeSpoof *bool `yaml:"claude-fast-mode-spoof,omitempty" json:"claude-fast-mode-spoof,omitempty"`
+
+	// ClaudeFastModeSpoofEntrypoint overrides the substituted entrypoint value
+	// (default: "cli"). Only takes effect when ClaudeFastModeSpoof is true.
+	ClaudeFastModeSpoofEntrypoint string `yaml:"claude-fast-mode-spoof-entrypoint,omitempty" json:"claude-fast-mode-spoof-entrypoint,omitempty"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 

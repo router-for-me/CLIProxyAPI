@@ -2318,3 +2318,96 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testin
 		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
 	}
 }
+
+func TestApplyClaudeHeaders_StripsForceFastModeHeader(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-strip-force",
+		Attributes: map[string]string{
+			"api_key": "key-strip-force",
+		},
+	}
+	incoming := http.Header{
+		"User-Agent":            []string{"claude-cli/2.1.63 (external, cli)"},
+		"X-Cpa-Force-Fast-Mode": []string{"1"},
+	}
+
+	req := newClaudeHeaderTestRequest(t, incoming)
+	// Pre-condition: simulate a buggy caller that already copied the header
+	// onto the outbound request. The strip must remove it regardless.
+	req.Header.Set("X-CPA-Force-Fast-Mode", "1")
+
+	applyClaudeHeaders(req, auth, "key-strip-force", false, nil, cfg)
+
+	if got := req.Header.Get("X-CPA-Force-Fast-Mode"); got != "" {
+		t.Fatalf("X-CPA-Force-Fast-Mode must be stripped before forwarding, got %q", got)
+	}
+	// Also verify the canonical form is gone (defense against canonicalization drift).
+	if got := req.Header.Get("X-Cpa-Force-Fast-Mode"); got != "" {
+		t.Fatalf("canonical X-Cpa-Force-Fast-Mode must be stripped, got %q", got)
+	}
+}
+
+func TestApplyClaudeHeaders_StripsForceFastModeHeaderEvenWhenFlagOff(t *testing.T) {
+	// The strip is unconditional: even when the Fast Mode spoof flag is off,
+	// the X-CPA-Force-Fast-Mode header is a private contract that must never
+	// reach Anthropic.
+	resetClaudeDeviceProfileCache()
+	falseFlag := false
+	cfg := &config.Config{ClaudeFastModeSpoof: &falseFlag}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-strip-force-off",
+		Attributes: map[string]string{
+			"api_key": "key-strip-force-off",
+		},
+	}
+	incoming := http.Header{
+		"X-Cpa-Force-Fast-Mode": []string{"true"},
+	}
+
+	req := newClaudeHeaderTestRequest(t, incoming)
+	req.Header.Set("X-CPA-Force-Fast-Mode", "true")
+	applyClaudeHeaders(req, auth, "key-strip-force-off", false, nil, cfg)
+
+	if got := req.Header.Get("X-CPA-Force-Fast-Mode"); got != "" {
+		t.Fatalf("X-CPA-Force-Fast-Mode must be stripped even when spoof flag is off, got %q", got)
+	}
+}
+
+func TestIsForceFastModeFromContext(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  bool
+	}{
+		{"truthy 1", "1", true, true},
+		{"truthy true", "true", true, true},
+		{"truthy yes", "yes", true, true},
+		{"truthy on", "on", true, true},
+		{"falsy 0", "0", true, false},
+		{"falsy false", "false", true, false},
+		{"empty value", "", true, false},
+		{"header absent", "", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			if tt.set {
+				headers.Set("X-CPA-Force-Fast-Mode", tt.value)
+			}
+			req := newClaudeHeaderTestRequest(t, headers)
+			if got := isForceFastModeFromContext(req.Context()); got != tt.want {
+				t.Fatalf("isForceFastModeFromContext header=%q set=%v = %v, want %v", tt.value, tt.set, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("ctx without gin returns false", func(t *testing.T) {
+		if isForceFastModeFromContext(context.Background()) {
+			t.Fatal("isForceFastModeFromContext on bare context should be false")
+		}
+	})
+}
