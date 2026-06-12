@@ -13,7 +13,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `protocol-format/`: minimal executor focused on input/output format declarations.
 - `request-translator/`: request translation capability only.
 - `request-normalizer/`: request normalization capability only.
-- `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.4` requests to the priority service tier when enabled.
+- `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.5` requests to the priority service tier when enabled.
 - `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
 - `response-translator/`: response translation capability only.
 - `response-normalizer/`: response normalization capability only.
@@ -22,12 +22,13 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `cli/`: command-line capability only.
 - `management-api/`: Management API and resource capability only.
 - `host-callback/`: minimal plugin resource that demonstrates host callbacks.
+- `host-model-callback/`: Go-only plugin resource that calls the host model execution callbacks.
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
 
 ## Codex Service Tier
 
-`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.4`.
+`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.5`.
 
 ```yaml
 plugins:
@@ -37,6 +38,22 @@ plugins:
       priority: 1
       fast: false
 ```
+
+## Host Model Callback
+
+`host-model-callback` declares the Management API capability and exposes a browser resource named `Host Model Callback`. The resource calls `host.model.execute` for non-streaming requests and `host.model.execute_stream` plus `host.model.stream_read` for streaming requests. It demonstrates explicit stream close with `host.model.stream_close` and an `implicit_close=true` option for RPC-scope host cleanup.
+
+When the resource forwards its `host_callback_id`, CPA identifies the plugin that initiated the host model callback and skips that same plugin's interceptors for the nested execution. This makes host model callbacks non-recursive for the caller while allowing other plugins to intercept the nested request.
+
+```yaml
+plugins:
+  configs:
+    host-model-callback:
+      enabled: true
+      priority: 1
+```
+
+The default example model is `gpt-5.5`, but the request succeeds only when the current CPA model and auth configuration can route that model.
 
 ## Scheduler
 

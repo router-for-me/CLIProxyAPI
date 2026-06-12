@@ -56,13 +56,17 @@ const (
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
 
-	MethodHostHTTPDo          = "host.http.do"
-	MethodHostHTTPDoStream    = "host.http.do_stream"
-	MethodHostHTTPStreamRead  = "host.http.stream_read"
-	MethodHostHTTPStreamClose = "host.http.stream_close"
-	MethodHostStreamEmit      = "host.stream.emit"
-	MethodHostStreamClose     = "host.stream.close"
-	MethodHostLog             = "host.log"
+	MethodHostHTTPDo             = "host.http.do"
+	MethodHostHTTPDoStream       = "host.http.do_stream"
+	MethodHostHTTPStreamRead     = "host.http.stream_read"
+	MethodHostHTTPStreamClose    = "host.http.stream_close"
+	MethodHostModelExecute       = "host.model.execute"
+	MethodHostModelExecuteStream = "host.model.execute_stream"
+	MethodHostModelStreamRead    = "host.model.stream_read"
+	MethodHostModelStreamClose   = "host.model.stream_close"
+	MethodHostStreamEmit         = "host.stream.emit"
+	MethodHostStreamClose        = "host.stream.close"
+	MethodHostLog                = "host.log"
 )
 
 type Envelope struct {

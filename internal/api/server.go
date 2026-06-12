@@ -301,6 +301,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.handlers.SetPluginHost(optionState.pluginHost)
+	if optionState.pluginHost != nil {
+		optionState.pluginHost.SetModelExecutor(s.handlers)
+	}
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
@@ -1587,6 +1590,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	s.handlers.UpdateClients(effectiveSDKConfig(cfg))
 	s.handlers.SetPluginHost(s.pluginHost)
+	if s.pluginHost != nil {
+		s.pluginHost.SetModelExecutor(s.handlers)
+	}
 
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)

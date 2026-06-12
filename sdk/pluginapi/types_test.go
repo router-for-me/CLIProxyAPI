@@ -3,6 +3,8 @@ package pluginapi
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -110,6 +112,153 @@ func TestHostInjectedHTTPClientIsNotEncodedInPluginJSON(t *testing.T) {
 		if errUnmarshal := json.Unmarshal(withLegacyHTTPClient, tt.dst); errUnmarshal != nil {
 			t.Fatalf("%s unmarshal with legacy HTTPClient object error = %v", tt.name, errUnmarshal)
 		}
+	}
+}
+
+func TestHostModelTypesPreserveFields(t *testing.T) {
+	request := HostModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "claude",
+		Model:         "gpt-test",
+		Stream:        true,
+		Body:          []byte(`{"input":"hello"}`),
+		Headers:       http.Header{"X-Test": []string{"one", "two"}},
+		Query:         url.Values{"alt": []string{"beta"}},
+		Alt:           "chat",
+	}
+	rawRequest, errMarshalRequest := json.Marshal(request)
+	if errMarshalRequest != nil {
+		t.Fatalf("marshal HostModelExecutionRequest: %v", errMarshalRequest)
+	}
+	requestJSON := string(rawRequest)
+	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt"} {
+		if !strings.Contains(requestJSON, `"`+field+`"`) {
+			t.Fatalf("HostModelExecutionRequest JSON missing field %q: %s", field, requestJSON)
+		}
+	}
+	var decodedRequest HostModelExecutionRequest
+	if errUnmarshalRequest := json.Unmarshal(rawRequest, &decodedRequest); errUnmarshalRequest != nil {
+		t.Fatalf("unmarshal HostModelExecutionRequest: %v", errUnmarshalRequest)
+	}
+	if decodedRequest.EntryProtocol != request.EntryProtocol ||
+		decodedRequest.ExitProtocol != request.ExitProtocol ||
+		decodedRequest.Model != request.Model ||
+		decodedRequest.Stream != request.Stream ||
+		string(decodedRequest.Body) != string(request.Body) ||
+		decodedRequest.Headers.Get("X-Test") != "one" ||
+		decodedRequest.Query.Get("alt") != "beta" ||
+		decodedRequest.Alt != request.Alt {
+		t.Fatalf("HostModelExecutionRequest round trip = %#v", decodedRequest)
+	}
+	if got := decodedRequest.Headers.Values("X-Test"); len(got) != 2 || got[1] != "two" {
+		t.Fatalf("HostModelExecutionRequest headers = %#v", decodedRequest.Headers)
+	}
+
+	response := HostModelExecutionResponse{
+		StatusCode: http.StatusAccepted,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(`{"ok":true}`),
+	}
+	rawResponse, errMarshalResponse := json.Marshal(response)
+	if errMarshalResponse != nil {
+		t.Fatalf("marshal HostModelExecutionResponse: %v", errMarshalResponse)
+	}
+	responseJSON := string(rawResponse)
+	for _, field := range []string{"status_code", "headers", "body"} {
+		if !strings.Contains(responseJSON, `"`+field+`"`) {
+			t.Fatalf("HostModelExecutionResponse JSON missing field %q: %s", field, responseJSON)
+		}
+	}
+	var decodedResponse HostModelExecutionResponse
+	if errUnmarshalResponse := json.Unmarshal(rawResponse, &decodedResponse); errUnmarshalResponse != nil {
+		t.Fatalf("unmarshal HostModelExecutionResponse: %v", errUnmarshalResponse)
+	}
+	if decodedResponse.StatusCode != response.StatusCode ||
+		decodedResponse.Headers.Get("Content-Type") != "application/json" ||
+		string(decodedResponse.Body) != string(response.Body) {
+		t.Fatalf("HostModelExecutionResponse round trip = %#v", decodedResponse)
+	}
+
+	streamResponse := HostModelStreamResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"text/event-stream"}},
+		StreamID:   "stream-1",
+	}
+	rawStreamResponse, errMarshalStreamResponse := json.Marshal(streamResponse)
+	if errMarshalStreamResponse != nil {
+		t.Fatalf("marshal HostModelStreamResponse: %v", errMarshalStreamResponse)
+	}
+	streamResponseJSON := string(rawStreamResponse)
+	for _, field := range []string{"status_code", "headers", "stream_id"} {
+		if !strings.Contains(streamResponseJSON, `"`+field+`"`) {
+			t.Fatalf("HostModelStreamResponse JSON missing field %q: %s", field, streamResponseJSON)
+		}
+	}
+	var decodedStreamResponse HostModelStreamResponse
+	if errUnmarshalStreamResponse := json.Unmarshal(rawStreamResponse, &decodedStreamResponse); errUnmarshalStreamResponse != nil {
+		t.Fatalf("unmarshal HostModelStreamResponse: %v", errUnmarshalStreamResponse)
+	}
+	if decodedStreamResponse.StatusCode != streamResponse.StatusCode ||
+		decodedStreamResponse.Headers.Get("Content-Type") != "text/event-stream" ||
+		decodedStreamResponse.StreamID != streamResponse.StreamID {
+		t.Fatalf("HostModelStreamResponse round trip = %#v", decodedStreamResponse)
+	}
+
+	readRequest := HostModelStreamReadRequest{StreamID: "stream-1"}
+	rawReadRequest, errMarshalReadRequest := json.Marshal(readRequest)
+	if errMarshalReadRequest != nil {
+		t.Fatalf("marshal HostModelStreamReadRequest: %v", errMarshalReadRequest)
+	}
+	if !strings.Contains(string(rawReadRequest), `"stream_id"`) {
+		t.Fatalf("HostModelStreamReadRequest JSON missing stream_id: %s", rawReadRequest)
+	}
+	var decodedReadRequest HostModelStreamReadRequest
+	if errUnmarshalReadRequest := json.Unmarshal(rawReadRequest, &decodedReadRequest); errUnmarshalReadRequest != nil {
+		t.Fatalf("unmarshal HostModelStreamReadRequest: %v", errUnmarshalReadRequest)
+	}
+	if decodedReadRequest.StreamID != readRequest.StreamID {
+		t.Fatalf("HostModelStreamReadRequest round trip = %#v", decodedReadRequest)
+	}
+
+	readResponse := HostModelStreamReadResponse{
+		Payload: []byte("data: test\n\n"),
+		Error:   "temporary stream error",
+		Done:    true,
+	}
+	rawReadResponse, errMarshalReadResponse := json.Marshal(readResponse)
+	if errMarshalReadResponse != nil {
+		t.Fatalf("marshal HostModelStreamReadResponse: %v", errMarshalReadResponse)
+	}
+	readResponseJSON := string(rawReadResponse)
+	for _, field := range []string{"payload", "error", "done"} {
+		if !strings.Contains(readResponseJSON, `"`+field+`"`) {
+			t.Fatalf("HostModelStreamReadResponse JSON missing field %q: %s", field, readResponseJSON)
+		}
+	}
+	var decodedReadResponse HostModelStreamReadResponse
+	if errUnmarshalReadResponse := json.Unmarshal(rawReadResponse, &decodedReadResponse); errUnmarshalReadResponse != nil {
+		t.Fatalf("unmarshal HostModelStreamReadResponse: %v", errUnmarshalReadResponse)
+	}
+	if string(decodedReadResponse.Payload) != string(readResponse.Payload) ||
+		decodedReadResponse.Error != readResponse.Error ||
+		decodedReadResponse.Done != readResponse.Done {
+		t.Fatalf("HostModelStreamReadResponse round trip = %#v", decodedReadResponse)
+	}
+
+	closeRequest := HostModelStreamCloseRequest{StreamID: "stream-1"}
+	rawCloseRequest, errMarshalCloseRequest := json.Marshal(closeRequest)
+	if errMarshalCloseRequest != nil {
+		t.Fatalf("marshal HostModelStreamCloseRequest: %v", errMarshalCloseRequest)
+	}
+	if !strings.Contains(string(rawCloseRequest), `"stream_id"`) {
+		t.Fatalf("HostModelStreamCloseRequest JSON missing stream_id: %s", rawCloseRequest)
+	}
+	var decodedCloseRequest HostModelStreamCloseRequest
+	if errUnmarshalCloseRequest := json.Unmarshal(rawCloseRequest, &decodedCloseRequest); errUnmarshalCloseRequest != nil {
+		t.Fatalf("unmarshal HostModelStreamCloseRequest: %v", errUnmarshalCloseRequest)
+	}
+	if decodedCloseRequest.StreamID != closeRequest.StreamID {
+		t.Fatalf("HostModelStreamCloseRequest round trip = %#v", decodedCloseRequest)
 	}
 }
 

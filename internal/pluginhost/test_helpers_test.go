@@ -22,11 +22,11 @@ func newTestSymbolLoader() *testSymbolLoader {
 	return &testSymbolLoader{lookups: make(map[string]*testSymbolLookup)}
 }
 
-func (l *testSymbolLoader) Open(path string, host *Host) (pluginClient, error) {
+func (l *testSymbolLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
 	l.openCalls++
-	lookup := l.lookups[pluginIDFromPath(path)]
+	lookup := l.lookups[file.ID]
 	if lookup == nil {
-		return nil, fmt.Errorf("missing test plugin for %s", path)
+		return nil, fmt.Errorf("missing test plugin for %s", file.Path)
 	}
 	return lookup, nil
 }
