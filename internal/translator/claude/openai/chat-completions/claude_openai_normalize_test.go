@@ -215,6 +215,70 @@ func TestConvertOpenAIRequestToClaude_CursorToolResultIsError(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_CursorToolResultNativeContentArray(t *testing.T) {
+	// Cursor can forward a tool_result whose content is an array of Claude-native
+	// blocks (e.g. an image with source, or a tool_reference). These must survive
+	// verbatim instead of being dropped/stringified by the OpenAI part converter.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_img", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_img",
+						"content": [
+							{"type": "text", "text": "here is the capture"},
+							{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	tr := messages[1].Get("content.0")
+	if got := tr.Get("type").String(); got != "tool_result" {
+		t.Fatalf("Expected tool_result block, got %q (%s)", got, messages[1].Raw)
+	}
+	blocks := tr.Get("content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("Expected 2 native content blocks preserved, got %d: %s", len(blocks), tr.Raw)
+	}
+	if got := blocks[0].Get("text").String(); got != "here is the capture" {
+		t.Fatalf("Expected text block preserved, got %q", got)
+	}
+	img := blocks[1]
+	if got := img.Get("type").String(); got != "image" {
+		t.Fatalf("Expected native image block preserved, got %q (%s)", got, img.Raw)
+	}
+	if got := img.Get("source.media_type").String(); got != "image/png" {
+		t.Fatalf("Expected image source media_type preserved, got %q (%s)", got, img.Raw)
+	}
+	if got := img.Get("source.data").String(); got != "iVBORw0KGgo=" {
+		t.Fatalf("Expected image source data preserved, got %q", got)
+	}
+	// The internal marker must not leak into the final Claude payload.
+	if messages[1].Get("_anthropic_native_content").Exists() {
+		t.Fatalf("Internal marker _anthropic_native_content leaked into output: %s", messages[1].Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_BareAnthropicTools(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-5",

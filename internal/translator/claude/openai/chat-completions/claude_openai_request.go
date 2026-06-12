@@ -257,11 +257,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				toolResultBlock := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "tool_use_id", toolCallID)
-				toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
-				if toolResultContentRaw {
-					toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolResultContent))
+				if message.Get("_anthropic_native_content").Bool() && toolContentResult.IsArray() {
+					// Content is already a Claude-native block array; keep it raw so
+					// blocks like image/source and tool_reference are not dropped or
+					// stringified by the OpenAI content-part converter.
+					toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolContentResult.Raw))
 				} else {
-					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
+					toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
+					if toolResultContentRaw {
+						toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolResultContent))
+					} else {
+						toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
+					}
 				}
 				// Reconstruct the Anthropic is_error flag carried from a Cursor
 				// tool_result so a failed tool execution stays marked as failed.
@@ -427,6 +434,13 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 					trContent := tr.Get("content")
 					if trContent.IsArray() {
 						toolMsg, _ = sjson.SetRaw(toolMsg, "content", trContent.Raw)
+						// When the array holds Claude-native blocks (e.g. image with
+						// source, tool_reference), flag it so the downstream mapper
+						// keeps it verbatim instead of routing it through the OpenAI
+						// content-part converter, which would drop unknown blocks.
+						if toolResultContentIsAnthropicNative(trContent) {
+							toolMsg, _ = sjson.Set(toolMsg, "_anthropic_native_content", true)
+						}
 					} else {
 						toolMsg, _ = sjson.Set(toolMsg, "content", flattenAnthropicToolResultText(trContent))
 					}
@@ -583,6 +597,31 @@ func messageHasAnthropicBlocks(content gjson.Result) bool {
 		return true
 	})
 	return found
+}
+
+// toolResultContentIsAnthropicNative reports whether a tool_result content array
+// holds Claude-native blocks that the OpenAI content-part converter does not
+// understand (anything other than text / image_url / file). Such arrays must be
+// passed through verbatim so blocks like image (with source) or tool_reference
+// are not dropped or stringified.
+func toolResultContentIsAnthropicNative(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	native := false
+	content.ForEach(func(_, block gjson.Result) bool {
+		if block.Type == gjson.String {
+			return true
+		}
+		switch block.Get("type").String() {
+		case "text", "image_url", "file":
+			return true
+		default:
+			native = true
+			return false
+		}
+	})
+	return native
 }
 
 // flattenAnthropicToolResultText reduces a tool_result content value to a plain
