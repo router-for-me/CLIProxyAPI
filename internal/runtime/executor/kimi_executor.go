@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,7 +76,10 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+		auth, req, err = prepareKimiClaudeSourceRequest(auth, req)
+		if err != nil {
+			return resp, err
+		}
 		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -185,7 +189,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+		auth, req, err = prepareKimiClaudeSourceRequest(auth, req)
+		if err != nil {
+			return nil, err
+		}
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -325,8 +332,192 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+	var err error
+	auth, req, err = prepareKimiClaudeSourceRequest(auth, req)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
+}
+
+func prepareKimiClaudeSourceRequest(auth *cliproxyauth.Auth, req cliproxyexecutor.Request) (*cliproxyauth.Auth, cliproxyexecutor.Request, error) {
+	if auth == nil {
+		auth = &cliproxyauth.Auth{}
+	} else {
+		auth = auth.Clone()
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+
+	body, err := normalizeKimiClaudeToolUseReasoning(req.Payload)
+	if err != nil {
+		return auth, req, err
+	}
+	req.Payload = body
+	return auth, req, nil
+}
+
+func normalizeKimiClaudeToolUseReasoning(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	out := body
+	patched := 0
+	latestReasoning := ""
+	hasLatestReasoning := false
+
+	for msgIdx, msg := range messages.Array() {
+		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+			continue
+		}
+
+		currentReasoning := kimiClaudeAssistantReasoningText(msg)
+		if currentReasoning != "" {
+			latestReasoning = currentReasoning
+			hasLatestReasoning = true
+		}
+
+		if !hasKimiClaudeToolUse(msg) {
+			continue
+		}
+
+		reasoningText := currentReasoning
+		if reasoningText == "" {
+			reasoningText = fallbackKimiClaudeAssistantReasoning(msg, hasLatestReasoning, latestReasoning)
+		}
+		reasoning := msg.Get("reasoning_content")
+		if !reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "" {
+			path := fmt.Sprintf("messages.%d.reasoning_content", msgIdx)
+			next, err := sjson.SetBytes(out, path, reasoningText)
+			if err != nil {
+				return body, fmt.Errorf("kimi executor: failed to set Claude assistant reasoning_content: %w", err)
+			}
+			out = next
+			patched++
+		}
+
+		next, addedThinking, err := ensureKimiClaudeThinkingBlock(out, msgIdx, reasoningText)
+		if err != nil {
+			return body, err
+		}
+		if addedThinking {
+			out = next
+			patched++
+		}
+	}
+
+	if patched > 0 {
+		log.WithField("patched_reasoning_messages", patched).Debug("kimi executor: normalized Claude assistant tool_use reasoning")
+	}
+	return out, nil
+}
+
+func hasKimiClaudeToolUse(msg gjson.Result) bool {
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		if strings.TrimSpace(part.Get("type").String()) == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureKimiClaudeThinkingBlock(body []byte, msgIdx int, reasoningText string) ([]byte, bool, error) {
+	contentPath := fmt.Sprintf("messages.%d.content", msgIdx)
+	content := gjson.GetBytes(body, contentPath)
+	if !content.IsArray() {
+		return body, false, nil
+	}
+
+	for _, part := range content.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "thinking" {
+			continue
+		}
+		if strings.TrimSpace(part.Get("thinking").String()) != "" {
+			return body, false, nil
+		}
+	}
+
+	var parts []any
+	if err := json.Unmarshal([]byte(content.Raw), &parts); err != nil {
+		return body, false, fmt.Errorf("kimi executor: failed to parse Claude assistant content: %w", err)
+	}
+	nextParts := make([]any, 0, len(parts)+1)
+	nextParts = append(nextParts, map[string]any{
+		"type":     "thinking",
+		"thinking": reasoningText,
+	})
+	nextParts = append(nextParts, parts...)
+
+	next, err := sjson.SetBytes(body, contentPath, nextParts)
+	if err != nil {
+		return body, false, fmt.Errorf("kimi executor: failed to set Claude assistant thinking block: %w", err)
+	}
+	return next, true, nil
+}
+
+func kimiClaudeAssistantReasoningText(msg gjson.Result) string {
+	if reasoning := strings.TrimSpace(msg.Get("reasoning_content").String()); reasoning != "" {
+		return reasoning
+	}
+
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return ""
+	}
+	parts := make([]string, 0)
+	for _, part := range content.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "thinking" {
+			continue
+		}
+		if text := strings.TrimSpace(part.Get("thinking").String()); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
+}
+
+func fallbackKimiClaudeAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
+	if hasLatest && strings.TrimSpace(latest) != "" {
+		return latest
+	}
+
+	content := msg.Get("content")
+	if content.Type == gjson.String {
+		if text := strings.TrimSpace(content.String()); text != "" {
+			return text
+		}
+	}
+	if content.IsArray() {
+		parts := make([]string, 0, len(content.Array()))
+		for _, part := range content.Array() {
+			if strings.TrimSpace(part.Get("type").String()) != "text" {
+				continue
+			}
+			if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+
+	return "[reasoning unavailable]"
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
