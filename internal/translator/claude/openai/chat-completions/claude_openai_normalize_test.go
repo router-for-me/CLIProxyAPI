@@ -170,6 +170,51 @@ func TestConvertOpenAIRequestToClaude_CursorParallelToolResults(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_CursorToolResultIsError(t *testing.T) {
+	// Cursor forwards failed tool executions as Anthropic tool_result blocks with
+	// is_error:true. That flag must survive the full conversion so Claude sees a
+	// failed result instead of an apparent success.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_err", "name": "run", "input": {"cmd": "boom"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_err", "content": "command failed", "is_error": true}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	tr := messages[1].Get("content.0")
+	if got := tr.Get("type").String(); got != "tool_result" {
+		t.Fatalf("Expected tool_result block, got %q (%s)", got, messages[1].Raw)
+	}
+	if got := tr.Get("tool_use_id").String(); got != "toolu_err" {
+		t.Fatalf("Expected tool_use_id toolu_err, got %q", got)
+	}
+	if !tr.Get("is_error").Exists() || !tr.Get("is_error").Bool() {
+		t.Fatalf("Expected is_error:true preserved on tool_result, got: %s", tr.Raw)
+	}
+	if got := tr.Get("content").String(); got != "command failed" {
+		t.Fatalf("Expected tool_result content preserved, got %q", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_BareAnthropicTools(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-5",

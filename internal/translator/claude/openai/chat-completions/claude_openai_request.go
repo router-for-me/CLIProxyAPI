@@ -263,6 +263,11 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				} else {
 					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
 				}
+				// Reconstruct the Anthropic is_error flag carried from a Cursor
+				// tool_result so a failed tool execution stays marked as failed.
+				if isErr := message.Get("is_error"); isErr.Exists() && isErr.Bool() {
+					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "is_error", true)
+				}
 
 				// Claude expects all tool_result blocks that answer the preceding
 				// assistant tool_use turn to be grouped in a single user message.
@@ -424,6 +429,12 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 						toolMsg, _ = sjson.SetRaw(toolMsg, "content", trContent.Raw)
 					} else {
 						toolMsg, _ = sjson.Set(toolMsg, "content", flattenAnthropicToolResultText(trContent))
+					}
+					// Carry the Anthropic is_error flag so the downstream Claude
+					// mapper can reconstruct a failed tool_result instead of
+					// silently turning a failure into an apparent success.
+					if isErr := tr.Get("is_error"); isErr.Exists() && isErr.Bool() {
+						toolMsg, _ = sjson.Set(toolMsg, "is_error", true)
 					}
 					newMessages, _ = sjson.SetRaw(newMessages, "-1", toolMsg)
 				}
