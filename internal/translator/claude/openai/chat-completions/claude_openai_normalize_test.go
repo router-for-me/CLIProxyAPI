@@ -548,6 +548,35 @@ func TestConvertOpenAIRequestToClaude_UnversionedBuiltinToolDropped(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_AnthropicToolChoicePreserved(t *testing.T) {
+	// Cursor sends bare Anthropic tools together with a native forced tool_choice
+	// {"type":"tool","name":...}. The mapper previously only handled OpenAI's
+	// {"type":"function",...} form, so the forced selection was dropped. It must
+	// be preserved as Claude's {"type":"tool","name":...} shape.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "read it"}],
+		"tools": [
+			{"name": "read_file", "description": "Read a file", "input_schema": {"type": "object"}}
+		],
+		"tool_choice": {"type": "tool", "name": "read_file"}
+	}`
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	outJSON := gjson.ParseBytes(out)
+
+	tc := outJSON.Get("tool_choice")
+	if !tc.Exists() {
+		t.Fatalf("Expected tool_choice preserved, got none: %s", out)
+	}
+	if got := tc.Get("type").String(); got != "tool" {
+		t.Fatalf("Expected tool_choice type tool, got %q (%s)", got, tc.Raw)
+	}
+	if got := tc.Get("name").String(); got != "read_file" {
+		t.Fatalf("Expected forced tool_choice name read_file, got %q (%s)", got, tc.Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_StandardOpenAIUnchanged(t *testing.T) {
 	// A normal OpenAI payload must pass through normalization untouched.
 	inputJSON := `{

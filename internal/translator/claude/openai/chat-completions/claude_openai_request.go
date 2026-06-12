@@ -388,11 +388,28 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			}
 		case gjson.JSON:
 			// Specific tool choice mapping
-			if toolChoice.Get("type").String() == "function" {
+			switch toolChoice.Get("type").String() {
+			case "function":
+				// OpenAI object form: {"type":"function","function":{"name":...}}
 				functionName := toolChoice.Get("function.name").String()
 				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			case "tool":
+				// Anthropic-native forced choice {"type":"tool","name":...} (sent
+				// by Cursor alongside bare tools) is already Claude's shape; keep
+				// it so the forced tool selection is not silently dropped.
+				if name := toolChoice.Get("name").String(); name != "" {
+					toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", name)
+					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				}
+			case "auto":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+			case "any":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+			case "none":
+				// Don't set tool_choice; Claude will not use tools.
 			}
 		default:
 		}
