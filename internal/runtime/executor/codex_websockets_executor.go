@@ -575,10 +575,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	translateModel := req.Model
-	if displayModel := codexFallbackDisplayModel(opts); displayModel != "" {
-		translateModel = displayModel
-	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		terminateReason := "completed"

@@ -1162,10 +1162,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
-	translateModel := req.Model
-	if displayModel := codexFallbackDisplayModel(opts); displayModel != "" {
-		translateModel = displayModel
-	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
