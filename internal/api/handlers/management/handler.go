@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -35,20 +36,22 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	postAuthPersistHook coreauth.PostAuthHook
-	pluginHost          *pluginhost.Host
+	cfg                    *config.Config
+	configFilePath         string
+	mu                     sync.Mutex
+	attemptsMu             sync.Mutex
+	failedAttempts         map[string]*attemptInfo // keyed by client IP
+	authManager            *coreauth.Manager
+	tokenStore             coreauth.Store
+	localPassword          string
+	allowRemoteOverride    bool
+	envSecret              string
+	logDir                 string
+	postAuthHook           coreauth.PostAuthHook
+	postAuthPersistHook    coreauth.PostAuthHook
+	pluginHost             *pluginhost.Host
+	pluginStoreRegistryURL string
+	pluginStoreHTTPClient  pluginstore.HTTPDoer
 }
 
 // NewHandler creates a new management handler instance.

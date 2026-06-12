@@ -114,6 +114,21 @@ func (h *Host) Snapshot() *Snapshot {
 	return emptySnapshot()
 }
 
+// PluginLoaded reports whether a plugin dynamic library is still loaded by the host.
+func (h *Host) PluginLoaded(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.loaded[id]
+	return ok
+}
+
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	if h == nil {
 		return

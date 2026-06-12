@@ -64,6 +64,55 @@ func TestHostApplyConfig_DisabledPluginSkipsCapability(t *testing.T) {
 	}
 }
 
+func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
+	disabled := false
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir := makePluginDir(t, "alpha")
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+		},
+	})
+
+	if !h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = false, want true after load")
+	}
+	if len(h.RegisteredPlugins()) != 1 {
+		t.Fatalf("RegisteredPlugins() len = %d, want 1", len(h.RegisteredPlugins()))
+	}
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {Enabled: &disabled},
+			},
+		},
+	})
+
+	if len(h.RegisteredPlugins()) != 0 {
+		t.Fatalf("RegisteredPlugins() len = %d, want 0 after disable", len(h.RegisteredPlugins()))
+	}
+	if !h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = false, want true while library remains loaded")
+	}
+
+	h.ShutdownAll()
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false after ShutdownAll")
+	}
+}
+
 func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 	loader := newTestSymbolLoader()
 	plugin := &testPlugin{
