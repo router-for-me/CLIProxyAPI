@@ -279,6 +279,72 @@ func TestConvertOpenAIRequestToClaude_CursorToolResultNativeContentArray(t *test
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_CursorThinkingBlocksPreserved(t *testing.T) {
+	// Extended-thinking models send thinking / redacted_thinking blocks before
+	// the tool_use in the assistant turn. Anthropic requires these to be returned
+	// unchanged on subsequent tool-result requests, so they must survive and lead
+	// the Claude assistant content.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{"role": "user", "content": "compute"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "let me reason", "signature": "sig-abc"},
+					{"type": "redacted_thinking", "data": "encrypted-xyz"},
+					{"type": "text", "text": "Calling tool"},
+					{"type": "tool_use", "id": "toolu_t", "name": "calc", "input": {"x": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_t", "content": "2"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	asst := messages[1]
+	blocks := asst.Get("content").Array()
+	if len(blocks) < 3 {
+		t.Fatalf("Expected thinking + text + tool_use in assistant content, got %d: %s", len(blocks), asst.Raw)
+	}
+	// thinking blocks must lead, unchanged.
+	if got := blocks[0].Get("type").String(); got != "thinking" {
+		t.Fatalf("Expected first block thinking, got %q (%s)", got, asst.Raw)
+	}
+	if got := blocks[0].Get("signature").String(); got != "sig-abc" {
+		t.Fatalf("Expected thinking signature preserved, got %q", got)
+	}
+	if got := blocks[0].Get("thinking").String(); got != "let me reason" {
+		t.Fatalf("Expected thinking text preserved, got %q", got)
+	}
+	if got := blocks[1].Get("type").String(); got != "redacted_thinking" {
+		t.Fatalf("Expected second block redacted_thinking, got %q (%s)", got, asst.Raw)
+	}
+	if got := blocks[1].Get("data").String(); got != "encrypted-xyz" {
+		t.Fatalf("Expected redacted_thinking data preserved, got %q", got)
+	}
+	// tool_use must still be present.
+	if !asst.Get("content.#(type==tool_use)").Exists() {
+		t.Fatalf("Expected tool_use preserved in assistant content: %s", asst.Raw)
+	}
+	// Internal marker must not leak.
+	if asst.Get("_anthropic_thinking").Exists() {
+		t.Fatalf("Internal marker _anthropic_thinking leaked into output: %s", asst.Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_BareAnthropicTools(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-5",

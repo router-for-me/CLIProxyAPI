@@ -195,6 +195,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
 
+				// Signed thinking / redacted_thinking blocks must lead the Claude
+				// assistant content, unchanged, so extended-thinking tool histories
+				// stay valid. They are carried verbatim from normalization.
+				if role == "assistant" {
+					if thinking := message.Get("_anthropic_thinking"); thinking.Exists() && thinking.IsArray() {
+						thinking.ForEach(func(_, block gjson.Result) bool {
+							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(block.Raw))
+							return true
+						})
+					}
+				}
+
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					part := []byte(`{"type":"text","text":""}`)
@@ -470,6 +482,7 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 			case "assistant":
 				textParts := make([]string, 0)
 				toolUses := make([]gjson.Result, 0)
+				thinkingBlocks := make([]gjson.Result, 0)
 				content.ForEach(func(_, block gjson.Result) bool {
 					switch block.Get("type").String() {
 					case "tool_use":
@@ -478,12 +491,24 @@ func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
 						if t := block.Get("text").String(); t != "" {
 							textParts = append(textParts, t)
 						}
+					case "thinking", "redacted_thinking":
+						thinkingBlocks = append(thinkingBlocks, block)
 					}
 					return true
 				})
 
 				asstMsg := `{"role":"assistant","content":""}`
 				asstMsg, _ = sjson.Set(asstMsg, "content", strings.Join(textParts, ""))
+				// Carry signed thinking / redacted_thinking blocks through so the
+				// downstream Claude mapper can return them unchanged. Anthropic
+				// requires prior thinking blocks to be preserved on subsequent
+				// tool-result requests from extended-thinking models.
+				if len(thinkingBlocks) > 0 {
+					asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_thinking", "[]")
+					for _, tb := range thinkingBlocks {
+						asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_thinking.-1", tb.Raw)
+					}
+				}
 				if len(toolUses) > 0 {
 					asstMsg, _ = sjson.SetRaw(asstMsg, "tool_calls", "[]")
 					for _, tu := range toolUses {
