@@ -17,15 +17,21 @@ jobs:
   prepare-release:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           release_notes_file="$(mktemp)"
-          current_notes_file="$(mktemp)"
+          generated_notes_file="$(mktemp)"
+          changelog_entries_file="$(mktemp)"
+          changelog_notes_file="$(mktemp)"
           updated_notes_file="$(mktemp)"
-          trap 'rm -f "$release_notes_file" "$current_notes_file" "$updated_notes_file"' EXIT
+          trap 'rm -f "$release_notes_file" "$generated_notes_file" "$changelog_entries_file" "$changelog_notes_file" "$updated_notes_file"' EXIT
 
           cat > "$release_notes_file" <<'EOF'
           <!-- cliproxyapi-linux-release-assets:start -->
@@ -37,22 +43,49 @@ jobs:
           <!-- cliproxyapi-linux-release-assets:end -->
           EOF
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME"
+          git fetch --force --tags
+          previous_tag=""
+          if previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
+            previous_tag="$previous_tag_value"
+            changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            changelog_range="$GITHUB_REF_NAME"
           fi
-          gh release view "$GITHUB_REF_NAME" --json body -q .body > "$current_notes_file"
+
+          git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
+            grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
+
+          gh api "repos/${GH_REPO}/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" \
+            --jq .body > "$generated_notes_file"
+          if [[ ! -s "$generated_notes_file" ]]; then
+            if [[ -n "$previous_tag" ]]; then
+              printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
+            else
+              printf '**Full Changelog**: https://github.com/%s/commits/%s\n' "$GH_REPO" "$GITHUB_REF_NAME" > "$generated_notes_file"
+            fi
+          fi
+
+          {
+            if [[ -s "$changelog_entries_file" ]]; then
+              printf '## Changelog\n\n'
+              cat "$changelog_entries_file"
+              printf '\n\n'
+            fi
+            cat "$generated_notes_file"
+          } > "$changelog_notes_file"
+
           {
             cat "$release_notes_file"
             printf '\n'
-            awk '
-              /^<!-- cliproxyapi-linux-release-assets:start -->$/ { skip = 1; next }
-              /^<!-- cliproxyapi-linux-release-assets:end -->$/ { skip = 0; next }
-              !skip { print }
-            ' "$current_notes_file"
+            cat "$changelog_notes_file"
           } > "$updated_notes_file"
-          gh release edit "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+          fi
 
   build-hosted:
     name: build ${{ matrix.target }}
