@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -254,14 +255,34 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				toolCallID := message.Get("tool_call_id").String()
 				toolContentResult := message.Get("content")
 
-				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
-				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
+				toolResultBlock := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+				toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "tool_use_id", toolCallID)
 				toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
 				if toolResultContentRaw {
-					msg, _ = sjson.SetRawBytes(msg, "content.0.content", []byte(toolResultContent))
+					toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolResultContent))
 				} else {
-					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
+					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
 				}
+
+				// Claude expects all tool_result blocks that answer the preceding
+				// assistant tool_use turn to be grouped in a single user message.
+				// Parallel tool calls arrive as consecutive role:"tool" messages, so
+				// append to the previous user/tool_result turn when present instead of
+				// emitting a separate user message per result.
+				if messageIndex > 0 {
+					lastIdx := messageIndex - 1
+					lastMsg := gjson.GetBytes(out, "messages."+strconv.Itoa(lastIdx))
+					lastContent := lastMsg.Get("content")
+					if lastMsg.Get("role").String() == "user" &&
+						lastContent.IsArray() && len(lastContent.Array()) > 0 &&
+						lastContent.Array()[len(lastContent.Array())-1].Get("type").String() == "tool_result" {
+						out, _ = sjson.SetRawBytes(out, "messages."+strconv.Itoa(lastIdx)+".content.-1", toolResultBlock)
+						return true
+					}
+				}
+
+				msg := []byte(`{"role":"user","content":[]}`)
+				msg, _ = sjson.SetRawBytes(msg, "content.-1", toolResultBlock)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
 			}

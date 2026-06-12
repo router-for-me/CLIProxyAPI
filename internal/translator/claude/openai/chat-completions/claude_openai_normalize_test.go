@@ -107,6 +107,69 @@ func TestConvertOpenAIRequestToClaude_CursorToolResultWithText(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_CursorParallelToolResults(t *testing.T) {
+	// Cursor agent mode runs parallel tool calls: one assistant turn with
+	// multiple tool_use blocks, answered by a single user turn carrying multiple
+	// tool_result blocks. Claude requires all tool_result blocks for the prior
+	// assistant tool_use turn to be grouped in ONE user message; splitting them
+	// into separate user turns breaks the tool_use/tool_result pairing.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{"role": "user", "content": "inspect both files"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_a", "name": "read_file", "input": {"path": "a.txt"}},
+					{"type": "tool_use", "id": "toolu_b", "name": "read_file", "input": {"path": "b.txt"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_a", "content": "alpha"},
+					{"type": "tool_result", "tool_use_id": "toolu_b", "content": "beta"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	// user, assistant(2 tool_use), user(2 tool_result grouped) -> 3 messages
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages (parallel results grouped), got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	asst := messages[1]
+	if got := len(asst.Get("content").Array()); got != 2 {
+		t.Fatalf("Expected 2 tool_use blocks in assistant turn, got %d: %s", got, asst.Raw)
+	}
+
+	toolTurn := messages[2]
+	if got := toolTurn.Get("role").String(); got != "user" {
+		t.Fatalf("Expected grouped tool_result turn role user, got %q", got)
+	}
+	blocks := toolTurn.Get("content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("Expected 2 tool_result blocks grouped in one user turn, got %d: %s", len(blocks), toolTurn.Raw)
+	}
+	if got := blocks[0].Get("tool_use_id").String(); got != "toolu_a" {
+		t.Fatalf("Expected first tool_result tool_use_id toolu_a, got %q", got)
+	}
+	if got := blocks[0].Get("content").String(); got != "alpha" {
+		t.Fatalf("Expected first tool_result content alpha, got %q", got)
+	}
+	if got := blocks[1].Get("tool_use_id").String(); got != "toolu_b" {
+		t.Fatalf("Expected second tool_result tool_use_id toolu_b, got %q", got)
+	}
+	if got := blocks[1].Get("content").String(); got != "beta" {
+		t.Fatalf("Expected second tool_result content beta, got %q", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_BareAnthropicTools(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-5",
