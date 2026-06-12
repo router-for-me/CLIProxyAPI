@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
@@ -85,8 +86,8 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 	for _, file := range files {
 		entries[file.ID] = pluginListEntry{
-			ID:           file.ID,
-			Path:         file.Path,
+			ID:           htmlsanitize.String(file.ID),
+			Path:         htmlsanitize.String(file.Path),
 			Enabled:      true,
 			ConfigFields: []pluginConfigFieldInfo{},
 			Menus:        []pluginMenuInfo{},
@@ -94,7 +95,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 	for id, item := range configs {
 		entry := entries[id]
-		entry.ID = id
+		entry.ID = htmlsanitize.String(id)
 		entry.Configured = true
 		entry.Enabled = pluginInstanceEnabled(item)
 		if entry.ConfigFields == nil {
@@ -108,10 +109,10 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	if host != nil {
 		for _, info := range host.RegisteredPlugins() {
 			entry := entries[info.ID]
-			entry.ID = info.ID
+			entry.ID = htmlsanitize.String(info.ID)
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
-			entry.Logo = info.Metadata.Logo
+			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			entry.Menus = pluginMenus(info.Menus)
 			entry.Metadata = pluginMetadata(info.Metadata)
@@ -143,7 +144,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 
 	c.JSON(http.StatusOK, pluginListResponse{
 		PluginsEnabled: pluginsEnabled,
-		PluginsDir:     pluginsDir,
+		PluginsDir:     htmlsanitize.String(pluginsDir),
 		Plugins:        out,
 	})
 }
@@ -265,12 +266,11 @@ func pluginInstanceEnabled(item config.PluginInstanceConfig) bool {
 func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo {
 	out := make([]pluginConfigFieldInfo, 0, len(fields))
 	for _, field := range fields {
-		enumValues := append([]string{}, field.EnumValues...)
 		out = append(out, pluginConfigFieldInfo{
-			Name:        field.Name,
-			Type:        string(field.Type),
-			EnumValues:  enumValues,
-			Description: field.Description,
+			Name:        htmlsanitize.String(field.Name),
+			Type:        htmlsanitize.String(string(field.Type)),
+			EnumValues:  htmlsanitize.Strings(field.EnumValues),
+			Description: htmlsanitize.String(field.Description),
 		})
 	}
 	return out
@@ -280,9 +280,9 @@ func pluginMenus(menus []pluginhost.RegisteredPluginMenu) []pluginMenuInfo {
 	out := make([]pluginMenuInfo, 0, len(menus))
 	for _, menu := range menus {
 		out = append(out, pluginMenuInfo{
-			Path:        menu.Path,
-			Menu:        menu.Menu,
-			Description: menu.Description,
+			Path:        htmlsanitize.String(menu.Path),
+			Menu:        htmlsanitize.String(menu.Menu),
+			Description: htmlsanitize.String(menu.Description),
 		})
 	}
 	return out
@@ -290,11 +290,11 @@ func pluginMenus(menus []pluginhost.RegisteredPluginMenu) []pluginMenuInfo {
 
 func pluginMetadata(meta pluginapi.Metadata) *pluginMetadataInfo {
 	return &pluginMetadataInfo{
-		Name:             meta.Name,
-		Version:          meta.Version,
-		Author:           meta.Author,
-		GitHubRepository: meta.GitHubRepository,
-		Logo:             meta.Logo,
+		Name:             htmlsanitize.String(meta.Name),
+		Version:          htmlsanitize.String(meta.Version),
+		Author:           htmlsanitize.String(meta.Author),
+		GitHubRepository: htmlsanitize.String(meta.GitHubRepository),
+		Logo:             htmlsanitize.String(meta.Logo),
 		ConfigFields:     pluginConfigFields(meta.ConfigFields),
 	}
 }

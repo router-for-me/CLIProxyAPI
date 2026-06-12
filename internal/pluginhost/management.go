@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -255,6 +256,7 @@ func (h *Host) ServeManagementHTTP(w http.ResponseWriter, r *http.Request) bool 
 		http.Error(w, "plugin management handler failed", http.StatusBadGateway)
 		return true
 	}
+	resp.Body = escapeManagementResponseBody(resp)
 
 	for keyHeader, values := range resp.Headers {
 		for _, value := range values {
@@ -328,6 +330,14 @@ func (h *Host) callManagementHandler(ctx context.Context, record managementRoute
 		}
 	}()
 	return record.route.Handler.HandleManagement(ctx, req)
+}
+
+func escapeManagementResponseBody(resp pluginapi.ManagementResponse) []byte {
+	body, okEscaped := htmlsanitize.JSONBodyIfLikely(resp.Body, resp.Headers.Get("Content-Type"))
+	if !okEscaped {
+		return resp.Body
+	}
+	return body
 }
 
 func (h *Host) callResourceHandler(ctx context.Context, record resourceRouteRecord, req pluginapi.ManagementRequest) (resp pluginapi.ManagementResponse, err error) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -81,19 +82,19 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		status := statuses[plugin.ID]
 		installedVersion := status.InstalledVersion
 		entries = append(entries, pluginStoreListEntry{
-			ID:               plugin.ID,
-			Name:             plugin.Name,
-			Description:      plugin.Description,
-			Author:           plugin.Author,
-			Version:          plugin.Version,
-			Repository:       plugin.Repository,
-			Logo:             plugin.Logo,
-			Homepage:         plugin.Homepage,
-			License:          plugin.License,
-			Tags:             append([]string{}, plugin.Tags...),
+			ID:               htmlsanitize.String(plugin.ID),
+			Name:             htmlsanitize.String(plugin.Name),
+			Description:      htmlsanitize.String(plugin.Description),
+			Author:           htmlsanitize.String(plugin.Author),
+			Version:          htmlsanitize.String(plugin.Version),
+			Repository:       htmlsanitize.String(plugin.Repository),
+			Logo:             htmlsanitize.String(plugin.Logo),
+			Homepage:         htmlsanitize.String(plugin.Homepage),
+			License:          htmlsanitize.String(plugin.License),
+			Tags:             htmlsanitize.Strings(plugin.Tags),
 			Installed:        status.Installed,
-			InstalledVersion: installedVersion,
-			Path:             status.Path,
+			InstalledVersion: htmlsanitize.String(installedVersion),
+			Path:             htmlsanitize.String(status.Path),
 			Configured:       status.Configured,
 			Registered:       status.Registered,
 			Enabled:          status.Enabled,
@@ -104,7 +105,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 
 	c.JSON(http.StatusOK, pluginStoreListResponse{
 		PluginsEnabled: pluginsEnabled,
-		PluginsDir:     pluginsDir,
+		PluginsDir:     htmlsanitize.String(pluginsDir),
 		Plugins:        entries,
 	})
 }
@@ -217,9 +218,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 
 	c.JSON(http.StatusOK, pluginInstallResponse{
 		Status:          "installed",
-		ID:              result.ID,
-		Version:         result.Version,
-		Path:            result.Path,
+		ID:              htmlsanitize.String(result.ID),
+		Version:         htmlsanitize.String(result.Version),
+		Path:            htmlsanitize.String(result.Path),
 		PluginsEnabled:  pluginsEnabled,
 		RestartRequired: restartRequired,
 	})

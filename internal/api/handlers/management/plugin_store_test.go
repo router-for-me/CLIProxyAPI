@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -76,6 +77,72 @@ func TestListPluginStoreMergesInstalledStatus(t *testing.T) {
 	}
 	if entry.Path == "" {
 		t.Fatal("path is empty")
+	}
+}
+
+func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     t.TempDir(),
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": []byte(`{
+				"schema_version": 1,
+				"plugins": [{
+					"id": "sample-provider",
+					"name": "<script>alert(1)</script>",
+					"description": "<img src=x onerror=alert(1)>",
+					"author": "\"attacker\"",
+					"version": "0.1.0",
+					"repository": "https://github.com/author-name/cliproxy-sample-provider-plugin",
+					"logo": "<svg onload=alert(1)>",
+					"homepage": "https://example.com/?q=<x>",
+					"license": "<b>MIT</b>",
+					"tags": ["<provider>", "safe & sound"]
+				}]
+			}`),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugin-store", nil)
+
+	h.ListPluginStore(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body pluginStoreListResponse
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if len(body.Plugins) != 1 {
+		t.Fatalf("plugins len = %d, want 1", len(body.Plugins))
+	}
+	entry := body.Plugins[0]
+	if entry.Name != html.EscapeString("<script>alert(1)</script>") ||
+		entry.Description != html.EscapeString("<img src=x onerror=alert(1)>") ||
+		entry.Author != html.EscapeString(`"attacker"`) ||
+		entry.Version != "0.1.0" ||
+		entry.Repository != "https://github.com/author-name/cliproxy-sample-provider-plugin" ||
+		entry.Logo != html.EscapeString("<svg onload=alert(1)>") ||
+		entry.Homepage != html.EscapeString("https://example.com/?q=<x>") ||
+		entry.License != html.EscapeString("<b>MIT</b>") {
+		t.Fatalf("store entry = %#v, want escaped strings", entry)
+	}
+	if len(entry.Tags) != 2 ||
+		entry.Tags[0] != html.EscapeString("<provider>") ||
+		entry.Tags[1] != html.EscapeString("safe & sound") {
+		t.Fatalf("tags = %#v, want escaped strings", entry.Tags)
 	}
 }
 

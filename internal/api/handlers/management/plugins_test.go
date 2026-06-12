@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -208,6 +211,58 @@ func TestPatchPluginConfigMergesAndDeletesFields(t *testing.T) {
 	raw := marshalPluginRaw(t, item)
 	if !strings.Contains(raw, "mode: fast") || !strings.Contains(raw, "count: 3") || strings.Contains(raw, "remove:") {
 		t.Fatalf("raw config =\n%s", raw)
+	}
+}
+
+func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
+	t.Parallel()
+
+	fields := pluginConfigFields([]pluginapi.ConfigField{{
+		Name:        `<img src=x onerror=alert(1)>`,
+		Type:        pluginapi.ConfigFieldTypeEnum,
+		EnumValues:  []string{`<fast>`, `safe & sound`},
+		Description: `"quoted" 'single' <b>mode</b>`,
+	}})
+	if len(fields) != 1 {
+		t.Fatalf("fields len = %d, want 1", len(fields))
+	}
+	if fields[0].Name != html.EscapeString(`<img src=x onerror=alert(1)>`) {
+		t.Fatalf("field name = %q, want escaped", fields[0].Name)
+	}
+	if fields[0].EnumValues[0] != html.EscapeString(`<fast>`) || fields[0].EnumValues[1] != html.EscapeString(`safe & sound`) {
+		t.Fatalf("enum values = %#v, want escaped values", fields[0].EnumValues)
+	}
+	if fields[0].Description != html.EscapeString(`"quoted" 'single' <b>mode</b>`) {
+		t.Fatalf("description = %q, want escaped", fields[0].Description)
+	}
+
+	menus := pluginMenus([]pluginhost.RegisteredPluginMenu{{
+		Path:        `/v0/resource/plugins/sample/<status>`,
+		Menu:        `<b>Status</b>`,
+		Description: `Shows <script>alert(1)</script>.`,
+	}})
+	if len(menus) != 1 {
+		t.Fatalf("menus len = %d, want 1", len(menus))
+	}
+	if menus[0].Path != html.EscapeString(`/v0/resource/plugins/sample/<status>`) ||
+		menus[0].Menu != html.EscapeString(`<b>Status</b>`) ||
+		menus[0].Description != html.EscapeString(`Shows <script>alert(1)</script>.`) {
+		t.Fatalf("menu = %#v, want escaped strings", menus[0])
+	}
+
+	meta := pluginMetadata(pluginapi.Metadata{
+		Name:             `<script>alert(1)</script>`,
+		Version:          `1.0.0&evil=true`,
+		Author:           `"attacker"`,
+		GitHubRepository: `https://example.com/repo?x=<script>`,
+		Logo:             `<svg onload=alert(1)>`,
+	})
+	if meta.Name != html.EscapeString(`<script>alert(1)</script>`) ||
+		meta.Version != html.EscapeString(`1.0.0&evil=true`) ||
+		meta.Author != html.EscapeString(`"attacker"`) ||
+		meta.GitHubRepository != html.EscapeString(`https://example.com/repo?x=<script>`) ||
+		meta.Logo != html.EscapeString(`<svg onload=alert(1)>`) {
+		t.Fatalf("metadata = %#v, want escaped strings", meta)
 	}
 }
 

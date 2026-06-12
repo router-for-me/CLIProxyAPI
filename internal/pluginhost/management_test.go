@@ -2,6 +2,8 @@ package pluginhost
 
 import (
 	"context"
+	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -60,6 +62,63 @@ func TestRegisterManagementRoutesSkipsReservedAndUsesPriority(t *testing.T) {
 	rec = httptest.NewRecorder()
 	if host.ServeManagementHTTP(rec, req) {
 		t.Fatal("reserved route was served by plugin")
+	}
+}
+
+func TestServeManagementHTMLEscapesJSONResponseStrings(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "json",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ManagementAPI: &managementPluginDouble{routes: []pluginapi.ManagementRoute{{
+				Method: http.MethodGet,
+				Path:   "/plugins/json/status",
+				Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+					return pluginapi.ManagementResponse{
+						Headers: http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+						Body: []byte(`{
+							"title": "<script>alert(1)</script>",
+							"items": ["<b>first</b>", {"description": "safe & sound"}],
+							"count": 1
+						}`),
+					}, nil
+				}),
+			}}},
+		}},
+	})
+	host.RegisterManagementRoutes(context.Background(), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/json/status", nil)
+	rec := httptest.NewRecorder()
+	if !host.ServeManagementHTTP(rec, req) {
+		t.Fatal("ServeManagementHTTP() = false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if body["title"] != html.EscapeString("<script>alert(1)</script>") {
+		t.Fatalf("title = %q, want escaped", body["title"])
+	}
+	items, okItems := body["items"].([]any)
+	if !okItems || len(items) != 2 {
+		t.Fatalf("items = %#v, want two items", body["items"])
+	}
+	if items[0] != html.EscapeString("<b>first</b>") {
+		t.Fatalf("items[0] = %q, want escaped", items[0])
+	}
+	nested, okNested := items[1].(map[string]any)
+	if !okNested {
+		t.Fatalf("items[1] = %#v, want object", items[1])
+	}
+	if nested["description"] != html.EscapeString("safe & sound") {
+		t.Fatalf("nested description = %q, want escaped", nested["description"])
+	}
+	if body["count"] != float64(1) {
+		t.Fatalf("count = %#v, want unchanged number", body["count"])
 	}
 }
 
