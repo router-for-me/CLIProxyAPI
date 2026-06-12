@@ -1,3 +1,11 @@
+
+// isTruncatedKey checks if a string looks like a truncated/masked API key.
+// Returns true if the key contains literal "..." (three dots) which indicates
+// the management panel UI saved a masked display value instead of the real key.
+func isTruncatedKey(key string) bool {
+	return strings.Contains(key, "...")
+}
+
 package management
 
 import (
@@ -301,15 +309,23 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// Protect truncated API keys from being saved
+	// Protect truncated API keys: match incoming keys to current config by
+	// (prefix + baseUrl) identity instead of list index, so reordering or
+	// deletion in the management panel doesn't map to wrong original keys.
 	for i := range arr {
-		if isTruncatedKey(arr[i].APIKey) && i < len(h.cfg.ClaudeKey) {
-			if h.cfg.ClaudeKey[i].APIKey != "" && !isTruncatedKey(h.cfg.ClaudeKey[i].APIKey) {
+		if !isTruncatedKey(arr[i].APIKey) {
+			continue
+		}
+		identity := arr[i].Prefix + "|" + arr[i].BaseURL
+		for j := range h.cfg.ClaudeKey {
+			candidate := h.cfg.ClaudeKey[j].Prefix + "|" + h.cfg.ClaudeKey[j].BaseURL
+			if candidate == identity && !isTruncatedKey(h.cfg.ClaudeKey[j].APIKey) && h.cfg.ClaudeKey[j].APIKey != "" {
 				log.WithFields(log.Fields{
 					"handler": "PutClaudeKeys",
-					"index":   i,
+					"prefix":  arr[i].Prefix,
 				}).Warn("detected truncated API key, preserving original from in-memory config")
-				arr[i].APIKey = h.cfg.ClaudeKey[i].APIKey
+				arr[i].APIKey = h.cfg.ClaudeKey[j].APIKey
+				break
 			}
 		}
 	}
