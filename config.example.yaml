@@ -392,9 +392,9 @@ nonstream-keepalive-interval: 0
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
-#   qoder:                            # plugin provider keys are supported for OAuth plugins
-#     - name: "qmodel_latest"
-#       alias: "qlatest"
+#   sample-provider:                  # plugin provider keys are supported for OAuth plugins
+#     - name: "sample-model-latest"
+#       alias: "sample-latest"
 
 # OAuth provider excluded models
 # oauth-excluded-models:
