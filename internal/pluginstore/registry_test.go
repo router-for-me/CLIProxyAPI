@@ -68,6 +68,21 @@ func TestParseRegistryNormalizesPluginFields(t *testing.T) {
 	}
 }
 
+func TestValidateRegistryAllowsMissingVersion(t *testing.T) {
+	t.Parallel()
+
+	registry := Registry{SchemaVersion: 1, Plugins: []Plugin{{
+		ID:          "sample-provider",
+		Name:        "Sample Provider",
+		Description: "Adds sample provider support.",
+		Author:      "author-name",
+		Repository:  "https://github.com/author-name/cliproxy-sample-provider-plugin",
+	}}}
+	if errValidate := ValidateRegistry(registry); errValidate != nil {
+		t.Fatalf("ValidateRegistry() error = %v, want nil for missing version", errValidate)
+	}
+}
+
 func TestValidateRegistryRejectsInvalidEntries(t *testing.T) {
 	t.Parallel()
 
