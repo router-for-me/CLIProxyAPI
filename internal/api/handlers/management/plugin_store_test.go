@@ -168,7 +168,7 @@ func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
-			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/tags/v0.1.0": []byte(`{
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
 				"tag_name": "v0.1.0",
 				"assets": [
 					{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
@@ -250,7 +250,7 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
 			"https://registry.example/registry.json": registryJSON(t),
-			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/tags/v0.1.0": []byte(`{
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
 				"tag_name": "v0.1.0",
 				"assets": [
 					{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},

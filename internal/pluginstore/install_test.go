@@ -4,7 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -249,6 +252,64 @@ func TestInstallArchiveRejectsUnsafeArchives(t *testing.T) {
 	}
 }
 
+func TestInstallUsesLatestReleaseVersion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.dylib": "library-data"})
+	archiveName := "sample-provider_0.2.0_darwin_arm64.zip"
+	checksum := sha256.Sum256(archiveData)
+	client := Client{HTTPClient: mapHTTPDoer{
+		"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+			"tag_name": "v0.2.0",
+			"assets": [
+				{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+				{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+			]
+		}`),
+		"https://downloads.example/" + archiveName: archiveData,
+		"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}}
+
+	result, errInstall := client.Install(context.Background(), testPlugin(), InstallOptions{
+		PluginsDir: root,
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
+	})
+	if errInstall != nil {
+		t.Fatalf("Install() error = %v", errInstall)
+	}
+	if result.Version != "0.2.0" {
+		t.Fatalf("Version = %q, want 0.2.0 from latest release tag", result.Version)
+	}
+	data, errRead := os.ReadFile(filepath.Join(root, "darwin", "arm64", "sample-provider.dylib"))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "library-data" {
+		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestInstallRejectsInvalidLatestReleaseTag(t *testing.T) {
+	t.Parallel()
+
+	client := Client{HTTPClient: mapHTTPDoer{
+		"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{"tag_name": "latest", "assets": []}`),
+	}}
+	_, errInstall := client.Install(context.Background(), testPlugin(), InstallOptions{
+		PluginsDir: t.TempDir(),
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
+	})
+	if errInstall == nil {
+		t.Fatal("Install() error = nil")
+	}
+	if !strings.Contains(errInstall.Error(), "invalid release tag") {
+		t.Fatalf("Install() error = %v, want invalid release tag", errInstall)
+	}
+}
+
 func makeZip(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 
@@ -273,6 +334,26 @@ type failingHTTPDoer struct{}
 
 func (failingHTTPDoer) Do(*http.Request) (*http.Response, error) {
 	return nil, errors.New("network unavailable")
+}
+
+type mapHTTPDoer map[string][]byte
+
+func (c mapHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	body, ok := c[req.URL.String()]
+	if !ok {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
 }
 
 func testPlugin() Plugin {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
@@ -48,16 +49,17 @@ func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 	return registry, nil
 }
 
-func (c Client) FetchRelease(ctx context.Context, plugin Plugin) (Release, error) {
+// FetchLatestRelease returns the latest published release of the plugin's
+// GitHub repository, mirroring the WebUI panel update check.
+func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release, error) {
 	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return Release{}, errRepository
 	}
 	releaseURL := fmt.Sprintf(
-		"https://api.github.com/repos/%s/%s/releases/tags/%s",
+		"https://api.github.com/repos/%s/%s/releases/latest",
 		url.PathEscape(owner),
 		url.PathEscape(repo),
-		url.PathEscape("v"+strings.TrimSpace(plugin.Version)),
 	)
 	data, errDownload := c.get(ctx, releaseURL, "application/vnd.github+json")
 	if errDownload != nil {
@@ -70,6 +72,16 @@ func (c Client) FetchRelease(ctx context.Context, plugin Plugin) (Release, error
 	return release, nil
 }
 
+// ReleaseVersion derives the plugin version from the release tag, stripping a
+// leading "v"/"V" and validating the result.
+func ReleaseVersion(release Release) (string, error) {
+	version := normalizeVersion(release.TagName)
+	if !validPluginVersion(version) {
+		return "", fmt.Errorf("invalid release tag %q", release.TagName)
+	}
+	return version, nil
+}
+
 func (c Client) DownloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, error) {
 	if strings.TrimSpace(asset.BrowserDownloadURL) == "" {
 		return nil, fmt.Errorf("asset %q missing browser_download_url", asset.Name)
@@ -78,10 +90,28 @@ func (c Client) DownloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, 
 }
 
 func (c Client) get(ctx context.Context, requestURL string, accept string) ([]byte, error) {
-	return httpfetch.GetBytes(ctx, c.httpClient(), requestURL, map[string]string{
+	headers := map[string]string{
 		"Accept":     accept,
 		"User-Agent": c.userAgent(),
-	}, 0)
+	}
+	if token := gitHubAPIToken(requestURL); token != "" {
+		headers["Authorization"] = "Bearer " + token
+	}
+	return httpfetch.GetBytes(ctx, c.httpClient(), requestURL, headers, 0)
+}
+
+// gitHubAPIToken returns the optional GitHub token for GitHub API requests to
+// raise the unauthenticated rate limit, mirroring the management asset updater.
+func gitHubAPIToken(requestURL string) string {
+	parsed, errParse := url.Parse(requestURL)
+	if errParse != nil || !strings.EqualFold(parsed.Host, "api.github.com") {
+		return ""
+	}
+	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
+	if !strings.Contains(gitURL, "github.com") {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN"))
 }
 
 func (c Client) httpClient() HTTPDoer {

@@ -64,6 +64,42 @@ func TestSelectReleaseAssetsRejectsMissingAssets(t *testing.T) {
 	}
 }
 
+func TestReleaseVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		tagName string
+		want    string
+		wantErr bool
+	}{
+		{name: "v prefix", tagName: "v1.2.3", want: "1.2.3"},
+		{name: "no prefix", tagName: "0.1.0", want: "0.1.0"},
+		{name: "whitespace", tagName: " v2.0.0 ", want: "2.0.0"},
+		{name: "empty", tagName: "", wantErr: true},
+		{name: "non numeric", tagName: "latest", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			version, errVersion := ReleaseVersion(Release{TagName: tt.tagName})
+			if tt.wantErr {
+				if errVersion == nil {
+					t.Fatalf("ReleaseVersion(%q) error = nil", tt.tagName)
+				}
+				return
+			}
+			if errVersion != nil {
+				t.Fatalf("ReleaseVersion(%q) error = %v", tt.tagName, errVersion)
+			}
+			if version != tt.want {
+				t.Fatalf("ReleaseVersion(%q) = %q, want %q", tt.tagName, version, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseChecksumsAndVerifyChecksum(t *testing.T) {
 	t.Parallel()
 
