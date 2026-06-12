@@ -155,12 +155,17 @@ func (h *Handler) GetPluginConfig(c *gin.Context) {
 	if !okID {
 		return
 	}
-	if h == nil || h.cfg == nil {
+	if h == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
 
 	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return
+	}
 	item, configured := h.cfg.Plugins.Configs[id]
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	host := h.pluginHost
