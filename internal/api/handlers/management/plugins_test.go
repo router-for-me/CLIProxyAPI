@@ -102,6 +102,117 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	}
 }
 
+func TestGetPluginConfigReturnsPreservedRawConfig(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample": pluginConfigFromYAML(t, `
+enabled: false
+priority: 7
+mode: safe
+allowed_models:
+  - gemini-2.5-pro
+  - claude-sonnet-4
+options:
+  retries: 2
+  strict: true
+`),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/sample/config", nil)
+
+	h.GetPluginConfig(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var body struct {
+		Enabled       bool           `json:"enabled"`
+		Priority      int            `json:"priority"`
+		Mode          string         `json:"mode"`
+		AllowedModels []string       `json:"allowed_models"`
+		Options       map[string]any `json:"options"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("decode response: %v; body=%s", errDecode, rec.Body.String())
+	}
+	if body.Enabled || body.Priority != 7 || body.Mode != "safe" {
+		t.Fatalf("base fields = enabled %v priority %d mode %q, want false 7 safe", body.Enabled, body.Priority, body.Mode)
+	}
+	if len(body.AllowedModels) != 2 || body.AllowedModels[0] != "gemini-2.5-pro" || body.AllowedModels[1] != "claude-sonnet-4" {
+		t.Fatalf("allowed_models = %#v", body.AllowedModels)
+	}
+	if body.Options["retries"] != float64(2) || body.Options["strict"] != true {
+		t.Fatalf("options = %#v", body.Options)
+	}
+}
+
+func TestGetPluginConfigReturnsEmptyObjectForKnownUnconfiguredPlugin(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	pluginsDir := writeManagementPluginFile(t, "scanned")
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir: pluginsDir,
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "scanned"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/scanned/config", nil)
+
+	h.GetPluginConfig(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body map[string]any
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("decode response: %v; body=%s", errDecode, rec.Body.String())
+	}
+	if len(body) != 0 {
+		t.Fatalf("body = %#v, want empty object", body)
+	}
+}
+
+func TestGetPluginConfigReturnsNotFoundForUnknownPlugin(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg:            &config.Config{},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "missing"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/missing/config", nil)
+
+	h.GetPluginConfig(c)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
 func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
