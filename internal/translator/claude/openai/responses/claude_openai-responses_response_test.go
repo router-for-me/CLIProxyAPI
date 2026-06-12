@@ -101,7 +101,7 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
 		[]byte(`data: {"type":"content_block_start","index":4,"content_block":{"type":"text","text":""}}`),
-		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"**对比竞品**\n- "}}`),
+		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"**Compare competitors**\n- "}}`),
 		[]byte(`data: {"type":"content_block_stop","index":4}`),
 		[]byte(`data: {"type":"content_block_start","index":5,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
 		[]byte(`data: {"type":"content_block_delta","index":5,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
@@ -154,7 +154,7 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 		t.Fatalf("response.function_call_arguments.delta count = %d, want 0", counts["response.function_call_arguments.delta"])
 	}
 
-	wantText := "**对比竞品**\n- Qwen 3.7 Max leads."
+	wantText := "**Compare competitors**\n- Qwen 3.7 Max leads."
 	if got := outputTextDone.Get("text").String(); got != wantText {
 		t.Fatalf("output_text.done text = %q, want %q", got, wantText)
 	}
