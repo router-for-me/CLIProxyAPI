@@ -92,6 +92,36 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+func TestManagementResponseExposesPluginSupportHeaderForCORS(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:5173")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-CPA-SUPPORT-PLUGIN"); got != pluginhost.SupportPluginHeaderValue() {
+		t.Fatalf("X-CPA-SUPPORT-PLUGIN = %q, want %q", got, pluginhost.SupportPluginHeaderValue())
+	}
+
+	exposedHeaders := make(map[string]struct{})
+	for _, headerName := range strings.Split(rr.Header().Get("Access-Control-Expose-Headers"), ",") {
+		headerName = strings.ToLower(strings.TrimSpace(headerName))
+		if headerName != "" {
+			exposedHeaders[headerName] = struct{}{}
+		}
+	}
+	for _, headerName := range corsExposedResponseHeaders {
+		if _, ok := exposedHeaders[strings.ToLower(headerName)]; !ok {
+			t.Fatalf("Access-Control-Expose-Headers missing %s: %q", headerName, rr.Header().Get("Access-Control-Expose-Headers"))
+		}
+	}
+}
+
 func TestNewServerWithPluginHostInjectsHandlerInterceptors(t *testing.T) {
 	host := pluginhost.New()
 	server := newTestServerWithOptions(t, WithPluginHost(host))
