@@ -301,6 +301,18 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Protect truncated API keys from being saved
+	for i := range arr {
+		if isTruncatedKey(arr[i].APIKey) && i < len(h.cfg.ClaudeKey) {
+			if h.cfg.ClaudeKey[i].APIKey != "" && !isTruncatedKey(h.cfg.ClaudeKey[i].APIKey) {
+				log.WithFields(log.Fields{
+					"handler": "PutClaudeKeys",
+					"index":   i,
+				}).Warn("detected truncated API key, preserving original from in-memory config")
+				arr[i].APIKey = h.cfg.ClaudeKey[i].APIKey
+			}
+		}
+	}
 	h.cfg.ClaudeKey = arr
 	h.cfg.SanitizeClaudeKeys()
 	h.persistLocked(c)
