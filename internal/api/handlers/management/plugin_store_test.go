@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -143,6 +144,98 @@ func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
 		entry.Tags[0] != html.EscapeString("<provider>") ||
 		entry.Tags[1] != html.EscapeString("safe & sound") {
 		t.Fatalf("tags = %#v, want escaped strings", entry.Tags)
+	}
+}
+
+func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	httpClient := &countingPluginStoreHTTPClient{responses: fakePluginStoreHTTPClient{
+		"https://registry.example/registry.json": registryJSON(t),
+		"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+			"tag_name": "v0.2.0",
+			"assets": []
+		}`),
+	}}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     t.TempDir(),
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient:  httpClient,
+	}
+
+	listOnce := func() pluginStoreListResponse {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugin-store", nil)
+		h.ListPluginStore(c)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var body pluginStoreListResponse
+		if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+			t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+		}
+		return body
+	}
+
+	for call := 0; call < 2; call++ {
+		body := listOnce()
+		if len(body.Plugins) != 1 {
+			t.Fatalf("plugins len = %d, want 1", len(body.Plugins))
+		}
+		if body.Plugins[0].Version != "0.2.0" {
+			t.Fatalf("version = %q, want 0.2.0 from latest release tag", body.Plugins[0].Version)
+		}
+	}
+	releaseCalls := httpClient.count("https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest")
+	if releaseCalls != 1 {
+		t.Fatalf("latest release fetched %d times, want 1 (cached)", releaseCalls)
+	}
+}
+
+func TestListPluginStoreFallsBackToRegistryVersion(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     t.TempDir(),
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": registryJSON(t),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugin-store", nil)
+
+	h.ListPluginStore(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body pluginStoreListResponse
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if len(body.Plugins) != 1 {
+		t.Fatalf("plugins len = %d, want 1", len(body.Plugins))
+	}
+	if body.Plugins[0].Version != "0.1.0" {
+		t.Fatalf("version = %q, want registry fallback 0.1.0", body.Plugins[0].Version)
 	}
 }
 
@@ -366,6 +459,28 @@ func (c fakePluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error)
 		Header:     make(http.Header),
 		Request:    req,
 	}, nil
+}
+
+type countingPluginStoreHTTPClient struct {
+	responses fakePluginStoreHTTPClient
+	mu        sync.Mutex
+	counts    map[string]int
+}
+
+func (c *countingPluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	if c.counts == nil {
+		c.counts = make(map[string]int)
+	}
+	c.counts[req.URL.String()]++
+	c.mu.Unlock()
+	return c.responses.Do(req)
+}
+
+func (c *countingPluginStoreHTTPClient) count(url string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts[url]
 }
 
 func registryJSON(t *testing.T) []byte {
