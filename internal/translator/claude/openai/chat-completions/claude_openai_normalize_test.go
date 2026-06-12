@@ -466,6 +466,36 @@ func TestConvertOpenAIRequestToClaude_TypedServerToolPreserved(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_UnversionedBuiltinToolDropped(t *testing.T) {
+	// An unversioned OpenAI built-in tool type (e.g. {"type":"web_search"}) is NOT
+	// a Claude-native server tool. Forwarding it verbatim would make Claude reject
+	// the request with a 400, so it must be dropped (as before this change), while
+	// a sibling function tool is still mapped normally.
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "search"}],
+		"tools": [
+			{"type": "web_search"},
+			{"type": "function", "function": {"name": "read_file", "description": "d", "parameters": {"type": "object"}}}
+		]
+	}`
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	outJSON := gjson.ParseBytes(out)
+	tools := outJSON.Get("tools").Array()
+
+	if len(tools) != 1 {
+		t.Fatalf("Expected only the function tool to survive (unversioned built-in dropped), got %d: %s", len(tools), outJSON.Get("tools").Raw)
+	}
+	if got := tools[0].Get("name").String(); got != "read_file" {
+		t.Fatalf("Expected surviving tool read_file, got %q (%s)", got, tools[0].Raw)
+	}
+	// The unversioned built-in must not be present.
+	if outJSON.Get(`tools.#(type=="web_search")`).Exists() {
+		t.Fatalf("Unversioned web_search built-in should have been dropped: %s", outJSON.Get("tools").Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_StandardOpenAIUnchanged(t *testing.T) {
 	// A normal OpenAI payload must pass through normalization untouched.
 	inputJSON := `{

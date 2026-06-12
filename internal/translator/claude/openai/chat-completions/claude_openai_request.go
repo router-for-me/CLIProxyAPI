@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -343,10 +344,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
 				hasAnthropicTools = true
-			} else if t := tool.Get("type").String(); t != "" {
+			} else if t := tool.Get("type").String(); isClaudeNativeServerToolType(t) {
 				// Typed Anthropic server tools (e.g. {"type":"web_search_20250305",...})
 				// are already in Claude's native shape. Pass them through unchanged
-				// instead of dropping them, so they survive the full conversion.
+				// so they survive the full conversion. Unversioned OpenAI built-ins
+				// (e.g. {"type":"web_search"}) are NOT Claude-native and would cause
+				// an upstream 400, so they are left to be dropped as before.
 				out, _ = sjson.SetRawBytes(out, "tools.-1", []byte(tool.Raw))
 				hasAnthropicTools = true
 			}
@@ -622,6 +625,18 @@ func messageHasAnthropicBlocks(content gjson.Result) bool {
 		return true
 	})
 	return found
+}
+
+// claudeNativeServerToolTypeRe matches Anthropic's versioned server-tool type
+// names, e.g. web_search_20250305, code_execution_20250522, computer_20250124.
+var claudeNativeServerToolTypeRe = regexp.MustCompile(`_\d{8}$`)
+
+// isClaudeNativeServerToolType reports whether a tool "type" is an Anthropic
+// native server tool (versioned, e.g. web_search_20250305). Unversioned OpenAI
+// built-in types (e.g. "web_search") are not Claude-native and must not be
+// forwarded verbatim, or Claude rejects the request with a 400.
+func isClaudeNativeServerToolType(t string) bool {
+	return t != "" && t != "function" && claudeNativeServerToolTypeRe.MatchString(t)
 }
 
 // toolResultContentIsAnthropicNative reports whether a tool_result content array
