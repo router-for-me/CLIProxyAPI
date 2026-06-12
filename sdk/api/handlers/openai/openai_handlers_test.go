@@ -22,3 +22,19 @@ func TestFilterOpenAIModelsResponseIncludesContextLength(t *testing.T) {
 		t.Fatal("expected display_name to remain filtered")
 	}
 }
+
+func TestFilterOpenAIModelsResponseOmitsNonPositiveContextLength(t *testing.T) {
+	models := filterOpenAIModelsResponse([]map[string]any{{
+		"id":             "gpt-5.4",
+		"object":         "model",
+		"owned_by":       "heybox",
+		"context_length": 0,
+	}})
+
+	if len(models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(models))
+	}
+	if _, ok := models[0]["context_length"]; ok {
+		t.Fatal("expected context_length to be omitted when it is not positive")
+	}
+}

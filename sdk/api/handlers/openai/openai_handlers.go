@@ -87,7 +87,7 @@ func filterOpenAIModelsResponse(models []map[string]any) []map[string]any {
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
 		}
-		if contextLength, exists := model["context_length"]; exists {
+		if contextLength := intModelValue(model, "context_length"); contextLength > 0 {
 			filteredModel["context_length"] = contextLength
 		}
 
