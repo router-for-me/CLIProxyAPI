@@ -33,7 +33,11 @@ const (
 	xaiImageHandlerType         = "openai-image"
 	xaiVideoHandlerType         = "openai-video"
 	xaiCustomToolType           = "custom"
+	xaiCustomToolCallType       = "custom_tool_call"
+	xaiCustomToolCallOutputType = "custom_tool_call_output"
 	xaiFunctionToolType         = "function"
+	xaiFunctionCallType         = "function_call"
+	xaiFunctionCallOutputType   = "function_call_output"
 	xaiImageGenerationToolType  = "image_generation"
 	xaiNamespaceToolType        = "namespace"
 	xaiToolSearchType           = "tool_search"
@@ -509,6 +513,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
 	body = normalizeXAIToolChoiceForTools(body)
+	body = normalizeXAIInputCustomToolCalls(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
@@ -777,6 +782,98 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		changed = true
 	}
 	return raw, changed, true
+}
+
+func normalizeXAIInputCustomToolCalls(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	inputArray := input.Array()
+	changed := false
+	items := make([]json.RawMessage, 0, len(inputArray))
+	for _, item := range inputArray {
+		raw := []byte(item.Raw)
+		switch item.Get("type").String() {
+		case xaiCustomToolCallType:
+			updated, errSet := sjson.SetBytes(raw, "type", xaiFunctionCallType)
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+			if item.Get("input").Exists() {
+				arguments := xaiCustomToolCallArguments(item.Get("input"))
+				updated, errSet = sjson.SetBytes(raw, "arguments", arguments)
+				if errSet != nil {
+					return body
+				}
+				raw = updated
+				updated, errDel := sjson.DeleteBytes(raw, "input")
+				if errDel != nil {
+					return body
+				}
+				raw = updated
+			} else if !item.Get("arguments").Exists() {
+				updated, errSet = sjson.SetBytes(raw, "arguments", "{}")
+				if errSet != nil {
+					return body
+				}
+				raw = updated
+			}
+			changed = true
+		case xaiCustomToolCallOutputType:
+			updated, errSet := sjson.SetBytes(raw, "type", xaiFunctionCallOutputType)
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+			changed = true
+		}
+		items = append(items, json.RawMessage(raw))
+	}
+	if !changed {
+		return body
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiCustomToolCallArguments(input gjson.Result) string {
+	if !input.Exists() {
+		return "{}"
+	}
+
+	if input.Type == gjson.String {
+		text := input.String()
+		trimmed := strings.TrimSpace(text)
+		if strings.HasPrefix(trimmed, "{") {
+			var object map[string]any
+			if errUnmarshal := json.Unmarshal([]byte(trimmed), &object); errUnmarshal == nil {
+				return trimmed
+			}
+		}
+		if encoded, errMarshal := json.Marshal(text); errMarshal == nil {
+			return `{"input":` + string(encoded) + `}`
+		}
+		return "{}"
+	}
+
+	if input.IsObject() {
+		return input.Raw
+	}
+	if input.Raw != "" {
+		return `{"input":` + input.Raw + `}`
+	}
+	return "{}"
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {
