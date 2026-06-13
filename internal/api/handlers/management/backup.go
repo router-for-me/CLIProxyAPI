@@ -2,6 +2,7 @@ package management
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -279,4 +280,58 @@ func (h *Handler) getLogDirectory() string {
 		return filepath.Join(filepath.Dir(h.configFilePath), "logs")
 	}
 	return "logs"
+}
+
+// RestoreBackup restores configuration from an uploaded backup file.
+func (h *Handler) RestoreBackup(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	// Parse uploaded file
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no file uploaded", "message": err.Error()})
+		return
+	}
+
+	// Validate file extension
+	if !strings.HasSuffix(strings.ToLower(file.Filename), ".zip") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file format", "message": "only .zip files are supported"})
+		return
+	}
+
+	// Open uploaded file
+	uploadedFile, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open uploaded file", "message": err.Error()})
+		return
+	}
+	defer uploadedFile.Close()
+
+	// Read file content
+	data, err := io.ReadAll(uploadedFile)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read uploaded file", "message": err.Error()})
+		return
+	}
+
+	// Create backup manager
+	manager, err := h.createBackupManager()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create backup manager", "message": err.Error()})
+		return
+	}
+
+	// Restore backup
+	if err := manager.Restore(data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to restore backup", "message": err.Error()})
+		return
+	}
+
+	log.Infof("backup restored from file: %s", file.Filename)
+	c.JSON(http.StatusOK, gin.H{
+		"message": "backup restored successfully, please restart the server to apply changes",
+	})
 }

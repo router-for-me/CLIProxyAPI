@@ -758,6 +758,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/backup/download", s.mgmt.DownloadBackup)
 		mgmt.DELETE("/backup", s.mgmt.DeleteBackup)
 		mgmt.POST("/backup/test-connection", s.mgmt.TestBackupConnection)
+		mgmt.POST("/backup/restore", s.mgmt.RestoreBackup)
 
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)

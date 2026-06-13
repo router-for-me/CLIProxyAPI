@@ -235,3 +235,72 @@ func (m *Manager) addRecentLogsToZip(zipWriter *zip.Writer, logsDir, zipBasePath
 
 	return nil
 }
+
+// Restore restores configuration from a backup zip file.
+func (m *Manager) Restore(data []byte) error {
+	// Create a reader from the backup data
+	reader := bytes.NewReader(data)
+	zipReader, err := zip.NewReader(reader, int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("failed to open zip file: %w", err)
+	}
+
+	// Extract files from zip
+	for _, file := range zipReader.File {
+		if err := m.extractFile(file); err != nil {
+			log.WithError(err).Warnf("failed to extract file: %s", file.Name)
+			// Continue with other files even if one fails
+		}
+	}
+
+	log.Info("backup restored successfully")
+	return nil
+}
+
+// extractFile extracts a single file from the zip archive.
+func (m *Manager) extractFile(file *zip.File) error {
+	rc, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open file in zip: %w", err)
+	}
+	defer rc.Close()
+
+	// Determine target path
+	var targetPath string
+	if strings.HasPrefix(file.Name, "auths/") {
+		// Extract to auth directory
+		relativePath := strings.TrimPrefix(file.Name, "auths/")
+		targetPath = filepath.Join(m.authDir, relativePath)
+	} else if file.Name == "config.yaml" {
+		// Extract to config path
+		targetPath = m.configPath
+	} else if strings.HasPrefix(file.Name, "logs/") {
+		// Skip logs during restore (we don't want to overwrite current logs)
+		log.Debugf("skipping log file during restore: %s", file.Name)
+		return nil
+	} else {
+		// Unknown file, skip
+		log.Warnf("skipping unknown file during restore: %s", file.Name)
+		return nil
+	}
+
+	// Create directory if needed
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Create target file
+	outFile, err := os.Create(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to create target file: %w", err)
+	}
+	defer outFile.Close()
+
+	// Copy content
+	if _, err := io.Copy(outFile, rc); err != nil {
+		return fmt.Errorf("failed to write file content: %w", err)
+	}
+
+	log.Infof("restored file: %s", targetPath)
+	return nil
+}
