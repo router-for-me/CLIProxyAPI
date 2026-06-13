@@ -11,6 +11,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -44,7 +46,12 @@ var (
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	// Some OpenAI-compatible clients (notably Cursor in agent/tool mode) send
+	// Anthropic-native content blocks (tool_use / tool_result) and bare tool
+	// definitions to the OpenAI Chat Completions endpoint. Those payloads are not
+	// valid OpenAI format, so normalize them to standard OpenAI shape before the
+	// regular translation below runs.
+	rawJSON := normalizeAnthropicRequestBlocks(inputRawJSON)
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -189,6 +196,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
 
+				// Signed thinking / redacted_thinking blocks must lead the Claude
+				// assistant content, unchanged, so extended-thinking tool histories
+				// stay valid. They are carried verbatim from normalization.
+				if role == "assistant" {
+					if thinking := message.Get("_anthropic_thinking"); thinking.Exists() && thinking.IsArray() {
+						thinking.ForEach(func(_, block gjson.Result) bool {
+							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(block.Raw))
+							return true
+						})
+					}
+				}
+
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					part := []byte(`{"type":"text","text":""}`)
@@ -202,6 +221,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						}
 						return true
 					})
+				}
+
+				// Server-tool history blocks (server_tool_use, *_tool_result) are
+				// already Claude-native; re-emit them verbatim so prior server-tool
+				// context survives into the next turn.
+				if role == "assistant" {
+					if serverTools := message.Get("_anthropic_server_tools"); serverTools.Exists() && serverTools.IsArray() {
+						serverTools.ForEach(func(_, block gjson.Result) bool {
+							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(block.Raw))
+							return true
+						})
+					}
 				}
 
 				// Handle tool calls (for assistant messages)
@@ -249,14 +280,46 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				toolCallID := message.Get("tool_call_id").String()
 				toolContentResult := message.Get("content")
 
-				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
-				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
-				toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
-				if toolResultContentRaw {
-					msg, _ = sjson.SetRawBytes(msg, "content.0.content", []byte(toolResultContent))
+				toolResultBlock := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+				toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "tool_use_id", toolCallID)
+				if message.Get("_anthropic_native_content").Bool() && toolContentResult.IsArray() {
+					// Content is already a Claude-native block array; keep it raw so
+					// blocks like image/source and tool_reference are not dropped or
+					// stringified by the OpenAI content-part converter.
+					toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolContentResult.Raw))
 				} else {
-					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
+					toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
+					if toolResultContentRaw {
+						toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolResultContent))
+					} else {
+						toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
+					}
 				}
+				// Reconstruct the Anthropic is_error flag carried from a Cursor
+				// tool_result so a failed tool execution stays marked as failed.
+				if isErr := message.Get("is_error"); isErr.Exists() && isErr.Bool() {
+					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "is_error", true)
+				}
+
+				// Claude expects all tool_result blocks that answer the preceding
+				// assistant tool_use turn to be grouped in a single user message.
+				// Parallel tool calls arrive as consecutive role:"tool" messages, so
+				// append to the previous user/tool_result turn when present instead of
+				// emitting a separate user message per result.
+				if messageIndex > 0 {
+					lastIdx := messageIndex - 1
+					lastMsg := gjson.GetBytes(out, "messages."+strconv.Itoa(lastIdx))
+					lastContent := lastMsg.Get("content")
+					if lastMsg.Get("role").String() == "user" &&
+						lastContent.IsArray() && len(lastContent.Array()) > 0 &&
+						lastContent.Array()[len(lastContent.Array())-1].Get("type").String() == "tool_result" {
+						out, _ = sjson.SetRawBytes(out, "messages."+strconv.Itoa(lastIdx)+".content.-1", toolResultBlock)
+						return true
+					}
+				}
+
+				msg := []byte(`{"role":"user","content":[]}`)
+				msg, _ = sjson.SetRawBytes(msg, "content.-1", toolResultBlock)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
 			}
@@ -293,6 +356,14 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
 				hasAnthropicTools = true
+			} else if t := tool.Get("type").String(); isClaudeNativeServerToolType(t) {
+				// Typed Anthropic server tools (e.g. {"type":"web_search_20250305",...})
+				// are already in Claude's native shape. Pass them through unchanged
+				// so they survive the full conversion. Unversioned OpenAI built-ins
+				// (e.g. {"type":"web_search"}) are NOT Claude-native and would cause
+				// an upstream 400, so they are left to be dropped as before.
+				out, _ = sjson.SetRawBytes(out, "tools.-1", []byte(tool.Raw))
+				hasAnthropicTools = true
 			}
 			return true
 		})
@@ -317,17 +388,352 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			}
 		case gjson.JSON:
 			// Specific tool choice mapping
-			if toolChoice.Get("type").String() == "function" {
+			switch toolChoice.Get("type").String() {
+			case "function":
+				// OpenAI object form: {"type":"function","function":{"name":...}}
 				functionName := toolChoice.Get("function.name").String()
 				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			case "tool":
+				// Anthropic-native forced choice {"type":"tool","name":...} (sent
+				// by Cursor alongside bare tools) is already Claude's shape; keep
+				// it so the forced tool selection is not silently dropped.
+				if name := toolChoice.Get("name").String(); name != "" {
+					toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", name)
+					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				}
+			case "auto":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+			case "any":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+			case "none":
+				// Don't set tool_choice; Claude will not use tools.
 			}
 		default:
 		}
 	}
 
 	return out
+}
+
+// normalizeAnthropicRequestBlocks rewrites Anthropic-native message and tool
+// shapes into standard OpenAI Chat Completions shapes. It is a no-op for
+// already-valid OpenAI payloads.
+//
+// Conversions:
+//  1. user message content with tool_result blocks -> separate role:"tool"
+//     messages ({tool_call_id, content}). Any sibling text blocks are kept as a
+//     trailing role:"user" message.
+//  2. assistant message content with tool_use blocks -> assistant message with
+//     tool_calls[].function (and text blocks merged into content).
+//  3. bare tool definitions ({name, description, input_schema}) -> wrapped
+//     {type:"function", function:{name, description, parameters}}.
+func normalizeAnthropicRequestBlocks(rawJSON []byte) []byte {
+	root := gjson.ParseBytes(rawJSON)
+
+	if !anthropicBlocksPresent(root) {
+		return rawJSON
+	}
+
+	out := rawJSON
+
+	// Rebuild messages array if any message carries Anthropic content blocks.
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		newMessages := "[]"
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := message.Get("role").String()
+			content := message.Get("content")
+
+			if !content.IsArray() || !messageHasAnthropicBlocks(content) {
+				newMessages, _ = sjson.SetRaw(newMessages, "-1", message.Raw)
+				return true
+			}
+
+			switch role {
+			case "user":
+				textParts := make([]string, 0)
+				toolResults := make([]gjson.Result, 0)
+				passthrough := make([]gjson.Result, 0)
+				content.ForEach(func(_, block gjson.Result) bool {
+					switch block.Get("type").String() {
+					case "tool_result":
+						toolResults = append(toolResults, block)
+					case "text":
+						if t := block.Get("text").String(); t != "" {
+							textParts = append(textParts, t)
+						}
+					default:
+						passthrough = append(passthrough, block)
+					}
+					return true
+				})
+
+				// tool_result blocks become standalone role:"tool" messages so
+				// the downstream translator pairs them with the prior tool_calls.
+				for _, tr := range toolResults {
+					toolMsg := `{"role":"tool","tool_call_id":"","content":""}`
+					toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", tr.Get("tool_use_id").String())
+					trContent := tr.Get("content")
+					if trContent.IsArray() {
+						toolMsg, _ = sjson.SetRaw(toolMsg, "content", trContent.Raw)
+						// When the array holds Claude-native blocks (e.g. image with
+						// source, tool_reference), flag it so the downstream mapper
+						// keeps it verbatim instead of routing it through the OpenAI
+						// content-part converter, which would drop unknown blocks.
+						if toolResultContentIsAnthropicNative(trContent) {
+							toolMsg, _ = sjson.Set(toolMsg, "_anthropic_native_content", true)
+						}
+					} else {
+						toolMsg, _ = sjson.Set(toolMsg, "content", flattenAnthropicToolResultText(trContent))
+					}
+					// Carry the Anthropic is_error flag so the downstream Claude
+					// mapper can reconstruct a failed tool_result instead of
+					// silently turning a failure into an apparent success.
+					if isErr := tr.Get("is_error"); isErr.Exists() && isErr.Bool() {
+						toolMsg, _ = sjson.Set(toolMsg, "is_error", true)
+					}
+					newMessages, _ = sjson.SetRaw(newMessages, "-1", toolMsg)
+				}
+
+				// Remaining text / passthrough parts stay as a user message.
+				if len(textParts) > 0 || len(passthrough) > 0 {
+					userMsg := `{"role":"user","content":[]}`
+					for _, t := range textParts {
+						textPart := `{"type":"text","text":""}`
+						textPart, _ = sjson.Set(textPart, "text", t)
+						userMsg, _ = sjson.SetRaw(userMsg, "content.-1", textPart)
+					}
+					for _, p := range passthrough {
+						userMsg, _ = sjson.SetRaw(userMsg, "content.-1", p.Raw)
+					}
+					newMessages, _ = sjson.SetRaw(newMessages, "-1", userMsg)
+				}
+
+			case "assistant":
+				textParts := make([]string, 0)
+				toolUses := make([]gjson.Result, 0)
+				thinkingBlocks := make([]gjson.Result, 0)
+				serverToolBlocks := make([]gjson.Result, 0)
+				content.ForEach(func(_, block gjson.Result) bool {
+					blockType := block.Get("type").String()
+					switch blockType {
+					case "tool_use":
+						toolUses = append(toolUses, block)
+					case "text":
+						if t := block.Get("text").String(); t != "" {
+							textParts = append(textParts, t)
+						}
+					case "thinking", "redacted_thinking":
+						thinkingBlocks = append(thinkingBlocks, block)
+					case "server_tool_use":
+						serverToolBlocks = append(serverToolBlocks, block)
+					default:
+						// Server-tool result history (e.g. web_search_tool_result)
+						// is already Claude-native and would be dropped by the
+						// OpenAI content converter, so carry it through verbatim.
+						if strings.HasSuffix(blockType, "_tool_result") {
+							serverToolBlocks = append(serverToolBlocks, block)
+						}
+					}
+					return true
+				})
+
+				asstMsg := `{"role":"assistant","content":""}`
+				asstMsg, _ = sjson.Set(asstMsg, "content", strings.Join(textParts, ""))
+				// Carry signed thinking / redacted_thinking blocks through so the
+				// downstream Claude mapper can return them unchanged. Anthropic
+				// requires prior thinking blocks to be preserved on subsequent
+				// tool-result requests from extended-thinking models.
+				if len(thinkingBlocks) > 0 {
+					asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_thinking", "[]")
+					for _, tb := range thinkingBlocks {
+						asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_thinking.-1", tb.Raw)
+					}
+				}
+				// Carry server-tool history blocks (server_tool_use and
+				// *_tool_result) through verbatim so a follow-up turn that includes
+				// prior server-tool context is not stripped to text only.
+				if len(serverToolBlocks) > 0 {
+					asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_server_tools", "[]")
+					for _, sb := range serverToolBlocks {
+						asstMsg, _ = sjson.SetRaw(asstMsg, "_anthropic_server_tools.-1", sb.Raw)
+					}
+				}
+				if len(toolUses) > 0 {
+					asstMsg, _ = sjson.SetRaw(asstMsg, "tool_calls", "[]")
+					for _, tu := range toolUses {
+						toolCall := `{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`
+						toolCall, _ = sjson.Set(toolCall, "id", tu.Get("id").String())
+						toolCall, _ = sjson.Set(toolCall, "function.name", tu.Get("name").String())
+						if input := tu.Get("input"); input.Exists() && input.IsObject() {
+							toolCall, _ = sjson.Set(toolCall, "function.arguments", input.Raw)
+						}
+						asstMsg, _ = sjson.SetRaw(asstMsg, "tool_calls.-1", toolCall)
+					}
+				}
+				newMessages, _ = sjson.SetRaw(newMessages, "-1", asstMsg)
+
+			default:
+				newMessages, _ = sjson.SetRaw(newMessages, "-1", message.Raw)
+			}
+			return true
+		})
+		out, _ = sjson.SetRawBytes(out, "messages", []byte(newMessages))
+	}
+
+	// Wrap bare Anthropic tool definitions into OpenAI function tools.
+	// Only tools with NO "type" field are treated as bare custom tools. Typed
+	// Anthropic server tools (e.g. {"type":"web_search_20250305","name":...})
+	// are left untouched so the downstream mapper can handle them correctly.
+	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
+		needsWrap := false
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if !tool.Get("type").Exists() && tool.Get("name").Exists() {
+				needsWrap = true
+				return false
+			}
+			return true
+		})
+
+		if needsWrap {
+			newTools := "[]"
+			tools.ForEach(func(_, tool gjson.Result) bool {
+				// Pass through anything that already has a type (OpenAI function
+				// tools and typed Anthropic server tools) unchanged.
+				if tool.Get("type").Exists() {
+					newTools, _ = sjson.SetRaw(newTools, "-1", tool.Raw)
+					return true
+				}
+				wrapped := `{"type":"function","function":{"name":"","description":""}}`
+				wrapped, _ = sjson.Set(wrapped, "function.name", tool.Get("name").String())
+				wrapped, _ = sjson.Set(wrapped, "function.description", tool.Get("description").String())
+				if schema := tool.Get("input_schema"); schema.Exists() {
+					wrapped, _ = sjson.SetRaw(wrapped, "function.parameters", schema.Raw)
+				} else if schema := tool.Get("parameters"); schema.Exists() {
+					wrapped, _ = sjson.SetRaw(wrapped, "function.parameters", schema.Raw)
+				}
+				newTools, _ = sjson.SetRaw(newTools, "-1", wrapped)
+				return true
+			})
+			out, _ = sjson.SetRawBytes(out, "tools", []byte(newTools))
+		}
+	}
+
+	return out
+}
+
+// anthropicBlocksPresent reports whether the request carries any Anthropic-native
+// message content blocks or bare tool definitions.
+func anthropicBlocksPresent(root gjson.Result) bool {
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		found := false
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if messageHasAnthropicBlocks(message.Get("content")) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+
+	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
+		found := false
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if !tool.Get("type").Exists() && tool.Get("name").Exists() {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+
+	return false
+}
+
+// messageHasAnthropicBlocks reports whether a message content array contains
+// Anthropic-native blocks that require normalization: tool_use / tool_result,
+// or server-tool history blocks (server_tool_use, *_tool_result such as
+// web_search_tool_result) that the OpenAI content converter would otherwise
+// drop.
+func messageHasAnthropicBlocks(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	found := false
+	content.ForEach(func(_, block gjson.Result) bool {
+		if isAnthropicNativeBlockType(block.Get("type").String()) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// isAnthropicNativeBlockType reports whether a content block type is an
+// Anthropic-native shape that the OpenAI content-part converter cannot map and
+// would silently drop (tool_use / tool_result, server_tool_use, and server-tool
+// result blocks like web_search_tool_result).
+func isAnthropicNativeBlockType(t string) bool {
+	switch t {
+	case "tool_use", "tool_result", "server_tool_use":
+		return true
+	}
+	return strings.HasSuffix(t, "_tool_result")
+}
+
+// claudeNativeServerToolTypeRe matches Anthropic's versioned server-tool type
+// names, e.g. web_search_20250305, code_execution_20250522, computer_20250124.
+var claudeNativeServerToolTypeRe = regexp.MustCompile(`_\d{8}$`)
+
+// isClaudeNativeServerToolType reports whether a tool "type" is an Anthropic
+// native server tool (versioned, e.g. web_search_20250305). Unversioned OpenAI
+// built-in types (e.g. "web_search") are not Claude-native and must not be
+// forwarded verbatim, or Claude rejects the request with a 400.
+func isClaudeNativeServerToolType(t string) bool {
+	return t != "" && t != "function" && claudeNativeServerToolTypeRe.MatchString(t)
+}
+
+// toolResultContentIsAnthropicNative reports whether a tool_result content array
+// holds Claude-native blocks that the OpenAI content-part converter does not
+// understand (anything other than text / image_url / file). Such arrays must be
+// passed through verbatim so blocks like image (with source) or tool_reference
+// are not dropped or stringified.
+func toolResultContentIsAnthropicNative(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	native := false
+	content.ForEach(func(_, block gjson.Result) bool {
+		if block.Type == gjson.String {
+			return true
+		}
+		switch block.Get("type").String() {
+		case "text", "image_url", "file":
+			return true
+		default:
+			native = true
+			return false
+		}
+	})
+	return native
+}
+
+// flattenAnthropicToolResultText reduces a tool_result content value to a plain
+// string for the non-array case.
+func flattenAnthropicToolResultText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	return content.Raw
 }
 
 func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
