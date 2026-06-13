@@ -101,7 +101,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			// System messages don't have reasoning_content mapping
 			wantReasoningContent:    "",
 			wantHasReasoningContent: false,
-			wantContentText:         "Hello",
+			wantContentText:         "System prompt.",
 			wantHasContent:          true,
 		},
 		{
@@ -356,12 +356,63 @@ func validGPTChatReasoningSignature() string {
 	return base64.URLEncoding.EncodeToString(raw)
 }
 
+func TestConvertClaudeRequestToOpenAI_SystemContentDoesNotEmitSystemRole(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"system": "Initial instructions",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "first"}]},
+			{"role": "system", "content": [{"type": "text", "text": "mid instructions"}]},
+			{"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+			{"role": "system", "content": "string instructions"},
+			{"role": "user", "content": [{"type": "text", "text": "second"}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	messages := gjson.ParseBytes(result).Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), gjson.GetBytes(result, "messages").Raw)
+	}
+
+	for i, message := range messages {
+		if got := message.Get("role").String(); got == "system" {
+			t.Fatalf("Expected no system messages, got system role at messages[%d]. Messages: %s", i, gjson.GetBytes(result, "messages").Raw)
+		}
+	}
+
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected first message role %q, got %q", "user", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "Initial instructions" {
+		t.Fatalf("Expected initial system text %q, got %q", "Initial instructions", got)
+	}
+	if got := messages[0].Get("content.1.text").String(); got != "mid instructions" {
+		t.Fatalf("Expected moved mid system text %q, got %q", "mid instructions", got)
+	}
+	if got := messages[0].Get("content.2.text").String(); got != "string instructions" {
+		t.Fatalf("Expected moved string system text %q, got %q", "string instructions", got)
+	}
+	if got := messages[0].Get("content.3.text").String(); got != "first" {
+		t.Fatalf("Expected first user text %q, got %q", "first", got)
+	}
+
+	wantRoles := []string{"user", "assistant", "user"}
+	for i, want := range wantRoles {
+		if got := messages[i].Get("role").String(); got != want {
+			t.Fatalf("Expected messages[%d] role %q, got %q. Messages: %s", i, want, got, gjson.GetBytes(result, "messages").Raw)
+		}
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 	tests := []struct {
-		name        string
-		inputJSON   string
-		wantHasSys  bool
-		wantSysText string
+		name               string
+		inputJSON          string
+		wantFirstRole      string
+		wantFirstText      string
+		wantLastSystemText string
 	}{
 		{
 			name: "No system field",
@@ -369,7 +420,7 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 				"model": "claude-3-opus",
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasSys: false,
+			wantFirstRole: "user",
 		},
 		{
 			name: "Empty string system field",
@@ -378,7 +429,7 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 				"system": "",
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasSys: false,
+			wantFirstRole: "user",
 		},
 		{
 			name: "String system field",
@@ -387,8 +438,9 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 				"system": "Be helpful",
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasSys:  true,
-			wantSysText: "Be helpful",
+			wantFirstRole:      "user",
+			wantFirstText:      "Be helpful",
+			wantLastSystemText: "Be helpful",
 		},
 		{
 			name: "Array system field with text",
@@ -397,8 +449,9 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 				"system": [{"type": "text", "text": "Array system"}],
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasSys:  true,
-			wantSysText: "Array system",
+			wantFirstRole:      "user",
+			wantFirstText:      "Array system",
+			wantLastSystemText: "Array system",
 		},
 		{
 			name: "Array system field with multiple text blocks",
@@ -410,8 +463,9 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 				],
 				"messages": [{"role": "user", "content": "hello"}]
 			}`,
-			wantHasSys:  true,
-			wantSysText: "Block 2", // We will update the test logic to check all blocks or specifically the second one
+			wantFirstRole:      "user",
+			wantFirstText:      "Block 1",
+			wantLastSystemText: "Block 2",
 		},
 	}
 
@@ -420,34 +474,34 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
 			resultJSON := gjson.ParseBytes(result)
 			messages := resultJSON.Get("messages").Array()
-
-			hasSys := false
-			var sysMsg gjson.Result
-			if len(messages) > 0 && messages[0].Get("role").String() == "system" {
-				hasSys = true
-				sysMsg = messages[0]
+			if len(messages) == 0 {
+				t.Fatalf("expected at least one message. Output: %s", resultJSON.Get("messages").Raw)
 			}
 
-			if hasSys != tt.wantHasSys {
-				t.Errorf("got hasSystem = %v, want %v", hasSys, tt.wantHasSys)
-			}
-
-			if tt.wantHasSys {
-				// Check content - it could be string or array in OpenAI
-				content := sysMsg.Get("content")
-				var gotText string
-				if content.IsArray() {
-					arr := content.Array()
-					if len(arr) > 0 {
-						// Get the last element's text for validation
-						gotText = arr[len(arr)-1].Get("text").String()
-					}
-				} else {
-					gotText = content.String()
+			for i, message := range messages {
+				if got := message.Get("role").String(); got == "system" {
+					t.Fatalf("messages[%d] role = system, want no system roles. Output: %s", i, resultJSON.Get("messages").Raw)
 				}
+			}
 
-				if tt.wantSysText != "" && gotText != tt.wantSysText {
-					t.Errorf("got system text = %q, want %q", gotText, tt.wantSysText)
+			if got := messages[0].Get("role").String(); got != tt.wantFirstRole {
+				t.Fatalf("messages[0].role = %q, want %q. Output: %s", got, tt.wantFirstRole, resultJSON.Get("messages").Raw)
+			}
+
+			if tt.wantFirstText != "" {
+				if got := messages[0].Get("content.0.text").String(); got != tt.wantFirstText {
+					t.Fatalf("messages[0].content[0].text = %q, want %q. Output: %s", got, tt.wantFirstText, resultJSON.Get("messages").Raw)
+				}
+			}
+			if tt.wantLastSystemText != "" {
+				content := messages[0].Get("content").Array()
+				if len(content) == 0 {
+					t.Fatalf("messages[0].content is empty. Output: %s", resultJSON.Get("messages").Raw)
+				}
+				if got := content[len(content)-1].Get("text").String(); got != tt.wantLastSystemText && len(content) > 1 {
+					if got2 := content[len(content)-2].Get("text").String(); got2 != tt.wantLastSystemText {
+						t.Fatalf("system text not preserved as expected. Output: %s", resultJSON.Get("messages").Raw)
+					}
 				}
 			}
 		})
@@ -771,15 +825,23 @@ func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T) 
 
 	output := ConvertClaudeRequestToOpenAI("gpt-5", inputJSON, false)
 	messages := gjson.GetBytes(output, "messages").Array()
-	if len(messages) == 0 || messages[0].Get("role").String() != "system" {
-		t.Fatalf("Expected first message to be system, got: %s", gjson.GetBytes(output, "messages").Raw)
+	if len(messages) == 0 || messages[0].Get("role").String() != "user" {
+		t.Fatalf("Expected first message to be user, got: %s", gjson.GetBytes(output, "messages").Raw)
+	}
+	for i, message := range messages {
+		if got := message.Get("role").String(); got == "system" {
+			t.Fatalf("messages[%d] role = system, want no system roles: %s", i, gjson.GetBytes(output, "messages").Raw)
+		}
 	}
 
 	content := messages[0].Get("content").Array()
-	if len(content) != 1 {
-		t.Fatalf("Expected 1 system content item after attribution strip, got %d: %s", len(content), messages[0].Get("content").Raw)
+	if len(content) != 2 {
+		t.Fatalf("Expected 2 user content items after attribution strip, got %d: %s", len(content), messages[0].Get("content").Raw)
 	}
 	if got := content[0].Get("text").String(); got != "User system prompt" {
-		t.Fatalf("Unexpected system content: %q", got)
+		t.Fatalf("Unexpected preserved system content: %q", got)
+	}
+	if got := content[1].Get("text").String(); got != "hi" {
+		t.Fatalf("Unexpected user content: %q", got)
 	}
 }

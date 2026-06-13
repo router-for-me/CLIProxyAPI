@@ -685,11 +685,28 @@ func codexReplayComparableCallIDs(callID string) []string {
 		return nil
 	}
 
-	claudeVisibleCallID := shortenCodexReplayCallIDIfNeeded(util.SanitizeClaudeToolID(callID))
-	if claudeVisibleCallID == "" || claudeVisibleCallID == callID {
-		return []string{callID}
+	variants := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	appendVariant := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		variants = append(variants, id)
 	}
-	return []string{callID, claudeVisibleCallID}
+
+	appendVariant(callID)
+	appendVariant(shortenCodexReplayCallIDIfNeeded(callID))
+
+	sanitized := util.SanitizeClaudeToolID(callID)
+	appendVariant(sanitized)
+	appendVariant(shortenCodexReplayCallIDIfNeeded(sanitized))
+
+	return variants
 }
 
 func shortenCodexReplayCallIDIfNeeded(id string) string {

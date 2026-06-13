@@ -15,6 +15,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -847,5 +848,97 @@ func TestCodexExecutorReasoningReplayCacheMatchesShortenedClaudeToolResultCallID
 	}
 	if got := gjson.GetBytes(secondBody, "input.3.call_id").String(); got != shortCallID {
 		t.Fatalf("input.3.call_id = %q, want shortened call_id %q; body=%s", got, shortCallID, string(secondBody))
+	}
+}
+
+func TestCodexExecutorReasoningReplayCacheMatchesSanitizedClaudeToolResultCallID(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	longCallID := "call_" + strings.Repeat("a", 62)
+	shortCallID := util.SanitizeClaudeToolID(longCallID)
+	if len(longCallID) <= 64 || len(shortCallID) > 64 || shortCallID == longCallID {
+		t.Fatalf("invalid test setup: long=%q short=%q", longCallID, shortCallID)
+	}
+
+	reasoningEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(14)
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		bodies = append(bodies, body)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_long","type":"reasoning","summary":[],"encrypted_content":"` + reasoningEncryptedContent + `"},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"fc_long","type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{\"q\":\"weather\"}","status":"completed"},"output_index":1}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"gpt-5.4","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-replay-claude-sanitized-tool",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"claude-session-sanitized-tool\"}"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"call lookup"}]}],
+			"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]
+		}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first Execute error: %v", err)
+	}
+
+	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"claude-session-sanitized-tool\"}"},
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"call lookup"}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + shortCallID + `","content":"sunny"}]}
+			],
+			"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]
+		}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("second Execute error: %v", err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(bodies))
+	}
+	secondBody := bodies[1]
+	if got := gjson.GetBytes(secondBody, "input.0.type").String(); got != "message" {
+		t.Fatalf("input.0.type = %q, want initial user message; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.1.type").String(); got != "reasoning" {
+		t.Fatalf("input.1.type = %q, want cached reasoning; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("input.2.type = %q, want cached function_call; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.2.call_id").String(); got != shortCallID {
+		t.Fatalf("input.2.call_id = %q, want sanitized call_id %q; body=%s", got, shortCallID, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.3.type").String(); got != "function_call_output" {
+		t.Fatalf("input.3.type = %q, want function_call_output after cached call; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.3.call_id").String(); got != shortCallID {
+		t.Fatalf("input.3.call_id = %q, want sanitized call_id %q; body=%s", got, shortCallID, string(secondBody))
 	}
 }

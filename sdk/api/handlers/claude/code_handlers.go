@@ -21,9 +21,11 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
@@ -58,6 +60,57 @@ func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
 	return modelRegistry.GetAvailableModels("claude")
 }
 
+func sanitizeClaudeMessagesToolIDs(rawJSON []byte) []byte {
+	if len(rawJSON) == 0 {
+		return rawJSON
+	}
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return rawJSON
+	}
+	toolIDMap := make(map[string]string)
+	updated := rawJSON
+	messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(contentIdx, part gjson.Result) bool {
+			typ := part.Get("type").String()
+			switch typ {
+			case "tool_use":
+				id := part.Get("id").String()
+				if id == "" {
+					return true
+				}
+				sanitized := util.SanitizeClaudeToolID(id)
+				toolIDMap[id] = sanitized
+				if sanitized != id {
+					path := fmt.Sprintf("messages.%d.content.%d.id", msgIdx.Int(), contentIdx.Int())
+					updated, _ = sjson.SetBytes(updated, path, sanitized)
+				}
+			case "tool_result":
+				id := part.Get("tool_use_id").String()
+				if id == "" {
+					return true
+				}
+				sanitized, ok := toolIDMap[id]
+				if !ok {
+					sanitized = util.SanitizeClaudeToolID(id)
+					toolIDMap[id] = sanitized
+				}
+				if sanitized != id {
+					path := fmt.Sprintf("messages.%d.content.%d.tool_use_id", msgIdx.Int(), contentIdx.Int())
+					updated, _ = sjson.SetBytes(updated, path, sanitized)
+				}
+			}
+			return true
+		})
+		return true
+	})
+	return updated
+}
+
 // ClaudeMessages handles Claude-compatible streaming chat completions.
 // This function implements a sophisticated client rotation and quota management system
 // to ensure high availability and optimal resource utilization across multiple backend clients.
@@ -77,6 +130,8 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		})
 		return
 	}
+
+	rawJSON = sanitizeClaudeMessagesToolIDs(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
