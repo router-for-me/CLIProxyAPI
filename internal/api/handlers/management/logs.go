@@ -28,16 +28,21 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
+	h.mu.Lock()
 	if h.cfg == nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if !h.cfg.LoggingToFile {
+	loggingToFile := h.cfg.LoggingToFile
+	logDir := h.logDirectory()
+	h.mu.Unlock()
+
+	if !loggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
 		return
 	}
 
-	logDir := h.logDirectory()
 	if strings.TrimSpace(logDir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -90,16 +95,21 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
+	h.mu.Lock()
 	if h.cfg == nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if !h.cfg.LoggingToFile {
+	loggingToFile := h.cfg.LoggingToFile
+	dir := h.logDirectory()
+	h.mu.Unlock()
+
+	if !loggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
 		return
 	}
 
-	dir := h.logDirectory()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -152,16 +162,21 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
+	h.mu.Lock()
 	if h.cfg == nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if h.cfg.RequestLog {
+	requestLogEnabled := h.cfg.RequestLog
+	dir := h.logDirectory()
+	h.mu.Unlock()
+
+	if requestLogEnabled {
 		c.JSON(http.StatusOK, gin.H{"files": []any{}})
 		return
 	}
 
-	dir := h.logDirectory()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -216,12 +231,14 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
+	h.mu.Lock()
 	if h.cfg == nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-
 	dir := h.logDirectory()
+	h.mu.Unlock()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -303,12 +320,14 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
+	h.mu.Lock()
 	if h.cfg == nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-
 	dir := h.logDirectory()
+	h.mu.Unlock()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
