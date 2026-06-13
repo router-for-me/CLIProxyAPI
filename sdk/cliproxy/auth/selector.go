@@ -393,14 +393,8 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 						return false, blockReasonNone, time.Time{}
 					}
 					if state.NextRetryAfter.After(now) {
-						next := state.NextRetryAfter
-						if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
-							next = state.Quota.NextRecoverAt
-						}
-						if next.Before(now) {
-							next = now
-						}
-						if state.Quota.Exceeded {
+						next := laterTime(state.NextRetryAfter, state.Quota.NextRecoverAt)
+						if state.Quota.Exceeded || isTransientAuthError(state.LastError) {
 							return true, blockReasonCooldown, next
 						}
 						return true, blockReasonOther, next
@@ -412,19 +406,29 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return false, blockReasonNone, time.Time{}
 	}
 	if auth.Unavailable && auth.NextRetryAfter.After(now) {
-		next := auth.NextRetryAfter
-		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
-			next = auth.Quota.NextRecoverAt
-		}
-		if next.Before(now) {
-			next = now
-		}
-		if auth.Quota.Exceeded {
+		next := laterTime(auth.NextRetryAfter, auth.Quota.NextRecoverAt)
+		if auth.Quota.Exceeded || isTransientAuthError(auth.LastError) {
 			return true, blockReasonCooldown, next
 		}
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+func laterTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+func isTransientAuthError(err *Error) bool {
+	switch statusCodeFromResult(err) {
+	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 // sessionPattern matches Claude Code user_id format:

@@ -283,6 +283,177 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	})
 }
 
+func TestSelectorPick_AllTransientModelCooldownReturnsModelCooldownError(t *testing.T) {
+	t.Parallel()
+
+	model := "test-model"
+	next := time.Now().Add(60 * time.Second)
+	auths := []*Auth{
+		{
+			ID: "a",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: next,
+					LastError:      &Error{HTTPStatus: http.StatusGatewayTimeout, Message: "upstream timeout"},
+				},
+			},
+		},
+	}
+
+	selector := &FillFirstSelector{}
+	_, err := selector.Pick(context.Background(), "codex", model, cliproxyexecutor.Options{}, auths)
+	if err == nil {
+		t.Fatalf("Pick() error = nil")
+	}
+
+	var mce *modelCooldownError
+	if !errors.As(err, &mce) {
+		t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
+	}
+	if got := mce.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if got := mce.Headers().Get("Retry-After"); got == "" {
+		t.Fatalf("Headers().Get(Retry-After) = empty")
+	}
+}
+
+func TestSelectorPick_AuthLevelTransientCooldownReturnsModelCooldownError(t *testing.T) {
+	t.Parallel()
+
+	next := time.Now().Add(60 * time.Second)
+	auths := []*Auth{
+		{
+			ID:              "a",
+			Status:          StatusError,
+			Unavailable:     true,
+			NextRetryAfter:  next,
+			LastError:       &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "auth unavailable"},
+			StatusMessage:   "transient upstream error",
+			LastRefreshedAt: time.Now(),
+		},
+	}
+
+	selector := &FillFirstSelector{}
+	_, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err == nil {
+		t.Fatalf("Pick() error = nil")
+	}
+
+	var mce *modelCooldownError
+	if !errors.As(err, &mce) {
+		t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
+	}
+	if got := mce.Headers().Get("Retry-After"); got == "" {
+		t.Fatalf("Headers().Get(Retry-After) = empty")
+	}
+}
+
+func TestSelectorPick_PermanentModelBlockDoesNotReturnModelCooldownError(t *testing.T) {
+	t.Parallel()
+
+	model := "test-model"
+	next := time.Now().Add(60 * time.Second)
+	auths := []*Auth{
+		{
+			ID: "a",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: next,
+					LastError:      &Error{HTTPStatus: http.StatusBadRequest, Message: "model_not_supported"},
+				},
+			},
+		},
+	}
+
+	selector := &FillFirstSelector{}
+	_, err := selector.Pick(context.Background(), "codex", model, cliproxyexecutor.Options{}, auths)
+	if err == nil {
+		t.Fatalf("Pick() error = nil")
+	}
+
+	var mce *modelCooldownError
+	if errors.As(err, &mce) {
+		t.Fatalf("Pick() error = %T, want non-cooldown auth error", err)
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("Pick() error = %T, want *Error", err)
+	}
+	if authErr.Code != "auth_unavailable" {
+		t.Fatalf("Error.Code = %q, want auth_unavailable", authErr.Code)
+	}
+}
+
+func TestIsAuthBlockedForModel_UsesLaterRetryHint(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	model := "test-model"
+	stateRetry := now.Add(2 * time.Minute)
+	quotaRecover := now.Add(5 * time.Minute)
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: stateRetry,
+				LastError:      &Error{HTTPStatus: http.StatusGatewayTimeout, Message: "upstream timeout"},
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: quotaRecover,
+				},
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if !next.Equal(quotaRecover) {
+		t.Fatalf("next = %v, want %v", next, quotaRecover)
+	}
+}
+
+func TestIsAuthBlockedForModel_PermanentBlockPreservesRetryTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	model := "test-model"
+	nextRetry := now.Add(30 * time.Minute)
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: nextRetry,
+				LastError:      &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
+	}
+	if !next.Equal(nextRetry) {
+		t.Fatalf("next = %v, want %v", next, nextRetry)
+	}
+}
+
 func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
 	t.Parallel()
 
