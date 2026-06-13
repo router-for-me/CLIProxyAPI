@@ -216,6 +216,9 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	server.cfg.Plugins.Configs = map[string]proxyconfig.PluginInstanceConfig{
 		"sample": {Enabled: &enabled, Priority: 4},
 	}
+	if errWrite := os.WriteFile(server.configFilePath, []byte("{}\n"), 0o600); errWrite != nil {
+		t.Fatalf("failed to write config file: %v", errWrite)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
 	req.Header.Set("Authorization", "Bearer test-management-key")
@@ -253,6 +256,14 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	}
 	if !configPayload.Enabled || configPayload.Priority != 4 {
 		t.Fatalf("plugin config = %#v, want enabled true priority 4", configPayload)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 }
 
