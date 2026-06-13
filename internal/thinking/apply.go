@@ -419,7 +419,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractOpenAIConfig(body)
 	case "codex", "xai":
 		return extractCodexConfig(body)
-	case "kimi":
+	case "kimi", "deepseek":
 		// Kimi uses OpenAI-compatible reasoning_effort format
 		return extractOpenAIConfig(body)
 	default:

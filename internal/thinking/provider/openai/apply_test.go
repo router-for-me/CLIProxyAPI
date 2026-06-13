@@ -7,7 +7,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestApplyCompatibleOpenAI_ModeLevel_ClampInternalLevels(t *testing.T) {
+func TestApplyCompatibleOpenAI_ModeLevel_PassesThroughLevels(t *testing.T) {
 	tests := []struct {
 		name            string
 		level           thinking.ThinkingLevel
@@ -15,15 +15,15 @@ func TestApplyCompatibleOpenAI_ModeLevel_ClampInternalLevels(t *testing.T) {
 		wantFieldExists bool
 	}{
 		{
-			name:            "xhigh is clamped to high",
+			name:            "xhigh passes through unchanged",
 			level:           thinking.LevelXHigh,
-			wantEffort:      "high",
+			wantEffort:      "xhigh",
 			wantFieldExists: true,
 		},
 		{
-			name:            "max is clamped to high",
+			name:            "max passes through unchanged",
 			level:           thinking.LevelMax,
-			wantEffort:      "high",
+			wantEffort:      "max",
 			wantFieldExists: true,
 		},
 		{
@@ -95,16 +95,16 @@ func TestApplyCompatibleOpenAI_ModeAuto(t *testing.T) {
 	}
 }
 
-func TestApplyCompatibleOpenAI_ModeBudget_HighBudgetClamped(t *testing.T) {
+func TestApplyCompatibleOpenAI_ModeBudget_HighBudgetPassesThrough(t *testing.T) {
 	body := []byte(`{"model":"test-model","messages":[]}`)
-	// Budget 64000 maps to xhigh, which should be clamped to high.
+	// Budget 64000 maps to xhigh, which should now pass through as xhigh.
 	config := thinking.ThinkingConfig{Mode: thinking.ModeBudget, Budget: 64000}
 	result, err := applyCompatibleOpenAI(body, config)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := gjson.GetBytes(result, "reasoning_effort").String()
-	if got != "high" {
-		t.Fatalf("reasoning_effort = %q, want %q (xhigh should be clamped). Output: %s", got, "high", string(result))
+	if got != "xhigh" {
+		t.Fatalf("reasoning_effort = %q, want %q (xhigh should pass through). Output: %s", got, "xhigh", string(result))
 	}
 }

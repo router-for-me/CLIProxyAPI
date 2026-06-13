@@ -101,6 +101,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	thinkingTarget := to.String()
+	if isDeepSeekModel(baseModel) {
+		thinkingTarget = "deepseek"
+	}
 	endpoint := "/chat/completions"
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
@@ -113,7 +117,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), thinkingTarget, e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -127,7 +131,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
-	translated = convertReasoningToThinkingContent(translated)
+	if !isDeepSeekModel(baseModel) {
+		translated = convertReasoningToThinkingContent(translated)
+	}
 
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
@@ -315,6 +321,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	thinkingTarget := to.String()
+	if isDeepSeekModel(baseModel) {
+		thinkingTarget = "deepseek"
+	}
 	endpoint := "/chat/completions"
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
@@ -327,7 +337,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), thinkingTarget, e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +351,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	translated = convertReasoningToThinkingContent(translated)
+	if !isDeepSeekModel(baseModel) {
+		translated = convertReasoningToThinkingContent(translated)
+	}
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
@@ -599,7 +611,11 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	modelForCounting := baseModel
 
-	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	thinkingTarget := to.String()
+	if isDeepSeekModel(baseModel) {
+		thinkingTarget = "deepseek"
+	}
+	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), thinkingTarget, e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -816,3 +832,9 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// isDeepSeekModel reports whether the model name indicates a DeepSeek model.
+// DeepSeek models use the "deepseek-" prefix (case-insensitive).
+func isDeepSeekModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "deepseek-")
+}

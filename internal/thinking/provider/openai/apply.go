@@ -112,11 +112,6 @@ func applyCompatibleOpenAI(body []byte, config thinking.ThinkingConfig) ([]byte,
 		return body, nil
 	}
 
-	// Clamp internal-only levels to the highest standard OpenAI level.
-	if effort == string(thinking.LevelXHigh) || effort == string(thinking.LevelMax) {
-		effort = string(thinking.LevelHigh)
-	}
-
 	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
 	return result, nil
 }

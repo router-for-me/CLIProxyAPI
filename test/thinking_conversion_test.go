@@ -823,7 +823,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "user-defined-model(64000)",
 			inputJSON:   `{"model":"user-defined-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning_effort",
-			expectValue: "high",
+			expectValue: "xhigh",
 			expectErr:   false,
 		},
 		// Case 69: Budget 0 → none → converted to high
@@ -1928,7 +1928,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
 			expectField: "reasoning_effort",
-			expectValue: "high",
+			expectValue: "xhigh",
 			expectErr:   false,
 		},
 		// Case 69: thinkingBudget=0 → none → converted to high
