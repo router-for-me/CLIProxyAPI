@@ -85,9 +85,9 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 
 	if downloadMode {
 		// Create backup and stream directly to client
-		data, filename, err := manager.Create()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create backup", "message": err.Error()})
+		data, filename, errCreate := manager.Create()
+		if errCreate != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create backup", "message": errCreate.Error()})
 			return
 		}
 
@@ -225,7 +225,7 @@ func (h *Handler) createBackupManager() (*backup.Manager, error) {
 	}
 
 	// Determine log directory
-	logsDir := h.logDirectory()
+	logsDir := h.getLogDirectory()
 
 	return backup.NewManager(h.configFilePath, h.cfg.AuthDir, logsDir, storage), nil
 }
@@ -271,8 +271,8 @@ func (h *Handler) createBackupStorage() (backup.Storage, error) {
 	}
 }
 
-// logDirectory returns the log directory path.
-func (h *Handler) logDirectory() string {
+// getLogDirectory returns the log directory path.
+func (h *Handler) getLogDirectory() string {
 	if h.logDir != "" {
 		return h.logDir
 	}
@@ -280,5 +280,5 @@ func (h *Handler) logDirectory() string {
 	if h.configFilePath != "" {
 		return filepath.Join(filepath.Dir(h.configFilePath), "logs")
 	}
-	return logging.DefaultLogDir()
+	return "logs"
 }
