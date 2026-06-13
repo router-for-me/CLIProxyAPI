@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"html"
 	"net/http"
@@ -322,6 +323,80 @@ func TestPatchPluginConfigMergesAndDeletesFields(t *testing.T) {
 	raw := marshalPluginRaw(t, item)
 	if !strings.Contains(raw, "mode: fast") || !strings.Contains(raw, "count: 3") || strings.Contains(raw, "remove:") {
 		t.Fatalf("raw config =\n%s", raw)
+	}
+}
+
+func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	pluginsDir := writeManagementPluginFile(t, "sample")
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir: pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+	reloads := 0
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+		reloads++
+		if cfg != h.cfg {
+			t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
+		}
+	})
+
+	path, errPath := pluginFilePath(pluginsDir, "sample")
+	if errPath != nil {
+		t.Fatalf("pluginFilePath() error = %v", errPath)
+	}
+	if path == "" {
+		t.Fatal("plugin path is empty")
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample", nil)
+
+	h.DeletePlugin(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if _, ok := h.cfg.Plugins.Configs["sample"]; ok {
+		t.Fatal("plugin config still exists after delete")
+	}
+	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+		t.Fatalf("plugin file stat error = %v, want not exist", errStat)
+	}
+	if reloads != 1 {
+		t.Fatalf("reloads = %d, want 1", reloads)
+	}
+}
+
+func TestDeletePluginReturnsNotFoundForUnknownPlugin(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg:            &config.Config{},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "missing"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/missing", nil)
+
+	h.DeletePlugin(c)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
