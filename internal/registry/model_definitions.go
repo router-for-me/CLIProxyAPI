@@ -85,6 +85,31 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// AntigravityWebSearchModelFor returns the Antigravity model that should run a
+// native web search request for modelID.
+func AntigravityWebSearchModelFor(modelID string) string {
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if modelID == "" {
+		return ""
+	}
+	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if model == nil {
+			continue
+		}
+		currentModelID := normalizeAntigravityCapabilityModelID(model.ID)
+		if currentModelID == "" {
+			continue
+		}
+		if currentModelID == modelID {
+			if model.SupportsWebSearch {
+				return currentModelID
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
@@ -101,6 +126,14 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+}
+
+func normalizeAntigravityCapabilityModelID(modelID string) string {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if open := strings.LastIndex(modelID, "("); open >= 0 && strings.HasSuffix(modelID, ")") {
+		modelID = strings.TrimSpace(modelID[:open])
+	}
+	return modelID
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
