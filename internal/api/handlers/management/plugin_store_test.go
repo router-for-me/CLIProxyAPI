@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -317,6 +318,62 @@ func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
 	}
 }
 
+func TestInstallPluginFromStoreTimesOutDownloadingAsset(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	pluginsDir := t.TempDir()
+	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	archiveURL := "https://downloads.example/" + archiveName
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: false,
+				Dir:     pluginsDir,
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: blockingPluginStoreHTTPClient{
+			blockURL: archiveURL,
+			responses: fakePluginStoreHTTPClient{
+				"https://registry.example/registry.json": registryJSON(t),
+				"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+					"tag_name": "v0.1.0",
+					"assets": [
+						{"name": "` + archiveName + `", "browser_download_url": "` + archiveURL + `"},
+						{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+					]
+				}`),
+			},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+
+	h.installPluginFromStoreWithTimeout(c, runtime.GOOS, runtime.GOARCH, 20*time.Millisecond)
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusGatewayTimeout, rec.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if body.Error != "plugin_install_timeout" {
+		t.Fatalf("error = %q, want plugin_install_timeout", body.Error)
+	}
+	targetPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider"+managementPluginExtension(runtime.GOOS))
+	if _, errStat := os.Stat(targetPath); !os.IsNotExist(errStat) {
+		t.Fatalf("target stat error = %v, want not exist", errStat)
+	}
+}
+
 func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -459,6 +516,19 @@ func (c fakePluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error)
 		Header:     make(http.Header),
 		Request:    req,
 	}, nil
+}
+
+type blockingPluginStoreHTTPClient struct {
+	responses fakePluginStoreHTTPClient
+	blockURL  string
+}
+
+func (c blockingPluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	if req.URL.String() == c.blockURL {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
+	return c.responses.Do(req)
 }
 
 type countingPluginStoreHTTPClient struct {
