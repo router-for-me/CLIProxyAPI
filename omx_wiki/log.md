@@ -39,3 +39,19 @@
 ## [2026-06-08T15:48:36.822Z] ingest
 - **Pages:** claude-openai-stream-tool-argument-chunks-must-not-passthrough.md
 - **Summary:** Created new page "Claude OpenAI Stream Tool Argument Chunks Must Not Passthrough"
+## [2026-06-13T01:15:33.390Z] query
+- **Pages:** claude-openai-stream-tool-argument-chunks-must-not-passthrough.md, claude-responses-tool-search-needs-query-schema.md, claude-tool-use-requires-real-names-when-openai-streams-omit-fun.md
+- **Summary:** Query "Codex MCP agency config.toml agency-mcp-server startup failed program not found" → 3 results (of 3 total)
+
+## [2026-06-13T01:15:52.366Z] ingest
+- **Pages:** codex-agency-mcp-startup-residual-config.md
+- **Summary:** Created new page "Codex Agency MCP Startup Residual Config"
+
+## [2026-06-13T01:21:10.245Z] ingest
+- **Pages:** codex-agency-mcp-startup-residual-config.md
+- **Summary:** Updated "Codex Agency MCP Startup Residual Config" with new content
+
+## [2026-06-13T01:23:56.010Z] ingest
+- **Pages:** codex-agency-mcp-startup-residual-config.md
+- **Summary:** Updated "Codex Agency MCP Startup Residual Config" with new content
+
