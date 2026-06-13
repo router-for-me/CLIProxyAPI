@@ -462,3 +462,40 @@ nonstream-keepalive-interval: 0
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+
+# Backup configuration
+backup:
+  # Enable automatic scheduled backups
+  enabled: false
+
+  # Backup schedule: supports duration strings ("1h", "24h") or special values (@hourly, @daily, @weekly, @monthly)
+  # Empty string disables scheduled backups (manual only via Management API)
+  schedule: ""
+
+  # Storage backend: "local", "s3", or "webdav"
+  storage: "local"
+
+  # Local storage directory (used when storage is "local")
+  local-dir: "./backups"
+
+  # Maximum number of backups to retain (oldest deleted first)
+  # Set to 0 for unlimited
+  max-backups: 10
+
+  # S3 configuration (used when storage is "s3")
+  s3:
+    endpoint: ""       # S3 endpoint URL (e.g., s3.amazonaws.com or MinIO endpoint)
+    region: ""         # AWS region (e.g., us-east-1)
+    bucket: ""         # Bucket name
+    path: ""           # Path prefix within bucket (e.g., "backups")
+    access-key: ""     # Access key ID
+    secret-key: ""     # Secret access key
+    use-ssl: true      # Use HTTPS
+
+  # WebDAV configuration (used when storage is "webdav")
+  webdav:
+    url: ""            # WebDAV server URL (e.g., https://dav.example.com)
+    username: ""       # Username
+    password: ""       # Password
+    path: ""           # Remote path for backups (e.g., "cliproxyapi-backups")
+

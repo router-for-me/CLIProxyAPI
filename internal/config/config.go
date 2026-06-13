@@ -152,6 +152,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// Backup configures automatic backup settings.
+	Backup BackupConfig `yaml:"backup" json:"backup"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -471,6 +474,44 @@ type CloakConfig struct {
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
+}
+
+// BackupConfig holds backup configuration.
+type BackupConfig struct {
+	// Enabled enables or disables automatic scheduled backups.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Schedule defines the backup schedule in cron format or special values (@hourly, @daily, @weekly, @monthly).
+	// Empty string disables scheduled backups (manual only).
+	Schedule string `yaml:"schedule" json:"schedule"`
+	// Storage defines the storage backend: "local", "s3", or "webdav".
+	Storage string `yaml:"storage" json:"storage"`
+	// LocalDir is the local storage directory (used when storage is "local").
+	LocalDir string `yaml:"local-dir" json:"local-dir"`
+	// MaxBackups is the maximum number of backups to retain (oldest deleted first). Set to 0 for unlimited.
+	MaxBackups int `yaml:"max-backups" json:"max-backups"`
+	// S3 holds S3 storage configuration (used when storage is "s3").
+	S3 BackupS3Config `yaml:"s3" json:"s3"`
+	// WebDAV holds WebDAV storage configuration (used when storage is "webdav").
+	WebDAV BackupWebDAVConfig `yaml:"webdav" json:"webdav"`
+}
+
+// BackupS3Config holds S3 storage configuration.
+type BackupS3Config struct {
+	Endpoint  string `yaml:"endpoint" json:"endpoint"`
+	Region    string `yaml:"region" json:"region"`
+	Bucket    string `yaml:"bucket" json:"bucket"`
+	Path      string `yaml:"path" json:"path"`
+	AccessKey string `yaml:"access-key" json:"access-key"`
+	SecretKey string `yaml:"secret-key" json:"secret-key"`
+	UseSSL    bool   `yaml:"use-ssl" json:"use-ssl"`
+}
+
+// BackupWebDAVConfig holds WebDAV storage configuration.
+type BackupWebDAVConfig struct {
+	URL      string `yaml:"url" json:"url"`
+	Username string `yaml:"username" json:"username"`
+	Password string `yaml:"password" json:"password"`
+	Path     string `yaml:"path" json:"path"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

@@ -750,6 +750,15 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
 		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
 
+		mgmt.GET("/backup/config", s.mgmt.GetBackupConfig)
+		mgmt.PUT("/backup/config", s.mgmt.PutBackupConfig)
+		mgmt.PATCH("/backup/config", s.mgmt.PutBackupConfig)
+		mgmt.POST("/backup/create", s.mgmt.CreateBackup)
+		mgmt.GET("/backup/list", s.mgmt.ListBackups)
+		mgmt.GET("/backup/download", s.mgmt.DownloadBackup)
+		mgmt.DELETE("/backup", s.mgmt.DeleteBackup)
+		mgmt.POST("/backup/test-connection", s.mgmt.TestBackupConnection)
+
 		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
 		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
 		mgmt.PATCH("/oauth-excluded-models", s.mgmt.PatchOAuthExcludedModels)
