@@ -1018,6 +1018,20 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			}
 		}
 	}
+	// OAuth (subscription) upstreams reject context-1m-2025-08-07 with a
+	// 429 "Usage credits are required for long context requests" unless the
+	// account has pay-as-you-go credits enabled. Strip it for OAuth so the
+	// request silently falls back to the 200k window instead of failing.
+	if !useAPIKey && strings.Contains(baseBetas, "context-1m-2025-08-07") {
+		parts := strings.Split(baseBetas, ",")
+		kept := parts[:0]
+		for _, p := range parts {
+			if strings.TrimSpace(p) != "context-1m-2025-08-07" {
+				kept = append(kept, p)
+			}
+		}
+		baseBetas = strings.Join(kept, ",")
+	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
