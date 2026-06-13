@@ -1161,7 +1161,7 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			"owned_by": model.OwnedBy,
 		}
 		if model.Created > 0 {
-			result["created_at"] = model.Created
+			result["created_at"] = time.Unix(model.Created, 0).UTC().Format(time.RFC3339)
 		}
 		if model.Type != "" {
 			result["type"] = "model"

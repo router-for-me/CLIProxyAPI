@@ -25,7 +25,7 @@ func TestGetAvailableModelsReturnsClonedSnapshots(t *testing.T) {
 func TestGetAvailableModelsClaudeIncludesTokenLimits(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "Claude", []*ModelInfo{
-		{ID: "claude-sonnet-4-6", OwnedBy: "anthropic", Type: "claude", ContextLength: 200000, MaxCompletionTokens: 64000},
+		{ID: "claude-sonnet-4-6", OwnedBy: "anthropic", Type: "claude", Created: 1771372800, ContextLength: 200000, MaxCompletionTokens: 64000},
 		{ID: "claude-no-limits", OwnedBy: "anthropic", Type: "claude"},
 	})
 
@@ -45,6 +45,9 @@ func TestGetAvailableModelsClaudeIncludesTokenLimits(t *testing.T) {
 	}
 	if got := withLimits["max_tokens"]; got != 64000 {
 		t.Fatalf("expected max_tokens 64000, got %v", got)
+	}
+	if got := withLimits["created_at"]; got != "2026-02-18T00:00:00Z" {
+		t.Fatalf("expected created_at as RFC 3339 string, got %v", got)
 	}
 
 	withDefaults, ok := byID["claude-no-limits"]
