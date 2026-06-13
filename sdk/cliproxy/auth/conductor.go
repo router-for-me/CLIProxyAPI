@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1425,6 +1426,178 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// ShouldInheritModelStates reports whether an active auth update should keep
+// previous per-model runtime availability. Capacity identity changes, such as a
+// Codex plan upgrade, must clear stale quota cooldowns so the account can be
+// retried immediately with its new limits.
+func ShouldInheritModelStates(existing, incoming *Auth) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	if existing.Disabled || existing.Status == StatusDisabled || incoming.Disabled || incoming.Status == StatusDisabled {
+		return false
+	}
+	if len(incoming.ModelStates) > 0 || len(existing.ModelStates) == 0 {
+		return false
+	}
+	return !capacityIdentityChanged(existing, incoming)
+}
+
+func shouldClearModelStates(existing, incoming *Auth) bool {
+	if existing == nil || incoming == nil || len(existing.ModelStates) == 0 || len(incoming.ModelStates) == 0 {
+		return false
+	}
+	if existing.Disabled || existing.Status == StatusDisabled || incoming.Disabled || incoming.Status == StatusDisabled {
+		return true
+	}
+	return capacityIdentityChanged(existing, incoming)
+}
+
+var capacityIdentityKeys = map[string]struct{}{
+	"account_id":                        {},
+	"account_uuid":                      {},
+	"accountid":                         {},
+	"balance":                           {},
+	"chatgpt_account_id":                {},
+	"chatgpt_plan_type":                 {},
+	"chatgpt_subscription_active_start": {},
+	"chatgpt_subscription_active_until": {},
+	"credit":                            {},
+	"credits":                           {},
+	"organization_id":                   {},
+	"org_id":                            {},
+	"plan":                              {},
+	"plan_type":                         {},
+	"project_id":                        {},
+	"quota":                             {},
+	"quota_limit":                       {},
+	"service_tier":                      {},
+	"subscription":                      {},
+	"subscription_plan":                 {},
+	"subscription_status":               {},
+	"team_id":                           {},
+	"tier":                              {},
+}
+
+func authCapacityIdentitySignature(auth *Auth) map[string]string {
+	if auth == nil {
+		return nil
+	}
+	signature := make(map[string]string)
+	for key, value := range auth.Attributes {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		canonical := capacityIdentityCanonicalKey(normalized)
+		if canonical == "" {
+			continue
+		}
+		val := strings.TrimSpace(value)
+		if val == "" {
+			continue
+		}
+		signature[canonical] = val
+	}
+	for key, value := range auth.Metadata {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		canonical := capacityIdentityCanonicalKey(normalized)
+		if canonical == "" {
+			continue
+		}
+		val := capacityIdentityValue(value)
+		if val == "" {
+			continue
+		}
+		if _, exists := signature[canonical]; exists {
+			continue
+		}
+		signature[canonical] = val
+	}
+	return signature
+}
+
+func capacityIdentityCanonicalKey(normalized string) string {
+	if _, ok := capacityIdentityKeys[normalized]; !ok {
+		return ""
+	}
+	switch normalized {
+	case "account_id", "account_uuid", "accountid", "chatgpt_account_id":
+		return "account_id"
+	case "chatgpt_plan_type", "plan", "plan_type", "subscription_plan":
+		return "plan_type"
+	case "chatgpt_subscription_active_start":
+		return "subscription_active_start"
+	case "chatgpt_subscription_active_until":
+		return "subscription_active_until"
+	case "credit", "credits":
+		return "credits"
+	case "organization_id", "org_id":
+		return "org_id"
+	default:
+		return normalized
+	}
+}
+
+func capacityIdentityValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	val := reflect.ValueOf(value)
+	for val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return ""
+		}
+		val = val.Elem()
+	}
+	underlying := val.Interface()
+	switch typed := underlying.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	case time.Time:
+		return typed.Format(time.RFC3339)
+	default:
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(raw))
+	}
+}
+
+func capacityIdentityChanged(existing, incoming *Auth) bool {
+	existingSignature := authCapacityIdentitySignature(existing)
+	if len(existingSignature) == 0 {
+		return false
+	}
+	incomingSignature := authCapacityIdentitySignature(incoming)
+	for key, existingValue := range existingSignature {
+		incomingValue, ok := incomingSignature[key]
+		if !ok || incomingValue != existingValue {
+			return true
+		}
+	}
+	return false
+}
+
+func capacityIdentitySignatureEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftValue := range left {
+		if right[key] != leftValue {
+			return false
+		}
+	}
+	return true
+}
+
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
@@ -1443,10 +1616,10 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
-	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
-		}
+	if ShouldInheritModelStates(existing, auth) {
+		auth.ModelStates = existing.ModelStates
+	} else if shouldClearModelStates(existing, auth) {
+		clearRuntimeModelStates(auth)
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
@@ -1460,6 +1633,20 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+func clearRuntimeModelStates(auth *Auth) {
+	if auth == nil {
+		return
+	}
+	auth.ModelStates = nil
+	clearAggregatedAvailability(auth)
+	if !auth.Disabled && auth.Status != StatusDisabled {
+		if auth.Status == StatusError {
+			auth.Status = StatusActive
+		}
+		auth.StatusMessage = ""
+	}
 }
 
 // Remove deletes an auth from runtime state without persisting.
