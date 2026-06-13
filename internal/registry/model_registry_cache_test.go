@@ -22,6 +22,46 @@ func TestGetAvailableModelsReturnsClonedSnapshots(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsClaudeIncludesTokenLimits(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "Claude", []*ModelInfo{
+		{ID: "claude-sonnet-4-6", OwnedBy: "anthropic", Type: "claude", ContextLength: 200000, MaxCompletionTokens: 64000},
+		{ID: "claude-no-limits", OwnedBy: "anthropic", Type: "claude"},
+	})
+
+	models := r.GetAvailableModels("claude")
+	byID := make(map[string]map[string]any, len(models))
+	for _, m := range models {
+		id, _ := m["id"].(string)
+		byID[id] = m
+	}
+
+	withLimits, ok := byID["claude-sonnet-4-6"]
+	if !ok {
+		t.Fatalf("expected claude-sonnet-4-6 in available models, got %v", byID)
+	}
+	if got := withLimits["max_input_tokens"]; got != 200000 {
+		t.Fatalf("expected max_input_tokens 200000, got %v", got)
+	}
+	if got := withLimits["max_tokens"]; got != 64000 {
+		t.Fatalf("expected max_tokens 64000, got %v", got)
+	}
+
+	withDefaults, ok := byID["claude-no-limits"]
+	if !ok {
+		t.Fatalf("expected claude-no-limits in available models, got %v", byID)
+	}
+	if got := withDefaults["max_input_tokens"]; got != defaultClaudeMaxInputTokens {
+		t.Fatalf("expected fallback max_input_tokens %d, got %v", defaultClaudeMaxInputTokens, got)
+	}
+	if got := withDefaults["max_tokens"]; got != defaultClaudeMaxOutputTokens {
+		t.Fatalf("expected fallback max_tokens %d, got %v", defaultClaudeMaxOutputTokens, got)
+	}
+	if got := withDefaults["display_name"]; got != "claude-no-limits" {
+		t.Fatalf("expected display_name to fall back to id, got %v", got)
+	}
+}
+
 func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{{ID: "m1", OwnedBy: "team-a", DisplayName: "Model One"}})
