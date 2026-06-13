@@ -2191,7 +2191,7 @@
       "display_name": "Composer 2.5 Fast",
       "name": "grok-composer-2.5-fast",
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
-      "context_length": 131072,
+      "context_length": 200000,
       "max_completion_tokens": 32768,
       "thinking": {
         "levels": [
