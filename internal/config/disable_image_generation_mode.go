@@ -9,18 +9,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DisableImageGenerationMode is a tri-state config value for disable-image-generation.
+// DisableImageGenerationMode is a four-state config value for disable-image-generation.
 //
 // It supports:
 //   - false: enabled
 //   - true: disabled everywhere (including /v1/images/* endpoints)
 //   - "chat": disabled for all non-images endpoints, but enabled for /v1/images/generations and /v1/images/edits
+//   - "passthrough": never inject and never strip image_generation on non-images endpoints
+//     (the client payload is forwarded unchanged); on /v1/images/* endpoints behave like "chat"
 type DisableImageGenerationMode int
 
 const (
 	DisableImageGenerationOff DisableImageGenerationMode = iota
 	DisableImageGenerationAll
 	DisableImageGenerationChat
+	DisableImageGenerationPassthrough
 )
 
 func (m DisableImageGenerationMode) String() string {
@@ -31,6 +34,8 @@ func (m DisableImageGenerationMode) String() string {
 		return "true"
 	case DisableImageGenerationChat:
 		return "chat"
+	case DisableImageGenerationPassthrough:
+		return "passthrough"
 	default:
 		return "false"
 	}
@@ -42,6 +47,8 @@ func (m DisableImageGenerationMode) MarshalYAML() (any, error) {
 		return true, nil
 	case DisableImageGenerationChat:
 		return "chat", nil
+	case DisableImageGenerationPassthrough:
+		return "passthrough", nil
 	default:
 		return false, nil
 	}
@@ -62,6 +69,8 @@ func (m DisableImageGenerationMode) MarshalJSON() ([]byte, error) {
 		return []byte("true"), nil
 	case DisableImageGenerationChat:
 		return json.Marshal("chat")
+	case DisableImageGenerationPassthrough:
+		return json.Marshal("passthrough")
 	default:
 		return []byte("false"), nil
 	}
@@ -130,7 +139,9 @@ func parseDisableImageGenerationString(s string) (DisableImageGenerationMode, er
 		return DisableImageGenerationAll, nil
 	case "chat":
 		return DisableImageGenerationChat, nil
+	case "passthrough":
+		return DisableImageGenerationPassthrough, nil
 	default:
-		return DisableImageGenerationOff, fmt.Errorf("invalid disable-image-generation value %q (allowed: true, false, chat)", s)
+		return DisableImageGenerationOff, fmt.Errorf("invalid disable-image-generation value %q (allowed: true, false, chat, passthrough)", s)
 	}
 }
