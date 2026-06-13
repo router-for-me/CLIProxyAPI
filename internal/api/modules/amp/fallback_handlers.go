@@ -146,14 +146,17 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			thinkingSuffix = "(" + suffixResult.RawSuffix + ")"
 		}
 
+		// Extract per-request fingerprint once for feature-aware mapping.
+		fingerprint := ExtractFingerprint(bodyBytes)
+
 		resolveMappedModel := func() (string, []string) {
 			if fh.modelMapper == nil {
 				return "", nil
 			}
 
-			mappedModel := fh.modelMapper.MapModel(modelName)
+			mappedModel := fh.modelMapper.MapModelCtx(modelName, fingerprint)
 			if mappedModel == "" {
-				mappedModel = fh.modelMapper.MapModel(normalizedModel)
+				mappedModel = fh.modelMapper.MapModelCtx(normalizedModel, fingerprint)
 			}
 			mappedModel = strings.TrimSpace(mappedModel)
 			if mappedModel == "" {
