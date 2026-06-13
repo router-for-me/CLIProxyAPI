@@ -1820,6 +1820,23 @@
         "zero_allowed": true,
         "dynamic_allowed": true
       }
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.7 Code",
+      "description": "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": false,
+        "dynamic_allowed": true
+      }
     }
   ],
   "antigravity": [
