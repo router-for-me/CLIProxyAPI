@@ -52,7 +52,7 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 		},
 	}
 
-	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute, 0)
 	if !ok {
 		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
 	}
@@ -65,7 +65,7 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 func TestNextRefreshCheckAt_APIKeyUnschedule(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	auth := &Auth{ID: "a1", Provider: "test", Attributes: map[string]string{"api_key": "k"}}
-	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute, 0); ok {
 		t.Fatalf("nextRefreshCheckAt() ok = true, want false")
 	}
 }
@@ -79,7 +79,7 @@ func TestNextRefreshCheckAt_NextRefreshAfterGate(t *testing.T) {
 		NextRefreshAfter: nextAfter,
 		Metadata:         map[string]any{"email": "x@example.com"},
 	}
-	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute, 0)
 	if !ok {
 		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
 	}
@@ -101,7 +101,7 @@ func TestNextRefreshCheckAt_PreferredInterval_PicksEarliestCandidate(t *testing.
 			"refresh_interval_seconds": 900, // 15m
 		},
 	}
-	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute, 0)
 	if !ok {
 		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
 	}
@@ -129,7 +129,7 @@ func TestNextRefreshCheckAt_ProviderLead_Expiry(t *testing.T) {
 		},
 	}
 
-	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute, 0)
 	if !ok {
 		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
 	}
@@ -148,7 +148,7 @@ func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 		Metadata: map[string]any{"email": "x@example.com"},
 		Runtime:  testRefreshEvaluator{},
 	}
-	got, ok := nextRefreshCheckAt(now, auth, interval)
+	got, ok := nextRefreshCheckAt(now, auth, interval, 0)
 	if !ok {
 		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
 	}

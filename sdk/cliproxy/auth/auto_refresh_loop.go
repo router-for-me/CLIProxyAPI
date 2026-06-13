@@ -3,17 +3,21 @@ package auth
 import (
 	"container/heap"
 	"context"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 type authAutoRefreshLoop struct {
-	manager     *Manager
-	interval    time.Duration
-	concurrency int
+	manager      *Manager
+	interval     time.Duration
+	concurrency  int
+	jitterWindow time.Duration // max random jitter added to refresh scheduling
 
 	mu    sync.Mutex
 	queue refreshMinHeap
@@ -35,15 +39,34 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 	if jobBuffer < 64 {
 		jobBuffer = 64
 	}
-	return &authAutoRefreshLoop{
-		manager:     manager,
-		interval:    interval,
-		concurrency: concurrency,
-		index:       make(map[string]*refreshHeapItem),
-		dirty:       make(map[string]struct{}),
-		wakeCh:      make(chan struct{}, 1),
-		jobs:        make(chan string, jobBuffer),
+	var jitter time.Duration
+	if cfg, ok := manager.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil {
+		if cfg.AuthRefreshJitterMinutes > 0 {
+			jitter = time.Duration(cfg.AuthRefreshJitterMinutes) * time.Minute
+		}
 	}
+	return &authAutoRefreshLoop{
+		manager:      manager,
+		interval:     interval,
+		concurrency:  concurrency,
+		jitterWindow: jitter,
+		index:        make(map[string]*refreshHeapItem),
+		dirty:        make(map[string]struct{}),
+		wakeCh:       make(chan struct{}, 1),
+		jobs:         make(chan string, jobBuffer),
+	}
+}
+
+// stableJitter returns a deterministic duration in [0, window) derived from the auth ID.
+// Using a hash of the ID ensures the same credential always gets the same offset, so
+// rebuild() doesn't shift scheduled refreshes unpredictably.
+func stableJitter(authID string, window time.Duration) time.Duration {
+	if window <= 0 || authID == "" {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(authID))
+	return time.Duration(h.Sum64() % uint64(window))
 }
 
 func (l *authAutoRefreshLoop) queueReschedule(authID string) {
@@ -100,7 +123,7 @@ func (l *authAutoRefreshLoop) rebuild(now time.Time) {
 
 	l.manager.mu.RLock()
 	for id, auth := range l.manager.auths {
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := nextRefreshCheckAt(now, auth, l.interval, l.jitterWindow)
 		if !ok {
 			continue
 		}
@@ -231,7 +254,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		manager.mu.RUnlock()
 		return
 	}
-	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
+	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval, l.jitterWindow)
 	shouldRefresh := manager.shouldRefresh(auth, now)
 	exec := manager.executors[auth.Provider]
 	manager.mu.RUnlock()
@@ -254,7 +277,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	if !manager.markRefreshPending(authID, now) {
 		manager.mu.RLock()
 		auth = manager.auths[authID]
-		next, shouldSchedule = nextRefreshCheckAt(now, auth, l.interval)
+		next, shouldSchedule = nextRefreshCheckAt(now, auth, l.interval, l.jitterWindow)
 		manager.mu.RUnlock()
 		if shouldSchedule {
 			l.upsert(authID, next)
@@ -280,7 +303,7 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 	for _, authID := range dirty {
 		l.manager.mu.RLock()
 		auth := l.manager.auths[authID]
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := nextRefreshCheckAt(now, auth, l.interval, l.jitterWindow)
 		l.manager.mu.RUnlock()
 
 		if !ok {
@@ -335,7 +358,10 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 	delete(l.index, authID)
 }
 
-func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
+// nextRefreshCheckAt computes when auth should next be checked for refresh.
+// jitterWindow, if > 0, adds a stable per-credential random offset to the
+// scheduled time to spread bulk-provisioned credentials over a rolling window.
+func nextRefreshCheckAt(now time.Time, auth *Auth, interval, jitterWindow time.Duration) (time.Time, bool) {
 	if auth == nil {
 		return time.Time{}, false
 	}
@@ -392,20 +418,22 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return next, true
 	}
 
+	jitter := stableJitter(auth.ID, jitterWindow)
+
 	provider := strings.ToLower(auth.Provider)
 	lead := ProviderRefreshLead(provider, auth.Runtime)
 	if lead == nil {
 		return time.Time{}, false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		dueAt := expiry.Add(-*lead)
+		dueAt := expiry.Add(-*lead).Add(jitter)
 		if !dueAt.After(now) {
 			return now, true
 		}
 		return dueAt, true
 	}
 	if !lastRefresh.IsZero() {
-		dueAt := lastRefresh.Add(*lead)
+		dueAt := lastRefresh.Add(*lead).Add(jitter)
 		if !dueAt.After(now) {
 			return now, true
 		}
