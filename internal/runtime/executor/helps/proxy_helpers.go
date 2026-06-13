@@ -17,6 +17,9 @@ import (
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
 //
+// The returned client reuses a shared Transport (and thus connection pool) for the
+// same proxy URL, avoiding the overhead of creating a brand-new connection pool per request.
+//
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
 //   - cfg: The application configuration
@@ -26,11 +29,6 @@ import (
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	httpClient := &http.Client{}
-	if timeout > 0 {
-		httpClient.Timeout = timeout
-	}
-
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
@@ -42,12 +40,14 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	// If we have a proxy URL configured, set up the transport
+	// If we have a proxy URL, use the shared transport pool.
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
-		if transport != nil {
-			httpClient.Transport = transport
-			return httpClient
+		if t := proxyutil.SharedTransport(proxyURL); t != nil {
+			client := &http.Client{Transport: t}
+			if timeout > 0 {
+				client.Timeout = timeout
+			}
+			return client
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
@@ -55,10 +55,14 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+		client := &http.Client{Transport: rt}
+		if timeout > 0 {
+			client.Timeout = timeout
+		}
+		return client
 	}
 
-	return httpClient
+	return &http.Client{}
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

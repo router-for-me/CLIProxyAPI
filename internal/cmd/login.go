@@ -382,6 +382,7 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 		return fmt.Errorf("execute request: %w", errDo)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -393,11 +394,11 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 	}
 
 	if result == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 
-	if errDecode := json.NewDecoder(resp.Body).Decode(result); errDecode != nil {
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if errDecode := json.Unmarshal(bodyBytes, result); errDecode != nil {
 		return fmt.Errorf("decode response body: %w", errDecode)
 	}
 
@@ -415,6 +416,7 @@ func fetchGCPProjects(ctx context.Context, httpClient *http.Client) ([]interface
 		return nil, fmt.Errorf("failed to execute project list request: %w", errDo)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -425,8 +427,9 @@ func fetchGCPProjects(ctx context.Context, httpClient *http.Client) ([]interface
 		return nil, fmt.Errorf("project list request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	var projects interfaces.GCPProject
-	if errDecode := json.NewDecoder(resp.Body).Decode(&projects); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &projects); errDecode != nil {
 		return nil, fmt.Errorf("failed to unmarshal project list: %w", errDecode)
 	}
 

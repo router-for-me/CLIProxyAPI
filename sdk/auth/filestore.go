@@ -25,6 +25,21 @@ type PluginAuthParser interface {
 	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*cliproxyauth.Auth, bool, error)
 }
 
+// sharedFileStoreHTTPClient returns a reusable HTTP client for filestore
+// operations that previously used http.DefaultClient. The client is created
+// once and reused to avoid discarding the underlying connection pool.
+var (
+	fileStoreHTTPClient     *http.Client
+	fileStoreHTTPClientOnce sync.Once
+)
+
+func sharedFileStoreHTTPClient() *http.Client {
+	fileStoreHTTPClientOnce.Do(func() {
+		fileStoreHTTPClient = &http.Client{}
+	})
+	return fileStoreHTTPClient
+}
+
 type pluginAuthParserHolder struct {
 	parser PluginAuthParser
 }
@@ -266,13 +281,13 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			// Refresh it using the long-lived refresh_token before querying.
 			if provider == "gemini" {
 				if tokenMap, ok := metadata["token"].(map[string]any); ok {
-					if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, http.DefaultClient); errRefresh == nil {
+					if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, sharedFileStoreHTTPClient()); errRefresh == nil {
 						accessToken = refreshed
 					}
 				}
 			}
 			if accessToken != "" {
-				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
+				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, sharedFileStoreHTTPClient())
 				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
 					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
 					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {

@@ -1295,9 +1295,10 @@ func closeHTTPResponseBody(resp *http.Response, logPrefix string) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
-	if errClose := resp.Body.Close(); errClose != nil {
-		log.Errorf("%s: %v", logPrefix, errClose)
-	}
+	// Drain remaining body data so the connection can return to the
+	// idle pool for reuse. Without this, HTTP/1.1 connections are
+	// silently discarded by the Transport.
+	proxyutil.DrainAndClose(resp)
 }
 
 func executionSessionIDFromOptions(opts cliproxyexecutor.Options) string {

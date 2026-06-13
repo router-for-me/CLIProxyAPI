@@ -35,6 +35,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
@@ -2943,6 +2944,7 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 		return fmt.Errorf("execute request: %w", errDo)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -2954,11 +2956,11 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 	}
 
 	if result == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 
-	if errDecode := json.NewDecoder(resp.Body).Decode(result); errDecode != nil {
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if errDecode := json.Unmarshal(bodyBytes, result); errDecode != nil {
 		return fmt.Errorf("decode response body: %w", errDecode)
 	}
 
@@ -2976,6 +2978,7 @@ func fetchGCPProjects(ctx context.Context, httpClient *http.Client) ([]interface
 		return nil, fmt.Errorf("failed to execute project list request: %w", errDo)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -2986,8 +2989,9 @@ func fetchGCPProjects(ctx context.Context, httpClient *http.Client) ([]interface
 		return nil, fmt.Errorf("project list request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	var projects interfaces.GCPProject
-	if errDecode := json.NewDecoder(resp.Body).Decode(&projects); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &projects); errDecode != nil {
 		return nil, fmt.Errorf("failed to unmarshal project list: %w", errDecode)
 	}
 
@@ -3015,11 +3019,11 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 		if resp.StatusCode == http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			if gjson.GetBytes(bodyBytes, "state").String() == "ENABLED" {
-				_ = resp.Body.Close()
+				proxyutil.DrainAndClose(resp)
 				continue
 			}
 		}
-		_ = resp.Body.Close()
+		proxyutil.DrainAndClose(resp)
 
 		enableURL := fmt.Sprintf("%s/v1/projects/%s/services/%s:enable", serviceUsageURL, projectID, service)
 		req, errRequest = http.NewRequestWithContext(ctx, http.MethodPost, enableURL, strings.NewReader("{}"))
@@ -3040,15 +3044,15 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			errMessage = errMessageResult.String()
 		}
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
-			_ = resp.Body.Close()
+			proxyutil.DrainAndClose(resp)
 			continue
 		} else if resp.StatusCode == http.StatusBadRequest {
-			_ = resp.Body.Close()
+			proxyutil.DrainAndClose(resp)
 			if strings.Contains(strings.ToLower(errMessage), "already enabled") {
 				continue
 			}
 		}
-		_ = resp.Body.Close()
+		proxyutil.DrainAndClose(resp)
 		return false, fmt.Errorf("project activation required: %s", errMessage)
 	}
 	return true, nil

@@ -28,40 +28,47 @@ var ipServices = []string{
 // Returns:
 //   - string: The public IP address as a string
 //   - error: An error if all services fail, nil otherwise
+// ipCheckClient is a shared HTTP client for IP detection services.
+var ipCheckClient = &http.Client{Timeout: 5 * time.Second}
+
 func getPublicIP() (string, error) {
 	for _, service := range ipServices {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, "GET", service, nil)
-		if err != nil {
-			log.Debugf("Failed to create request to %s: %v", service, err)
-			continue
+		if ip, err := fetchIPFromService(service); err != nil {
+			log.Debugf("%v", err)
+		} else if ip != "" {
+			return ip, nil
 		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Debugf("Failed to get public IP from %s: %v", service, err)
-			continue
-		}
-		defer func() {
-			if closeErr := resp.Body.Close(); closeErr != nil {
-				log.Warnf("Failed to close response body from %s: %v", service, closeErr)
-			}
-		}()
-
-		if resp.StatusCode != http.StatusOK {
-			log.Debugf("bad status code from %s: %d", service, resp.StatusCode)
-			continue
-		}
-
-		ip, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Debugf("Failed to read response body from %s: %v", service, err)
-			continue
-		}
-		return strings.TrimSpace(string(ip)), nil
 	}
 	return "", fmt.Errorf("all IP services failed")
+}
+
+func fetchIPFromService(service string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", service, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request to %s: %w", service, err)
+	}
+
+	resp, err := ipCheckClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to get public IP from %s: %w", service, err)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("bad status code from %s: %d", service, resp.StatusCode)
+	}
+
+	ip, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body from %s: %w", service, err)
+	}
+	return strings.TrimSpace(string(ip)), nil
 }
 
 // getOutboundIP retrieves the preferred outbound IP address of this machine.

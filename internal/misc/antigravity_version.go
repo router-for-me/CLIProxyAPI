@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -27,6 +28,12 @@ type antigravityRelease struct {
 	Version     string `json:"version"`
 	ExecutionID string `json:"execution_id"`
 }
+
+// antigravityFetchClient is a long-lived HTTP client reused across periodic version fetches.
+var (
+	antigravityFetchClient *http.Client
+	antigravityFetchOnce    sync.Once
+)
 
 var (
 	cachedAntigravityVersion = antigravityFallbackVersion
@@ -174,7 +181,10 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		ctx = context.Background()
 	}
 
-	client := &http.Client{Timeout: antigravityFetchTimeout}
+	antigravityFetchOnce.Do(func() {
+		antigravityFetchClient = &http.Client{Timeout: antigravityFetchTimeout}
+	})
+	client := antigravityFetchClient
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityReleasesURL, nil)
 	if errReq != nil {
@@ -186,6 +196,7 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("fetch antigravity releases: %w", errDo)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.WithError(errClose).Warn("antigravity releases response body close error")
 		}
@@ -195,8 +206,12 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("antigravity releases API returned status %d", resp.StatusCode)
 	}
 
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return "", fmt.Errorf("read antigravity releases response: %w", errRead)
+	}
 	var releases []antigravityRelease
-	if errDecode := json.NewDecoder(resp.Body).Decode(&releases); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &releases); errDecode != nil {
 		return "", fmt.Errorf("decode antigravity releases response: %w", errDecode)
 	}
 

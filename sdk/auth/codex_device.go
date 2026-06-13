@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -20,6 +21,19 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+// sharedCodexDeviceClient returns a reusable HTTP client for Codex device flow.
+var (
+	codexDeviceClient     *http.Client
+	codexDeviceClientOnce sync.Once
+)
+
+func sharedCodexDeviceClient() *http.Client {
+	codexDeviceClientOnce.Do(func() {
+		codexDeviceClient = &http.Client{}
+	})
+	return codexDeviceClient
+}
 
 const (
 	codexLoginModeMetadataKey             = "codex_login_mode"
@@ -66,7 +80,7 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		ctx = context.Background()
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	httpClient := util.SetProxy(&cfg.SDKConfig, sharedCodexDeviceClient())
 
 	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
 	if err != nil {

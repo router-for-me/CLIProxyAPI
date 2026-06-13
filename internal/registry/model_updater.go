@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -35,6 +36,12 @@ type modelStore struct {
 var modelsCatalogStore = &modelStore{}
 
 var updaterOnce sync.Once
+
+// modelsFetchClient is a long-lived HTTP client reused across periodic model fetches.
+var (
+	modelsFetchClient *http.Client
+	modelsFetchOnce   sync.Once
+)
 
 // ModelRefreshCallback is invoked when startup or periodic model refresh detects changes.
 // changedProviders contains the provider names whose model definitions changed.
@@ -141,7 +148,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
 // along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
 func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
-	client := &http.Client{Timeout: modelsFetchTimeout}
+	// Reuse a package-level client so the underlying Transport (connection pool)
+	// is shared across periodic fetches instead of being recreated each time.
+	modelsFetchOnce.Do(func() {
+		modelsFetchClient = &http.Client{Timeout: modelsFetchTimeout}
+	})
+	client := modelsFetchClient
 	for _, url := range modelsURLs {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
@@ -159,14 +171,14 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 		}
 
 		if resp.StatusCode != 200 {
-			resp.Body.Close()
+			proxyutil.DrainAndClose(resp)
 			cancel()
 			log.Debugf("models fetch returned %d from %s", resp.StatusCode, url)
 			continue
 		}
 
 		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		proxyutil.DrainAndClose(resp)
 		cancel()
 
 		if err != nil {

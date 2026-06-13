@@ -154,6 +154,9 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 		return nil, fmt.Errorf("antigravity token exchange: execute request: %w", errDo)
 	}
 	defer func() {
+		// Drain remaining body data so the HTTP/1.1 connection can be
+		// reused by the Transport's idle pool.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity token exchange: close body error: %v", errClose)
 		}
@@ -171,8 +174,12 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 		return nil, fmt.Errorf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, body)
 	}
 
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return nil, fmt.Errorf("antigravity token exchange: read response: %w", errRead)
+	}
 	var token TokenResponse
-	if errDecode := json.NewDecoder(resp.Body).Decode(&token); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &token); errDecode != nil {
 		return nil, fmt.Errorf("antigravity token exchange: decode response: %w", errDecode)
 	}
 	return &token, nil
@@ -196,6 +203,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		return "", fmt.Errorf("antigravity userinfo: execute request: %w", errDo)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity userinfo: close body error: %v", errClose)
 		}
@@ -212,8 +220,12 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		}
 		return "", fmt.Errorf("antigravity userinfo: request failed: status %d: %s", resp.StatusCode, body)
 	}
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return "", fmt.Errorf("antigravity userinfo: read response: %w", errRead)
+	}
 	var info userInfo
-	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &info); errDecode != nil {
 		return "", fmt.Errorf("antigravity userinfo: decode response: %w", errDecode)
 	}
 	email := strings.TrimSpace(info.Email)

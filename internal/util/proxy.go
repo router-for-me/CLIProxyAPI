@@ -14,11 +14,19 @@ import (
 // SetProxy configures the provided HTTP client with proxy settings from the configuration.
 // It supports SOCKS5, HTTP, and HTTPS proxies. The function modifies the client's transport
 // to route requests through the configured proxy server.
+// It uses a shared Transport pool so that callers reusing the same proxy URL
+// share the same underlying connection pool instead of creating a new one each time.
 func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	if cfg == nil || httpClient == nil {
 		return httpClient
 	}
 
+	if t := proxyutil.SharedTransport(cfg.ProxyURL); t != nil {
+		httpClient.Transport = t
+		return httpClient
+	}
+
+	// Fallback: no shared transport available (ModeInherit), try building one.
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)

@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
@@ -132,7 +133,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	if !isDeepSeekModel(baseModel) {
-		translated = convertReasoningToThinkingContent(translated)
+		translated, err = convertReasoningToThinkingContent(translated)
+		if err != nil {
+			return resp, err
+		}
 	}
 
 	if opts.Alt == "responses/compact" {
@@ -352,7 +356,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	if !isDeepSeekModel(baseModel) {
-		translated = convertReasoningToThinkingContent(translated)
+		translated, err = convertReasoningToThinkingContent(translated)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics
@@ -415,7 +422,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer httpResp.Body.Close()
+		defer proxyutil.DrainAndClose(httpResp)
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
@@ -569,9 +576,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	go func() {
 		defer close(out)
 		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("openai compat executor: close response body error: %v", errClose)
-			}
+			proxyutil.DrainAndClose(httpResp)
 			reporter.EnsurePublished(ctx)
 		}()
 		buffer := make([]byte, 32*1024)

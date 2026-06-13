@@ -111,13 +111,20 @@ func runAutoUpdater(ctx context.Context) {
 	}
 }
 
+// assetHTTPClient is a long-lived HTTP client reused for management asset downloads.
+var (
+	assetHTTPClient     *http.Client
+	assetHTTPClientOnce sync.Once
+)
+
 func newHTTPClient(proxyURL string) *http.Client {
-	client := &http.Client{Timeout: 15 * time.Second}
-
-	sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
-	util.SetProxy(sdkCfg, client)
-
-	return client
+	assetHTTPClientOnce.Do(func() {
+		client := &http.Client{Timeout: 15 * time.Second}
+		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
+		util.SetProxy(sdkCfg, client)
+		assetHTTPClient = client
+	})
+	return assetHTTPClient
 }
 
 type releaseAsset struct {
@@ -353,6 +360,7 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 		return nil, "", fmt.Errorf("execute release request: %w", err)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 	}()
 
@@ -361,8 +369,12 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 		return nil, "", fmt.Errorf("unexpected release status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return nil, "", fmt.Errorf("read release response: %w", errRead)
+	}
 	var release releaseResponse
-	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err = json.Unmarshal(bodyBytes, &release); err != nil {
 		return nil, "", fmt.Errorf("decode release response: %w", err)
 	}
 
@@ -393,6 +405,7 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 		return nil, "", fmt.Errorf("execute download request: %w", err)
 	}
 	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 	}()
 
