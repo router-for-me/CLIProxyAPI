@@ -38,6 +38,12 @@ const (
 	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
 )
 
+const (
+	responsesWebsocketReadTimeout       = 60 * time.Second
+	responsesWebsocketWriteTimeout      = 10 * time.Second
+	responsesWebsocketHeartbeatInterval = 30 * time.Second
+)
+
 var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -225,6 +231,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 	wsDone := make(chan struct{})
 	defer close(wsDone)
+	startResponsesWebsocketHeartbeat(conn, wsDone, passthroughSessionID, responsesWebsocketHeartbeatInterval)
 
 	if h != nil && h.AuthManager != nil {
 		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
@@ -442,6 +449,32 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		lastResponseID = strings.TrimSpace(completedResponseID)
 		lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
 	}
+}
+
+func startResponsesWebsocketHeartbeat(conn *websocket.Conn, done <-chan struct{}, sessionID string, interval time.Duration) {
+	if conn == nil || interval <= 0 {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(responsesWebsocketReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(responsesWebsocketReadTimeout))
+	})
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(responsesWebsocketWriteTimeout)); err != nil {
+					log.Warnf("responses websocket: ping failed id=%s error=%v", sessionID, err)
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
 }
 
 func websocketClientAddress(c *gin.Context) string {
