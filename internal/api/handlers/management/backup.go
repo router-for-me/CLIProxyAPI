@@ -8,7 +8,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -58,8 +57,7 @@ func (h *Handler) PutBackupConfig(c *gin.Context) {
 	h.cfg.Backup.WebDAV.Path = strings.TrimSpace(newConfig.WebDAV.Path)
 	h.mu.Unlock()
 
-	if err := h.persist(c); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save configuration", "message": err.Error()})
+	if !h.persist(c) {
 		return
 	}
 
