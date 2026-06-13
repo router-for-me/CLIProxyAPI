@@ -175,10 +175,10 @@ func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
 func TestOAuthModelAliasChannel_PluginProvider(t *testing.T) {
 	t.Parallel()
 
-	if got := OAuthModelAliasChannel(" Qoder ", "oauth"); got != "qoder" {
-		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "qoder")
+	if got := OAuthModelAliasChannel(" Sample-Provider ", "oauth"); got != "sample-provider" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "sample-provider")
 	}
-	if got := OAuthModelAliasChannel("qoder", "api_key"); got != "" {
+	if got := OAuthModelAliasChannel("sample-provider", "api_key"); got != "" {
 		t.Fatalf("OAuthModelAliasChannel() = %q, want empty channel for API key", got)
 	}
 }
@@ -206,18 +206,18 @@ func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
 	t.Parallel()
 
 	aliases := map[string][]internalconfig.OAuthModelAlias{
-		"qoder": {{Name: "qmodel_latest", Alias: "qlatest"}},
+		"sample-provider": {{Name: "sample-model-latest", Alias: "sample-latest"}},
 	}
 
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{})
 	mgr.SetOAuthModelAlias(aliases)
 
-	auth := &Auth{ID: "qoder-auth", Provider: "qoder", Attributes: map[string]string{"auth_kind": "oauth"}}
+	auth := &Auth{ID: "sample-provider-auth", Provider: "sample-provider", Attributes: map[string]string{"auth_kind": "oauth"}}
 
-	resolvedModel := mgr.applyOAuthModelAlias(auth, "qlatest")
-	if resolvedModel != "qmodel_latest" {
-		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "qmodel_latest")
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "sample-latest")
+	if resolvedModel != "sample-model-latest" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "sample-model-latest")
 	}
 }
 
@@ -225,17 +225,17 @@ func TestApplyOAuthModelAlias_PluginProviderSkipsAPIKey(t *testing.T) {
 	t.Parallel()
 
 	aliases := map[string][]internalconfig.OAuthModelAlias{
-		"qoder": {{Name: "qmodel_latest", Alias: "qlatest"}},
+		"sample-provider": {{Name: "sample-model-latest", Alias: "sample-latest"}},
 	}
 
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{})
 	mgr.SetOAuthModelAlias(aliases)
 
-	auth := &Auth{ID: "qoder-auth", Provider: "qoder", Attributes: map[string]string{"auth_kind": "api_key"}}
+	auth := &Auth{ID: "sample-provider-auth", Provider: "sample-provider", Attributes: map[string]string{"auth_kind": "api_key"}}
 
-	resolvedModel := mgr.applyOAuthModelAlias(auth, "qlatest")
-	if resolvedModel != "qlatest" {
-		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "qlatest")
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "sample-latest")
+	if resolvedModel != "sample-latest" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "sample-latest")
 	}
 }

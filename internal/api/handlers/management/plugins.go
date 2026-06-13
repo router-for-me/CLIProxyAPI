@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
@@ -85,8 +86,8 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 	for _, file := range files {
 		entries[file.ID] = pluginListEntry{
-			ID:           file.ID,
-			Path:         file.Path,
+			ID:           htmlsanitize.String(file.ID),
+			Path:         htmlsanitize.String(file.Path),
 			Enabled:      true,
 			ConfigFields: []pluginConfigFieldInfo{},
 			Menus:        []pluginMenuInfo{},
@@ -94,7 +95,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 	for id, item := range configs {
 		entry := entries[id]
-		entry.ID = id
+		entry.ID = htmlsanitize.String(id)
 		entry.Configured = true
 		entry.Enabled = pluginInstanceEnabled(item)
 		if entry.ConfigFields == nil {
@@ -108,10 +109,10 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	if host != nil {
 		for _, info := range host.RegisteredPlugins() {
 			entry := entries[info.ID]
-			entry.ID = info.ID
+			entry.ID = htmlsanitize.String(info.ID)
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
-			entry.Logo = info.Metadata.Logo
+			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			entry.Menus = pluginMenus(info.Menus)
 			entry.Metadata = pluginMetadata(info.Metadata)
@@ -143,9 +144,58 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 
 	c.JSON(http.StatusOK, pluginListResponse{
 		PluginsEnabled: pluginsEnabled,
-		PluginsDir:     pluginsDir,
+		PluginsDir:     htmlsanitize.String(pluginsDir),
 		Plugins:        out,
 	})
+}
+
+// GetPluginConfig returns the preserved plugins.configs.<id> object as JSON.
+func (h *Handler) GetPluginConfig(c *gin.Context) {
+	id, okID := pluginIDFromRequest(c)
+	if !okID {
+		return
+	}
+	if h == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return
+	}
+
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return
+	}
+	item, configured := h.cfg.Plugins.Configs[id]
+	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	host := h.pluginHost
+	h.mu.Unlock()
+
+	if configured {
+		body, errBody := pluginConfigJSONObject(item)
+		if errBody != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_config_encode_failed", "message": errBody.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, body)
+		return
+	}
+
+	if pluginRegistered(host, id) {
+		c.JSON(http.StatusOK, gin.H{})
+		return
+	}
+	discovered, errDiscover := pluginDiscovered(pluginsDir, id)
+	if errDiscover != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errDiscover.Error()})
+		return
+	}
+	if discovered {
+		c.JSON(http.StatusOK, gin.H{})
+		return
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 }
 
 // PatchPluginEnabled updates plugins.configs.<id>.enabled without touching plugins.enabled.
@@ -262,15 +312,39 @@ func pluginInstanceEnabled(item config.PluginInstanceConfig) bool {
 	return *item.Enabled
 }
 
+func pluginRegistered(host *pluginhost.Host, id string) bool {
+	if host == nil {
+		return false
+	}
+	for _, info := range host.RegisteredPlugins() {
+		if info.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginDiscovered(pluginsDir string, id string) (bool, error) {
+	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir)
+	if errDiscover != nil {
+		return false, errDiscover
+	}
+	for _, file := range files {
+		if file.ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo {
 	out := make([]pluginConfigFieldInfo, 0, len(fields))
 	for _, field := range fields {
-		enumValues := append([]string{}, field.EnumValues...)
 		out = append(out, pluginConfigFieldInfo{
-			Name:        field.Name,
-			Type:        string(field.Type),
-			EnumValues:  enumValues,
-			Description: field.Description,
+			Name:        htmlsanitize.String(field.Name),
+			Type:        htmlsanitize.String(string(field.Type)),
+			EnumValues:  htmlsanitize.Strings(field.EnumValues),
+			Description: htmlsanitize.String(field.Description),
 		})
 	}
 	return out
@@ -280,9 +354,9 @@ func pluginMenus(menus []pluginhost.RegisteredPluginMenu) []pluginMenuInfo {
 	out := make([]pluginMenuInfo, 0, len(menus))
 	for _, menu := range menus {
 		out = append(out, pluginMenuInfo{
-			Path:        menu.Path,
-			Menu:        menu.Menu,
-			Description: menu.Description,
+			Path:        htmlsanitize.String(menu.Path),
+			Menu:        htmlsanitize.String(menu.Menu),
+			Description: htmlsanitize.String(menu.Description),
 		})
 	}
 	return out
@@ -290,11 +364,11 @@ func pluginMenus(menus []pluginhost.RegisteredPluginMenu) []pluginMenuInfo {
 
 func pluginMetadata(meta pluginapi.Metadata) *pluginMetadataInfo {
 	return &pluginMetadataInfo{
-		Name:             meta.Name,
-		Version:          meta.Version,
-		Author:           meta.Author,
-		GitHubRepository: meta.GitHubRepository,
-		Logo:             meta.Logo,
+		Name:             htmlsanitize.String(meta.Name),
+		Version:          htmlsanitize.String(meta.Version),
+		Author:           htmlsanitize.String(meta.Author),
+		GitHubRepository: htmlsanitize.String(meta.GitHubRepository),
+		Logo:             htmlsanitize.String(meta.Logo),
 		ConfigFields:     pluginConfigFields(meta.ConfigFields),
 	}
 }
@@ -342,6 +416,18 @@ func pluginConfigNode(item config.PluginInstanceConfig) *yaml.Node {
 		setYAMLMappingValue(node, "priority", intYAMLNode(item.Priority))
 	}
 	return node
+}
+
+func pluginConfigJSONObject(item config.PluginInstanceConfig) (map[string]any, error) {
+	value, errValue := yamlNodeToJSONValue(pluginConfigNode(item))
+	if errValue != nil {
+		return nil, errValue
+	}
+	body, ok := value.(map[string]any)
+	if !ok || body == nil {
+		return map[string]any{}, nil
+	}
+	return body, nil
 }
 
 func pluginInstanceConfigFromNode(node *yaml.Node) (config.PluginInstanceConfig, error) {
@@ -404,6 +490,52 @@ func yamlNodeFromJSONValue(value any) (*yaml.Node, error) {
 		return yamlNodeFromJSONObject(typed)
 	default:
 		return nil, fmt.Errorf("unsupported value type %T", value)
+	}
+}
+
+func yamlNodeToJSONValue(node *yaml.Node) (any, error) {
+	if node == nil {
+		return nil, nil
+	}
+	switch node.Kind {
+	case yaml.MappingNode:
+		out := make(map[string]any, len(node.Content)/2)
+		for index := 0; index+1 < len(node.Content); index += 2 {
+			key := node.Content[index]
+			value := node.Content[index+1]
+			if key == nil {
+				continue
+			}
+			child, errChild := yamlNodeToJSONValue(value)
+			if errChild != nil {
+				return nil, fmt.Errorf("%s: %w", key.Value, errChild)
+			}
+			out[key.Value] = child
+		}
+		return out, nil
+	case yaml.SequenceNode:
+		out := make([]any, 0, len(node.Content))
+		for _, childNode := range node.Content {
+			child, errChild := yamlNodeToJSONValue(childNode)
+			if errChild != nil {
+				return nil, errChild
+			}
+			out = append(out, child)
+		}
+		return out, nil
+	case yaml.ScalarNode:
+		if node.Tag == "!!str" || node.Tag == "" {
+			return node.Value, nil
+		}
+		var value any
+		if errDecode := node.Decode(&value); errDecode != nil {
+			return nil, errDecode
+		}
+		return value, nil
+	case yaml.AliasNode:
+		return yamlNodeToJSONValue(node.Alias)
+	default:
+		return nil, fmt.Errorf("unsupported YAML node kind %d", node.Kind)
 	}
 }
 

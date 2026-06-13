@@ -34,6 +34,7 @@ func (l *testSymbolLoader) Open(file pluginFile, host *Host) (pluginClient, erro
 type testSymbolLookup struct {
 	plugin              *testPlugin
 	active              pluginapi.Plugin
+	shutdownCalls       int
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
 }
@@ -148,7 +149,9 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 	}
 }
 
-func (l *testSymbolLookup) Shutdown() {}
+func (l *testSymbolLookup) Shutdown() {
+	l.shutdownCalls++
+}
 
 func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, error) {
 	var req rpcLifecycleRequest

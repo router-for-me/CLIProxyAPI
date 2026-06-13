@@ -183,6 +183,7 @@ The native plugin management endpoints remain:
 ```text
 GET /v0/management/plugins
 PATCH /v0/management/plugins/{pluginID}/enabled
+GET /v0/management/plugins/{pluginID}/config
 PUT /v0/management/plugins/{pluginID}/config
 PATCH /v0/management/plugins/{pluginID}/config
 ```

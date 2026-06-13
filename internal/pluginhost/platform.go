@@ -44,6 +44,11 @@ func pluginIDFromPath(path string) string {
 	return base
 }
 
+// PluginExtension returns the dynamic library file extension used for goos.
+func PluginExtension(goos string) string {
+	return pluginExtension(goos)
+}
+
 func pluginExtension(goos string) string {
 	switch goos {
 	case "darwin":
