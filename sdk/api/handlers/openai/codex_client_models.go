@@ -53,6 +53,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
+			applyCodexClientContextWindowOverride(entry, model)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
 			result = append(result, entry)
@@ -97,6 +98,15 @@ func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any,
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
 }
 
+func applyCodexClientContextWindowOverride(entry map[string]any, model map[string]any) {
+	contextWindow := intModelValue(model, "context_length")
+	if contextWindow <= 0 {
+		return
+	}
+	entry["context_window"] = contextWindow
+	entry["max_context_window"] = contextWindow
+}
+
 func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any) {
 	info := registry.LookupModelInfo(id)
 
@@ -111,7 +121,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if info.Description != "" {
 			description = info.Description
 		}
-		if info.ContextLength > 0 {
+		if info.ContextLength > 0 && contextWindow <= 0 {
 			contextWindow = info.ContextLength
 		}
 		if info.Type == registry.OpenAIImageModelType {
