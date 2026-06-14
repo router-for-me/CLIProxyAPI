@@ -2,7 +2,11 @@ package management
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -20,6 +24,8 @@ const (
 	defaultLogFileName      = "main.log"
 	logScannerInitialBuffer = 64 * 1024
 	logScannerMaxBuffer     = 8 * 1024 * 1024
+	logCursorVersion        = 1
+	logCursorFingerprintMax = 4 * 1024
 )
 
 // GetLogs returns log lines with optional incremental loading.
@@ -473,6 +479,299 @@ func (acc *logAccumulator) result() ([]string, int, int64) {
 		acc.lines = []string{}
 	}
 	return acc.lines, acc.total, acc.latest
+}
+
+type logCursor struct {
+	Version         int    `json:"v"`
+	File            string `json:"file"`
+	Offset          int64  `json:"offset"`
+	Size            int64  `json:"size"`
+	ModTime         int64  `json:"modTime"`
+	LatestTimestamp int64  `json:"latestTimestamp"`
+	Fingerprint     string `json:"fingerprint"`
+}
+
+type completeLogRead struct {
+	lines     []string
+	endOffset int64
+	latest    int64
+	hitLimit  bool
+}
+
+func encodeLogCursor(cursor logCursor) (string, error) {
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func decodeLogCursor(raw string) (logCursor, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return logCursor{}, fmt.Errorf("empty cursor")
+	}
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		data, err = base64.URLEncoding.DecodeString(value)
+	}
+	if err != nil {
+		return logCursor{}, fmt.Errorf("invalid cursor encoding")
+	}
+	var cursor logCursor
+	if errUnmarshal := json.Unmarshal(data, &cursor); errUnmarshal != nil {
+		return logCursor{}, fmt.Errorf("invalid cursor payload")
+	}
+	if errValidate := validateLogCursor(cursor); errValidate != nil {
+		return logCursor{}, errValidate
+	}
+	return cursor, nil
+}
+
+func validateLogCursor(cursor logCursor) error {
+	if cursor.Version != logCursorVersion {
+		return fmt.Errorf("unsupported cursor version")
+	}
+	if !isAllowedLogCursorFile(cursor.File) {
+		return fmt.Errorf("invalid cursor file")
+	}
+	if cursor.Offset < 0 || cursor.Size < 0 || cursor.ModTime < 0 || cursor.LatestTimestamp < 0 {
+		return fmt.Errorf("invalid cursor position")
+	}
+	if strings.TrimSpace(cursor.Fingerprint) == "" {
+		return fmt.Errorf("invalid cursor fingerprint")
+	}
+	return nil
+}
+
+func isAllowedLogCursorFile(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	if filepath.Base(name) != name {
+		return false
+	}
+	return name == defaultLogFileName || isRotatedLogFile(name)
+}
+
+func safeLogFilePath(logDir, name string) (string, error) {
+	if !isAllowedLogCursorFile(name) {
+		return "", fmt.Errorf("invalid log file")
+	}
+	dirAbs, errAbs := filepath.Abs(logDir)
+	if errAbs != nil {
+		return "", fmt.Errorf("resolve log directory: %w", errAbs)
+	}
+	dirAbs = filepath.Clean(dirAbs)
+	fullPath := filepath.Clean(filepath.Join(dirAbs, name))
+	rel, errRel := filepath.Rel(dirAbs, fullPath)
+	if errRel != nil {
+		return "", fmt.Errorf("resolve log file: %w", errRel)
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("invalid log file")
+	}
+	return fullPath, nil
+}
+
+func newLogCursor(path string, offset, latest int64) (string, error) {
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		return "", errStat
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("invalid log file")
+	}
+	if offset < 0 || offset > info.Size() {
+		return "", fmt.Errorf("invalid cursor offset")
+	}
+	fingerprint, errFingerprint := logFileFingerprint(path, offset)
+	if errFingerprint != nil {
+		return "", errFingerprint
+	}
+	return encodeLogCursor(logCursor{
+		Version:         logCursorVersion,
+		File:            filepath.Base(path),
+		Offset:          offset,
+		Size:            info.Size(),
+		ModTime:         info.ModTime().Unix(),
+		LatestTimestamp: latest,
+		Fingerprint:     fingerprint,
+	})
+}
+
+func logFileFingerprint(path string, boundary int64) (string, error) {
+	if boundary < 0 {
+		return "", fmt.Errorf("invalid fingerprint boundary")
+	}
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		return "", errOpen
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	info, errStat := file.Stat()
+	if errStat != nil {
+		return "", errStat
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("invalid log file")
+	}
+	if boundary > info.Size() {
+		return "", fmt.Errorf("invalid fingerprint boundary")
+	}
+
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "log-cursor-v1:%d:", boundary)
+	firstLen := minInt64(boundary, logCursorFingerprintMax)
+	if errRead := writeFileRange(hash, file, 0, firstLen); errRead != nil {
+		return "", errRead
+	}
+	tailLen := minInt64(boundary, logCursorFingerprintMax)
+	tailStart := boundary - tailLen
+	_, _ = fmt.Fprintf(hash, ":%d:", tailStart)
+	if errRead := writeFileRange(hash, file, tailStart, tailLen); errRead != nil {
+		return "", errRead
+	}
+	sum := hash.Sum(nil)
+	return base64.RawURLEncoding.EncodeToString(sum[:12]), nil
+}
+
+func writeFileRange(dst io.Writer, file *os.File, start, length int64) error {
+	if length <= 0 {
+		return nil
+	}
+	buf := make([]byte, 32*1024)
+	pos := start
+	remaining := length
+	for remaining > 0 {
+		chunk := minInt64(int64(len(buf)), remaining)
+		n, errRead := file.ReadAt(buf[:chunk], pos)
+		if n > 0 {
+			if _, errWrite := dst.Write(buf[:n]); errWrite != nil {
+				return errWrite
+			}
+			pos += int64(n)
+			remaining -= int64(n)
+		}
+		if errRead != nil {
+			if errRead == io.EOF && remaining == 0 {
+				return nil
+			}
+			return errRead
+		}
+	}
+	return nil
+}
+
+func readCompleteLogLines(path string, offset, maxOffset int64, limit int) (completeLogRead, error) {
+	if offset < 0 {
+		return completeLogRead{}, fmt.Errorf("invalid log offset")
+	}
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		return completeLogRead{}, errOpen
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	info, errStat := file.Stat()
+	if errStat != nil {
+		return completeLogRead{}, errStat
+	}
+	if info.IsDir() {
+		return completeLogRead{}, fmt.Errorf("invalid log file")
+	}
+	size := info.Size()
+	if maxOffset < 0 || maxOffset > size {
+		maxOffset = size
+	}
+	if offset > maxOffset {
+		return completeLogRead{}, fmt.Errorf("invalid log offset")
+	}
+
+	reader := bufio.NewReader(io.NewSectionReader(file, offset, maxOffset-offset))
+	result := completeLogRead{
+		lines:     []string{},
+		endOffset: offset,
+	}
+	currentOffset := offset
+	for {
+		raw, errRead := reader.ReadString('\n')
+		if strings.HasSuffix(raw, "\n") {
+			currentOffset += int64(len(raw))
+			line := strings.TrimSuffix(raw, "\n")
+			line = strings.TrimRight(line, "\r")
+			result.lines = append(result.lines, line)
+			result.endOffset = currentOffset
+			if ts := parseTimestamp(line); ts > result.latest {
+				result.latest = ts
+			}
+			if limit > 0 && len(result.lines) >= limit {
+				result.hitLimit = true
+				break
+			}
+			if errRead == nil {
+				continue
+			}
+		}
+		if errRead == io.EOF {
+			break
+		}
+		if errRead != nil {
+			return completeLogRead{}, errRead
+		}
+	}
+	return result, nil
+}
+
+func completeLogBoundary(path string) (int64, error) {
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		return 0, errOpen
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	info, errStat := file.Stat()
+	if errStat != nil {
+		return 0, errStat
+	}
+	if info.IsDir() {
+		return 0, fmt.Errorf("invalid log file")
+	}
+	size := info.Size()
+	if size == 0 {
+		return 0, nil
+	}
+	buf := make([]byte, 32*1024)
+	pos := size
+	for pos > 0 {
+		chunk := minInt64(int64(len(buf)), pos)
+		pos -= chunk
+		n, errRead := file.ReadAt(buf[:chunk], pos)
+		if errRead != nil && errRead != io.EOF {
+			return 0, errRead
+		}
+		if n <= 0 {
+			continue
+		}
+		if idx := strings.LastIndexByte(string(buf[:n]), '\n'); idx >= 0 {
+			return pos + int64(idx) + 1, nil
+		}
+	}
+	return 0, nil
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func parseCutoff(raw string) int64 {
