@@ -267,6 +267,45 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	}
 }
 
+func TestVideosRoutesKeepXAINativeAndExposeOpenAIPrefix(t *testing.T) {
+	server := newTestServer(t)
+
+	nativeReq := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"sora-2","prompt":"make a video"}`))
+	nativeReq.Header.Set("Authorization", "Bearer test-key")
+	nativeReq.Header.Set("Content-Type", "application/json")
+	nativeRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(nativeRR, nativeReq)
+	if nativeRR.Code != http.StatusBadRequest {
+		t.Fatalf("native status = %d, want %d body=%s", nativeRR.Code, http.StatusBadRequest, nativeRR.Body.String())
+	}
+	if !strings.Contains(nativeRR.Body.String(), "/v1/videos/generations") {
+		t.Fatalf("expected /v1/videos to keep xAI native validation, body=%s", nativeRR.Body.String())
+	}
+
+	openAIReq := httptest.NewRequest(http.MethodPost, "/openai/v1/videos", strings.NewReader(`{"model":`))
+	openAIReq.Header.Set("Authorization", "Bearer test-key")
+	openAIReq.Header.Set("Content-Type", "application/json")
+	openAIRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(openAIRR, openAIReq)
+	if openAIRR.Code != http.StatusBadRequest {
+		t.Fatalf("openai create status = %d, want %d body=%s", openAIRR.Code, http.StatusBadRequest, openAIRR.Body.String())
+	}
+	if !strings.Contains(openAIRR.Body.String(), "body must be valid JSON") {
+		t.Fatalf("expected /openai/v1/videos create handler, body=%s", openAIRR.Body.String())
+	}
+
+	contentReq := httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_123/content?variant=thumbnail", nil)
+	contentReq.Header.Set("Authorization", "Bearer test-key")
+	contentRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(contentRR, contentReq)
+	if contentRR.Code != http.StatusBadRequest {
+		t.Fatalf("content status = %d, want %d body=%s", contentRR.Code, http.StatusBadRequest, contentRR.Body.String())
+	}
+	if !strings.Contains(contentRR.Body.String(), "variant") {
+		t.Fatalf("expected /openai/v1/videos content handler, body=%s", contentRR.Body.String())
+	}
+}
+
 func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 

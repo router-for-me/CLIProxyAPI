@@ -72,6 +72,12 @@ func TestIsAIAPIPathIncludesImages(t *testing.T) {
 	if !isAIAPIPath("/v1/videos/video_123") {
 		t.Fatalf("expected /v1/videos/video_123 to be treated as AI API path")
 	}
+	if !isAIAPIPath("/openai/v1/videos") {
+		t.Fatalf("expected /openai/v1/videos to be treated as AI API path")
+	}
+	if !isAIAPIPath("/openai/v1/videos/video_123/content") {
+		t.Fatalf("expected /openai/v1/videos/video_123/content to be treated as AI API path")
+	}
 }
 
 func TestIsAIAPIPathIncludesCodexBackend(t *testing.T) {
