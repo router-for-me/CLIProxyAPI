@@ -2096,7 +2096,10 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
 	payload := []byte(`{"system":"proxy rules","messages":[{"role":"user","content":[{"type":"text","text":"proxy access"}]}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	out, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
@@ -2191,8 +2194,7 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 // must pass through unchanged) and a lowercase tool that we forward-rename.
 // Before the fix, triggering ANY forward rename caused the reverse pass to
 // lowercase every TitleCase tool in the response using a global reverse map,
-// corrupting tool names the client originally sent in TitleCase (notably Amp
-// CLI's `Bash`, which its registry lookup cannot find as `bash`).
+// corrupting tool names the client originally sent in TitleCase.
 func TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed(t *testing.T) {
 	body := []byte(`{"tools":[` +
 		`{"name":"Bash","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},` +

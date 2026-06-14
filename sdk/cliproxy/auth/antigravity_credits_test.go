@@ -9,6 +9,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -124,6 +125,35 @@ func TestManagerExecuteStream_AntigravityCreditsFallbackAfterBootstrap429(t *tes
 	}
 	if executor.streamCreditsRequested[0] || !executor.streamCreditsRequested[1] {
 		t.Fatalf("credits flags = %v, want [false true]", executor.streamCreditsRequested)
+	}
+}
+
+func TestManagerExecuteStream_AntigravityCreditsHomeKVUnavailableFailsRequest(t *testing.T) {
+	const model = "claude-opus-4-6-thinking"
+	executor := &antigravityCreditsFallbackExecutor{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:          internalconfig.HomeConfig{Enabled: true},
+		QuotaExceeded: internalconfig.QuotaExceeded{AntigravityCredits: true},
+	})
+	manager.RegisterExecutor(executor)
+	registry.GetGlobalRegistry().RegisterClient("ag-credits-home-kv", "antigravity", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("ag-credits-home-kv") })
+	homekv.SetCurrent(homekv.New(internalconfig.HomeConfig{Enabled: false}))
+	t.Cleanup(homekv.ClearCurrent)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "ag-credits-home-kv", Provider: "antigravity"}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, errExecute := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("ExecuteStream() error = nil, want home kv unavailable error")
+	}
+	if status := statusCodeFromError(errExecute); status != http.StatusServiceUnavailable {
+		t.Fatalf("ExecuteStream() status = %d, want %d; err=%v", status, http.StatusServiceUnavailable, errExecute)
+	}
+	if !strings.Contains(errExecute.Error(), "home kv store unavailable") {
+		t.Fatalf("ExecuteStream() error = %v, want home kv store unavailable", errExecute)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -100,6 +101,17 @@ var (
 	}
 )
 
+type antigravityKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSet(ctx context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error)
+	KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
+	KVDel(ctx context.Context, keys ...string) (int64, error)
+}
+
+var currentAntigravityKVClient = func() (antigravityKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
+
 type antigravityCreditsBalance struct {
 	CreditAmount    float64
 	MinCreditAmount float64
@@ -120,26 +132,62 @@ type antigravityTokenRefreshData struct {
 }
 
 func antigravityAuthHasCredits(auth *cliproxyauth.Auth) bool {
-	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+	ok, err := antigravityAuthHasCreditsRequired(context.Background(), auth)
+	if err != nil {
+		log.Errorf("antigravity executor: home kv credits check error: %v", err)
 		return false
 	}
-	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID); ok && hint.Known {
-		return hint.Available
+	return ok
+}
+
+func antigravityAuthHasCreditsRequired(ctx context.Context, auth *cliproxyauth.Auth) (bool, error) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return false, nil
 	}
-	val, ok := antigravityCreditsBalanceByAuth.Load(strings.TrimSpace(auth.ID))
+	authID := strings.TrimSpace(auth.ID)
+	if hint, ok, errHint := cliproxyauth.GetAntigravityCreditsHintRequired(ctx, authID); errHint != nil {
+		return false, errHint
+	} else if ok && hint.Known {
+		return hint.Available, nil
+	}
+
+	client, homeMode, errClient := currentAntigravityKVClient()
+	if homeMode {
+		if errClient != nil {
+			return false, errClient
+		}
+		raw, found, errBalance := client.KVGet(ctx, antigravityCreditsBalanceKey(authID))
+		if errBalance != nil {
+			return false, errBalance
+		}
+		if !found {
+			return true, nil
+		}
+		var homeBalance antigravityCreditsBalance
+		if errUnmarshal := json.Unmarshal(raw, &homeBalance); errUnmarshal != nil {
+			return false, errUnmarshal
+		}
+		return antigravityCreditsBalanceAvailable(authID, homeBalance), nil
+	}
+
+	val, ok := antigravityCreditsBalanceByAuth.Load(authID)
 	if !ok {
-		return true // optimistic: assume credits available when balance unknown
+		return true, nil // optimistic: assume credits available when balance unknown
 	}
 	bal, valid := val.(antigravityCreditsBalance)
 	if !valid {
-		antigravityCreditsBalanceByAuth.Delete(strings.TrimSpace(auth.ID))
-		return false
+		antigravityCreditsBalanceByAuth.Delete(authID)
+		return false, nil
 	}
+	return antigravityCreditsBalanceAvailable(authID, bal), nil
+}
+
+func antigravityCreditsBalanceAvailable(authID string, bal antigravityCreditsBalance) bool {
 	if !bal.Known {
 		return false
 	}
 	available := bal.CreditAmount >= bal.MinCreditAmount
-	cliproxyauth.SetAntigravityCreditsHint(strings.TrimSpace(auth.ID), cliproxyauth.AntigravityCreditsHint{
+	cliproxyauth.SetAntigravityCreditsHint(strings.TrimSpace(authID), cliproxyauth.AntigravityCreditsHint{
 		Known:           true,
 		Available:       available,
 		CreditAmount:    bal.CreditAmount,
@@ -249,7 +297,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	return client
 }
 
-func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
+func validateAntigravityRequestSignatures(ctx context.Context, modelName string, from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
 	if from.String() != "claude" {
 		return rawJSON, nil
 	}
@@ -258,6 +306,9 @@ func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []b
 	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
 	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "prefix_cleanup", "empty_or_non_claude_signature")
 	if cache.SignatureCacheEnabled() {
+		if errRequire := antigravityclaude.RequireCachedThinkingSignatures(ctx, modelName, rawJSON); errRequire != nil {
+			return nil, homeKVUnavailableStatusErr(errRequire)
+		}
 		return rawJSON, nil
 	}
 	if !cache.SignatureBypassStrictMode() {
@@ -511,11 +562,12 @@ func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 		ExplicitBalanceExhausted: true,
 	}
 	antigravityCreditsFailureByAuth.Store(authID, state)
-	antigravityCreditsBalanceByAuth.Store(authID, antigravityCreditsBalance{
+	bal := antigravityCreditsBalance{
 		CreditAmount:    0,
 		MinCreditAmount: 1,
 		Known:           true,
-	})
+	}
+	storeAntigravityCreditsBalanceBestEffort(authID, bal)
 	cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
 		Known:           true,
 		Available:       false,
@@ -568,7 +620,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	if inCooldown, remaining := antigravityIsInShortCooldown(auth, baseModel, time.Now()); inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
+	if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
+		return resp, homeKVUnavailableStatusErr(errCooldown)
+	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
 		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
 		d := remaining
 		return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
@@ -591,7 +645,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	originalPayload, errValidate := validateAntigravityRequestSignatures(ctx, baseModel, from, originalPayload)
 	if errValidate != nil {
 		return resp, errValidate
 	}
@@ -689,7 +743,10 @@ attemptLoop:
 					}
 				case antigravity429DecisionShortCooldownSwitchAuth:
 					if decision.retryAfter != nil && *decision.retryAfter > 0 {
-						markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+						if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
+							err = homeKVUnavailableStatusErr(errMarkCooldown)
+							return resp, err
+						}
 						log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
 					}
 				case antigravity429DecisionFullQuotaExhausted:
@@ -775,7 +832,9 @@ attemptLoop:
 // executeClaudeNonStream performs a claude non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	if inCooldown, remaining := antigravityIsInShortCooldown(auth, baseModel, time.Now()); inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
+	if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
+		return resp, homeKVUnavailableStatusErr(errCooldown)
+	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
 		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
 		d := remaining
 		return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
@@ -793,7 +852,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	originalPayload, errValidate := validateAntigravityRequestSignatures(ctx, baseModel, from, originalPayload)
 	if errValidate != nil {
 		return resp, errValidate
 	}
@@ -906,7 +965,10 @@ attemptLoop:
 						}
 					case antigravity429DecisionShortCooldownSwitchAuth:
 						if decision.retryAfter != nil && *decision.retryAfter > 0 {
-							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
+								err = homeKVUnavailableStatusErr(errMarkCooldown)
+								return resp, err
+							}
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
 						}
 					case antigravity429DecisionFullQuotaExhausted:
@@ -1239,7 +1301,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	ctx = context.WithValue(ctx, "alt", "")
-	if inCooldown, remaining := antigravityIsInShortCooldown(auth, baseModel, time.Now()); inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
+	if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
+		return nil, homeKVUnavailableStatusErr(errCooldown)
+	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
 		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
 		d := remaining
 		return nil, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
@@ -1257,7 +1321,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	originalPayload, errValidate := validateAntigravityRequestSignatures(ctx, baseModel, from, originalPayload)
 	if errValidate != nil {
 		return nil, errValidate
 	}
@@ -1370,7 +1434,10 @@ attemptLoop:
 						}
 					case antigravity429DecisionShortCooldownSwitchAuth:
 						if decision.retryAfter != nil && *decision.retryAfter > 0 {
-							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
+							if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
+								err = homeKVUnavailableStatusErr(errMarkCooldown)
+								return nil, err
+							}
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
 						}
 					case antigravity429DecisionFullQuotaExhausted:
@@ -1564,7 +1631,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
-	originalPayloadSource, errValidate := validateAntigravityRequestSignatures(from, originalPayloadSource)
+	originalPayloadSource, errValidate := validateAntigravityRequestSignatures(ctx, baseModel, from, originalPayloadSource)
 	if errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
@@ -1767,6 +1834,34 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 		accessToken = metaStringValue(auth.Metadata, "access_token")
 	}
 	if strings.TrimSpace(accessToken) == "" {
+		return
+	}
+
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv best-effort refresh lock failed prefix=cpa:antigravity:*: %v", errClient)
+			return
+		}
+		written, errSetNX := client.KVSetNX(context.Background(), antigravityCreditsRefreshLockKey(authID), []byte("1"), antigravityCreditsHintRefreshInterval)
+		if errSetNX != nil {
+			log.Errorf("antigravity executor: home kv best-effort refresh lock failed prefix=cpa:antigravity:*: %v", errSetNX)
+			return
+		}
+		if !written {
+			return
+		}
+		refreshCtx := context.Background()
+		if ctx != nil {
+			if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+				refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
+			}
+		}
+		refreshCtx, cancel := context.WithTimeout(refreshCtx, antigravityCreditsHintRefreshTimeout)
+		authCopy := auth.Clone()
+		go func(auth *cliproxyauth.Auth, token string) {
+			defer cancel()
+			e.updateAntigravityCreditsBalance(refreshCtx, auth, token)
+		}(authCopy, accessToken)
 		return
 	}
 
@@ -2048,7 +2143,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 			PaidTierID:      paidTierID,
 			Known:           true,
 		}
-		antigravityCreditsBalanceByAuth.Store(authID, bal)
+		storeAntigravityCreditsBalanceBestEffort(authID, bal)
 		cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
 			Known:           true,
 			Available:       creditAmount >= minAmount,
@@ -2406,34 +2501,147 @@ func antigravityShortCooldownKey(auth *cliproxyauth.Auth, modelName string) stri
 	return authID + "|" + modelName + "|sc"
 }
 
+func antigravityCreditsBalanceKey(authID string) string {
+	return "cpa:antigravity:credits-balance:" + strings.TrimSpace(authID)
+}
+
+func antigravityCreditsRefreshLockKey(authID string) string {
+	return "cpa:antigravity:credits-refresh-lock:" + strings.TrimSpace(authID)
+}
+
+func antigravityShortCooldownKVKey(auth *cliproxyauth.Auth, modelName string) string {
+	if auth == nil {
+		return ""
+	}
+	authID := strings.TrimSpace(auth.ID)
+	modelName = strings.TrimSpace(modelName)
+	if authID == "" || modelName == "" {
+		return ""
+	}
+	return "cpa:antigravity:short-cooldown:" + authID + ":" + homekv.HashKeyPart(modelName)
+}
+
 func antigravityIsInShortCooldown(auth *cliproxyauth.Auth, modelName string, now time.Time) (bool, time.Duration) {
+	inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(context.Background(), auth, modelName, now)
+	if errCooldown != nil {
+		log.Errorf("antigravity executor: home kv cooldown read error: %v", errCooldown)
+		return false, 0
+	}
+	return inCooldown, remaining
+}
+
+func antigravityIsInShortCooldownRequired(ctx context.Context, auth *cliproxyauth.Auth, modelName string, now time.Time) (bool, time.Duration, error) {
+	kvKey := antigravityShortCooldownKVKey(auth, modelName)
+	client, homeMode, errClient := currentAntigravityKVClient()
+	if homeMode {
+		if errClient != nil {
+			return false, 0, errClient
+		}
+		if kvKey == "" {
+			return false, 0, nil
+		}
+		raw, found, errGet := client.KVGet(ctx, kvKey)
+		if errGet != nil || !found {
+			return false, 0, errGet
+		}
+		untilNano, errParse := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		if errParse != nil {
+			return false, 0, errParse
+		}
+		remaining := time.Unix(0, untilNano).Sub(now)
+		if remaining <= 0 {
+			if _, errDel := client.KVDel(ctx, kvKey); errDel != nil {
+				return false, 0, errDel
+			}
+			return false, 0, nil
+		}
+		return true, remaining, nil
+	}
+
 	key := antigravityShortCooldownKey(auth, modelName)
 	if key == "" {
-		return false, 0
+		return false, 0, nil
 	}
 	value, ok := antigravityShortCooldownByAuth.Load(key)
 	if !ok {
-		return false, 0
+		return false, 0, nil
 	}
 	until, ok := value.(time.Time)
 	if !ok || until.IsZero() {
 		antigravityShortCooldownByAuth.Delete(key)
-		return false, 0
+		return false, 0, nil
 	}
 	remaining := until.Sub(now)
 	if remaining <= 0 {
 		antigravityShortCooldownByAuth.Delete(key)
-		return false, 0
+		return false, 0, nil
 	}
-	return true, remaining
+	return true, remaining, nil
 }
 
 func markAntigravityShortCooldown(auth *cliproxyauth.Auth, modelName string, now time.Time, duration time.Duration) {
+	if errMark := markAntigravityShortCooldownRequired(context.Background(), auth, modelName, now, duration); errMark != nil {
+		log.Errorf("antigravity executor: home kv cooldown write error: %v", errMark)
+	}
+}
+
+func markAntigravityShortCooldownRequired(ctx context.Context, auth *cliproxyauth.Auth, modelName string, now time.Time, duration time.Duration) error {
+	kvKey := antigravityShortCooldownKVKey(auth, modelName)
+	client, homeMode, errClient := currentAntigravityKVClient()
+	if homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		if kvKey == "" || duration <= 0 {
+			return nil
+		}
+		until := now.Add(duration)
+		written, errSet := client.KVSet(ctx, kvKey, []byte(strconv.FormatInt(until.UnixNano(), 10)), homekv.KVSetOptions{EX: duration + 5*time.Second})
+		if errSet != nil {
+			return errSet
+		}
+		if !written {
+			return fmt.Errorf("home kv store unavailable")
+		}
+		return nil
+	}
+
 	key := antigravityShortCooldownKey(auth, modelName)
 	if key == "" {
-		return
+		return nil
 	}
 	antigravityShortCooldownByAuth.Store(key, now.Add(duration))
+	return nil
+}
+
+func storeAntigravityCreditsBalanceBestEffort(authID string, bal antigravityCreditsBalance) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv best-effort credits balance set failed prefix=cpa:antigravity:*: %v", errClient)
+			return
+		}
+		raw, errMarshal := json.Marshal(bal)
+		if errMarshal != nil {
+			log.Errorf("antigravity executor: home kv best-effort credits balance set failed prefix=cpa:antigravity:*: %v", errMarshal)
+			return
+		}
+		if _, errSet := client.KVSet(context.Background(), antigravityCreditsBalanceKey(authID), raw, homekv.KVSetOptions{EX: 30 * time.Minute}); errSet != nil {
+			log.Errorf("antigravity executor: home kv best-effort credits balance set failed prefix=cpa:antigravity:*: %v", errSet)
+		}
+		return
+	}
+	antigravityCreditsBalanceByAuth.Store(authID, bal)
+}
+
+func homeKVUnavailableStatusErr(cause error) statusErr {
+	if cause == nil {
+		return statusErr{code: http.StatusServiceUnavailable, msg: "home kv store unavailable"}
+	}
+	return statusErr{code: http.StatusServiceUnavailable, msg: fmt.Sprintf("home kv store unavailable: %v", cause)}
 }
 
 func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
