@@ -2276,10 +2276,17 @@ func openAICompatibilityModelThinking(model config.OpenAICompatibilityModel) *re
 	}
 	if upstream := registry.LookupStaticModelInfo(strings.TrimSpace(model.Name)); upstream != nil && upstream.Thinking != nil {
 		if len(upstream.Thinking.Levels) > 0 {
-			return cloneThinkingSupport(upstream.Thinking)
+			return cloneThinkingLevels(upstream.Thinking)
 		}
 	}
 	return &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+}
+
+func cloneThinkingLevels(thinking *registry.ThinkingSupport) *registry.ThinkingSupport {
+	if thinking == nil {
+		return nil
+	}
+	return &registry.ThinkingSupport{Levels: append([]string(nil), thinking.Levels...)}
 }
 
 func cloneThinkingSupport(thinking *registry.ThinkingSupport) *registry.ThinkingSupport {

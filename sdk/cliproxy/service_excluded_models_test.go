@@ -188,6 +188,28 @@ func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForStaticBudgetO
 	}
 }
 
+func TestBuildOpenAICompatibilityConfigModelsInheritsOnlyStaticThinkingLevels(t *testing.T) {
+	staticModel := internalregistry.LookupStaticModelInfo("gemini-3.1-pro-preview")
+	if staticModel == nil || staticModel.Thinking == nil || len(staticModel.Thinking.Levels) == 0 || staticModel.Thinking.Max == 0 || !staticModel.Thinking.DynamicAllowed {
+		t.Fatal("expected static gemini-3.1-pro-preview to have hybrid thinking support")
+	}
+
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "gemini-3.1-pro-preview"},
+		},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	requireThinkingLevels(t, models[0].Thinking, staticModel.Thinking.Levels)
+	if models[0].Thinking.Min != 0 || models[0].Thinking.Max != 0 || models[0].Thinking.DynamicAllowed || models[0].Thinking.ZeroAllowed {
+		t.Fatalf("thinking support = %+v, want levels-only static inheritance", models[0].Thinking)
+	}
+}
+
 func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForUnknownModel(t *testing.T) {
 	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
 		Name: "compat",
