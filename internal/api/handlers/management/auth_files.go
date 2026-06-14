@@ -2299,6 +2299,19 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
+		// Mirror the enriched subscription fields into attributes the runtime
+		// reads (sdk/cliproxy/service.go selects the Codex model catalog from
+		// Attributes["plan_type"]); without this a Free/Plus/Team account added
+		// through this flow would be registered as the default plan.
+		if record.Attributes == nil {
+			record.Attributes = make(map[string]string)
+		}
+		if planType, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(planType) != "" {
+			record.Attributes["plan_type"] = strings.TrimSpace(planType)
+		}
+		if expiry, ok := metadata["subscription_active_until"].(string); ok && strings.TrimSpace(expiry) != "" {
+			record.Attributes["subscription_active_until"] = strings.TrimSpace(expiry)
+		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")

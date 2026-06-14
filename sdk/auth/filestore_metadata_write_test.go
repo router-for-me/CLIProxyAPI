@@ -98,3 +98,41 @@ func TestList_CopiesCodexPlanTypeIntoAttributes(t *testing.T) {
 		t.Fatalf("Attributes[subscription_active_until] = %q, want %s", got, future)
 	}
 }
+
+func TestPersistCodexSubscriptionFields_DoesNotClobberTokens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex.json")
+	// Simulate the latest on-disk state written by a concurrent token Save.
+	if err := os.WriteFile(path, []byte(`{"type":"codex","access_token":"fresh","refresh_token":"fresh-r"}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	// Enrichment built from a STALE read (old tokens) plus new subscription info.
+	enriched := map[string]any{
+		"access_token":              "stale",
+		"refresh_token":             "stale-r",
+		"plan_type":                 "plus",
+		"subscription_active_until": "2030-01-01T00:00:00Z",
+		"subscription_expired":      false,
+	}
+	store.persistCodexSubscriptionFields(path, enriched)
+
+	raw, _ := os.ReadFile(path)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", string(raw), err)
+	}
+	// Tokens must remain the fresh on-disk values, not be rolled back.
+	if got["access_token"] != "fresh" || got["refresh_token"] != "fresh-r" {
+		t.Fatalf("tokens were clobbered: %s", string(raw))
+	}
+	// Subscription fields must be written.
+	if got["plan_type"] != "plus" {
+		t.Fatalf("plan_type not persisted: %s", string(raw))
+	}
+	if got["subscription_active_until"] != "2030-01-01T00:00:00Z" {
+		t.Fatalf("expiry not persisted: %s", string(raw))
+	}
+}

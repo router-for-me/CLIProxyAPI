@@ -296,7 +296,7 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 		changed, _ := codex.EnrichSubscriptionMetadata(enrichCtx, metadata, http.DefaultClient)
 		cancelEnrich()
 		if changed {
-			_ = writeAuthMetadataFile(path, metadata)
+			s.persistCodexSubscriptionFields(path, metadata)
 		}
 	}
 	info, errStat = os.Stat(path)
@@ -341,6 +341,43 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+// codexSubscriptionMetadataKeys are the only keys the List-path enrichment is
+// allowed to write back, so a concurrent token Save is never rolled back.
+var codexSubscriptionMetadataKeys = []string{
+	"plan_type",
+	"subscription_active_until",
+	"subscription_expired",
+	"chatgpt_account_id",
+	"account_id",
+	"chatgpt_subscription_active_until",
+	"chatgpt_subscription_last_checked",
+}
+
+// persistCodexSubscriptionFields writes the enriched subscription fields back
+// to disk under the store mutex (the same lock Save uses). It re-reads the
+// current file and merges only the subscription keys, so a token refresh/login
+// Save racing the enrichment cannot have its fresh access/refresh tokens
+// clobbered by a stale read taken before the network call.
+func (s *FileTokenStore) persistCodexSubscriptionFields(path string, enriched map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, errRead := os.ReadFile(path)
+	if errRead != nil || len(data) == 0 {
+		return
+	}
+	current := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(data, &current); errUnmarshal != nil {
+		return
+	}
+	for _, key := range codexSubscriptionMetadataKeys {
+		if value, ok := enriched[key]; ok {
+			current[key] = value
+		}
+	}
+	_ = writeAuthMetadataFile(path, current)
 }
 
 func writeAuthMetadataFile(path string, metadata map[string]any) error {
