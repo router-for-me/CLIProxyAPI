@@ -359,6 +359,100 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 	}
 }
 
+func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-anthropic-version-dispatch"
+	modelRegistry.RegisterClient(clientID, "claude", []*registry.ModelInfo{
+		{
+			ID:                  "claude-sonnet-4-6",
+			Object:              "model",
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.6 Sonnet",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	// Anthropic API request (Anthropic-Version header, non-claude-cli User-Agent) -> Claude format.
+	t.Run("anthropic version header routes to claude format", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("User-Agent", "Zed/1.0")
+		req.Header.Set("Anthropic-Version", "2023-06-01")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var resp struct {
+			Object  string           `json:"object"`
+			HasMore *bool            `json:"has_more"`
+			Data    []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if resp.Object == "list" {
+			t.Fatalf("expected Claude format (no object=list), got OpenAI format: %s", rr.Body.String())
+		}
+		if resp.HasMore == nil {
+			t.Fatalf("expected Claude envelope with has_more, got %s", rr.Body.String())
+		}
+
+		var claudeModel map[string]any
+		for _, m := range resp.Data {
+			if id, _ := m["id"].(string); id == "claude-sonnet-4-6" {
+				claudeModel = m
+			}
+		}
+		if claudeModel == nil {
+			t.Fatalf("expected claude-sonnet-4-6 in response, got %s", rr.Body.String())
+		}
+		for _, field := range []string{"max_input_tokens", "max_tokens", "display_name"} {
+			if _, ok := claudeModel[field]; !ok {
+				t.Fatalf("expected Claude model to include %q, got %v", field, claudeModel)
+			}
+		}
+	})
+
+	// Plain request (no Anthropic-Version, non-claude-cli User-Agent) -> OpenAI format, unaffected.
+	t.Run("plain request stays on openai format", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var resp struct {
+			Object string           `json:"object"`
+			Data   []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if resp.Object != "list" {
+			t.Fatalf("expected OpenAI format (object=list), got %s", rr.Body.String())
+		}
+		for _, m := range resp.Data {
+			if _, ok := m["max_input_tokens"]; ok {
+				t.Fatalf("did not expect max_input_tokens in OpenAI format, got %v", m)
+			}
+		}
+	})
+}
+
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
