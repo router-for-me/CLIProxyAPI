@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestWriteAuthMetadataFile_WritesAtomicallyWithoutTempLeftover(t *testing.T) {
@@ -134,5 +136,33 @@ func TestPersistCodexSubscriptionFields_DoesNotClobberTokens(t *testing.T) {
 	}
 	if got["subscription_active_until"] != "2030-01-01T00:00:00Z" {
 		t.Fatalf("expiry not persisted: %s", string(raw))
+	}
+}
+
+func TestList_SkipsEnrichmentForDisabledCodex(t *testing.T) {
+	dir := t.TempDir()
+	// Disabled codex auth with an expired/missing expiry would otherwise hit the
+	// network; List must return promptly without contacting ChatGPT.
+	seed := `{"type":"codex","access_token":"a","id_token":"","disabled":true,"subscription_active_until":"2000-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(dir, "codex.json"), []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+
+	done := make(chan struct{})
+	var auths []*cliproxyauth.Auth
+	go func() {
+		auths, _ = store.List(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("List blocked on enrichment for a disabled codex auth")
+	}
+	if len(auths) != 1 || !auths[0].Disabled {
+		t.Fatalf("expected one disabled auth, got %#v", auths)
 	}
 }

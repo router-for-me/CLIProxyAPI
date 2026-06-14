@@ -289,7 +289,11 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 			}
 		}
 	}
-	if provider == "codex" {
+	disabled, _ := metadata["disabled"].(bool)
+	// Skip the subscription lookup for disabled credentials: they are excluded
+	// from runtime use, so contacting ChatGPT here would only delay List by up
+	// to the 20s timeout per file for no benefit.
+	if provider == "codex" && !disabled {
 		// Derive the timeout from the caller's context so a cancelled load
 		// (startup/shutdown) aborts promptly instead of blocking ~20s per file.
 		enrichCtx, cancelEnrich := context.WithTimeout(ctx, 20*time.Second)
@@ -304,7 +308,6 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 		return nil, fmt.Errorf("stat file: %w", errStat)
 	}
 	id := s.idFor(path, baseDir)
-	disabled, _ := metadata["disabled"].(bool)
 	status := cliproxyauth.StatusActive
 	if disabled {
 		status = cliproxyauth.StatusDisabled
