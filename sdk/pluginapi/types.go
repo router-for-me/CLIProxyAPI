@@ -3,6 +3,7 @@ package pluginapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"time"
@@ -74,6 +75,10 @@ type Capabilities struct {
 	AuthProvider AuthProvider
 	// FrontendAuthProvider authenticates frontend requests before proxy handling.
 	FrontendAuthProvider FrontendAuthProvider
+	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
+	FrontendAuthProviderExclusive bool
+	// Scheduler chooses an auth candidate before the built-in scheduler runs.
+	Scheduler Scheduler
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -93,13 +98,19 @@ type Capabilities struct {
 	ResponseBeforeTranslator ResponseNormalizer
 	// ResponseAfterTranslator normalizes translated responses before delivery.
 	ResponseAfterTranslator ResponseNormalizer
+	// RequestInterceptor rewrites execution requests before and after credential selection.
+	RequestInterceptor RequestInterceptor
+	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
+	ResponseInterceptor ResponseInterceptor
+	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
+	StreamChunkInterceptor StreamChunkInterceptor
 	// ThinkingApplier applies validated thinking configuration to provider payloads.
 	ThinkingApplier ThinkingApplier
 	// UsagePlugin receives completed usage records.
 	UsagePlugin UsagePlugin
 	// CommandLinePlugin declares and handles plugin-owned command-line flags.
 	CommandLinePlugin CommandLinePlugin
-	// ManagementAPI declares plugin-owned diagnostic Management API routes.
+	// ManagementAPI declares plugin-owned diagnostic Management API and resource routes.
 	ManagementAPI ManagementAPI
 }
 
@@ -433,6 +444,70 @@ type FrontendAuthResponse struct {
 	Metadata map[string]string
 }
 
+const (
+	// SchedulerBuiltinRoundRobin delegates auth selection to the built-in round-robin scheduler.
+	SchedulerBuiltinRoundRobin = "round-robin"
+	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
+	SchedulerBuiltinFillFirst = "fill-first"
+)
+
+// Scheduler chooses an auth candidate before the built-in scheduler runs.
+type Scheduler interface {
+	Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error)
+}
+
+// SchedulerPickRequest describes the routing context offered to a scheduler plugin.
+type SchedulerPickRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata
+	// Provider is the primary provider key requested by the route.
+	Provider string
+	// Providers contains every provider key accepted by the route.
+	Providers []string
+	// Model is the requested model identifier.
+	Model string
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Options contains request-scoped scheduler inputs.
+	Options SchedulerOptions
+	// Candidates contains auth records available for selection.
+	Candidates []SchedulerAuthCandidate
+}
+
+// SchedulerOptions carries request-scoped scheduler inputs.
+type SchedulerOptions struct {
+	// Headers contains request headers relevant to scheduling.
+	Headers map[string][]string
+	// Metadata carries host-provided scheduler context.
+	Metadata map[string]any
+}
+
+// SchedulerAuthCandidate describes one auth candidate available to a scheduler.
+type SchedulerAuthCandidate struct {
+	// ID identifies the auth record.
+	ID string
+	// Provider identifies the auth provider.
+	Provider string
+	// Priority is the host priority assigned to the auth record.
+	Priority int
+	// Status is the current host-visible auth status.
+	Status string
+	// Attributes contains immutable routing and provider attributes.
+	Attributes map[string]string
+	// Metadata contains mutable host-managed auth metadata.
+	Metadata map[string]any
+}
+
+// SchedulerPickResponse returns a scheduler plugin routing decision.
+type SchedulerPickResponse struct {
+	// AuthID identifies the selected auth record.
+	AuthID string
+	// DelegateBuiltin asks the host to use a named built-in scheduler.
+	DelegateBuiltin string
+	// Handled reports whether the plugin made a scheduling decision.
+	Handled bool
+}
+
 // ProviderExecutor handles model execution, streaming, HTTP bridging, and token counting.
 type ProviderExecutor interface {
 	Identifier() string
@@ -448,6 +523,179 @@ type ProviderExecutor interface {
 type HostHTTPClient interface {
 	Do(context.Context, HTTPRequest) (HTTPResponse, error)
 	DoStream(context.Context, HTTPRequest) (HTTPStreamResponse, error)
+}
+
+// HostModelExecutionRequest describes a model execution request issued through the host.
+type HostModelExecutionRequest struct {
+	// EntryProtocol is the inbound client protocol format.
+	EntryProtocol string `json:"entry_protocol"`
+	// ExitProtocol is the target provider protocol format.
+	ExitProtocol string `json:"exit_protocol"`
+	// Model is the requested model identifier.
+	Model string `json:"model"`
+	// Stream reports whether the request expects streaming output.
+	Stream bool `json:"stream"`
+	// Body contains the raw request body.
+	Body []byte `json:"body"`
+	// Headers contains request headers.
+	Headers http.Header `json:"headers"`
+	// Query contains request query parameters.
+	Query url.Values `json:"query"`
+	// Alt carries an alternate route or mode suffix when present.
+	Alt string `json:"alt"`
+}
+
+// HostModelExecutionResponse describes a non-streaming host model execution response.
+type HostModelExecutionResponse struct {
+	// StatusCode is the model execution HTTP status code.
+	StatusCode int `json:"status_code"`
+	// Headers contains response headers.
+	Headers http.Header `json:"headers"`
+	// Body contains the raw response body.
+	Body []byte `json:"body"`
+}
+
+// HostModelStreamResponse describes a streaming host model execution response.
+type HostModelStreamResponse struct {
+	// StatusCode is the model execution HTTP status code.
+	StatusCode int `json:"status_code"`
+	// Headers contains response headers.
+	Headers http.Header `json:"headers"`
+	// StreamID identifies the host-owned stream for later reads.
+	StreamID string `json:"stream_id"`
+}
+
+// HostModelStreamReadRequest asks the host to read the next model stream chunk.
+type HostModelStreamReadRequest struct {
+	// StreamID identifies the host-owned stream.
+	StreamID string `json:"stream_id"`
+}
+
+// HostModelStreamReadResponse returns one model stream chunk or terminal state.
+type HostModelStreamReadResponse struct {
+	// Payload contains the raw stream chunk bytes.
+	Payload []byte `json:"payload"`
+	// Error reports a stream error associated with this read.
+	Error string `json:"error"`
+	// Done reports whether the stream has ended.
+	Done bool `json:"done"`
+}
+
+// HostModelStreamCloseRequest asks the host to close a model stream.
+type HostModelStreamCloseRequest struct {
+	// StreamID identifies the host-owned stream.
+	StreamID string `json:"stream_id"`
+}
+
+type HostRecentRequestEntry struct {
+	// Time is the recent request bucket label.
+	Time string `json:"time"`
+	// Success is the success count in the bucket.
+	Success int64 `json:"success"`
+	// Failed is the failure count in the bucket.
+	Failed int64 `json:"failed"`
+}
+
+// HostAuthFileEntry describes one credential exposed through host auth callbacks.
+type HostAuthFileEntry struct {
+	// ID identifies the credential record.
+	ID string `json:"id,omitempty"`
+	// AuthIndex is the stable runtime credential index.
+	AuthIndex string `json:"auth_index,omitempty"`
+	// Name is the credential file name or runtime identifier.
+	Name string `json:"name"`
+	// Type is the credential provider type.
+	Type string `json:"type,omitempty"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider,omitempty"`
+	// Label is the human-readable credential label.
+	Label string `json:"label,omitempty"`
+	// Status is the current credential status.
+	Status string `json:"status,omitempty"`
+	// StatusMessage carries the latest status detail.
+	StatusMessage string `json:"status_message,omitempty"`
+	// Disabled reports whether the credential is disabled.
+	Disabled bool `json:"disabled,omitempty"`
+	// Unavailable reports whether the credential is currently unavailable.
+	Unavailable bool `json:"unavailable,omitempty"`
+	// RuntimeOnly reports whether the credential has no backing auth file.
+	RuntimeOnly bool `json:"runtime_only,omitempty"`
+	// Source reports whether the credential came from file or memory.
+	Source string `json:"source,omitempty"`
+	// Path is the backing auth file path when available.
+	Path string `json:"path,omitempty"`
+	// Size is the backing auth file size when available.
+	Size int64 `json:"size,omitempty"`
+	// ModTime is the last modification time when available.
+	ModTime time.Time `json:"modtime,omitempty"`
+	// UpdatedAt is the last credential update time.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// CreatedAt is the credential creation time.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	// LastRefresh is the last refresh timestamp.
+	LastRefresh time.Time `json:"last_refresh,omitempty"`
+	// NextRetryAfter is the next retry timestamp.
+	NextRetryAfter time.Time `json:"next_retry_after,omitempty"`
+	// Email is the credential email when available.
+	Email string `json:"email,omitempty"`
+	// ProjectID is the credential project identifier when available.
+	ProjectID string `json:"project_id,omitempty"`
+	// AccountType is the credential account type when available.
+	AccountType string `json:"account_type,omitempty"`
+	// Account is the credential account identifier when available.
+	Account string `json:"account,omitempty"`
+	// Priority is the credential routing priority when available.
+	Priority int `json:"priority,omitempty"`
+	// Note is the credential note when available.
+	Note string `json:"note,omitempty"`
+	// Websockets reports whether websocket mode is enabled when available.
+	Websockets bool `json:"websockets,omitempty"`
+	// Success is the recent success count.
+	Success int64 `json:"success,omitempty"`
+	// Failed is the recent failure count.
+	Failed int64 `json:"failed,omitempty"`
+	// RecentRequests is the recent request snapshot.
+	RecentRequests []HostRecentRequestEntry `json:"recent_requests,omitempty"`
+}
+
+// HostAuthGetRequest asks the host for credential JSON by auth index.
+type HostAuthGetRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+}
+
+// HostAuthGetResponse returns credential JSON resolved by auth index.
+type HostAuthGetResponse struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// Name is the credential file name or runtime identifier.
+	Name string `json:"name,omitempty"`
+	// Path is the backing auth file path when available.
+	Path string `json:"path,omitempty"`
+	// JSON contains the credential JSON payload.
+	JSON json.RawMessage `json:"json"`
+}
+
+// HostAuthGetRuntimeResponse returns runtime credential information by auth index.
+type HostAuthGetRuntimeResponse struct {
+	// Auth is the runtime credential entry.
+	Auth HostAuthFileEntry `json:"auth"`
+}
+
+// HostAuthSaveRequest asks the host to persist credential JSON to a physical auth file.
+type HostAuthSaveRequest struct {
+	// Name is the target auth file name. It must end with .json.
+	Name string `json:"name"`
+	// JSON contains the credential JSON payload to save.
+	JSON json.RawMessage `json:"json"`
+}
+
+// HostAuthSaveResponse reports the saved physical auth file.
+type HostAuthSaveResponse struct {
+	// Name is the saved auth file name.
+	Name string `json:"name"`
+	// Path is the saved auth file path.
+	Path string `json:"path"`
 }
 
 // HTTPRequest describes an upstream HTTP request issued through the host.
@@ -606,6 +854,25 @@ type ResponseNormalizer interface {
 	NormalizeResponse(context.Context, ResponseTransformRequest) (PayloadResponse, error)
 }
 
+// RequestInterceptor rewrites execution requests before and after credential selection.
+type RequestInterceptor interface {
+	InterceptRequestBeforeAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
+	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
+}
+
+// ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
+type ResponseInterceptor interface {
+	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
+}
+
+// StreamChunkInterceptor rewrites successful stream chunks before downstream delivery.
+type StreamChunkInterceptor interface {
+	InterceptStreamChunk(context.Context, StreamChunkInterceptRequest) (StreamChunkInterceptResponse, error)
+}
+
+// StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
+const StreamChunkHeaderInitIndex = -1
+
 // RequestTransformRequest describes a request payload transformation.
 type RequestTransformRequest struct {
 	// FromFormat is the source protocol format.
@@ -636,6 +903,93 @@ type ResponseTransformRequest struct {
 	TranslatedRequest []byte
 	// Body contains the response payload to transform.
 	Body []byte
+}
+
+// RequestInterceptRequest describes a request about to be executed upstream.
+type RequestInterceptRequest struct {
+	// SourceFormat is the original client protocol format.
+	SourceFormat string
+	// ToFormat is the selected upstream protocol format. It is empty before credential selection.
+	ToFormat string
+	// Model is the current execution model. After credential selection this is the selected upstream model.
+	Model string
+	// RequestedModel is the client-requested model before alias/model-pool rewriting.
+	RequestedModel string
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Headers contains the current upstream request headers.
+	Headers http.Header
+	// Body contains the current request payload.
+	Body []byte
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
+	Metadata map[string]any
+}
+
+// RequestInterceptResponse returns request modifications.
+type RequestInterceptResponse struct {
+	// Headers replaces matching current request headers and preserves headers not mentioned here.
+	Headers http.Header
+	// Body replaces the current request body only when non-empty.
+	Body []byte
+	// ClearHeaders explicitly removes current request headers before Headers is applied.
+	ClearHeaders []string
+}
+
+// ResponseInterceptRequest describes a successful non-streaming response.
+type ResponseInterceptRequest struct {
+	SourceFormat    string
+	Model           string
+	RequestedModel  string
+	Stream          bool
+	RequestHeaders  http.Header
+	ResponseHeaders http.Header
+	OriginalRequest []byte
+	RequestBody     []byte
+	Body            []byte
+	StatusCode      int
+	Metadata        map[string]any
+}
+
+// ResponseInterceptResponse returns non-streaming response modifications.
+type ResponseInterceptResponse struct {
+	// Headers replaces matching current response headers and preserves headers not mentioned here.
+	Headers http.Header
+	// Body replaces the current response body only when non-empty.
+	Body []byte
+	// ClearHeaders explicitly removes current response headers before Headers is applied.
+	ClearHeaders []string
+}
+
+// StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
+type StreamChunkInterceptRequest struct {
+	SourceFormat    string
+	Model           string
+	RequestedModel  string
+	RequestHeaders  http.Header
+	ResponseHeaders http.Header
+	OriginalRequest []byte
+	RequestBody     []byte
+	Body            []byte
+	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
+	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
+	HistoryChunks [][]byte
+	// ChunkIndex starts at 0 for payload chunks. StreamChunkHeaderInitIndex marks the header-only initialization call.
+	ChunkIndex int
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
+	Metadata map[string]any
+}
+
+// StreamChunkInterceptResponse returns stream chunk modifications.
+type StreamChunkInterceptResponse struct {
+	// Headers replaces matching current stream headers and preserves headers not mentioned here.
+	Headers http.Header
+	// Body replaces the current stream chunk body only when non-empty.
+	Body []byte
+	// ClearHeaders explicitly removes current stream headers before Headers is applied.
+	ClearHeaders []string
+	// DropChunk skips delivery of the current payload chunk and prevents it from entering HistoryChunks.
+	// Header updates returned with DropChunk still apply to the interceptor chain state.
+	DropChunk bool
 }
 
 // PayloadResponse returns a transformed raw payload.
@@ -751,7 +1105,7 @@ type CommandLineExecutionResponse struct {
 	ExitCode int
 }
 
-// ManagementAPI declares plugin-owned Management API routes.
+// ManagementAPI declares plugin-owned Management API and resource routes.
 type ManagementAPI interface {
 	RegisterManagement(context.Context, ManagementRegistrationRequest) (ManagementRegistrationResponse, error)
 }
@@ -762,12 +1116,16 @@ type ManagementRegistrationRequest struct {
 	Plugin Metadata
 	// BasePath is the only Management API prefix plugins may register under.
 	BasePath string
+	// ResourceBasePath is the plugin resource prefix for browser-navigable resources.
+	ResourceBasePath string
 }
 
-// ManagementRegistrationResponse lists plugin-owned Management API routes.
+// ManagementRegistrationResponse lists plugin-owned Management API and resource routes.
 type ManagementRegistrationResponse struct {
 	// Routes contains the exact Management API routes to expose.
 	Routes []ManagementRoute
+	// Resources contains browser-navigable plugin resources exposed under /v0/resource/plugins/<pluginID>/.
+	Resources []ResourceRoute
 }
 
 // ManagementRoute describes one plugin-owned Management API route.
@@ -776,15 +1134,27 @@ type ManagementRoute struct {
 	Method string
 	// Path is an exact path under /v0/management/. Relative paths are resolved under that prefix.
 	Path string
-	// Menu is the optional management UI menu label for GET routes.
+	// Menu is a legacy resource menu label. GET routes with Menu are registered under /v0/resource/plugins/<pluginID>/.
 	Menu string
-	// Description explains the management route for UI display.
+	// Description explains the legacy resource menu entry for UI display.
 	Description string
 	// Handler processes matching Management API requests.
 	Handler ManagementHandler
 }
 
-// ManagementHandler handles one plugin-owned Management API route.
+// ResourceRoute describes one plugin-owned browser-navigable resource route.
+type ResourceRoute struct {
+	// Path is an exact path under /v0/resource/plugins/<pluginID>/. Relative paths are resolved under that prefix.
+	Path string
+	// Menu is the management UI menu label for this GET resource.
+	Menu string
+	// Description explains the resource route for UI display.
+	Description string
+	// Handler processes matching resource requests. Resource requests are not management-authenticated.
+	Handler ManagementHandler
+}
+
+// ManagementHandler handles one plugin-owned Management API or resource route.
 type ManagementHandler interface {
 	HandleManagement(context.Context, ManagementRequest) (ManagementResponse, error)
 }

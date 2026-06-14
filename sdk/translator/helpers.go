@@ -17,6 +17,16 @@ func HasResponseTransformerByFormatName(from, to Format) bool {
 	return HasResponseTransformer(from, to)
 }
 
+// HasStreamResponseTransformerByFormatName reports whether a stream response translator exists between two schemas.
+func HasStreamResponseTransformerByFormatName(from, to Format) bool {
+	return HasStreamResponseTransformer(from, to)
+}
+
+// HasNonStreamResponseTransformerByFormatName reports whether a non-stream response translator exists between two schemas.
+func HasNonStreamResponseTransformerByFormatName(from, to Format) bool {
+	return HasNonStreamResponseTransformer(from, to)
+}
+
 // TranslateStreamByFormatName converts streaming responses between schemas by their string identifiers.
 func TranslateStreamByFormatName(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	return TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)

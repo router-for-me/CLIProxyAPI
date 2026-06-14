@@ -119,6 +119,29 @@
       }
     },
     {
+      "id": "claude-fable-5",
+      "object": "model",
+      "created": 1781049600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Fable 5",
+      "description": "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "claude-opus-4-5-20251101",
       "object": "model",
       "created": 1761955200,
@@ -1797,6 +1820,23 @@
         "zero_allowed": true,
         "dynamic_allowed": true
       }
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.7 Code",
+      "description": "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": false,
+        "dynamic_allowed": true
+      }
     }
   ],
   "antigravity": [
@@ -2168,7 +2208,7 @@
       "display_name": "Composer 2.5 Fast",
       "name": "grok-composer-2.5-fast",
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
-      "context_length": 131072,
+      "context_length": 200000,
       "max_completion_tokens": 32768,
       "thinking": {
         "levels": [

@@ -108,13 +108,13 @@ func defaultPluginLoader() pluginLoader {
 	return dynamicLibraryLoader{}
 }
 
-func (dynamicLibraryLoader) Open(path string, host *Host) (pluginClient, error) {
-	cPath := C.CString(path)
+func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
+	cPath := C.CString(file.Path)
 	defer C.free(unsafe.Pointer(cPath))
 
 	handle := C.cliproxy_dlopen(cPath)
 	if handle == nil {
-		return nil, fmt.Errorf("dlopen %s: %s", path, dlerrorString())
+		return nil, fmt.Errorf("dlopen %s: %s", file.Path, dlerrorString())
 	}
 
 	cSymbol := C.CString("cliproxy_plugin_init")
@@ -138,7 +138,7 @@ func (dynamicLibraryLoader) Open(path string, host *Host) (pluginClient, error) 
 	}
 	id := hostCallbackID.Add(1)
 	*(*C.uintptr_t)(hostCtx) = C.uintptr_t(id)
-	hostCallbackEntries.Store(id, host)
+	hostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID})
 	C.cliproxy_set_host_api(hostAPI, C.uint32_t(pluginHostABIVersion), hostCtx)
 
 	client := &dynamicLibraryClient{

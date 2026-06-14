@@ -178,16 +178,20 @@ The host still performs the real HTTP request, so proxy handling, transport poli
 
 ## Management API
 
-The native plugin management endpoints remain:
+The native plugin management endpoints are:
 
 ```text
 GET /v0/management/plugins
+DELETE /v0/management/plugins/{pluginID}
 PATCH /v0/management/plugins/{pluginID}/enabled
+GET /v0/management/plugins/{pluginID}/config
 PUT /v0/management/plugins/{pluginID}/config
 PATCH /v0/management/plugins/{pluginID}/config
 ```
 
-Plugin-owned Management API routes are registered through `management.register` and handled through `management.handle`.
+Plugin-owned Management API routes are registered through the `routes` field of `management.register` and handled through `management.handle`.
+
+Browser-navigable menu resources are registered through the `resources` field of `management.register`. CPA exposes those resources under `/v0/resource/plugins/<pluginID>/...`; for example, a plugin with ID `example` and resource path `/status` is served as `/v0/resource/plugins/example/status`.
 
 ## Trust Boundary
 

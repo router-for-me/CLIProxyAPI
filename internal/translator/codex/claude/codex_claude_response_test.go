@@ -68,6 +68,55 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamCyberPolicyError(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null},"sequence_number":3}`), &param)
+	if len(outputs) != 1 {
+		t.Fatalf("expected one error chunk, got %d: %q", len(outputs), outputs)
+	}
+	out := string(outputs[0])
+	if !strings.Contains(out, "event: error\n") {
+		t.Fatalf("expected Claude SSE error event, got: %q", out)
+	}
+
+	payload, ok := firstClaudeStreamPayloadForEvent(out, "error")
+	if !ok {
+		t.Fatalf("missing error event payload: %q", out)
+	}
+	if got := payload.Get("type").String(); got != "error" {
+		t.Fatalf("type = %q, want error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.message").String(); got != "This content was flagged for possible cybersecurity risk." {
+		t.Fatalf("error.message = %q. Payload: %s", got, payload.Raw)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamErrorTypeFallbackMessage(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{},"error_type":"overloaded_error"}`), &param)
+	if len(outputs) != 1 {
+		t.Fatalf("expected one error chunk, got %d: %q", len(outputs), outputs)
+	}
+
+	payload, ok := firstClaudeStreamPayloadForEvent(string(outputs[0]), "error")
+	if !ok {
+		t.Fatalf("missing error event payload: %q", outputs[0])
+	}
+	if got := payload.Get("error.type").String(); got != "overloaded_error" {
+		t.Fatalf("error.type = %q, want overloaded_error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.message").String(); got != "overloaded_error" {
+		t.Fatalf("error.message = %q, want overloaded_error. Payload: %s", got, payload.Raw)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillIncludesSignatureField(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
@@ -723,6 +772,21 @@ func findClaudeStreamMessageDelta(outputs [][]byte) (gjson.Result, bool) {
 				return data, true
 			}
 		}
+	}
+	return gjson.Result{}, false
+}
+
+func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool) {
+	var currentEvent string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if currentEvent != event || !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		return gjson.Parse(strings.TrimPrefix(line, "data: ")), true
 	}
 	return gjson.Result{}, false
 }

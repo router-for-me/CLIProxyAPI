@@ -103,25 +103,41 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	// Handle system message first
 	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
 	hasSystemContent := false
-	if system := root.Get("system"); system.Exists() {
-		if system.Type == gjson.String {
-			if system.String() != "" && !util.IsClaudeCodeAttributionSystemText(system.String()) {
-				oldSystem := []byte(`{"type":"text","text":""}`)
-				oldSystem, _ = sjson.SetBytes(oldSystem, "text", system.String())
-				systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", oldSystem)
-				hasSystemContent = true
-			}
-		} else if system.Type == gjson.JSON {
-			if system.IsArray() {
-				systemResults := system.Array()
-				for i := 0; i < len(systemResults); i++ {
-					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
-						systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", []byte(contentItem))
-						hasSystemContent = true
-					}
-				}
-			}
+	appendSystemContent := func(content gjson.Result) {
+		if !content.Exists() {
+			return
 		}
+		if content.Type == gjson.String {
+			if content.String() == "" || util.IsClaudeCodeAttributionSystemText(content.String()) {
+				return
+			}
+			oldSystem := []byte(`{"type":"text","text":""}`)
+			oldSystem, _ = sjson.SetBytes(oldSystem, "text", content.String())
+			systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", oldSystem)
+			hasSystemContent = true
+			return
+		}
+		if content.IsArray() {
+			content.ForEach(func(_, item gjson.Result) bool {
+				if contentItem, ok := convertClaudeContentPart(item); ok {
+					systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", []byte(contentItem))
+					hasSystemContent = true
+				}
+				return true
+			})
+		}
+	}
+
+	if system := root.Get("system"); system.Exists() {
+		appendSystemContent(system)
+	}
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if message.Get("role").String() == "system" {
+				appendSystemContent(message.Get("content"))
+			}
+			return true
+		})
 	}
 	// Only add system message if it has content
 	if hasSystemContent {
@@ -132,6 +148,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
+			if role == "system" {
+				return true
+			}
 			contentResult := message.Get("content")
 
 			// Handle content

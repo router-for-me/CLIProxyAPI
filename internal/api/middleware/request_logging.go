@@ -248,9 +248,5 @@ func shouldLogRequest(path string) bool {
 		return false
 	}
 
-	if strings.HasPrefix(path, "/api") {
-		return strings.HasPrefix(path, "/api/provider")
-	}
-
 	return true
 }

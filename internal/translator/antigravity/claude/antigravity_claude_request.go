@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"context"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -19,36 +20,56 @@ import (
 )
 
 func resolveThinkingSignature(modelName, thinkingText, rawSignature string) string {
+	signature, errSignature := resolveThinkingSignatureRequired(context.Background(), modelName, thinkingText, rawSignature)
+	if errSignature != nil {
+		return ""
+	}
+	return signature
+}
+
+func resolveThinkingSignatureRequired(ctx context.Context, modelName, thinkingText, rawSignature string) (string, error) {
 	targetProvider := sigcompat.SignatureProviderFromModelName(modelName)
 	if targetProvider == sigcompat.SignatureProviderGemini {
-		return resolveProviderCompatibleSignature(targetProvider, rawSignature, sigcompat.SignatureBlockKindGeminiModelPart)
+		return resolveProviderCompatibleSignature(targetProvider, rawSignature, sigcompat.SignatureBlockKindGeminiModelPart), nil
 	}
 	if cache.SignatureCacheEnabled() {
-		return resolveCacheModeSignature(modelName, thinkingText, rawSignature)
+		return resolveCacheModeSignatureRequired(ctx, modelName, thinkingText, rawSignature)
 	}
 	if signature := resolveProviderCompatibleSignature(targetProvider, rawSignature, sigcompat.SignatureBlockKindUnknown); signature != "" {
-		return signature
+		return signature, nil
 	}
-	return resolveBypassModeSignatureForProvider(targetProvider, rawSignature)
+	return resolveBypassModeSignatureForProvider(targetProvider, rawSignature), nil
 }
 
 func resolveCacheModeSignature(modelName, thinkingText, rawSignature string) string {
+	signature, errSignature := resolveCacheModeSignatureRequired(context.Background(), modelName, thinkingText, rawSignature)
+	if errSignature != nil {
+		return ""
+	}
+	return signature
+}
+
+func resolveCacheModeSignatureRequired(ctx context.Context, modelName, thinkingText, rawSignature string) (string, error) {
 	targetProvider := sigcompat.SignatureProviderFromModelName(modelName)
 	if thinkingText != "" {
-		if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
+		cachedSig, errCachedSig := cache.GetCachedSignatureRequired(ctx, modelName, thinkingText)
+		if errCachedSig != nil {
+			return "", errCachedSig
+		}
+		if cachedSig != "" {
 			if targetProvider == sigcompat.SignatureProviderClaude {
 				signature, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(cachedSig)
 				if !ok {
-					return ""
+					return "", nil
 				}
-				return signature
+				return signature, nil
 			}
-			return cachedSig
+			return cachedSig, nil
 		}
 	}
 
 	if rawSignature == "" {
-		return ""
+		return "", nil
 	}
 
 	clientSignature := ""
@@ -62,14 +83,46 @@ func resolveCacheModeSignature(modelName, thinkingText, rawSignature string) str
 		if targetProvider == sigcompat.SignatureProviderClaude {
 			signature, ok := sigcompat.CompatibleAntigravityClaudeThinkingSignature(clientSignature)
 			if !ok {
-				return ""
+				return "", nil
 			}
-			return signature
+			return signature, nil
 		}
-		return clientSignature
+		return clientSignature, nil
 	}
 
-	return ""
+	return "", nil
+}
+
+func RequireCachedThinkingSignatures(ctx context.Context, modelName string, rawJSON []byte) error {
+	if !cache.SignatureCacheEnabled() {
+		return nil
+	}
+	if sigcompat.SignatureProviderFromModelName(modelName) == sigcompat.SignatureProviderGemini {
+		return nil
+	}
+	messagesResult := gjson.GetBytes(rawJSON, "messages")
+	if !messagesResult.IsArray() {
+		return nil
+	}
+	for _, messageResult := range messagesResult.Array() {
+		contentsResult := messageResult.Get("content")
+		if !contentsResult.IsArray() {
+			continue
+		}
+		for _, contentResult := range contentsResult.Array() {
+			if contentResult.Get("type").String() != "thinking" {
+				continue
+			}
+			thinkingText := thinking.GetThinkingText(contentResult)
+			if thinkingText == "" {
+				continue
+			}
+			if _, errSignature := cache.GetCachedSignatureRequired(ctx, modelName, thinkingText); errSignature != nil {
+				return errSignature
+			}
+		}
+	}
+	return nil
 }
 
 func resolveBypassModeSignature(rawSignature string) string {
@@ -256,6 +309,9 @@ func logDroppedAntigravityToolUseSignature(modelName string, messageIndex, conte
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
+	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
+		return buildAntigravityWebSearchRequest(modelName, rawJSON)
+	}
 
 	// system instruction
 	var systemInstructionJSON []byte
@@ -595,10 +651,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
-		toolsJSON = []byte(`[{"functionDeclarations":[]}]`)
+		functionToolNode := []byte(`{"functionDeclarations":[]}`)
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+			if isClaudeTypedWebSearchToolType(toolResult.Get("type").String()) {
+				continue
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
@@ -612,9 +671,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 					tool, _ = sjson.DeleteBytes(tool, toolKey)
 				}
-				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "0.functionDeclarations.-1", tool)
+				functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", tool)
 				toolDeclCount++
 			}
+		}
+		if toolDeclCount > 0 {
+			toolsJSON = []byte(`[]`)
+			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", functionToolNode)
 		}
 	}
 

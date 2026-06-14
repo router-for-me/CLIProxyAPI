@@ -2,6 +2,8 @@ package pluginhost
 
 import (
 	"context"
+	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -63,6 +65,63 @@ func TestRegisterManagementRoutesSkipsReservedAndUsesPriority(t *testing.T) {
 	}
 }
 
+func TestServeManagementHTMLEscapesJSONResponseStrings(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "json",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ManagementAPI: &managementPluginDouble{routes: []pluginapi.ManagementRoute{{
+				Method: http.MethodGet,
+				Path:   "/plugins/json/status",
+				Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+					return pluginapi.ManagementResponse{
+						Headers: http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+						Body: []byte(`{
+							"title": "<script>alert(1)</script>",
+							"items": ["<b>first</b>", {"description": "safe & sound"}],
+							"count": 1
+						}`),
+					}, nil
+				}),
+			}}},
+		}},
+	})
+	host.RegisterManagementRoutes(context.Background(), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/json/status", nil)
+	rec := httptest.NewRecorder()
+	if !host.ServeManagementHTTP(rec, req) {
+		t.Fatal("ServeManagementHTTP() = false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if body["title"] != html.EscapeString("<script>alert(1)</script>") {
+		t.Fatalf("title = %q, want escaped", body["title"])
+	}
+	items, okItems := body["items"].([]any)
+	if !okItems || len(items) != 2 {
+		t.Fatalf("items = %#v, want two items", body["items"])
+	}
+	if items[0] != html.EscapeString("<b>first</b>") {
+		t.Fatalf("items[0] = %q, want escaped", items[0])
+	}
+	nested, okNested := items[1].(map[string]any)
+	if !okNested {
+		t.Fatalf("items[1] = %#v, want object", items[1])
+	}
+	if nested["description"] != html.EscapeString("safe & sound") {
+		t.Fatalf("nested description = %q, want escaped", nested["description"])
+	}
+	if body["count"] != float64(1) {
+		t.Fatalf("count = %#v, want unchanged number", body["count"])
+	}
+}
+
 func TestManagementHandlerPanicFusesPlugin(t *testing.T) {
 	host := newHostWithRecords(capabilityRecord{
 		id: "panic",
@@ -91,18 +150,77 @@ func TestManagementHandlerPanicFusesPlugin(t *testing.T) {
 	}
 }
 
-func TestRegisteredPluginsIncludesGETManagementMenus(t *testing.T) {
-	plugin := &managementPluginDouble{
-		routes: []pluginapi.ManagementRoute{
-			{
-				Method:      http.MethodGet,
-				Path:        "/plugins/menu/status",
+func TestServeResourceHTTPDispatchesPluginResource(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "resource",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ManagementAPI: &managementPluginDouble{resources: []pluginapi.ResourceRoute{{
+				Path:        "/status",
 				Menu:        "Status",
 				Description: "Shows plugin status.",
-				Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
-					return pluginapi.ManagementResponse{}, nil
+				Handler: managementHandlerFunc(func(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+					if req.Path != "/v0/resource/plugins/resource/status" {
+						t.Fatalf("resource request path = %q, want normalized resource path", req.Path)
+					}
+					return pluginapi.ManagementResponse{
+						Headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+						Body:    []byte("<!doctype html><title>resource</title>"),
+					}, nil
 				}),
-			},
+			}}},
+		}},
+	})
+	host.RegisterManagementRoutes(context.Background(), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	rec := httptest.NewRecorder()
+	if !host.ServeResourceHTTP(rec, req) {
+		t.Fatal("ServeResourceHTTP() = false, want true")
+	}
+	if rec.Code != http.StatusOK || rec.Body.String() != "<!doctype html><title>resource</title>" {
+		t.Fatalf("response = %d %q, want 200 html", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want text/html; charset=utf-8", got)
+	}
+}
+
+func TestLegacyGETManagementMenuRegistersAsResource(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "legacy",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ManagementAPI: &managementPluginDouble{routes: []pluginapi.ManagementRoute{{
+				Method:      http.MethodGet,
+				Path:        "/plugins/legacy/status",
+				Menu:        "Legacy Status",
+				Description: "Shows legacy plugin status.",
+				Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+					return pluginapi.ManagementResponse{Body: []byte("legacy")}, nil
+				}),
+			}}},
+		}},
+	})
+	host.RegisterManagementRoutes(context.Background(), nil)
+
+	managementReq := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/legacy/status", nil)
+	managementRec := httptest.NewRecorder()
+	if host.ServeManagementHTTP(managementRec, managementReq) {
+		t.Fatal("legacy menu route was served as Management API route")
+	}
+
+	resourceReq := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/legacy/status", nil)
+	resourceRec := httptest.NewRecorder()
+	if !host.ServeResourceHTTP(resourceRec, resourceReq) {
+		t.Fatal("legacy menu route was not served as resource route")
+	}
+	if resourceRec.Body.String() != "legacy" {
+		t.Fatalf("resource body = %q, want legacy", resourceRec.Body.String())
+	}
+}
+
+func TestRegisteredPluginsIncludesResourceMenus(t *testing.T) {
+	plugin := &managementPluginDouble{
+		routes: []pluginapi.ManagementRoute{
 			{
 				Method: http.MethodGet,
 				Path:   "/plugins/menu/hidden",
@@ -110,11 +228,12 @@ func TestRegisteredPluginsIncludesGETManagementMenus(t *testing.T) {
 					return pluginapi.ManagementResponse{}, nil
 				}),
 			},
+		},
+		resources: []pluginapi.ResourceRoute{
 			{
-				Method:      http.MethodPost,
-				Path:        "/plugins/menu/run",
-				Menu:        "Run",
-				Description: "Runs a plugin action.",
+				Path:        "/status",
+				Menu:        "Status",
+				Description: "Shows plugin status.",
 				Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
 					return pluginapi.ManagementResponse{}, nil
 				}),
@@ -136,17 +255,18 @@ func TestRegisteredPluginsIncludesGETManagementMenus(t *testing.T) {
 		t.Fatalf("RegisteredPlugins()[0].Menus = %#v, want one visible GET menu", plugins[0].Menus)
 	}
 	menu := plugins[0].Menus[0]
-	if menu.Path != "/v0/management/plugins/menu/status" || menu.Menu != "Status" || menu.Description != "Shows plugin status." {
+	if menu.Path != "/v0/resource/plugins/menu/status" || menu.Menu != "Status" || menu.Description != "Shows plugin status." {
 		t.Fatalf("menu = %#v, want normalized status menu", menu)
 	}
 }
 
 type managementPluginDouble struct {
-	routes []pluginapi.ManagementRoute
+	routes    []pluginapi.ManagementRoute
+	resources []pluginapi.ResourceRoute
 }
 
 func (p *managementPluginDouble) RegisterManagement(context.Context, pluginapi.ManagementRegistrationRequest) (pluginapi.ManagementRegistrationResponse, error) {
-	return pluginapi.ManagementRegistrationResponse{Routes: p.routes}, nil
+	return pluginapi.ManagementRegistrationResponse{Routes: p.routes, Resources: p.resources}, nil
 }
 
 type managementHandlerFunc func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error)

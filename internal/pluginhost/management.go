@@ -8,24 +8,35 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
-const managementBasePath = "/v0/management"
+const (
+	managementBasePath      = "/v0/management"
+	resourcePluginBasePath  = "/v0/resource/plugins"
+	legacyPluginRoutePrefix = "/plugins"
+)
 
 type managementRouteRecord struct {
 	pluginID string
 	route    pluginapi.ManagementRoute
 }
 
-// RegisterManagementRoutes rebuilds the plugin-owned Management API route table.
+type resourceRouteRecord struct {
+	pluginID string
+	route    pluginapi.ResourceRoute
+}
+
+// RegisterManagementRoutes rebuilds the plugin-owned Management API and resource route tables.
 func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string]struct{}) {
 	if h == nil {
 		return
 	}
 
 	nextRoutes := make(map[string]managementRouteRecord)
+	nextResources := make(map[string]resourceRouteRecord)
 	for _, record := range h.Snapshot().records {
 		plugin := record.plugin.Capabilities.ManagementAPI
 		if plugin == nil || h.isPluginFused(record.id) {
@@ -36,10 +47,17 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 			log.Warnf("pluginhost: management registrar %s failed: %v", record.id, errRegister)
 			continue
 		}
+
 		for _, item := range resp.Routes {
 			method, path, okRoute := normalizeManagementRoute(item)
 			if !okRoute {
 				log.Warnf("pluginhost: plugin %s declared invalid management route %s %s", record.id, item.Method, item.Path)
+				continue
+			}
+			if routeDeclaresLegacyMenuResource(method, item) {
+				if !registerResourceRoute(nextResources, record.id, resourceRouteFromManagementRoute(item)) {
+					log.Warnf("pluginhost: plugin %s declared invalid resource route %s", record.id, item.Path)
+				}
 				continue
 			}
 			key := managementRouteKey(method, path)
@@ -58,10 +76,17 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 				route:    item,
 			}
 		}
+
+		for _, item := range resp.Resources {
+			if !registerResourceRoute(nextResources, record.id, item) {
+				log.Warnf("pluginhost: plugin %s declared invalid resource route %s", record.id, item.Path)
+			}
+		}
 	}
 
 	h.mu.Lock()
 	h.managementRoutes = nextRoutes
+	h.resourceRoutes = nextResources
 	h.mu.Unlock()
 }
 
@@ -77,8 +102,9 @@ func (h *Host) callManagementRegistrar(ctx context.Context, record capabilityRec
 		}
 	}()
 	return plugin.RegisterManagement(ctx, pluginapi.ManagementRegistrationRequest{
-		Plugin:   record.meta,
-		BasePath: managementBasePath,
+		Plugin:           record.meta,
+		BasePath:         managementBasePath,
+		ResourceBasePath: resourcePluginBasePath + "/" + record.id,
 	})
 }
 
@@ -116,6 +142,75 @@ func normalizeManagementRoute(item pluginapi.ManagementRoute) (string, string, b
 		return "", "", false
 	}
 	return method, fullPath, true
+}
+
+func routeDeclaresLegacyMenuResource(method string, item pluginapi.ManagementRoute) bool {
+	return strings.EqualFold(strings.TrimSpace(method), http.MethodGet) && strings.TrimSpace(item.Menu) != ""
+}
+
+func resourceRouteFromManagementRoute(item pluginapi.ManagementRoute) pluginapi.ResourceRoute {
+	return pluginapi.ResourceRoute{
+		Path:        item.Path,
+		Menu:        item.Menu,
+		Description: item.Description,
+		Handler:     item.Handler,
+	}
+}
+
+func registerResourceRoute(routes map[string]resourceRouteRecord, pluginID string, item pluginapi.ResourceRoute) bool {
+	path, okRoute := normalizeResourceRoute(pluginID, item)
+	if !okRoute {
+		return false
+	}
+	key := managementRouteKey(http.MethodGet, path)
+	if _, exists := routes[key]; exists {
+		log.Warnf("pluginhost: plugin %s resource route %s conflicts with a higher-priority plugin and was skipped", pluginID, key)
+		return true
+	}
+	item.Path = path
+	routes[key] = resourceRouteRecord{
+		pluginID: pluginID,
+		route:    item,
+	}
+	return true
+}
+
+func normalizeResourceRoute(pluginID string, item pluginapi.ResourceRoute) (string, bool) {
+	if item.Handler == nil {
+		return "", false
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return "", false
+	}
+
+	path := strings.TrimSpace(item.Path)
+	if path == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	pluginBasePath := resourcePluginBasePath + "/" + pluginID
+	if strings.HasPrefix(path, pluginBasePath+"/") {
+		path = strings.TrimPrefix(path, pluginBasePath)
+	} else if strings.HasPrefix(path, legacyPluginRoutePrefix+"/"+pluginID+"/") {
+		path = strings.TrimPrefix(path, legacyPluginRoutePrefix+"/"+pluginID)
+	}
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return "", false
+	}
+
+	fullPath := pluginBasePath + path
+	if !strings.HasPrefix(fullPath, pluginBasePath+"/") {
+		return "", false
+	}
+	if strings.ContainsAny(fullPath, " \t\r\n") || strings.Contains(fullPath, ":") || strings.Contains(fullPath, "*") || strings.Contains(fullPath, "..") {
+		return "", false
+	}
+	return fullPath, true
 }
 
 func managementRouteKey(method, path string) string {
@@ -161,6 +256,7 @@ func (h *Host) ServeManagementHTTP(w http.ResponseWriter, r *http.Request) bool 
 		http.Error(w, "plugin management handler failed", http.StatusBadGateway)
 		return true
 	}
+	resp.Body = escapeManagementResponseBody(resp)
 
 	for keyHeader, values := range resp.Headers {
 		for _, value := range values {
@@ -178,6 +274,50 @@ func (h *Host) ServeManagementHTTP(w http.ResponseWriter, r *http.Request) bool 
 	return true
 }
 
+// ServeResourceHTTP dispatches an unauthenticated browser-navigable resource request to a plugin route.
+func (h *Host) ServeResourceHTTP(w http.ResponseWriter, r *http.Request) bool {
+	if h == nil || w == nil || r == nil || r.URL == nil {
+		return false
+	}
+	if !strings.EqualFold(r.Method, http.MethodGet) {
+		return false
+	}
+	key := managementRouteKey(http.MethodGet, r.URL.Path)
+	h.mu.Lock()
+	record, okRoute := h.resourceRoutes[key]
+	h.mu.Unlock()
+	if !okRoute || record.route.Handler == nil || h.isPluginFused(record.pluginID) {
+		return false
+	}
+
+	resp, errHandle := h.callResourceHandler(r.Context(), record, pluginapi.ManagementRequest{
+		Method:  http.MethodGet,
+		Path:    r.URL.Path,
+		Headers: cloneHeader(r.Header),
+		Query:   cloneValues(r.URL.Query()),
+	})
+	if errHandle != nil {
+		log.Warnf("pluginhost: resource handler %s failed: %v", record.pluginID, errHandle)
+		http.Error(w, "plugin resource handler failed", http.StatusBadGateway)
+		return true
+	}
+
+	for keyHeader, values := range resp.Headers {
+		for _, value := range values {
+			w.Header().Add(keyHeader, value)
+		}
+	}
+	statusCode := resp.StatusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	w.WriteHeader(statusCode)
+	if _, errWrite := w.Write(resp.Body); errWrite != nil {
+		log.Warnf("pluginhost: failed to write plugin resource response: %v", errWrite)
+	}
+	return true
+}
+
 func (h *Host) callManagementHandler(ctx context.Context, record managementRouteRecord, req pluginapi.ManagementRequest) (resp pluginapi.ManagementResponse, err error) {
 	if h == nil || record.route.Handler == nil || h.isPluginFused(record.pluginID) {
 		return pluginapi.ManagementResponse{}, nil
@@ -187,6 +327,28 @@ func (h *Host) callManagementHandler(ctx context.Context, record managementRoute
 			h.fusePlugin(record.pluginID, "ManagementHandler.HandleManagement", recovered)
 			resp = pluginapi.ManagementResponse{}
 			err = fmt.Errorf("management handler panic: %v", recovered)
+		}
+	}()
+	return record.route.Handler.HandleManagement(ctx, req)
+}
+
+func escapeManagementResponseBody(resp pluginapi.ManagementResponse) []byte {
+	body, okEscaped := htmlsanitize.JSONBodyIfLikely(resp.Body, resp.Headers.Get("Content-Type"))
+	if !okEscaped {
+		return resp.Body
+	}
+	return body
+}
+
+func (h *Host) callResourceHandler(ctx context.Context, record resourceRouteRecord, req pluginapi.ManagementRequest) (resp pluginapi.ManagementResponse, err error) {
+	if h == nil || record.route.Handler == nil || h.isPluginFused(record.pluginID) {
+		return pluginapi.ManagementResponse{}, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.pluginID, "ResourceHandler.HandleManagement", recovered)
+			resp = pluginapi.ManagementResponse{}
+			err = fmt.Errorf("resource handler panic: %v", recovered)
 		}
 	}()
 	return record.route.Handler.HandleManagement(ctx, req)

@@ -1,12 +1,16 @@
 package cache
 
 import (
+	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,6 +39,17 @@ var (
 	codexReasoningReplayEntries = make(map[string]codexReasoningReplayEntry)
 )
 
+type codexReasoningReplayKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSet(ctx context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error)
+	KVDel(ctx context.Context, keys ...string) (int64, error)
+	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
+}
+
+var currentCodexReasoningReplayKVClient = func() (codexReasoningReplayKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
+
 // CacheCodexReasoningReplayItem stores a final GPT/Codex reasoning item for
 // stateless replay. The stored item is normalized to the minimal shape accepted
 // by Responses input replay.
@@ -45,6 +60,11 @@ func CacheCodexReasoningReplayItem(modelName, sessionKey string, item []byte) bo
 // CacheCodexReasoningReplayItems stores the final GPT/Codex assistant output
 // items needed to replay a stateless next turn.
 func CacheCodexReasoningReplayItems(modelName, sessionKey string, items [][]byte) bool {
+	return CacheCodexReasoningReplayItemsBestEffort(context.Background(), modelName, sessionKey, items)
+}
+
+// CacheCodexReasoningReplayItemsBestEffort stores replay items for completed response paths.
+func CacheCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, sessionKey string, items [][]byte) bool {
 	key := codexReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
 		return false
@@ -52,6 +72,23 @@ func CacheCodexReasoningReplayItems(modelName, sessionKey string, items [][]byte
 	normalized, ok := normalizeCodexReasoningReplayItems(items)
 	if !ok {
 		return false
+	}
+	if client, homeMode, errClient := currentCodexReasoningReplayKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errClient)
+			return false
+		}
+		raw, errMarshal := json.Marshal(normalized)
+		if errMarshal != nil {
+			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errMarshal)
+			return false
+		}
+		written, errSet := client.KVSet(ctx, codexReasoningReplayKVKey(modelName, sessionKey), raw, homekv.KVSetOptions{EX: CodexReasoningReplayCacheTTL})
+		if errSet != nil {
+			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errSet)
+			return false
+		}
+		return written
 	}
 
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -79,9 +116,36 @@ func GetCodexReasoningReplayItem(modelName, sessionKey string) ([]byte, bool) {
 
 // GetCodexReasoningReplayItems retrieves normalized assistant output items.
 func GetCodexReasoningReplayItems(modelName, sessionKey string) ([][]byte, bool) {
+	items, ok, err := GetCodexReasoningReplayItemsRequired(context.Background(), modelName, sessionKey)
+	if err == nil {
+		return items, ok
+	}
+	return nil, false
+}
+
+// GetCodexReasoningReplayItemsRequired retrieves replay items for request-time paths.
+func GetCodexReasoningReplayItemsRequired(ctx context.Context, modelName, sessionKey string) ([][]byte, bool, error) {
 	key := codexReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
-		return nil, false
+		return nil, false, nil
+	}
+	client, homeMode, errClient := currentCodexReasoningReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return nil, false, errClient
+		}
+		raw, found, errGet := client.KVGet(ctx, codexReasoningReplayKVKey(modelName, sessionKey))
+		if errGet != nil || !found {
+			return nil, false, errGet
+		}
+		var homeItems [][]byte
+		if errUnmarshal := json.Unmarshal(raw, &homeItems); errUnmarshal != nil {
+			return nil, false, errUnmarshal
+		}
+		if _, errExpire := client.KVExpire(ctx, codexReasoningReplayKVKey(modelName, sessionKey), CodexReasoningReplayCacheTTL); errExpire != nil {
+			return nil, false, errExpire
+		}
+		return cloneCodexReasoningReplayItems(homeItems), true, nil
 	}
 
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -90,27 +154,43 @@ func GetCodexReasoningReplayItems(modelName, sessionKey string) ([][]byte, bool)
 	defer codexReasoningReplayMu.Unlock()
 	entry, ok := codexReasoningReplayEntries[key]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	if now.Sub(entry.Timestamp) > CodexReasoningReplayCacheTTL {
 		delete(codexReasoningReplayEntries, key)
-		return nil, false
+		return nil, false, nil
 	}
 	entry.Timestamp = now
 	codexReasoningReplayEntries[key] = entry
-	return cloneCodexReasoningReplayItems(entry.Items), true
+	return cloneCodexReasoningReplayItems(entry.Items), true, nil
 }
 
 // DeleteCodexReasoningReplayItem removes one replay item after upstream rejects
 // it or the caller otherwise knows it is stale.
 func DeleteCodexReasoningReplayItem(modelName, sessionKey string) {
+	if errDelete := DeleteCodexReasoningReplayItemRequired(context.Background(), modelName, sessionKey); errDelete != nil {
+		return
+	}
+}
+
+// DeleteCodexReasoningReplayItemRequired removes one replay item for request-time paths.
+func DeleteCodexReasoningReplayItemRequired(ctx context.Context, modelName, sessionKey string) error {
 	key := codexReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
-		return
+		return nil
+	}
+	client, homeMode, errClient := currentCodexReasoningReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		_, errDel := client.KVDel(ctx, codexReasoningReplayKVKey(modelName, sessionKey))
+		return errDel
 	}
 	codexReasoningReplayMu.Lock()
 	delete(codexReasoningReplayEntries, key)
 	codexReasoningReplayMu.Unlock()
+	return nil
 }
 
 // ClearCodexReasoningReplayCache clears all Codex reasoning replay state.
@@ -129,6 +209,10 @@ func codexReasoningReplayCacheKey(modelName, sessionKey string) string {
 	// The session key is the continuity boundary. Keep this independent from
 	// the selected upstream Codex credential so auth failover can preserve replay.
 	return strings.Join([]string{"codex-reasoning-replay", modelName, sessionKey}, "\x00")
+}
+
+func codexReasoningReplayKVKey(modelName, sessionKey string) string {
+	return "cpa:codex:reasoning-replay:" + homekv.HashKeyPart(strings.TrimSpace(modelName)) + ":" + homekv.HashKeyPart(strings.TrimSpace(sessionKey))
 }
 
 func normalizeCodexReasoningReplayItems(items [][]byte) ([][]byte, bool) {

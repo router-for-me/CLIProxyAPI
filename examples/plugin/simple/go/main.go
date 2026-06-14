@@ -100,7 +100,8 @@ type streamResponse struct {
 }
 
 type managementRegistrationResponse struct {
-	Routes []pluginapi.ManagementRoute `json:"routes,omitempty"`
+	Routes    []pluginapi.ManagementRoute `json:"routes,omitempty"`
+	Resources []pluginapi.ResourceRoute   `json:"resources,omitempty"`
 }
 
 func main() {}
@@ -207,14 +208,18 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodCommandLineExecute:
 		return okEnvelope(pluginapi.CommandLineExecutionResponse{Stdout: []byte("plugin example command\n")})
 	case pluginabi.MethodManagementRegister:
-		return okEnvelope(managementRegistrationResponse{Routes: []pluginapi.ManagementRoute{{
-			Method:      http.MethodGet,
-			Path:        "/plugins/example/status",
+		// CPA exposes menu resources under /v0/resource/plugins/<plugin-id>/.
+		return okEnvelope(managementRegistrationResponse{Resources: []pluginapi.ResourceRoute{{
+			Path:        "/status",
 			Menu:        "Example Plugin",
-			Description: "Shows example plugin status.",
+			Description: "Shows example plugin status as a browser-navigable resource.",
 		}}})
 	case pluginabi.MethodManagementHandle:
-		return okEnvelope(pluginapi.ManagementResponse{StatusCode: http.StatusOK, Body: []byte(`{"plugin":"example"}`)})
+		return okEnvelope(pluginapi.ManagementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+			Body:       []byte(`<!doctype html><title>Example Plugin</title><main>Example Plugin</main>`),
+		})
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}

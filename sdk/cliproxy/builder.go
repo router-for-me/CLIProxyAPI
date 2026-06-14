@@ -266,6 +266,9 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	if pluginHost != nil {
+		coreManager.SetPluginScheduler(pluginHost)
+	}
 
 	service := &Service{
 		cfg:            b.cfg,
@@ -283,7 +286,13 @@ func (b *Builder) Build() (*Service, error) {
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
-	service.serverOptions = append(service.serverOptions, api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()), api.WithPluginHost(pluginHost))
+	service.serverOptions = append(service.serverOptions,
+		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
+		api.WithPluginHost(pluginHost),
+		api.WithConfigReloadHook(func(ctx context.Context, cfg *config.Config) {
+			service.applyConfigUpdate(cfg)
+		}),
+	)
 	return service, nil
 }
 
