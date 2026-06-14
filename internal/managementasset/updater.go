@@ -111,6 +111,23 @@ func runAutoUpdater(ctx context.Context) {
 	}
 }
 
+
+func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
+if cfg == nil {
+return "config not yet available", true
+}
+if cfg.Home.Enabled {
+return "cluster mode enabled", true
+}
+if cfg.RemoteManagement.DisableControlPanel {
+return "control panel disabled", true
+}
+if cfg.RemoteManagement.DisableAutoUpdatePanel {
+return "disable-auto-update-panel is enabled", true
+}
+return "", false
+}
+
 // assetHTTPClient is a long-lived HTTP client reused for management asset downloads.
 // The client is rebuilt when the proxy URL changes (e.g. after hot-reload).
 var (
