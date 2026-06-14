@@ -551,3 +551,39 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestHomeModelsAuthStatus(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		wantStatus  int
+		wantHandled bool
+	}{
+		{"no credentials", `{"error":{"type":"no_credentials","message":"Missing API key"}}`, http.StatusUnauthorized, true},
+		{"invalid credential", `{"error":{"type":"invalid_credential","message":"Invalid API key"}}`, http.StatusUnauthorized, true},
+		{"internal error maps to bad gateway", `{"error":{"type":"internal_error","message":"boom"}}`, http.StatusBadGateway, true},
+		{"models payload not an error", `{"openai":[{"id":"gpt-5.5"}]}`, 0, false},
+		{"empty payload not an error", `{}`, 0, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, handled := homeModelsAuthStatus([]byte(tc.raw))
+			if handled != tc.wantHandled {
+				t.Fatalf("handled = %v, want %v (status=%d)", handled, tc.wantHandled, status)
+			}
+			if handled && status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestHomeModelsErrorMessage(t *testing.T) {
+	if msg := homeModelsErrorMessage([]byte(`{"error":{"type":"invalid_credential","message":"Invalid API key"}}`)); msg != "Invalid API key" {
+		t.Fatalf("message = %q, want %q", msg, "Invalid API key")
+	}
+	if msg := homeModelsErrorMessage([]byte(`{"openai":[]}`)); msg != "home models request failed" {
+		t.Fatalf("default message = %q, want fallback", msg)
+	}
+}
