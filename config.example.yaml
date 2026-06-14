@@ -61,6 +61,9 @@ pprof:
 plugins:
   enabled: false
   dir: "plugins"
+  # Additional plugin store registries. The built-in official registry is always included.
+  # store-sources:
+  #   - "https://example.com/cliproxy-plugins/registry.json"
   configs:
     example:
       enabled: true
