@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -285,6 +286,14 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			}
 		}
 	}
+	if provider == "codex" {
+		enrichCtx, cancelEnrich := context.WithTimeout(context.Background(), 20*time.Second)
+		changed, _ := codex.EnrichSubscriptionMetadata(enrichCtx, metadata, http.DefaultClient)
+		cancelEnrich()
+		if changed {
+			_ = writeAuthMetadataFile(path, metadata)
+		}
+	}
 	info, errStat = os.Stat(path)
 	if errStat != nil {
 		return nil, fmt.Errorf("stat file: %w", errStat)
@@ -314,6 +323,22 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+func writeAuthMetadataFile(path string, metadata map[string]any) error {
+	raw, errMarshal := json.Marshal(metadata)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if errOpen != nil {
+		return errOpen
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	_, errWrite := file.Write(raw)
+	return errWrite
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

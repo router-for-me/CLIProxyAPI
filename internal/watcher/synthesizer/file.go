@@ -191,6 +191,12 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				}
 			}
 		}
+		if pt, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(pt) != "" {
+			a.Attributes["plan_type"] = strings.TrimSpace(pt)
+		}
+		if expiry, ok := metadata["subscription_active_until"].(string); ok && strings.TrimSpace(expiry) != "" {
+			a.Attributes["subscription_active_until"] = strings.TrimSpace(expiry)
+		}
 	}
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {

@@ -122,7 +122,7 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return a.buildAuthRecord(ctx, authSvc, authBundle)
 }
 
 func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
@@ -251,7 +251,7 @@ func codexDeviceIsSuccessStatus(code int) bool {
 	return code >= 200 && code < 300
 }
 
-func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
+func (a *CodexAuthenticator) buildAuthRecord(ctx context.Context, authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
 	if tokenStorage == nil || tokenStorage.Email == "" {
@@ -273,8 +273,23 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
-		"email": tokenStorage.Email,
+		"email":      tokenStorage.Email,
+		"account_id": tokenStorage.AccountID,
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	subscriptionCtx, cancelSubscription := context.WithTimeout(ctx, 20*time.Second)
+	if _, errEnrich := authSvc.EnrichSubscriptionMetadata(
+		subscriptionCtx,
+		metadata,
+		tokenStorage.IDToken,
+		tokenStorage.AccessToken,
+		tokenStorage.AccountID,
+	); errEnrich != nil {
+		log.Warnf("Codex subscription metadata enrichment failed: %v", errEnrich)
+	}
+	cancelSubscription()
 
 	fmt.Println("Codex authentication successful")
 	if authBundle.APIKey != "" {

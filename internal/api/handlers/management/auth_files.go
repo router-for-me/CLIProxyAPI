@@ -529,6 +529,15 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if subscription := extractCodexSubscriptionMetadata(auth); subscription != nil {
+		entry["codex_subscription"] = subscription
+		if v, ok := subscription["plan_type"]; ok {
+			entry["plan_type"] = v
+		}
+		if v, ok := subscription["subscription_active_until"]; ok {
+			entry["subscription_active_until"] = v
+		}
+	}
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
@@ -657,6 +666,43 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 		return nil
 	}
 	return result
+}
+
+func extractCodexSubscriptionMetadata(auth *coreauth.Auth) gin.H {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil
+	}
+	result := gin.H{}
+	copyMetadataValue(result, auth.Metadata, "account_id")
+	copyMetadataValue(result, auth.Metadata, "chatgpt_account_id")
+	copyMetadataValue(result, auth.Metadata, "plan_type")
+	copyMetadataValue(result, auth.Metadata, "subscription_active_until")
+	copyMetadataValue(result, auth.Metadata, "chatgpt_subscription_active_until")
+	copyMetadataValue(result, auth.Metadata, "subscription_expired")
+	copyMetadataValue(result, auth.Metadata, "chatgpt_subscription_last_checked")
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func copyMetadataValue(dst gin.H, metadata map[string]any, key string) {
+	if dst == nil || metadata == nil {
+		return
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return
+	}
+	if text, isString := value.(string); isString {
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+	}
+	dst[key] = value
 }
 
 func authEmail(auth *coreauth.Auth) string {
@@ -2228,15 +2274,25 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		// Create token storage and persist
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+		metadata := map[string]any{
+			"email":      tokenStorage.Email,
+			"account_id": tokenStorage.AccountID,
+		}
+		if _, errEnrich := openaiAuth.EnrichSubscriptionMetadata(
+			ctx,
+			metadata,
+			tokenStorage.IDToken,
+			tokenStorage.AccessToken,
+			tokenStorage.AccountID,
+		); errEnrich != nil {
+			log.Warnf("Codex subscription metadata enrichment failed: %v", errEnrich)
+		}
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "codex",
 			FileName: fileName,
 			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-			},
+			Metadata: metadata,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
