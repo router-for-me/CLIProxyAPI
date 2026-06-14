@@ -67,6 +67,10 @@ const (
 	MethodHostStreamEmit         = "host.stream.emit"
 	MethodHostStreamClose        = "host.stream.close"
 	MethodHostLog                = "host.log"
+	MethodHostAuthList           = "host.auth.list"
+	MethodHostAuthGet            = "host.auth.get"
+	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
+	MethodHostAuthSave           = "host.auth.save"
 )
 
 type Envelope struct {

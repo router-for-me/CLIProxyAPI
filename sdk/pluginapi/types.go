@@ -3,6 +3,7 @@ package pluginapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"time"
@@ -584,6 +585,117 @@ type HostModelStreamReadResponse struct {
 type HostModelStreamCloseRequest struct {
 	// StreamID identifies the host-owned stream.
 	StreamID string `json:"stream_id"`
+}
+
+type HostRecentRequestEntry struct {
+	// Time is the recent request bucket label.
+	Time string `json:"time"`
+	// Success is the success count in the bucket.
+	Success int64 `json:"success"`
+	// Failed is the failure count in the bucket.
+	Failed int64 `json:"failed"`
+}
+
+// HostAuthFileEntry describes one credential exposed through host auth callbacks.
+type HostAuthFileEntry struct {
+	// ID identifies the credential record.
+	ID string `json:"id,omitempty"`
+	// AuthIndex is the stable runtime credential index.
+	AuthIndex string `json:"auth_index,omitempty"`
+	// Name is the credential file name or runtime identifier.
+	Name string `json:"name"`
+	// Type is the credential provider type.
+	Type string `json:"type,omitempty"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider,omitempty"`
+	// Label is the human-readable credential label.
+	Label string `json:"label,omitempty"`
+	// Status is the current credential status.
+	Status string `json:"status,omitempty"`
+	// StatusMessage carries the latest status detail.
+	StatusMessage string `json:"status_message,omitempty"`
+	// Disabled reports whether the credential is disabled.
+	Disabled bool `json:"disabled,omitempty"`
+	// Unavailable reports whether the credential is currently unavailable.
+	Unavailable bool `json:"unavailable,omitempty"`
+	// RuntimeOnly reports whether the credential has no backing auth file.
+	RuntimeOnly bool `json:"runtime_only,omitempty"`
+	// Source reports whether the credential came from file or memory.
+	Source string `json:"source,omitempty"`
+	// Path is the backing auth file path when available.
+	Path string `json:"path,omitempty"`
+	// Size is the backing auth file size when available.
+	Size int64 `json:"size,omitempty"`
+	// ModTime is the last modification time when available.
+	ModTime time.Time `json:"modtime,omitempty"`
+	// UpdatedAt is the last credential update time.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// CreatedAt is the credential creation time.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	// LastRefresh is the last refresh timestamp.
+	LastRefresh time.Time `json:"last_refresh,omitempty"`
+	// NextRetryAfter is the next retry timestamp.
+	NextRetryAfter time.Time `json:"next_retry_after,omitempty"`
+	// Email is the credential email when available.
+	Email string `json:"email,omitempty"`
+	// ProjectID is the credential project identifier when available.
+	ProjectID string `json:"project_id,omitempty"`
+	// AccountType is the credential account type when available.
+	AccountType string `json:"account_type,omitempty"`
+	// Account is the credential account identifier when available.
+	Account string `json:"account,omitempty"`
+	// Priority is the credential routing priority when available.
+	Priority int `json:"priority,omitempty"`
+	// Note is the credential note when available.
+	Note string `json:"note,omitempty"`
+	// Websockets reports whether websocket mode is enabled when available.
+	Websockets bool `json:"websockets,omitempty"`
+	// Success is the recent success count.
+	Success int64 `json:"success,omitempty"`
+	// Failed is the recent failure count.
+	Failed int64 `json:"failed,omitempty"`
+	// RecentRequests is the recent request snapshot.
+	RecentRequests []HostRecentRequestEntry `json:"recent_requests,omitempty"`
+}
+
+// HostAuthGetRequest asks the host for credential JSON by auth index.
+type HostAuthGetRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+}
+
+// HostAuthGetResponse returns credential JSON resolved by auth index.
+type HostAuthGetResponse struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// Name is the credential file name or runtime identifier.
+	Name string `json:"name,omitempty"`
+	// Path is the backing auth file path when available.
+	Path string `json:"path,omitempty"`
+	// JSON contains the credential JSON payload.
+	JSON json.RawMessage `json:"json"`
+}
+
+// HostAuthGetRuntimeResponse returns runtime credential information by auth index.
+type HostAuthGetRuntimeResponse struct {
+	// Auth is the runtime credential entry.
+	Auth HostAuthFileEntry `json:"auth"`
+}
+
+// HostAuthSaveRequest asks the host to persist credential JSON to a physical auth file.
+type HostAuthSaveRequest struct {
+	// Name is the target auth file name. It must end with .json.
+	Name string `json:"name"`
+	// JSON contains the credential JSON payload to save.
+	JSON json.RawMessage `json:"json"`
+}
+
+// HostAuthSaveResponse reports the saved physical auth file.
+type HostAuthSaveResponse struct {
+	// Name is the saved auth file name.
+	Name string `json:"name"`
+	// Path is the saved auth file path.
+	Path string `json:"path"`
 }
 
 // HTTPRequest describes an upstream HTTP request issued through the host.
