@@ -87,7 +87,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 	}
 
 	// Backfill empty functionResponse.name from the preceding functionCall.name.
-	// Amp may send function responses with empty names; the Gemini API rejects these.
+	// Some clients send function responses with empty names; the Gemini API rejects these.
 	out = backfillEmptyFunctionResponseNames(out)
 
 	out = common.AttachDefaultSafetySettings(out, "safetySettings")
