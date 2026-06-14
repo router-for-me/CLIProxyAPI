@@ -27,6 +27,8 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type CursorComposerKey = internalconfig.CursorComposerKey
+type CursorComposerModel = internalconfig.CursorComposerModel
 
 type TLS = internalconfig.TLSConfig
 

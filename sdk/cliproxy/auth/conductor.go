@@ -1279,6 +1279,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "cursor-composer":
+			if entry := resolveCursorComposerAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		default:
 			// OpenAI-compat uses config selection from auth.Attributes.
 			providerKey := ""
@@ -2364,6 +2368,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	case "cursor-composer":
+		upstreamModel = resolveUpstreamModelForCursorComposerAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}
@@ -2448,6 +2454,13 @@ func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
 }
 
+func resolveCursorComposerAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.CursorComposerKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.CursorComposerKey, auth)
+}
+
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveGeminiAPIKeyConfig(cfg, auth)
 	if entry == nil {
@@ -2474,6 +2487,14 @@ func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, 
 
 func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveVertexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForCursorComposerAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveCursorComposerAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
