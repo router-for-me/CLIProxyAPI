@@ -136,6 +136,61 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 }
 
+func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinkingSupport(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "gpt-5.5"},
+		},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high", "xhigh"})
+}
+
+func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForUnknownModel(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "not-a-static-model"},
+		},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high"})
+}
+
+func TestBuildOpenAICompatibilityConfigModelsKeepsExplicitThinkingSupport(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{
+				Name:     "gpt-5.5",
+				Thinking: &internalregistry.ThinkingSupport{Levels: []string{"low"}},
+			},
+		},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	requireThinkingLevels(t, models[0].Thinking, []string{"low"})
+}
+
+func requireThinkingLevels(t *testing.T, thinking *internalregistry.ThinkingSupport, want []string) {
+	t.Helper()
+	if thinking == nil {
+		t.Fatalf("thinking = nil, want levels %v", want)
+	}
+	if got := strings.Join(thinking.Levels, ","); got != strings.Join(want, ",") {
+		t.Fatalf("thinking levels = [%s], want %v", got, want)
+	}
+}
+
 func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
 	var sawFetch bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
