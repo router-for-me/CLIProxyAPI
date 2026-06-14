@@ -2252,7 +2252,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if model.Image {
 			modelType = registry.OpenAIImageModelType
 		}
-		thinking := openAICompatibilityModelThinking(model)
+		thinking := openAICompatibilityModelThinking(model, modelID)
 		models = append(models, &ModelInfo{
 			ID:          modelID,
 			Object:      "model",
@@ -2267,14 +2267,18 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	return models
 }
 
-func openAICompatibilityModelThinking(model config.OpenAICompatibilityModel) *registry.ThinkingSupport {
+func openAICompatibilityModelThinking(model config.OpenAICompatibilityModel, modelID string) *registry.ThinkingSupport {
 	if model.Image {
 		return nil
 	}
 	if model.Thinking != nil {
 		return cloneThinkingSupport(model.Thinking)
 	}
-	if upstream := registry.LookupStaticModelInfo(strings.TrimSpace(model.Name)); upstream != nil && upstream.Thinking != nil {
+	staticModelID := strings.TrimSpace(model.Name)
+	if staticModelID == "" {
+		staticModelID = strings.TrimSpace(modelID)
+	}
+	if upstream := registry.LookupStaticModelInfo(staticModelID); upstream != nil && upstream.Thinking != nil {
 		if len(upstream.Thinking.Levels) > 0 {
 			return cloneThinkingLevels(upstream.Thinking)
 		}

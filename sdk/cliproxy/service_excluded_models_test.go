@@ -166,6 +166,23 @@ func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinkingSupport(t *te
 	}
 }
 
+func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinkingSupportFromAliasOnlyModel(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Alias: "gpt-5.5"},
+		},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	if models[0].ID != "gpt-5.5" {
+		t.Fatalf("model ID = %q, want gpt-5.5", models[0].ID)
+	}
+	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high", "xhigh"})
+}
+
 func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForStaticBudgetOnlyModel(t *testing.T) {
 	staticModel := internalregistry.LookupStaticModelInfo("gemini-2.5-pro")
 	if staticModel == nil || staticModel.Thinking == nil || len(staticModel.Thinking.Levels) > 0 || staticModel.Thinking.Max == 0 {
