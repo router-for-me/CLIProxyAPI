@@ -2959,7 +2959,10 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 		return nil
 	}
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return fmt.Errorf("read response body: %w", errRead)
+	}
 	if errDecode := json.Unmarshal(bodyBytes, result); errDecode != nil {
 		return fmt.Errorf("decode response body: %w", errDecode)
 	}

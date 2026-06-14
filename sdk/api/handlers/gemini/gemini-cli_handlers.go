@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,19 +22,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
-
-// sharedGeminiCLIClient returns a reusable HTTP client for Gemini CLI proxy requests.
-var (
-	geminiCLIClient     *http.Client
-	geminiCLIClientOnce sync.Once
-)
-
-func sharedGeminiCLIClient() *http.Client {
-	geminiCLIClientOnce.Do(func() {
-		geminiCLIClient = &http.Client{}
-	})
-	return geminiCLIClient
-}
 
 // GeminiCLIAPIHandler contains the handlers for Gemini CLI API endpoints.
 // It holds a pool of clients to interact with the backend service.
@@ -113,7 +99,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 			req.Header[key] = value
 		}
 
-		httpClient := util.SetProxy(h.Cfg, sharedGeminiCLIClient())
+		httpClient := util.SetProxy(h.Cfg, &http.Client{})
 
 		resp, err := httpClient.Do(req)
 		if err != nil {

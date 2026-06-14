@@ -62,7 +62,11 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		return client
 	}
 
-	return &http.Client{}
+	client := &http.Client{}
+	if timeout > 0 {
+		client.Timeout = timeout
+	}
+	return client
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

@@ -243,8 +243,17 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		// For budget-based models (Gemini 2.5), default to auto (budget=-1).
 		if modelInfo.Thinking != nil {
 			if len(modelInfo.Thinking.Levels) > 0 {
-				// Use the first (lowest) level as default
-				config = ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(modelInfo.Thinking.Levels[0])}
+				// Use the first (lowest) non-special level as default.
+				// Skip "none" and "auto" which are special values that disable
+				// or delegate thinking control rather than enabling a specific level.
+				for _, lvl := range modelInfo.Thinking.Levels {
+					level := ThinkingLevel(lvl)
+					if level == LevelNone || level == LevelAuto {
+						continue
+					}
+					config = ThinkingConfig{Mode: ModeLevel, Level: level}
+					break
+				}
 			} else if modelInfo.Thinking.DynamicAllowed {
 				config = ThinkingConfig{Mode: ModeAuto, Budget: -1}
 			} else if modelInfo.Thinking.Min > 0 {

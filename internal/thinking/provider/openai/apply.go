@@ -95,8 +95,9 @@ func applyCompatibleOpenAI(body []byte, config thinking.ThinkingConfig) ([]byte,
 		effort = string(config.Level)
 	case thinking.ModeNone:
 		// "none" is an internal value; upstream APIs don't accept it.
-		// Convert to "high" to ensure thinking is always enabled.
-		effort = string(thinking.LevelHigh)
+		// Delete the field to let upstream disable reasoning effort.
+		result, _ := sjson.DeleteBytes(body, "reasoning_effort")
+		return result, nil
 	case thinking.ModeAuto:
 		// "auto" is an internal value; delete the field to let upstream decide.
 		result, _ := sjson.DeleteBytes(body, "reasoning_effort")

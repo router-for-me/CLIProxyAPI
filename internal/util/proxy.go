@@ -8,7 +8,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
-	log "github.com/sirupsen/logrus"
 )
 
 // SetProxy configures the provided HTTP client with proxy settings from the configuration.
@@ -23,16 +22,6 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 
 	if t := proxyutil.SharedTransport(cfg.ProxyURL); t != nil {
 		httpClient.Transport = t
-		return httpClient
-	}
-
-	// Fallback: no shared transport available (ModeInherit), try building one.
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
-	if errBuild != nil {
-		log.Errorf("%v", errBuild)
-	}
-	if transport != nil {
-		httpClient.Transport = transport
 	}
 	return httpClient
 }

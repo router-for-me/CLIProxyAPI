@@ -77,9 +77,8 @@ func TestApplyCompatibleOpenAI_ModeNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	got := gjson.GetBytes(result, "reasoning_effort").String()
-	if got != "high" {
-		t.Fatalf("reasoning_effort = %q, want %q. Output: %s", got, "high", string(result))
+	if gjson.GetBytes(result, "reasoning_effort").Exists() {
+		t.Fatalf("reasoning_effort should be absent for ModeNone. Output: %s", string(result))
 	}
 }
 

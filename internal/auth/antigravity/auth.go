@@ -174,7 +174,7 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 		return nil, fmt.Errorf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, body)
 	}
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if errRead != nil {
 		return nil, fmt.Errorf("antigravity token exchange: read response: %w", errRead)
 	}
@@ -220,7 +220,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		}
 		return "", fmt.Errorf("antigravity userinfo: request failed: status %d: %s", resp.StatusCode, body)
 	}
-	bodyBytes, errRead := io.ReadAll(resp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if errRead != nil {
 		return "", fmt.Errorf("antigravity userinfo: read response: %w", errRead)
 	}
@@ -267,7 +267,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if errRead != nil {
 		return "", fmt.Errorf("read response: %w", errRead)
 	}

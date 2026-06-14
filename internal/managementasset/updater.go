@@ -112,18 +112,30 @@ func runAutoUpdater(ctx context.Context) {
 }
 
 // assetHTTPClient is a long-lived HTTP client reused for management asset downloads.
+// The client is rebuilt when the proxy URL changes (e.g. after hot-reload).
 var (
-	assetHTTPClient     *http.Client
-	assetHTTPClientOnce sync.Once
+	assetHTTPClientMu       sync.Mutex
+	assetHTTPClient         *http.Client
+	assetHTTPClientProxyURL string
 )
 
 func newHTTPClient(proxyURL string) *http.Client {
-	assetHTTPClientOnce.Do(func() {
-		client := &http.Client{Timeout: 15 * time.Second}
-		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
+	proxyURL = strings.TrimSpace(proxyURL)
+
+	assetHTTPClientMu.Lock()
+	defer assetHTTPClientMu.Unlock()
+
+	if assetHTTPClient != nil && assetHTTPClientProxyURL == proxyURL {
+		return assetHTTPClient
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	if proxyURL != "" {
+		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
 		util.SetProxy(sdkCfg, client)
-		assetHTTPClient = client
-	})
+	}
+	assetHTTPClient = client
+	assetHTTPClientProxyURL = proxyURL
 	return assetHTTPClient
 }
 
