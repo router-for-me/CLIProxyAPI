@@ -235,11 +235,38 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}
 
 	if !hasThinkingConfig(config) {
+		// When a model supports thinking but the user did not specify any
+		// thinking configuration, inject a default so that the upstream
+		// provider returns thought/reasoning content.
+		//
+		// For level-based models (Gemini 3.x), default to the lowest level.
+		// For budget-based models (Gemini 2.5), default to auto (budget=-1).
+		if modelInfo.Thinking != nil {
+			if len(modelInfo.Thinking.Levels) > 0 {
+				// Use the first (lowest) level as default
+				config = ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(modelInfo.Thinking.Levels[0])}
+			} else if modelInfo.Thinking.DynamicAllowed {
+				config = ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			} else if modelInfo.Thinking.Min > 0 {
+				config = ThinkingConfig{Mode: ModeBudget, Budget: modelInfo.Thinking.Min}
+			}
+		}
+
+		if !hasThinkingConfig(config) {
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+			}).Debug("thinking: no config found, passthrough |")
+			return body, nil
+		}
+
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
 			"model":    modelInfo.ID,
-		}).Debug("thinking: no config found, passthrough |")
-		return body, nil
+			"mode":     config.Mode,
+			"budget":   config.Budget,
+			"level":    config.Level,
+		}).Debug("thinking: no config found, applying default |")
 	}
 
 	// 5. Validate and normalize configuration
