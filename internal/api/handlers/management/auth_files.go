@@ -1321,11 +1321,19 @@ func (h *Handler) mergeAuthFileStatusMetadata(auth *coreauth.Auth, requestMetada
 		auth.Provider = provider
 	}
 	auth.Metadata = merged
-	// The scheduler derives priority from Attributes["priority"], not Metadata,
-	// so mirror the merged priority into attributes. Otherwise a re-enabled
-	// account whose in-memory attributes lacked the priority would be scheduled
-	// at priority 0 until the next reload.
-	syncAuthFilePriorityAttribute(auth)
+	// Mirror the merged metadata into the runtime fields/attributes the
+	// executors and scheduler read (custom headers, proxy_url, prefix,
+	// priority, note, websockets). Without this, re-enabling a partially-loaded
+	// auth would republish it missing its configured headers/proxy/priority
+	// until a later file reload. Disabled state is handled by the caller.
+	syncAuthFileMetadataFields(auth, map[string]struct{}{
+		"prefix":     {},
+		"proxy_url":  {},
+		"headers":    {},
+		"priority":   {},
+		"note":       {},
+		"websockets": {},
+	})
 	return nil
 }
 

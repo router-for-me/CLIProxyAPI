@@ -152,18 +152,18 @@ func TestPatchAuthFileStatus_AcceptsMetadataAndTypeFromRequest(t *testing.T) {
 	}
 }
 
-// Regression: re-enabling an account whose in-memory attributes lack a priority
-// must sync the priority preserved from disk into Attributes, so the scheduler
-// (which reads Attributes["priority"]) sees it immediately, not only after a
-// reload.
-func TestPatchAuthFileStatus_SyncsPriorityIntoAttributes(t *testing.T) {
+// Regression: re-enabling an account whose in-memory record is partial must
+// sync the runtime fields the executors/scheduler read (priority, proxy_url,
+// custom headers, ...) from the metadata merged off disk, not only after a
+// later file reload.
+func TestPatchAuthFileStatus_SyncsRuntimeFieldsFromMergedMetadata(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	fileName := "codex.json"
 	filePath := filepath.Join(authDir, fileName)
-	original := `{"type":"codex","access_token":"access","priority":5}`
+	original := `{"type":"codex","access_token":"access","priority":5,"proxy_url":"http://proxy.local","headers":{"X-Old":"old"}}`
 	if errWrite := os.WriteFile(filePath, []byte(original), 0o600); errWrite != nil {
 		t.Fatalf("seed auth file: %v", errWrite)
 	}
@@ -171,7 +171,7 @@ func TestPatchAuthFileStatus_SyncsPriorityIntoAttributes(t *testing.T) {
 	store := fileauth.NewFileTokenStore()
 	store.SetBaseDir(authDir)
 	manager := coreauth.NewManager(store, nil, nil)
-	// In-memory record is partial: no priority in Metadata or Attributes.
+	// In-memory record is partial: no priority/proxy/headers in runtime fields.
 	record := &coreauth.Auth{
 		ID:         fileName,
 		FileName:   fileName,
@@ -204,5 +204,11 @@ func TestPatchAuthFileStatus_SyncsPriorityIntoAttributes(t *testing.T) {
 	}
 	if got := updated.Attributes["priority"]; got != "5" {
 		t.Fatalf("Attributes[priority] = %q, want \"5\" (synced for scheduler)", got)
+	}
+	if got := updated.ProxyURL; got != "http://proxy.local" {
+		t.Fatalf("ProxyURL = %q, want http://proxy.local (synced from metadata)", got)
+	}
+	if got := updated.Attributes["header:X-Old"]; got != "old" {
+		t.Fatalf("Attributes[header:X-Old] = %q, want \"old\" (custom headers synced)", got)
 	}
 }
