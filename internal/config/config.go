@@ -148,8 +148,6 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
-
-	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
 // PluginsConfig holds dynamic plugin system settings.
@@ -690,19 +688,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// NOTE: Startup legacy key migration is intentionally disabled.
-	// Reason: avoid mutating config.yaml during server startup.
-	// Re-enable the block below if automatic startup migration is needed again.
-	// var legacy legacyConfigData
-	// if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
-	// 	if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
-	// 	if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
-	// }
-
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
@@ -777,21 +762,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
-
-	// NOTE: Legacy migration persistence is intentionally disabled together with
-	// startup legacy migration to keep startup read-only for config.yaml.
-	// Re-enable the block below if automatic startup migration is needed again.
-	// if cfg.legacyMigrationPending {
-	// 	fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
-	// 	if !optional && configFile != "" {
-	// 		if err := SaveConfigPreserveComments(configFile, &cfg); err != nil {
-	// 			return nil, fmt.Errorf("failed to persist migrated legacy config: %w", err)
-	// 		}
-	// 		fmt.Println("Legacy configuration normalized and persisted.")
-	// 	} else {
-	// 		fmt.Println("Legacy configuration normalized in memory; persistence skipped.")
-	// 	}
-	// }
 
 	// Return the populated configuration struct.
 	return &cfg, nil
@@ -1825,122 +1795,6 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 	default:
 		// Scalars keep their existing style to preserve quoting
 	}
-}
-
-// Legacy migration helpers (move deprecated config keys into structured fields).
-type legacyConfigData struct {
-	LegacyGeminiKeys []string                    `yaml:"generative-language-api-key"`
-	OpenAICompat     []legacyOpenAICompatibility `yaml:"openai-compatibility"`
-}
-
-type legacyOpenAICompatibility struct {
-	Name    string   `yaml:"name"`
-	BaseURL string   `yaml:"base-url"`
-	APIKeys []string `yaml:"api-keys"`
-}
-
-func (cfg *Config) migrateLegacyGeminiKeys(legacy []string) bool {
-	if cfg == nil || len(legacy) == 0 {
-		return false
-	}
-	changed := false
-	seen := make(map[string]struct{}, len(cfg.GeminiKey))
-	for i := range cfg.GeminiKey {
-		key := strings.TrimSpace(cfg.GeminiKey[i].APIKey)
-		if key == "" {
-			continue
-		}
-		seen[key] = struct{}{}
-	}
-	for _, raw := range legacy {
-		key := strings.TrimSpace(raw)
-		if key == "" {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		cfg.GeminiKey = append(cfg.GeminiKey, GeminiKey{APIKey: key})
-		seen[key] = struct{}{}
-		changed = true
-	}
-	return changed
-}
-
-func (cfg *Config) migrateLegacyOpenAICompatibilityKeys(legacy []legacyOpenAICompatibility) bool {
-	if cfg == nil || len(cfg.OpenAICompatibility) == 0 || len(legacy) == 0 {
-		return false
-	}
-	changed := false
-	for _, legacyEntry := range legacy {
-		if len(legacyEntry.APIKeys) == 0 {
-			continue
-		}
-		target := findOpenAICompatTarget(cfg.OpenAICompatibility, legacyEntry.Name, legacyEntry.BaseURL)
-		if target == nil {
-			continue
-		}
-		if mergeLegacyOpenAICompatAPIKeys(target, legacyEntry.APIKeys) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-func mergeLegacyOpenAICompatAPIKeys(entry *OpenAICompatibility, keys []string) bool {
-	if entry == nil || len(keys) == 0 {
-		return false
-	}
-	changed := false
-	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
-	for i := range entry.APIKeyEntries {
-		key := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
-		if key == "" {
-			continue
-		}
-		existing[key] = struct{}{}
-	}
-	for _, raw := range keys {
-		key := strings.TrimSpace(raw)
-		if key == "" {
-			continue
-		}
-		if _, ok := existing[key]; ok {
-			continue
-		}
-		entry.APIKeyEntries = append(entry.APIKeyEntries, OpenAICompatibilityAPIKey{APIKey: key})
-		existing[key] = struct{}{}
-		changed = true
-	}
-	return changed
-}
-
-func findOpenAICompatTarget(entries []OpenAICompatibility, legacyName, legacyBase string) *OpenAICompatibility {
-	nameKey := strings.ToLower(strings.TrimSpace(legacyName))
-	baseKey := strings.ToLower(strings.TrimSpace(legacyBase))
-	if nameKey != "" && baseKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey &&
-				strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
-				return &entries[i]
-			}
-		}
-	}
-	if baseKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
-				return &entries[i]
-			}
-		}
-	}
-	if nameKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey {
-				return &entries[i]
-			}
-		}
-	}
-	return nil
 }
 
 func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
