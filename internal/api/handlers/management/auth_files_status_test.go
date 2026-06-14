@@ -151,3 +151,58 @@ func TestPatchAuthFileStatus_AcceptsMetadataAndTypeFromRequest(t *testing.T) {
 		t.Fatalf("updated.Provider = %q, want codex", got)
 	}
 }
+
+// Regression: re-enabling an account whose in-memory attributes lack a priority
+// must sync the priority preserved from disk into Attributes, so the scheduler
+// (which reads Attributes["priority"]) sees it immediately, not only after a
+// reload.
+func TestPatchAuthFileStatus_SyncsPriorityIntoAttributes(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "codex.json"
+	filePath := filepath.Join(authDir, fileName)
+	original := `{"type":"codex","access_token":"access","priority":5}`
+	if errWrite := os.WriteFile(filePath, []byte(original), 0o600); errWrite != nil {
+		t.Fatalf("seed auth file: %v", errWrite)
+	}
+
+	store := fileauth.NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	manager := coreauth.NewManager(store, nil, nil)
+	// In-memory record is partial: no priority in Metadata or Attributes.
+	record := &coreauth.Auth{
+		ID:         fileName,
+		FileName:   fileName,
+		Provider:   "codex",
+		Attributes: map[string]string{"path": filePath},
+		Metadata:   map[string]any{"name": fileName},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("register auth record: %v", errRegister)
+	}
+	if errWrite := os.WriteFile(filePath, []byte(original), 0o600); errWrite != nil {
+		t.Fatalf("restore seed after registration: %v", errWrite)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files?name="+fileName, strings.NewReader(`{"name":"codex.json","disabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileStatus(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID(fileName)
+	if !ok || updated == nil {
+		t.Fatalf("expected updated auth")
+	}
+	if got := updated.Attributes["priority"]; got != "5" {
+		t.Fatalf("Attributes[priority] = %q, want \"5\" (synced for scheduler)", got)
+	}
+}

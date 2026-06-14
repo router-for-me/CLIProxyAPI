@@ -1321,6 +1321,11 @@ func (h *Handler) mergeAuthFileStatusMetadata(auth *coreauth.Auth, requestMetada
 		auth.Provider = provider
 	}
 	auth.Metadata = merged
+	// The scheduler derives priority from Attributes["priority"], not Metadata,
+	// so mirror the merged priority into attributes. Otherwise a re-enabled
+	// account whose in-memory attributes lacked the priority would be scheduled
+	// at priority 0 until the next reload.
+	syncAuthFilePriorityAttribute(auth)
 	return nil
 }
 
