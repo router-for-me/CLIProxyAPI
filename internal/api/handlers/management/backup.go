@@ -65,8 +65,8 @@ func (h *Handler) PutBackupConfig(c *gin.Context) {
 
 	// persist() already writes JSON response, so we're done
 }
-}
 
+// CreateBackup creates a new backup immediately.
 // CreateBackup creates a new backup immediately.
 func (h *Handler) CreateBackup(c *gin.Context) {
 	if h == nil || h.cfg == nil {
@@ -136,18 +136,6 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 			// Cleanup old backups for this storage
 			if h.cfg.Backup.MaxBackups > 0 {
 				manager := backup.NewManager(h.configFilePath, h.cfg.AuthDir, logsDir, storage)
-				if err := manager.CleanupOldBackups(h.cfg.Backup.MaxBackups); err != nil {
-					log.WithError(err).Warnf("failed to cleanup old backups for %s", storageType)
-				}
-			}
-		}
-
-			uploadedInfo = info
-			successCount++
-			log.Infof("backup uploaded to %s successfully", storageType)
-
-			// Cleanup old backups for this storage
-			if h.cfg.Backup.MaxBackups > 0 {
 				if err := manager.CleanupOldBackups(h.cfg.Backup.MaxBackups); err != nil {
 					log.WithError(err).Warnf("failed to cleanup old backups for %s", storageType)
 				}
