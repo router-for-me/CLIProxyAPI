@@ -360,6 +360,50 @@ func TestEnrichSubscriptionMetadataForTokens_BackendFallbackPopulatesMetadata(t 
 	}
 }
 
+func TestNormalizeSubscriptionPlan(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"chatgptplusplan", "plus"},
+		{"chatgptfreeplan", "free"},
+		{"chatgptproplan", "pro"},
+		{"chatgpt_team_plan", "team"},
+		{"ChatGPT Pro", "pro"},
+		{"plus", "plus"},
+		{"free", "free"},
+		{"enterprise", "enterprise"},
+		{"  Plus  ", "plus"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := normalizeSubscriptionPlan(tc.in); got != tc.want {
+			t.Fatalf("normalizeSubscriptionPlan(%q)=%q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestEnrichSubscriptionMetadataForTokens_NormalizesBackendPlan(t *testing.T) {
+	future := time.Now().UTC().Add(20 * 24 * time.Hour).Format(time.RFC3339)
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/accounts/check/") {
+			// Backend returns a raw web plan value.
+			body := `{"accounts":[{"account":{"account_id":"acc-1"},"entitlement":{"subscription_plan":"chatgptplusplan","expires_at":"` + future + `"}}]}`
+			return jsonResponse(req, http.StatusOK, body), nil
+		}
+		t.Fatalf("unexpected request to %s", req.URL)
+		return nil, nil
+	})}
+
+	meta := map[string]any{}
+	if _, err := EnrichSubscriptionMetadataForTokens(context.Background(), meta, "", "access-token", "acc-1", client); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := stringMetadata(meta, "plan_type"); got != "plus" {
+		t.Fatalf("plan_type=%q, want normalized plus", got)
+	}
+}
+
 func TestEnrichSubscriptionMetadataForTokens_NoTokensNoChange(t *testing.T) {
 	meta := map[string]any{}
 	changed, err := EnrichSubscriptionMetadataForTokens(context.Background(), meta, "", "", "", nil)

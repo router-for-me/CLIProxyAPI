@@ -75,7 +75,7 @@ func EnrichSubscriptionMetadataForTokens(ctx context.Context, metadata map[strin
 		if setStringMetadata(metadata, "account_id", strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)) {
 			changed = true
 		}
-		if setStringMetadata(metadata, "plan_type", strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)) {
+		if setStringMetadata(metadata, "plan_type", normalizeSubscriptionPlan(claims.CodexAuthInfo.ChatgptPlanType)) {
 			changed = true
 		}
 		if activeUntil := normalizeSubscriptionScalar(claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil); activeUntil != "" {
@@ -129,7 +129,7 @@ func EnrichSubscriptionMetadataForTokens(ctx context.Context, metadata map[strin
 	if setStringMetadata(metadata, "account_id", snapshot.AccountID) {
 		changed = true
 	}
-	if setStringMetadata(metadata, "plan_type", snapshot.PlanType) {
+	if setStringMetadata(metadata, "plan_type", normalizeSubscriptionPlan(snapshot.PlanType)) {
 		changed = true
 	}
 	if setStringMetadata(metadata, "chatgpt_subscription_active_until", snapshot.ActiveUntil) {
@@ -446,6 +446,37 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// normalizeSubscriptionPlan maps web subscription_plan values (e.g.
+// "chatgptplusplan", "chatgpt_free_plan", "ChatGPT Pro") to the canonical plan
+// tokens the rest of the app expects (e.g. "free", "plus", "pro"); values that
+// are already canonical pass through unchanged. The free-plan check and model
+// registration read this normalized form from Attributes["plan_type"].
+func normalizeSubscriptionPlan(plan string) string {
+	trimmed := strings.TrimSpace(plan)
+	if trimmed == "" {
+		return ""
+	}
+	// Collapse to lowercase alphanumerics so separators/casing don't matter.
+	collapsed := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		case r >= '0' && r <= '9':
+			return r
+		default:
+			return -1
+		}
+	}, trimmed)
+	stripped := strings.TrimSuffix(strings.TrimPrefix(collapsed, "chatgpt"), "plan")
+	if stripped == "" {
+		// Degenerate input like "chatgpt" or "plan"; keep the collapsed form.
+		return collapsed
+	}
+	return stripped
 }
 
 func isDigits(value string) bool {

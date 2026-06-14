@@ -174,7 +174,7 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 			return nil
 		}
-		auth, err := s.readAuthFile(path, dir)
+		auth, err := s.readAuthFile(ctx, path, dir)
 		if err != nil {
 			return nil
 		}
@@ -216,7 +216,10 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(dir, id), nil
 }
 
-func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
+func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string) (*cliproxyauth.Auth, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -287,7 +290,9 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		}
 	}
 	if provider == "codex" {
-		enrichCtx, cancelEnrich := context.WithTimeout(context.Background(), 20*time.Second)
+		// Derive the timeout from the caller's context so a cancelled load
+		// (startup/shutdown) aborts promptly instead of blocking ~20s per file.
+		enrichCtx, cancelEnrich := context.WithTimeout(ctx, 20*time.Second)
 		changed, _ := codex.EnrichSubscriptionMetadata(enrichCtx, metadata, http.DefaultClient)
 		cancelEnrich()
 		if changed {
