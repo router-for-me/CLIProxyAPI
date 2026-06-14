@@ -152,29 +152,53 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 	}
 }
 
-// ListBackups returns all available backups.
+// ListBackups returns all available backups from all configured storage backends.
 func (h *Handler) ListBackups(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "配置不可用"})
 		return
 	}
 
-	manager, err := h.createBackupManager()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建备份管理器失败", "message": err.Error()})
-		return
+	storageTypes := strings.ToLower(strings.TrimSpace(h.cfg.Backup.Storage))
+	if storageTypes == "" {
+		storageTypes = "local"
 	}
 
-	backups, err := manager.List()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "列出备份失败", "message": err.Error()})
-		return
+	types := strings.Split(storageTypes, ",")
+	allBackups := make([]backup.BackupInfo, 0)
+	seenNames := make(map[string]bool)
+
+	for _, storageType := range types {
+		storageType = strings.TrimSpace(storageType)
+		if storageType == "" {
+			continue
+		}
+
+		manager, err := h.createBackupManagerForType(storageType)
+		if err != nil {
+			log.WithError(err).Warnf("failed to create backup manager for %s", storageType)
+			continue
+		}
+
+		backups, err := manager.List()
+		if err != nil {
+			log.WithError(err).Warnf("failed to list backups from %s", storageType)
+			continue
+		}
+
+		// Add backups, avoiding duplicates by name
+		for _, b := range backups {
+			if !seenNames[b.Name] {
+				allBackups = append(allBackups, b)
+				seenNames[b.Name] = true
+			}
+		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"backups": backups})
+	c.JSON(http.StatusOK, gin.H{"backups": allBackups})
 }
 
-// DownloadBackup downloads a specific backup.
+// DownloadBackup downloads a specific backup from any configured storage.
 func (h *Handler) DownloadBackup(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "配置不可用"})
@@ -187,23 +211,46 @@ func (h *Handler) DownloadBackup(c *gin.Context) {
 		return
 	}
 
-	manager, err := h.createBackupManager()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建备份管理器失败", "message": err.Error()})
+	storageTypes := strings.ToLower(strings.TrimSpace(h.cfg.Backup.Storage))
+	if storageTypes == "" {
+		storageTypes = "local"
+	}
+
+	types := strings.Split(storageTypes, ",")
+	var lastErr error
+
+	// Try to download from each storage backend
+	for _, storageType := range types {
+		storageType = strings.TrimSpace(storageType)
+		if storageType == "" {
+			continue
+		}
+
+		manager, err := h.createBackupManagerForType(storageType)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		data, err := manager.Download(name)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Successfully downloaded
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", name))
+		c.Data(http.StatusOK, "application/zip", data)
 		return
 	}
 
-	data, err := manager.Download(name)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "下载备份失败", "message": err.Error()})
-		return
-	}
-
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", name))
-	c.Data(http.StatusOK, "application/zip", data)
+	c.JSON(http.StatusInternalServerError, gin.H{
+		"error":   "下载备份失败",
+		"message": fmt.Sprintf("无法从任何存储后端下载: %v", lastErr),
+	})
 }
 
-// DeleteBackup deletes a specific backup.
+// DeleteBackup deletes a specific backup from all configured storage backends.
 func (h *Handler) DeleteBackup(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "配置不可用"})
@@ -216,18 +263,47 @@ func (h *Handler) DeleteBackup(c *gin.Context) {
 		return
 	}
 
-	manager, err := h.createBackupManager()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建备份管理器失败", "message": err.Error()})
+	storageTypes := strings.ToLower(strings.TrimSpace(h.cfg.Backup.Storage))
+	if storageTypes == "" {
+		storageTypes = "local"
+	}
+
+	types := strings.Split(storageTypes, ",")
+	successCount := 0
+	var lastErr error
+
+	// Delete from all storage backends
+	for _, storageType := range types {
+		storageType = strings.TrimSpace(storageType)
+		if storageType == "" {
+			continue
+		}
+
+		manager, err := h.createBackupManagerForType(storageType)
+		if err != nil {
+			log.WithError(err).Warnf("failed to create backup manager for %s", storageType)
+			lastErr = err
+			continue
+		}
+
+		if err := manager.Delete(name); err != nil {
+			log.WithError(err).Warnf("failed to delete backup from %s", storageType)
+			lastErr = err
+			continue
+		}
+
+		successCount++
+	}
+
+	if successCount == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "删除备份失败",
+			"message": fmt.Sprintf("无法从任何存储后端删除: %v", lastErr),
+		})
 		return
 	}
 
-	if err := manager.Delete(name); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除备份失败", "message": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "备份删除成功"})
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("备份已从 %d 个存储后端删除", successCount)})
 }
 
 // TestBackupConnection tests the backup storage connection.

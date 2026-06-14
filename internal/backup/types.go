@@ -1,6 +1,10 @@
 package backup
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // StorageType defines the backup storage backend type.
 type StorageType string
@@ -20,6 +24,89 @@ type Config struct {
 	MaxBackups int         `yaml:"max-backups" json:"max-backups"`
 	S3         S3Config    `yaml:"s3" json:"s3"`
 	WebDAV     WebDAVConfig `yaml:"webdav" json:"webdav"`
+}
+
+// Validate checks if the backup configuration is valid.
+func (c *Config) Validate() error {
+	if !c.Enabled {
+		return nil // No validation needed if disabled
+	}
+
+	// Validate storage type
+	if c.Storage == "" {
+		return fmt.Errorf("storage type is required when backup is enabled")
+	}
+
+	// Support multiple storage types separated by comma
+	storageTypes := strings.Split(string(c.Storage), ",")
+	for _, st := range storageTypes {
+		st = strings.TrimSpace(st)
+		storageType := StorageType(st)
+
+		switch storageType {
+		case StorageTypeLocal:
+			// Local storage is always valid (will use default if LocalDir is empty)
+		case StorageTypeS3:
+			if err := c.S3.Validate(); err != nil {
+				return fmt.Errorf("S3 configuration error: %w", err)
+			}
+		case StorageTypeWebDAV:
+			if err := c.WebDAV.Validate(); err != nil {
+				return fmt.Errorf("WebDAV configuration error: %w", err)
+			}
+		default:
+			return fmt.Errorf("unsupported storage type: %s", storageType)
+		}
+	}
+
+	// Validate schedule format if provided
+	if c.Schedule != "" {
+		if err := validateSchedule(c.Schedule); err != nil {
+			return fmt.Errorf("invalid schedule: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Validate checks if the S3 configuration is valid.
+func (s *S3Config) Validate() error {
+	if s.Endpoint == "" {
+		return fmt.Errorf("endpoint is required")
+	}
+	if s.Bucket == "" {
+		return fmt.Errorf("bucket is required")
+	}
+	if s.AccessKey == "" {
+		return fmt.Errorf("access key is required")
+	}
+	if s.SecretKey == "" {
+		return fmt.Errorf("secret key is required")
+	}
+	return nil
+}
+
+// Validate checks if the WebDAV configuration is valid.
+func (w *WebDAVConfig) Validate() error {
+	if w.URL == "" {
+		return fmt.Errorf("URL is required")
+	}
+	if !strings.HasPrefix(w.URL, "http://") && !strings.HasPrefix(w.URL, "https://") {
+		return fmt.Errorf("URL must start with http:// or https://")
+	}
+	return nil
+}
+
+// validateSchedule validates the schedule format.
+func validateSchedule(schedule string) error {
+	switch schedule {
+	case "@hourly", "@daily", "@weekly", "@monthly":
+		return nil
+	default:
+		// Try to parse as duration
+		_, err := time.ParseDuration(schedule)
+		return err
+	}
 }
 
 // S3Config holds S3 storage configuration.
@@ -63,3 +150,4 @@ type Storage interface {
 	// TestConnection tests if the storage is accessible.
 	TestConnection() error
 }
+

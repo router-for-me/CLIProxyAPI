@@ -36,7 +36,7 @@ func NewWebDAVStorage(cfg WebDAVConfig) (*WebDAVStorage, error) {
 		username: cfg.Username,
 		password: cfg.Password,
 		basePath: strings.Trim(cfg.Path, "/"),
-		client:   &http.Client{Timeout: 5 * time.Minute},
+		client:   &http.Client{},
 	}, nil
 }
 

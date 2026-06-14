@@ -60,8 +60,7 @@ func NewS3Storage(cfg S3Config) (*S3Storage, error) {
 
 // Upload uploads a backup file to S3.
 func (s *S3Storage) Upload(filename string, data []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := context.Background()
 
 	objectName := s.objectName(filename)
 	reader := bytes.NewReader(data)
@@ -79,8 +78,7 @@ func (s *S3Storage) Upload(filename string, data []byte) error {
 
 // List returns all available backups in S3.
 func (s *S3Storage) List() ([]BackupInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	objectCh := s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
 		Prefix:    s.prefix,
@@ -119,8 +117,7 @@ func (s *S3Storage) List() ([]BackupInfo, error) {
 
 // Download retrieves a backup file from S3.
 func (s *S3Storage) Download(name string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := context.Background()
 
 	objectName := s.objectName(name)
 	object, err := s.client.GetObject(ctx, s.bucket, objectName, minio.GetObjectOptions{})
@@ -139,8 +136,7 @@ func (s *S3Storage) Download(name string) ([]byte, error) {
 
 // Delete removes a backup file from S3.
 func (s *S3Storage) Delete(name string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	objectName := s.objectName(name)
 	if err := s.client.RemoveObject(ctx, s.bucket, objectName, minio.RemoveObjectOptions{}); err != nil {

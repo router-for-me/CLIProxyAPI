@@ -56,6 +56,10 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	go s.run(ctx)
 
 	log.Infof("backup scheduler started with interval: %v", interval)
+
+	// Execute backup immediately on start
+	go s.executeBackup()
+
 	return nil
 }
 
@@ -79,12 +83,15 @@ func (s *Scheduler) Stop() {
 
 // UpdateSchedule updates the schedule and restarts if running.
 func (s *Scheduler) UpdateSchedule(ctx context.Context, schedule string, maxBackups int) error {
-	s.Stop()
-
 	s.mu.Lock()
+	wasRunning := s.running
 	s.schedule = schedule
 	s.maxBackups = maxBackups
 	s.mu.Unlock()
+
+	if wasRunning {
+		s.Stop()
+	}
 
 	if schedule != "" {
 		return s.Start(ctx)
