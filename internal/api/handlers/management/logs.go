@@ -1062,29 +1062,47 @@ func readCompleteLogLines(path string, offset, maxOffset int64, limit int) (comp
 		return completeLogRead{}, fmt.Errorf("invalid log offset")
 	}
 
-	reader := bufio.NewReader(io.NewSectionReader(file, offset, maxOffset-offset))
+	reader := io.NewSectionReader(file, offset, maxOffset-offset)
 	result := completeLogRead{
 		lines:     []string{},
 		endOffset: offset,
 	}
 	currentOffset := offset
+	buf := make([]byte, 32*1024)
+	line := make([]byte, 0, logScannerInitialBuffer)
 	for {
-		raw, errRead := reader.ReadString('\n')
-		if strings.HasSuffix(raw, "\n") {
-			currentOffset += int64(len(raw))
-			line := strings.TrimSuffix(raw, "\n")
-			line = strings.TrimRight(line, "\r")
-			result.lines = append(result.lines, line)
-			result.endOffset = currentOffset
-			if ts := parseTimestamp(line); ts > result.latest {
-				result.latest = ts
-			}
-			if limit > 0 && len(result.lines) >= limit {
-				result.hitLimit = true
-				break
-			}
-			if errRead == nil {
-				continue
+		n, errRead := reader.Read(buf)
+		if n > 0 {
+			data := buf[:n]
+			for len(data) > 0 {
+				idx := bytes.IndexByte(data, '\n')
+				if idx < 0 {
+					if len(line)+len(data) > logScannerMaxBuffer {
+						return completeLogRead{}, fmt.Errorf("log line exceeds %d bytes", logScannerMaxBuffer)
+					}
+					line = append(line, data...)
+					currentOffset += int64(len(data))
+					break
+				}
+
+				segment := data[:idx]
+				if len(line)+len(segment) > logScannerMaxBuffer {
+					return completeLogRead{}, fmt.Errorf("log line exceeds %d bytes", logScannerMaxBuffer)
+				}
+				line = append(line, segment...)
+				currentOffset += int64(idx) + 1
+				text := strings.TrimRight(string(line), "\r")
+				result.lines = append(result.lines, text)
+				result.endOffset = currentOffset
+				if ts := parseTimestamp(text); ts > result.latest {
+					result.latest = ts
+				}
+				line = line[:0]
+				if limit > 0 && len(result.lines) >= limit {
+					result.hitLimit = true
+					return result, nil
+				}
+				data = data[idx+1:]
 			}
 		}
 		if errRead == io.EOF {

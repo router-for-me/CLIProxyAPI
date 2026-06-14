@@ -239,6 +239,24 @@ func TestGetLogsCursorReturnsOnlyNewCompleteLines(t *testing.T) {
 	}
 }
 
+func TestGetLogsCursorRejectsOversizedLine(t *testing.T) {
+	dir := t.TempDir()
+	writeMainLog(t, dir, "[2026-06-15 10:00:00] first\n")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+	if initial.NextCursor == "" {
+		t.Fatal("initial next-cursor is empty")
+	}
+
+	appendMainLog(t, dir, strings.Repeat("x", logScannerMaxBuffer+1)+"\n")
+	status, body := performGetLogsRaw(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=1")
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", status, http.StatusInternalServerError)
+	}
+	if !strings.Contains(body, "log line exceeds") {
+		t.Fatalf("body = %s, want oversized line error", body)
+	}
+}
+
 func TestGetLogsCursorNoNewLinesKeepsCursorStable(t *testing.T) {
 	dir := t.TempDir()
 	line := "[2026-06-15 10:00:00] first"
