@@ -261,7 +261,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
-			if isClaudeWebSearchToolType(toolResult.Get("type").String()) {
+			if isClaudeWebSearchTool(toolResult) {
 				template, _ = sjson.SetRawBytes(template, "tools.-1", convertClaudeWebSearchToolToCodex(toolResult))
 				continue
 			}
@@ -355,6 +355,44 @@ func isClaudeWebSearchToolType(toolType string) bool {
 	return toolType == "web_search_20250305" || toolType == "web_search_20260209"
 }
 
+// isClaudeWebSearchTool reports whether a Claude tool declaration should be
+// mapped to the Codex Responses builtin web_search tool. It matches both the
+// typed Anthropic server tools (web_search_20250305 / web_search_20260209) and
+// the plain function-style "WebSearch" tool emitted by recent Claude Code
+// releases (2.1.177+), which declares a normal input_schema instead of a typed
+// tool and would otherwise be forwarded to Codex as a regular function tool.
+func isClaudeWebSearchTool(tool gjson.Result) bool {
+	if isClaudeWebSearchToolType(tool.Get("type").String()) {
+		return true
+	}
+	return isClaudeCodeWebSearchFunctionTool(tool)
+}
+
+// isClaudeCodeWebSearchFunctionTool detects the function-style WebSearch tool
+// that Claude Code declares as {"name":"WebSearch","input_schema":{...}}. The
+// schema is fingerprinted by its query plus allowed_domains / blocked_domains
+// filter properties so unrelated custom tools (for example a user tool named
+// "web_search") are not misclassified as the builtin web search tool.
+func isClaudeCodeWebSearchFunctionTool(tool gjson.Result) bool {
+	if tool.Get("name").String() != "WebSearch" {
+		return false
+	}
+	// Typed server tools carry an explicit type and are handled separately;
+	// only plain custom/function declarations reach this branch.
+	switch tool.Get("type").String() {
+	case "", "custom":
+	default:
+		return false
+	}
+	props := tool.Get("input_schema.properties")
+	if !props.IsObject() {
+		return false
+	}
+	return props.Get("query").Exists() &&
+		props.Get("allowed_domains").Exists() &&
+		props.Get("blocked_domains").Exists()
+}
+
 func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
 	names := map[string]struct{}{}
 	if !tools.IsArray() {
@@ -362,8 +400,7 @@ func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
 	}
 
 	tools.ForEach(func(_, tool gjson.Result) bool {
-		toolType := tool.Get("type").String()
-		if !isClaudeWebSearchToolType(toolType) {
+		if !isClaudeWebSearchTool(tool) {
 			return true
 		}
 

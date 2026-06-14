@@ -332,6 +332,97 @@ func TestConvertClaudeRequestToCodex_WebSearchToolChoiceUsesDeclaredTypedToolNam
 	}
 }
 
+func TestConvertClaudeRequestToCodex_ClaudeCodeWebSearchFunctionToolMapping(t *testing.T) {
+	// Recent Claude Code (>= 2.1.177) declares WebSearch as a plain function tool
+	// with an input_schema instead of a typed web_search_* server tool. It must
+	// still map to the Codex Responses builtin web_search tool, while ordinary
+	// function tools alongside it are preserved.
+	inputJSON := `{
+		"model": "gpt-5.5",
+		"tools": [
+			{
+				"name": "Bash",
+				"description": "Run a shell command",
+				"input_schema": {"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}
+			},
+			{
+				"name": "WebSearch",
+				"description": "Search the web. Returns result blocks with titles and URLs.",
+				"input_schema": {
+					"type": "object",
+					"additionalProperties": false,
+					"properties": {
+						"query": {"type": "string", "minLength": 2, "description": "The search query to use"},
+						"allowed_domains": {"type": "array", "items": {"type": "string"}},
+						"blocked_domains": {"type": "array", "items": {"type": "string"}}
+					},
+					"required": ["query"]
+				}
+			}
+		],
+		"messages": [{"role": "user", "content": "search the latest Go release"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.#").Int(); got != 2 {
+		t.Fatalf("tools length = %d, want 2. Output: %s", got, string(result))
+	}
+	webSearchTool := resultJSON.Get(`tools.#(type=="web_search")`)
+	if !webSearchTool.Exists() {
+		t.Fatalf("expected a builtin web_search tool. Output: %s", string(result))
+	}
+	// The builtin tool must not leak the function schema fields.
+	if webSearchTool.Get("parameters").Exists() || webSearchTool.Get("input_schema").Exists() || webSearchTool.Get("name").Exists() {
+		t.Fatalf("builtin web_search tool should not carry name/parameters/input_schema. Output: %s", string(result))
+	}
+	if resultJSON.Get(`tools.#(name=="WebSearch")`).Exists() {
+		t.Fatalf("WebSearch must not be forwarded as a function tool. Output: %s", string(result))
+	}
+	// The ordinary Bash tool must still be forwarded as a function tool.
+	bashTool := resultJSON.Get(`tools.#(name=="Bash")`)
+	if !bashTool.Exists() {
+		t.Fatalf("expected Bash to remain a function tool. Output: %s", string(result))
+	}
+	if got := bashTool.Get("type").String(); got != "function" {
+		t.Fatalf("Bash tool type = %q, want function. Output: %s", got, string(result))
+	}
+	if got := bashTool.Get("parameters.properties.command.type").String(); got != "string" {
+		t.Fatalf("Bash tool parameters not preserved. Output: %s", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ClaudeCodeWebSearchToolChoiceMapsToBuiltin(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5.5",
+		"tools": [
+			{
+				"name": "WebSearch",
+				"description": "Search the web.",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"query": {"type": "string"},
+						"allowed_domains": {"type": "array", "items": {"type": "string"}},
+						"blocked_domains": {"type": "array", "items": {"type": "string"}}
+					},
+					"required": ["query"]
+				}
+			}
+		],
+		"tool_choice": {"type": "tool", "name": "WebSearch"},
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.type = %q, want web_search. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureToReasoningItem(t *testing.T) {
 	signature := validCodexReasoningSignature()
 	inputJSON := `{
