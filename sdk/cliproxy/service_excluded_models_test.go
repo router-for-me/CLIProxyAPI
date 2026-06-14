@@ -137,6 +137,15 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 }
 
 func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinkingSupport(t *testing.T) {
+	staticModel := internalregistry.LookupStaticModelInfo("gpt-5.5")
+	if staticModel == nil || staticModel.Thinking == nil {
+		t.Fatal("expected static gpt-5.5 thinking support")
+	}
+	originalLevels := append([]string(nil), staticModel.Thinking.Levels...)
+	defer func() {
+		staticModel.Thinking.Levels = originalLevels
+	}()
+
 	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
 		Name: "compat",
 		Models: []config.OpenAICompatibilityModel{
@@ -148,6 +157,35 @@ func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinkingSupport(t *te
 		t.Fatalf("models length = %d, want 1", len(models))
 	}
 	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high", "xhigh"})
+	if models[0].Thinking == staticModel.Thinking {
+		t.Fatal("expected inherited thinking support to be cloned")
+	}
+	models[0].Thinking.Levels[0] = "mutated"
+	if staticModel.Thinking.Levels[0] != originalLevels[0] {
+		t.Fatal("mutating inherited thinking support should not change static registry")
+	}
+}
+
+func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForStaticBudgetOnlyModel(t *testing.T) {
+	staticModel := internalregistry.LookupStaticModelInfo("gemini-2.5-pro")
+	if staticModel == nil || staticModel.Thinking == nil || len(staticModel.Thinking.Levels) > 0 || staticModel.Thinking.Max == 0 {
+		t.Fatal("expected static gemini-2.5-pro to be budget-only")
+	}
+
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "gemini-2.5-pro"},
+		},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high"})
+	if models[0].Thinking.Min != 0 || models[0].Thinking.Max != 0 {
+		t.Fatalf("thinking budget range = [%d,%d], want default level-only support", models[0].Thinking.Min, models[0].Thinking.Max)
+	}
 }
 
 func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForUnknownModel(t *testing.T) {
@@ -165,12 +203,13 @@ func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForUnknownModel(
 }
 
 func TestBuildOpenAICompatibilityConfigModelsKeepsExplicitThinkingSupport(t *testing.T) {
+	explicitThinking := &internalregistry.ThinkingSupport{Levels: []string{"low"}}
 	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
 		Name: "compat",
 		Models: []config.OpenAICompatibilityModel{
 			{
 				Name:     "gpt-5.5",
-				Thinking: &internalregistry.ThinkingSupport{Levels: []string{"low"}},
+				Thinking: explicitThinking,
 			},
 		},
 	})
@@ -179,6 +218,13 @@ func TestBuildOpenAICompatibilityConfigModelsKeepsExplicitThinkingSupport(t *tes
 		t.Fatalf("models length = %d, want 1", len(models))
 	}
 	requireThinkingLevels(t, models[0].Thinking, []string{"low"})
+	if models[0].Thinking == explicitThinking {
+		t.Fatal("expected explicit thinking support to be cloned")
+	}
+	models[0].Thinking.Levels[0] = "mutated"
+	if explicitThinking.Levels[0] != "low" {
+		t.Fatal("mutating registered thinking support should not change explicit config")
+	}
 }
 
 func requireThinkingLevels(t *testing.T, thinking *internalregistry.ThinkingSupport, want []string) {

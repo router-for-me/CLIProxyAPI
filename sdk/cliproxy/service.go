@@ -2268,13 +2268,29 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 }
 
 func openAICompatibilityModelThinking(model config.OpenAICompatibilityModel) *registry.ThinkingSupport {
-	if model.Thinking != nil || model.Image {
-		return model.Thinking
+	if model.Image {
+		return nil
+	}
+	if model.Thinking != nil {
+		return cloneThinkingSupport(model.Thinking)
 	}
 	if upstream := registry.LookupStaticModelInfo(strings.TrimSpace(model.Name)); upstream != nil && upstream.Thinking != nil {
-		return upstream.Thinking
+		if len(upstream.Thinking.Levels) > 0 {
+			return cloneThinkingSupport(upstream.Thinking)
+		}
 	}
 	return &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+}
+
+func cloneThinkingSupport(thinking *registry.ThinkingSupport) *registry.ThinkingSupport {
+	if thinking == nil {
+		return nil
+	}
+	cloned := *thinking
+	if thinking.Levels != nil {
+		cloned.Levels = append([]string(nil), thinking.Levels...)
+	}
+	return &cloned
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
