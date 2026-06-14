@@ -51,11 +51,18 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		return
 	}
 
+	rawCursor := strings.TrimSpace(c.Query("cursor"))
 	files, err := h.collectLogFiles(logDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			cutoff := parseCutoff(c.Query("after"))
-			writeLogsResponse(c, []string{}, 0, cutoff, "", false)
+			latest := cutoff
+			if rawCursor != "" {
+				if cursor, errCursor := decodeLogCursor(rawCursor); errCursor == nil && cursor.LatestTimestamp > latest {
+					latest = cursor.LatestTimestamp
+				}
+			}
+			writeLogsResponse(c, []string{}, 0, latest, "", rawCursor != "")
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list log files: %v", err)})
@@ -69,7 +76,26 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	}
 
 	cutoff := parseCutoff(c.Query("after"))
-	if strings.TrimSpace(c.Query("cursor")) == "" && cutoff == 0 && limit > 0 {
+	if rawCursor != "" {
+		result, reset, errCursor := readLogFilesFromCursor(logDir, files, rawCursor, limit)
+		if errCursor != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errCursor)})
+			return
+		}
+		if reset {
+			result, errCursor = tailLogFiles(files, limit, result.latest)
+			if errCursor != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errCursor)})
+				return
+			}
+			writeLogsResponse(c, result.lines, len(result.lines), result.latest, result.nextCursor, true)
+			return
+		}
+		writeLogsResponse(c, result.lines, len(result.lines), result.latest, result.nextCursor, false)
+		return
+	}
+
+	if cutoff == 0 && limit > 0 {
 		result, errTail := tailLogFiles(files, limit, 0)
 		if errTail != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errTail)})
@@ -639,6 +665,140 @@ func cursorForLatestLogFile(files []string, latest int64) (string, error) {
 		return cursor, nil
 	}
 	return "", nil
+}
+
+func readLogFilesFromCursor(logDir string, files []string, raw string, limit int) (logReadResult, bool, error) {
+	cursor, errDecode := decodeLogCursor(raw)
+	if errDecode != nil {
+		return logReadResult{lines: []string{}}, true, nil
+	}
+	result := logReadResult{
+		lines:      []string{},
+		latest:     cursor.LatestTimestamp,
+		nextCursor: raw,
+	}
+	if _, errPath := safeLogFilePath(logDir, cursor.File); errPath != nil {
+		return result, true, nil
+	}
+	startIndex, found, errLocate := locateLogCursorFile(files, cursor)
+	if errLocate != nil {
+		return result, false, errLocate
+	}
+	if !found {
+		return result, true, nil
+	}
+
+	currentCursorPath := files[startIndex]
+	currentCursorOffset := cursor.Offset
+	advanced := false
+	for i := startIndex; i < len(files); i++ {
+		remaining := 0
+		if limit > 0 {
+			remaining = limit - len(result.lines)
+			if remaining <= 0 {
+				break
+			}
+		}
+		offset := int64(0)
+		if i == startIndex {
+			offset = cursor.Offset
+		}
+		read, errRead := readCompleteLogLines(files[i], offset, -1, remaining)
+		if errRead != nil {
+			if errors.Is(errRead, os.ErrNotExist) {
+				return result, true, nil
+			}
+			return result, false, errRead
+		}
+		if len(read.lines) > 0 {
+			result.lines = append(result.lines, read.lines...)
+			if read.latest > result.latest {
+				result.latest = read.latest
+			}
+			currentCursorPath = files[i]
+			currentCursorOffset = read.endOffset
+			advanced = true
+		}
+		if read.hitLimit {
+			break
+		}
+	}
+	if !advanced {
+		return result, false, nil
+	}
+
+	nextCursor, errCursor := newLogCursor(currentCursorPath, currentCursorOffset, result.latest)
+	if errCursor != nil {
+		if errors.Is(errCursor, os.ErrNotExist) {
+			return result, true, nil
+		}
+		return result, false, errCursor
+	}
+	result.nextCursor = nextCursor
+	return result, false, nil
+}
+
+func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
+	nameToIndex := make(map[string]int, len(files))
+	for i := range files {
+		nameToIndex[filepath.Base(files[i])] = i
+	}
+	if index, ok := nameToIndex[cursor.File]; ok {
+		matches, truncated, errMatch := logFileMatchesCursor(files[index], cursor)
+		if errMatch != nil {
+			if errors.Is(errMatch, os.ErrNotExist) {
+				return 0, false, nil
+			}
+			return 0, false, errMatch
+		}
+		if truncated {
+			return 0, false, nil
+		}
+		if matches {
+			return index, true, nil
+		}
+	}
+
+	if cursor.File != defaultLogFileName || cursor.Offset == 0 {
+		return 0, false, nil
+	}
+	for i := range files {
+		if filepath.Base(files[i]) == defaultLogFileName {
+			continue
+		}
+		matches, truncated, errMatch := logFileMatchesCursor(files[i], cursor)
+		if errMatch != nil {
+			if errors.Is(errMatch, os.ErrNotExist) {
+				continue
+			}
+			return 0, false, errMatch
+		}
+		if truncated {
+			continue
+		}
+		if matches {
+			return i, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+func logFileMatchesCursor(path string, cursor logCursor) (bool, bool, error) {
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		return false, false, errStat
+	}
+	if info.IsDir() {
+		return false, false, fmt.Errorf("invalid log file")
+	}
+	if info.Size() < cursor.Offset {
+		return false, true, nil
+	}
+	fingerprint, errFingerprint := logFileFingerprint(path, cursor.Offset)
+	if errFingerprint != nil {
+		return false, false, errFingerprint
+	}
+	return fingerprint == cursor.Fingerprint, false, nil
 }
 
 func encodeLogCursor(cursor logCursor) (string, error) {

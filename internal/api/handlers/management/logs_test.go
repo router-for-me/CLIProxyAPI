@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -207,6 +208,210 @@ func TestGetLogsAfterKeepsTimestampScanAndReturnsCursor(t *testing.T) {
 	}
 }
 
+func TestGetLogsCursorReturnsOnlyNewCompleteLines(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		"[2026-06-15 10:00:00] first",
+		"[2026-06-15 10:00:01] second",
+		"[2026-06-15 10:00:02] third",
+	}
+	writeMainLog(t, dir, strings.Join(lines, "\n")+"\n")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=2")
+	if initial.NextCursor == "" {
+		t.Fatal("initial next-cursor is empty")
+	}
+
+	appendMainLog(t, dir, "[2026-06-15 10:00:03] fourth\n")
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10")
+	wantLines := []string{"[2026-06-15 10:00:03] fourth"}
+	if !reflect.DeepEqual(resp.Lines, wantLines) {
+		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
+	}
+	if resp.LineCount != 1 {
+		t.Fatalf("line-count = %d, want 1", resp.LineCount)
+	}
+	if resp.CursorReset {
+		t.Fatal("cursor-reset = true, want false")
+	}
+	wantLatest := time.Date(2026, 6, 15, 10, 0, 3, 0, time.Local).Unix()
+	if resp.LatestTimestamp != wantLatest {
+		t.Fatalf("latest-timestamp = %d, want %d", resp.LatestTimestamp, wantLatest)
+	}
+}
+
+func TestGetLogsCursorNoNewLinesKeepsCursorStable(t *testing.T) {
+	dir := t.TempDir()
+	line := "[2026-06-15 10:00:00] first"
+	writeMainLog(t, dir, line+"\n")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10")
+	if len(resp.Lines) != 0 {
+		t.Fatalf("lines = %#v, want empty", resp.Lines)
+	}
+	if resp.LineCount != 0 {
+		t.Fatalf("line-count = %d, want 0", resp.LineCount)
+	}
+	if resp.NextCursor != initial.NextCursor {
+		t.Fatalf("next-cursor changed with no complete lines")
+	}
+	if resp.LatestTimestamp != initial.LatestTimestamp {
+		t.Fatalf("latest-timestamp = %d, want %d", resp.LatestTimestamp, initial.LatestTimestamp)
+	}
+}
+
+func TestGetLogsCursorDoesNotAdvancePastTrailingPartial(t *testing.T) {
+	dir := t.TempDir()
+	line := "[2026-06-15 10:00:00] first"
+	writeMainLog(t, dir, line+"\n")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+
+	appendMainLog(t, dir, "partial")
+	partial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10")
+	if len(partial.Lines) != 0 {
+		t.Fatalf("partial lines = %#v, want empty", partial.Lines)
+	}
+	if partial.NextCursor != initial.NextCursor {
+		t.Fatalf("cursor advanced past partial line")
+	}
+
+	appendMainLog(t, dir, "\n")
+	complete := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10")
+	if !reflect.DeepEqual(complete.Lines, []string{"partial"}) {
+		t.Fatalf("complete lines = %#v, want partial", complete.Lines)
+	}
+	if complete.LatestTimestamp != initial.LatestTimestamp {
+		t.Fatalf("latest-timestamp = %d, want %d", complete.LatestTimestamp, initial.LatestTimestamp)
+	}
+}
+
+func TestGetLogsCursorResetAfterTruncateTailsLimit(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		"[2026-06-15 10:00:00] first",
+		"[2026-06-15 10:00:01] second",
+		"[2026-06-15 10:00:02] third",
+	}
+	writeMainLog(t, dir, strings.Join(lines, "\n")+"\n")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=3")
+
+	resetLine := "[2026-06-15 10:00:03] reset"
+	writeMainLog(t, dir, resetLine+"\n")
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=1")
+	if !resp.CursorReset {
+		t.Fatal("cursor-reset = false, want true")
+	}
+	if !reflect.DeepEqual(resp.Lines, []string{resetLine}) {
+		t.Fatalf("lines = %#v, want reset tail", resp.Lines)
+	}
+	if resp.LineCount != 1 {
+		t.Fatalf("line-count = %d, want 1", resp.LineCount)
+	}
+}
+
+func TestGetLogsCursorReadsAcrossRotation(t *testing.T) {
+	dir := t.TempDir()
+	line1 := "[2026-06-15 10:00:00] first"
+	line2 := "[2026-06-15 10:00:01] second"
+	line3 := "[2026-06-15 10:00:02] third"
+	writeMainLog(t, dir, line1+"\n")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+
+	appendMainLog(t, dir, line2+"\n")
+	if err := os.Rename(filepath.Join(dir, defaultLogFileName), filepath.Join(dir, defaultLogFileName+".1")); err != nil {
+		t.Fatalf("rotate main log: %v", err)
+	}
+	writeMainLog(t, dir, line3+"\n")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=10")
+	wantLines := []string{line2, line3}
+	if !reflect.DeepEqual(resp.Lines, wantLines) {
+		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
+	}
+	if resp.CursorReset {
+		t.Fatal("cursor-reset = true, want false")
+	}
+}
+
+func TestGetLogsInvalidCursorResetsToTail(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		"[2026-06-15 10:00:00] first",
+		"[2026-06-15 10:00:01] second",
+	}
+	writeMainLog(t, dir, strings.Join(lines, "\n")+"\n")
+
+	cases := []string{
+		"not-base64",
+		mustEncodeRawCursor(t, logCursor{
+			Version:     logCursorVersion,
+			File:        "../secret",
+			Fingerprint: "fingerprint",
+		}),
+	}
+	for _, raw := range cases {
+		resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(raw)+"&limit=1")
+		if !resp.CursorReset {
+			t.Fatalf("cursor-reset = false for cursor %q", raw)
+		}
+		if !reflect.DeepEqual(resp.Lines, []string{lines[1]}) {
+			t.Fatalf("lines = %#v, want latest line", resp.Lines)
+		}
+		if resp.LineCount != 1 {
+			t.Fatalf("line-count = %d, want 1", resp.LineCount)
+		}
+	}
+}
+
+func TestGetLogsMissingRotatedCursorFileResetsToTail(t *testing.T) {
+	dir := t.TempDir()
+	current := "[2026-06-15 10:00:01] current"
+	writeMainLog(t, dir, current+"\n")
+	rotatedPath := filepath.Join(dir, defaultLogFileName+".1")
+	if err := os.WriteFile(rotatedPath, []byte("[2026-06-15 10:00:00] old\n"), 0o644); err != nil {
+		t.Fatalf("write rotated log: %v", err)
+	}
+	cursor, errCursor := newLogCursor(rotatedPath, int64(len("[2026-06-15 10:00:00] old\n")), 0)
+	if errCursor != nil {
+		t.Fatalf("newLogCursor() error = %v", errCursor)
+	}
+	if errRemove := os.Remove(rotatedPath); errRemove != nil {
+		t.Fatalf("remove rotated log: %v", errRemove)
+	}
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(cursor)+"&limit=1")
+	if !resp.CursorReset {
+		t.Fatal("cursor-reset = false, want true")
+	}
+	if !reflect.DeepEqual(resp.Lines, []string{current}) {
+		t.Fatalf("lines = %#v, want current tail", resp.Lines)
+	}
+}
+
+func TestGetLogsMissingLogDirKeepsOKEmptyResponse(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape("not-base64")+"&limit=1")
+	if len(resp.Lines) != 0 {
+		t.Fatalf("lines = %#v, want empty", resp.Lines)
+	}
+	if resp.LineCount != 0 {
+		t.Fatalf("line-count = %d, want 0", resp.LineCount)
+	}
+	if !resp.CursorReset {
+		t.Fatal("cursor-reset = false, want true for cursor against missing log dir")
+	}
+}
+
+func TestGetLogsLoggingDisabledKeepsBadRequest(t *testing.T) {
+	status, body := performGetLogsRaw(t, newLogsTestHandler(t.TempDir(), false), "/v0/management/logs?cursor=not-base64&limit=1")
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+	if !strings.Contains(body, "logging to file disabled") {
+		t.Fatalf("body = %s, want logging disabled error", body)
+	}
+}
+
 func mustEncodeRawCursor(t *testing.T, cursor logCursor) string {
 	t.Helper()
 	raw, err := json.Marshal(cursor)
@@ -232,16 +437,12 @@ func newLogsTestHandler(dir string, loggingToFile bool) *Handler {
 
 func performGetLogs(t *testing.T, h *Handler, target string) logsAPIResponse {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
-	h.GetLogs(c)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GetLogs status = %d, body = %s", rec.Code, rec.Body.String())
+	status, body := performGetLogsRaw(t, h, target)
+	if status != http.StatusOK {
+		t.Fatalf("GetLogs status = %d, body = %s", status, body)
 	}
 	var resp logsAPIResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if resp.Lines == nil {
@@ -250,9 +451,34 @@ func performGetLogs(t *testing.T, h *Handler, target string) logsAPIResponse {
 	return resp
 }
 
+func performGetLogsRaw(t *testing.T, h *Handler, target string) (int, string) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	h.GetLogs(c)
+	return rec.Code, rec.Body.String()
+}
+
 func writeMainLog(t *testing.T, dir, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, defaultLogFileName), []byte(content), 0o644); err != nil {
 		t.Fatalf("write main log: %v", err)
+	}
+}
+
+func appendMainLog(t *testing.T, dir, content string) {
+	t.Helper()
+	file, errOpen := os.OpenFile(filepath.Join(dir, defaultLogFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if errOpen != nil {
+		t.Fatalf("open main log: %v", errOpen)
+	}
+	if _, errWrite := file.WriteString(content); errWrite != nil {
+		_ = file.Close()
+		t.Fatalf("append main log: %v", errWrite)
+	}
+	if errClose := file.Close(); errClose != nil {
+		t.Fatalf("close main log: %v", errClose)
 	}
 }
