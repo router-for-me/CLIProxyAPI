@@ -101,7 +101,12 @@ func (h *Handler) GetLogs(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errTail)})
 			return
 		}
-		writeLogsResponse(c, result.lines, len(result.lines), result.latest, result.nextCursor, false)
+		total, errCount := countLogFileLines(files)
+		if errCount != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errCount)})
+			return
+		}
+		writeLogsResponse(c, result.lines, total, result.latest, result.nextCursor, false)
 		return
 	}
 
@@ -604,6 +609,66 @@ func readTailLogLines(path string, limit int) (completeLogRead, error) {
 		return completeLogRead{}, errStart
 	}
 	return readCompleteLogLines(path, start, boundary, limit)
+}
+
+func countLogFileLines(files []string) (int, error) {
+	total := 0
+	for i := range files {
+		count, errCount := countLogLines(files[i])
+		if errCount != nil {
+			if errors.Is(errCount, os.ErrNotExist) {
+				continue
+			}
+			return 0, errCount
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func countLogLines(path string) (int, error) {
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		return 0, errOpen
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	info, errStat := file.Stat()
+	if errStat != nil {
+		return 0, errStat
+	}
+	if info.IsDir() {
+		return 0, fmt.Errorf("invalid log file")
+	}
+
+	buf := make([]byte, 32*1024)
+	count := 0
+	lineLen := 0
+	for {
+		n, errRead := file.Read(buf)
+		for _, b := range buf[:n] {
+			if b == '\n' {
+				count++
+				lineLen = 0
+				continue
+			}
+			lineLen++
+			if lineLen > logScannerMaxBuffer {
+				return 0, fmt.Errorf("log line exceeds %d bytes", logScannerMaxBuffer)
+			}
+		}
+		if errRead == io.EOF {
+			break
+		}
+		if errRead != nil {
+			return 0, errRead
+		}
+	}
+	if lineLen > 0 {
+		count++
+	}
+	return count, nil
 }
 
 func tailStartOffset(path string, boundary int64, limit int) (int64, error) {

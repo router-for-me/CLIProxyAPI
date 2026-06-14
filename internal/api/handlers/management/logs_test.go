@@ -149,8 +149,8 @@ func TestGetLogsTailLimitReturnsRecentLinesWithCursor(t *testing.T) {
 	if !reflect.DeepEqual(resp.Lines, wantLines) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
-	if resp.LineCount != 2 {
-		t.Fatalf("line-count = %d, want 2", resp.LineCount)
+	if resp.LineCount != 4 {
+		t.Fatalf("line-count = %d, want full scan count 4", resp.LineCount)
 	}
 	if resp.NextCursor == "" {
 		t.Fatal("next-cursor is empty")
