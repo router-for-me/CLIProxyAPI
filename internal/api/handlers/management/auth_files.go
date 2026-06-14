@@ -681,7 +681,18 @@ func extractCodexSubscriptionMetadata(auth *coreauth.Auth) gin.H {
 	copyMetadataValue(result, auth.Metadata, "plan_type")
 	copyMetadataValue(result, auth.Metadata, "subscription_active_until")
 	copyMetadataValue(result, auth.Metadata, "chatgpt_subscription_active_until")
-	copyMetadataValue(result, auth.Metadata, "subscription_expired")
+	// Derive the expired flag from the expiry at response time rather than
+	// exposing the cached boolean, which goes stale once the stored expiry
+	// passes without a reload/enrichment.
+	activeUntil := strings.TrimSpace(valueAsString(auth.Metadata["subscription_active_until"]))
+	if activeUntil == "" {
+		activeUntil = strings.TrimSpace(valueAsString(auth.Metadata["chatgpt_subscription_active_until"]))
+	}
+	if activeUntil != "" {
+		result["subscription_expired"] = codex.IsSubscriptionExpired(activeUntil)
+	} else {
+		copyMetadataValue(result, auth.Metadata, "subscription_expired")
+	}
 	copyMetadataValue(result, auth.Metadata, "chatgpt_subscription_last_checked")
 	if len(result) == 0 {
 		return nil

@@ -406,6 +406,14 @@ func subscriptionMissingOrExpired(value any) bool {
 	return !ok || !parsed.After(time.Now().UTC())
 }
 
+// IsSubscriptionExpired reports whether a subscription expiry value is missing,
+// unparseable, or already in the past relative to now (UTC). Callers can use it
+// to derive the expired state at response time instead of trusting a cached
+// boolean that may have gone stale since the last enrichment.
+func IsSubscriptionExpired(activeUntil any) bool {
+	return subscriptionMissingOrExpired(activeUntil)
+}
+
 func updateSubscriptionExpiredMetadata(metadata map[string]any, activeUntil string) bool {
 	parsed, ok := parseSubscriptionTime(activeUntil)
 	if !ok {
