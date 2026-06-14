@@ -230,44 +230,74 @@ func (h *Handler) createBackupManager() (*backup.Manager, error) {
 }
 
 // createBackupStorage creates a storage backend based on configuration.
+// Supports comma-separated storage types (e.g., "local,s3,webdav").
+// Returns the first successfully created storage backend.
 func (h *Handler) createBackupStorage() (backup.Storage, error) {
-	storageType := strings.ToLower(strings.TrimSpace(h.cfg.Backup.Storage))
-	if storageType == "" {
-		storageType = "local"
+	storageTypes := strings.ToLower(strings.TrimSpace(h.cfg.Backup.Storage))
+	if storageTypes == "" {
+		storageTypes = "local"
 	}
 
-	switch backup.StorageType(storageType) {
-	case backup.StorageTypeLocal:
-		localDir := h.cfg.Backup.LocalDir
-		if localDir == "" {
-			localDir = "./backups"
-		}
-		return backup.NewLocalStorage(localDir)
+	// Split by comma to support multiple storage backends
+	types := strings.Split(storageTypes, ",")
 
-	case backup.StorageTypeS3:
-		s3Config := backup.S3Config{
-			Endpoint:  h.cfg.Backup.S3.Endpoint,
-			Region:    h.cfg.Backup.S3.Region,
-			Bucket:    h.cfg.Backup.S3.Bucket,
-			Path:      h.cfg.Backup.S3.Path,
-			AccessKey: h.cfg.Backup.S3.AccessKey,
-			SecretKey: h.cfg.Backup.S3.SecretKey,
-			UseSSL:    h.cfg.Backup.S3.UseSSL,
+	var lastErr error
+	for _, storageType := range types {
+		storageType = strings.TrimSpace(storageType)
+		if storageType == "" {
+			continue
 		}
-		return backup.NewS3Storage(s3Config)
 
-	case backup.StorageTypeWebDAV:
-		webdavConfig := backup.WebDAVConfig{
-			URL:      h.cfg.Backup.WebDAV.URL,
-			Username: h.cfg.Backup.WebDAV.Username,
-			Password: h.cfg.Backup.WebDAV.Password,
-			Path:     h.cfg.Backup.WebDAV.Path,
+		switch backup.StorageType(storageType) {
+		case backup.StorageTypeLocal:
+			localDir := h.cfg.Backup.LocalDir
+			if localDir == "" {
+				localDir = "./backups"
+			}
+			storage, err := backup.NewLocalStorage(localDir)
+			if err == nil {
+				return storage, nil
+			}
+			lastErr = err
+
+		case backup.StorageTypeS3:
+			s3Config := backup.S3Config{
+				Endpoint:  h.cfg.Backup.S3.Endpoint,
+				Region:    h.cfg.Backup.S3.Region,
+				Bucket:    h.cfg.Backup.S3.Bucket,
+				Path:      h.cfg.Backup.S3.Path,
+				AccessKey: h.cfg.Backup.S3.AccessKey,
+				SecretKey: h.cfg.Backup.S3.SecretKey,
+				UseSSL:    h.cfg.Backup.S3.UseSSL,
+			}
+			storage, err := backup.NewS3Storage(s3Config)
+			if err == nil {
+				return storage, nil
+			}
+			lastErr = err
+
+		case backup.StorageTypeWebDAV:
+			webdavConfig := backup.WebDAVConfig{
+				URL:      h.cfg.Backup.WebDAV.URL,
+				Username: h.cfg.Backup.WebDAV.Username,
+				Password: h.cfg.Backup.WebDAV.Password,
+				Path:     h.cfg.Backup.WebDAV.Path,
+			}
+			storage, err := backup.NewWebDAVStorage(webdavConfig)
+			if err == nil {
+				return storage, nil
+			}
+			lastErr = err
+
+		default:
+			lastErr = fmt.Errorf("unsupported storage type: %s", storageType)
 		}
-		return backup.NewWebDAVStorage(webdavConfig)
-
-	default:
-		return nil, fmt.Errorf("unsupported storage type: %s", storageType)
 	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no valid storage backend configured")
 }
 
 // getLogDirectory returns the log directory path.

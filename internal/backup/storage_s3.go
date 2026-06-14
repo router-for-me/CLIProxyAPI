@@ -31,7 +31,18 @@ func NewS3Storage(cfg S3Config) (*S3Storage, error) {
 		return nil, fmt.Errorf("S3 bucket is required")
 	}
 
-	client, err := minio.New(cfg.Endpoint, &minio.Options{
+	// Clean endpoint: remove protocol prefix and trailing slashes
+	endpoint := cfg.Endpoint
+	endpoint = strings.TrimPrefix(endpoint, "https://")
+	endpoint = strings.TrimPrefix(endpoint, "http://")
+	endpoint = strings.TrimRight(endpoint, "/")
+
+	// Remove any path components (minio doesn't accept paths in endpoint)
+	if idx := strings.Index(endpoint, "/"); idx != -1 {
+		endpoint = endpoint[:idx]
+	}
+
+	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: cfg.UseSSL,
 		Region: cfg.Region,
