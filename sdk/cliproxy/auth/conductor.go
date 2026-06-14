@@ -1628,8 +1628,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
-		if agResult, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
-			return agResult, nil
+		if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
+			return nil, errCredits
+		} else if ok {
+			return result, nil
 		}
 	}
 	var bootstrapErr *streamBootstrapError
