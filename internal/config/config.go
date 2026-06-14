@@ -157,16 +157,9 @@ type PluginsConfig struct {
 	// Dir is the plugin discovery directory.
 	Dir string `yaml:"dir" json:"dir"`
 	// StoreSources appends third-party plugin store registries to the built-in official source.
-	StoreSources []PluginStoreSource `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
+	StoreSources []string `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
 	// Configs stores per-plugin instance configuration by plugin ID.
 	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
-}
-
-// PluginStoreSource describes an additional plugin store registry.
-type PluginStoreSource struct {
-	ID   string `yaml:"id" json:"id"`
-	Name string `yaml:"name,omitempty" json:"name,omitempty"`
-	URL  string `yaml:"url" json:"url"`
 }
 
 // PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
@@ -786,12 +779,10 @@ func (cfg *Config) NormalizePluginsConfig() {
 		cfg.Plugins.Dir = "plugins"
 	}
 	if len(cfg.Plugins.StoreSources) > 0 {
-		sources := make([]PluginStoreSource, 0, len(cfg.Plugins.StoreSources))
+		sources := make([]string, 0, len(cfg.Plugins.StoreSources))
 		for _, source := range cfg.Plugins.StoreSources {
-			source.ID = strings.TrimSpace(source.ID)
-			source.Name = strings.TrimSpace(source.Name)
-			source.URL = strings.TrimSpace(source.URL)
-			if source.URL == "" {
+			source = strings.TrimSpace(source)
+			if source == "" {
 				continue
 			}
 			sources = append(sources, source)

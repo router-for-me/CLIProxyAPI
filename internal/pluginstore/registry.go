@@ -2,6 +2,8 @@ package pluginstore
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -19,7 +21,6 @@ const (
 )
 
 var pluginVersionPattern = regexp.MustCompile(`^[0-9][0-9A-Za-z.+-]*$`)
-var sourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type Source struct {
 	ID   string `json:"id"`
@@ -53,32 +54,44 @@ func DefaultSource() Source {
 	}
 }
 
-func NormalizeSources(sources []Source) ([]Source, error) {
+func NormalizeSources(registryURLs []string) ([]Source, error) {
 	out := []Source{DefaultSource()}
-	seen := map[string]struct{}{DefaultSourceID: {}}
-	for index, source := range sources {
-		source.ID = strings.TrimSpace(source.ID)
-		source.Name = strings.TrimSpace(source.Name)
-		source.URL = strings.TrimSpace(source.URL)
-		if source.URL == "" {
+	seenIDs := map[string]string{DefaultSourceID: DefaultRegistryURL}
+	seenURLs := map[string]struct{}{DefaultRegistryURL: {}}
+	for _, registryURL := range registryURLs {
+		registryURL = strings.TrimSpace(registryURL)
+		if registryURL == "" {
 			continue
 		}
-		if source.ID == "" {
-			source.ID = fmt.Sprintf("source-%d", index+1)
+		if _, exists := seenURLs[registryURL]; exists {
+			continue
 		}
-		if !sourceIDPattern.MatchString(source.ID) {
-			return nil, fmt.Errorf("invalid plugin store source id %q", source.ID)
+		source := Source{
+			ID:   SourceID(registryURL),
+			Name: SourceName(registryURL),
+			URL:  registryURL,
 		}
-		if _, exists := seen[source.ID]; exists {
-			return nil, fmt.Errorf("duplicate plugin store source id %q", source.ID)
+		if existingURL, exists := seenIDs[source.ID]; exists {
+			return nil, fmt.Errorf("plugin store source id collision for %q and %q", existingURL, registryURL)
 		}
-		seen[source.ID] = struct{}{}
-		if source.Name == "" {
-			source.Name = source.ID
-		}
+		seenIDs[source.ID] = registryURL
+		seenURLs[registryURL] = struct{}{}
 		out = append(out, source)
 	}
 	return out, nil
+}
+
+func SourceID(registryURL string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(registryURL)))
+	return "source-" + hex.EncodeToString(sum[:])[:12]
+}
+
+func SourceName(registryURL string) string {
+	parsed, errParse := url.Parse(strings.TrimSpace(registryURL))
+	if errParse != nil || strings.TrimSpace(parsed.Host) == "" {
+		return strings.TrimSpace(registryURL)
+	}
+	return parsed.Host
 }
 
 func ParseRegistry(data []byte) (Registry, error) {

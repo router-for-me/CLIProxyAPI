@@ -310,7 +310,7 @@ func (h *Handler) enablePluginConfigLocked(id string) error {
 	return nil
 }
 
-func (h *Handler) pluginStoreSnapshot() (bool, string, string, []config.PluginStoreSource, map[string]config.PluginInstanceConfig, *pluginhost.Host) {
+func (h *Handler) pluginStoreSnapshot() (bool, string, string, []string, map[string]config.PluginInstanceConfig, *pluginhost.Host) {
 	if h == nil || h.cfg == nil {
 		return false, "plugins", "", nil, map[string]config.PluginInstanceConfig{}, nil
 	}
@@ -319,7 +319,7 @@ func (h *Handler) pluginStoreSnapshot() (bool, string, string, []config.PluginSt
 	pluginsEnabled := h.cfg.Plugins.Enabled
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	proxyURL := strings.TrimSpace(h.cfg.ProxyURL)
-	sourceConfigs := append([]config.PluginStoreSource(nil), h.cfg.Plugins.StoreSources...)
+	sourceConfigs := append([]string(nil), h.cfg.Plugins.StoreSources...)
 	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
 	for id, item := range h.cfg.Plugins.Configs {
 		configs[id] = item
@@ -327,21 +327,13 @@ func (h *Handler) pluginStoreSnapshot() (bool, string, string, []config.PluginSt
 	return pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, configs, h.pluginHost
 }
 
-func (h *Handler) pluginStoreSources(sourceConfigs []config.PluginStoreSource) ([]pluginstore.Source, error) {
+func (h *Handler) pluginStoreSources(sourceConfigs []string) ([]pluginstore.Source, error) {
 	if h != nil && strings.TrimSpace(h.pluginStoreRegistryURL) != "" {
 		source := pluginstore.DefaultSource()
 		source.URL = strings.TrimSpace(h.pluginStoreRegistryURL)
 		return []pluginstore.Source{source}, nil
 	}
-	sources := make([]pluginstore.Source, 0, len(sourceConfigs))
-	for _, source := range sourceConfigs {
-		sources = append(sources, pluginstore.Source{
-			ID:   source.ID,
-			Name: source.Name,
-			URL:  source.URL,
-		})
-	}
-	return pluginstore.NormalizeSources(sources)
+	return pluginstore.NormalizeSources(sourceConfigs)
 }
 
 func (h *Handler) newPluginStoreClient(proxyURL string, registryURL string) pluginstore.Client {

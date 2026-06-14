@@ -247,13 +247,9 @@ func TestListPluginStoreIncludesThirdPartySources(t *testing.T) {
 	h := &Handler{
 		cfg: &config.Config{
 			Plugins: config.PluginsConfig{
-				Enabled: true,
-				Dir:     t.TempDir(),
-				StoreSources: []config.PluginStoreSource{{
-					ID:   "community",
-					Name: "Community",
-					URL:  "https://community.example/registry.json",
-				}},
+				Enabled:      true,
+				Dir:          t.TempDir(),
+				StoreSources: []string{"https://community.example/registry.json"},
 			},
 		},
 		configFilePath: writeTestConfigFile(t),
@@ -300,7 +296,8 @@ func TestListPluginStoreIncludesThirdPartySources(t *testing.T) {
 		t.Fatalf("official source id = %q, want %q", byID["sample-provider"].SourceID, pluginstore.DefaultSourceID)
 	}
 	third := byID["third-provider"]
-	if third.StoreID != "community/third-provider" || third.SourceName != "Community" || third.SourceURL != "https://community.example/registry.json" {
+	communitySourceID := pluginstore.SourceID("https://community.example/registry.json")
+	if third.StoreID != communitySourceID+"/third-provider" || third.SourceID != communitySourceID || third.SourceName != "community.example" || third.SourceURL != "https://community.example/registry.json" {
 		t.Fatalf("third-party source fields = %#v", third)
 	}
 }
@@ -394,13 +391,9 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 	h := &Handler{
 		cfg: &config.Config{
 			Plugins: config.PluginsConfig{
-				Enabled: false,
-				Dir:     pluginsDir,
-				StoreSources: []config.PluginStoreSource{{
-					ID:   "community",
-					Name: "Community",
-					URL:  "https://community.example/registry.json",
-				}},
+				Enabled:      false,
+				Dir:          pluginsDir,
+				StoreSources: []string{"https://community.example/registry.json"},
 			},
 		},
 		configFilePath: writeTestConfigFile(t),
@@ -422,7 +415,8 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install?source=community", nil)
+	communitySourceID := pluginstore.SourceID("https://community.example/registry.json")
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install?source="+communitySourceID, nil)
 
 	h.InstallPluginFromStore(c)
 
@@ -433,7 +427,7 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
 		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
 	}
-	if body.SourceID != "community" || body.Version != "0.3.0" {
+	if body.SourceID != communitySourceID || body.Version != "0.3.0" {
 		t.Fatalf("install response = %#v, want community source version 0.3.0", body)
 	}
 	targetPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider"+managementPluginExtension(runtime.GOOS))
@@ -453,12 +447,9 @@ func TestInstallPluginFromStoreRequiresSourceForDuplicateIDs(t *testing.T) {
 	h := &Handler{
 		cfg: &config.Config{
 			Plugins: config.PluginsConfig{
-				Enabled: false,
-				Dir:     t.TempDir(),
-				StoreSources: []config.PluginStoreSource{{
-					ID:  "community",
-					URL: "https://community.example/registry.json",
-				}},
+				Enabled:      false,
+				Dir:          t.TempDir(),
+				StoreSources: []string{"https://community.example/registry.json"},
 			},
 		},
 		configFilePath: writeTestConfigFile(t),

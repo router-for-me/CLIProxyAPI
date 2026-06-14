@@ -35,11 +35,8 @@ func TestParseConfigBytes_PluginStoreSources(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`
 plugins:
   store-sources:
-    - id: " community "
-      name: " Community "
-      url: " https://community.example/registry.json "
-    - id: empty
-      url: ""
+    - " https://community.example/registry.json "
+    - ""
 `))
 	if errParse != nil {
 		t.Fatalf("ParseConfigBytes() error = %v", errParse)
@@ -49,7 +46,7 @@ plugins:
 		t.Fatalf("Plugins.StoreSources len = %d, want 1", len(cfg.Plugins.StoreSources))
 	}
 	source := cfg.Plugins.StoreSources[0]
-	if source.ID != "community" || source.Name != "Community" || source.URL != "https://community.example/registry.json" {
+	if source != "https://community.example/registry.json" {
 		t.Fatalf("Plugins.StoreSources[0] = %#v", source)
 	}
 }
