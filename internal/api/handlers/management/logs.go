@@ -2,9 +2,11 @@ package management
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -53,11 +55,7 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cutoff := parseCutoff(c.Query("after"))
-			c.JSON(http.StatusOK, gin.H{
-				"lines":            []string{},
-				"line-count":       0,
-				"latest-timestamp": cutoff,
-			})
+			writeLogsResponse(c, []string{}, 0, cutoff, "", false)
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list log files: %v", err)})
@@ -71,10 +69,20 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	}
 
 	cutoff := parseCutoff(c.Query("after"))
+	if strings.TrimSpace(c.Query("cursor")) == "" && cutoff == 0 && limit > 0 {
+		result, errTail := tailLogFiles(files, limit, 0)
+		if errTail != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errTail)})
+			return
+		}
+		writeLogsResponse(c, result.lines, len(result.lines), result.latest, result.nextCursor, false)
+		return
+	}
+
 	acc := newLogAccumulator(cutoff, limit)
 	for i := range files {
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errProcess)})
 			return
 		}
 	}
@@ -83,11 +91,12 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	if latest == 0 || latest < cutoff {
 		latest = cutoff
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"lines":            lines,
-		"line-count":       total,
-		"latest-timestamp": latest,
-	})
+	nextCursor, errCursor := cursorForLatestLogFile(files, latest)
+	if errCursor != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to prepare log cursor: %v", errCursor)})
+		return
+	}
+	writeLogsResponse(c, lines, total, latest, nextCursor, false)
 }
 
 // DeleteLogs removes all rotated log files and truncates the active log.
@@ -498,6 +507,140 @@ type completeLogRead struct {
 	hitLimit  bool
 }
 
+type logReadResult struct {
+	lines      []string
+	latest     int64
+	nextCursor string
+}
+
+func writeLogsResponse(c *gin.Context, lines []string, lineCount int, latest int64, nextCursor string, cursorReset bool) {
+	if lines == nil {
+		lines = []string{}
+	}
+	payload := gin.H{
+		"lines":            lines,
+		"line-count":       lineCount,
+		"latest-timestamp": latest,
+		"next-cursor":      nextCursor,
+	}
+	if cursorReset {
+		payload["cursor-reset"] = true
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+func tailLogFiles(files []string, limit int, fallbackLatest int64) (logReadResult, error) {
+	result := logReadResult{
+		lines:  []string{},
+		latest: fallbackLatest,
+	}
+	for i := len(files) - 1; i >= 0; i-- {
+		remaining := 0
+		if limit > 0 {
+			remaining = limit - len(result.lines)
+			if remaining <= 0 {
+				break
+			}
+		}
+		read, errRead := readTailLogLines(files[i], remaining)
+		if errRead != nil {
+			if errors.Is(errRead, os.ErrNotExist) {
+				continue
+			}
+			return logReadResult{}, errRead
+		}
+		if len(read.lines) == 0 {
+			continue
+		}
+		result.lines = append(append([]string{}, read.lines...), result.lines...)
+		if read.latest > result.latest {
+			result.latest = read.latest
+		}
+	}
+	nextCursor, errCursor := cursorForLatestLogFile(files, result.latest)
+	if errCursor != nil {
+		return logReadResult{}, errCursor
+	}
+	result.nextCursor = nextCursor
+	return result, nil
+}
+
+func readTailLogLines(path string, limit int) (completeLogRead, error) {
+	boundary, errBoundary := completeLogBoundary(path)
+	if errBoundary != nil {
+		return completeLogRead{}, errBoundary
+	}
+	if boundary == 0 {
+		return completeLogRead{lines: []string{}}, nil
+	}
+	start, errStart := tailStartOffset(path, boundary, limit)
+	if errStart != nil {
+		return completeLogRead{}, errStart
+	}
+	return readCompleteLogLines(path, start, boundary, limit)
+}
+
+func tailStartOffset(path string, boundary int64, limit int) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		return 0, errOpen
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	buf := make([]byte, 32*1024)
+	pos := boundary
+	lineBreaks := 0
+	for pos > 0 {
+		chunk := minInt64(int64(len(buf)), pos)
+		pos -= chunk
+		n, errRead := file.ReadAt(buf[:chunk], pos)
+		if errRead != nil && errRead != io.EOF {
+			return 0, errRead
+		}
+		if n <= 0 {
+			continue
+		}
+		data := buf[:n]
+		for len(data) > 0 {
+			idx := bytes.LastIndexByte(data, '\n')
+			if idx < 0 {
+				break
+			}
+			lineBreaks++
+			if lineBreaks > limit {
+				return pos + int64(idx) + 1, nil
+			}
+			data = data[:idx]
+		}
+	}
+	return 0, nil
+}
+
+func cursorForLatestLogFile(files []string, latest int64) (string, error) {
+	for i := len(files) - 1; i >= 0; i-- {
+		boundary, errBoundary := completeLogBoundary(files[i])
+		if errBoundary != nil {
+			if errors.Is(errBoundary, os.ErrNotExist) {
+				continue
+			}
+			return "", errBoundary
+		}
+		cursor, errCursor := newLogCursor(files[i], boundary, latest)
+		if errCursor != nil {
+			if errors.Is(errCursor, os.ErrNotExist) {
+				continue
+			}
+			return "", errCursor
+		}
+		return cursor, nil
+	}
+	return "", nil
+}
+
 func encodeLogCursor(cursor logCursor) (string, error) {
 	raw, err := json.Marshal(cursor)
 	if err != nil {
@@ -760,7 +903,7 @@ func completeLogBoundary(path string) (int64, error) {
 		if n <= 0 {
 			continue
 		}
-		if idx := strings.LastIndexByte(string(buf[:n]), '\n'); idx >= 0 {
+		if idx := bytes.LastIndexByte(buf[:n], '\n'); idx >= 0 {
 			return pos + int64(idx) + 1, nil
 		}
 	}

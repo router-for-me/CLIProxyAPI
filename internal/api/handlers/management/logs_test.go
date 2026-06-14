@@ -3,11 +3,18 @@ package management
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestDecodeLogCursorRejectsUnsafeFiles(t *testing.T) {
@@ -126,6 +133,80 @@ func TestReadCompleteLogLinesSkipsTrailingPartial(t *testing.T) {
 	}
 }
 
+func TestGetLogsTailLimitReturnsRecentLinesWithCursor(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		"[2026-06-15 10:00:00] first",
+		"[2026-06-15 10:00:01] second",
+		"[2026-06-15 10:00:02] third",
+		"[2026-06-15 10:00:03] fourth",
+	}
+	writeMainLog(t, dir, strings.Join(lines, "\n")+"\n")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=2")
+	wantLines := []string{lines[2], lines[3]}
+	if !reflect.DeepEqual(resp.Lines, wantLines) {
+		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
+	}
+	if resp.LineCount != 2 {
+		t.Fatalf("line-count = %d, want 2", resp.LineCount)
+	}
+	if resp.NextCursor == "" {
+		t.Fatal("next-cursor is empty")
+	}
+	wantLatest := time.Date(2026, 6, 15, 10, 0, 3, 0, time.Local).Unix()
+	if resp.LatestTimestamp != wantLatest {
+		t.Fatalf("latest-timestamp = %d, want %d", resp.LatestTimestamp, wantLatest)
+	}
+}
+
+func TestGetLogsNoLimitKeepsFullScanBehavior(t *testing.T) {
+	dir := t.TempDir()
+	writeMainLog(t, dir, "complete\npartial")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs")
+	wantLines := []string{"complete", "partial"}
+	if !reflect.DeepEqual(resp.Lines, wantLines) {
+		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
+	}
+	if resp.LineCount != 2 {
+		t.Fatalf("line-count = %d, want full scan count 2", resp.LineCount)
+	}
+	if resp.NextCursor == "" {
+		t.Fatal("next-cursor is empty")
+	}
+	cursor, errCursor := decodeLogCursor(resp.NextCursor)
+	if errCursor != nil {
+		t.Fatalf("decode next-cursor: %v", errCursor)
+	}
+	if cursor.Offset != int64(len("complete\n")) {
+		t.Fatalf("cursor offset = %d, want complete-line boundary", cursor.Offset)
+	}
+}
+
+func TestGetLogsAfterKeepsTimestampScanAndReturnsCursor(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		"[2026-06-15 10:00:00] first",
+		"[2026-06-15 10:00:01] second",
+		"[2026-06-15 10:00:02] third",
+	}
+	writeMainLog(t, dir, strings.Join(lines, "\n")+"\n")
+
+	cutoff := time.Date(2026, 6, 15, 10, 0, 0, 0, time.Local).Unix()
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?after="+strconv.FormatInt(cutoff, 10))
+	wantLines := []string{lines[1], lines[2]}
+	if !reflect.DeepEqual(resp.Lines, wantLines) {
+		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
+	}
+	if resp.LineCount != 3 {
+		t.Fatalf("line-count = %d, want full scan count 3", resp.LineCount)
+	}
+	if resp.NextCursor == "" {
+		t.Fatal("next-cursor is empty")
+	}
+}
+
 func mustEncodeRawCursor(t *testing.T, cursor logCursor) string {
 	t.Helper()
 	raw, err := json.Marshal(cursor)
@@ -133,4 +214,45 @@ func mustEncodeRawCursor(t *testing.T, cursor logCursor) string {
 		t.Fatalf("json.Marshal cursor: %v", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+type logsAPIResponse struct {
+	Lines           []string `json:"lines"`
+	LineCount       int      `json:"line-count"`
+	LatestTimestamp int64    `json:"latest-timestamp"`
+	NextCursor      string   `json:"next-cursor"`
+	CursorReset     bool     `json:"cursor-reset"`
+}
+
+func newLogsTestHandler(dir string, loggingToFile bool) *Handler {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{LoggingToFile: loggingToFile}, nil)
+	h.SetLogDirectory(dir)
+	return h
+}
+
+func performGetLogs(t *testing.T, h *Handler, target string) logsAPIResponse {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	h.GetLogs(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GetLogs status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp logsAPIResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Lines == nil {
+		resp.Lines = []string{}
+	}
+	return resp
+}
+
+func writeMainLog(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, defaultLogFileName), []byte(content), 0o644); err != nil {
+		t.Fatalf("write main log: %v", err)
+	}
 }
