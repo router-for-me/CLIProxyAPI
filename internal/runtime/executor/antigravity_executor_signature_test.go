@@ -101,7 +101,7 @@ func TestAntigravityExecutor_StrictBypassStripsInvalidSignature(t *testing.T) {
 	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
-	output, err := validateAntigravityRequestSignatures(from, payload)
+	output, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload)
 	if err != nil {
 		t.Fatalf("strict bypass should strip invalid signatures instead of rejecting request: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestAntigravityExecutor_StrictBypassLogsStrippedInvalidSignature(t *testing
 	}`)
 	from := sdktranslator.FromString("claude")
 
-	if _, err := validateAntigravityRequestSignatures(from, payload); err != nil {
+	if _, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload); err != nil {
 		t.Fatalf("strict bypass should strip invalid signatures instead of rejecting request: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestAntigravityExecutor_NonStrictBypassSkipsPrecheck(t *testing.T) {
 	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
-	_, err := validateAntigravityRequestSignatures(from, payload)
+	_, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload)
 	if err != nil {
 		t.Fatalf("non-strict bypass should skip precheck, got: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
-	_, err := validateAntigravityRequestSignatures(from, payload)
+	_, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload)
 	if err != nil {
 		t.Fatalf("cache mode should skip precheck, got: %v", err)
 	}
