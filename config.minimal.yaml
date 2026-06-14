@@ -23,4 +23,5 @@ claude-api-key:
   - api-key: 'sk-ant-REPLACE_ME'
 
 # Optional: enable verbose logs while bringing the proxy up for the first time.
+# WARNING: Always set to false before any real use to avoid leaking sensitive data in logs.
 debug: true

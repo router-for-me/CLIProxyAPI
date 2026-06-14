@@ -86,7 +86,8 @@ passthrough-headers: false
 request-retry: 3
 
 # Maximum number of different credentials to try for one failed request.
-# Set to 0 to keep legacy behavior (try all available credentials).
+# WARNING: 0 means legacy behavior (try ALL available credentials). This can leak requests
+# across multiple providers and exhaust quotas. Use a small positive value (e.g. 2) in production.
 max-retry-credentials: 0
 
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
@@ -297,8 +298,9 @@ nonstream-keepalive-interval: 0
 #     - upstream-api-key: "amp_key_for_team_b"
 #       api-keys:
 #         - "your-api-key-3"
-#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
-#   restrict-management-to-localhost: false
+#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: true).
+#   # Set to false only if you intentionally need remote management access.
+#   restrict-management-to-localhost: true
 #   # Force model mappings to run before checking local API keys (default: false)
 #   force-model-mappings: false
 #   # Amp Model Mappings
