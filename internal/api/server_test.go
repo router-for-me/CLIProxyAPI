@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	homeaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/home_access"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -90,6 +92,66 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestV1ModelsRejectsMissingAPIKeyWithNoAccessProviders(t *testing.T) {
+	sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+	homeaccess.Unregister()
+	t.Cleanup(func() {
+		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+		homeaccess.Unregister()
+	})
+
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	cfg := &proxyconfig.Config{
+		Port:          0,
+		AuthDir:       filepath.Join(tmpDir, "auth"),
+		LoggingToFile: false,
+	}
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	server := NewServer(cfg, authManager, accessManager, filepath.Join(tmpDir, "config.yaml"))
+	server.accessManager.SetProviders(nil)
+	if got := len(server.accessManager.Providers()); got != 0 {
+		t.Fatalf("access providers = %d, want 0", got)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+}
+
+func TestStandaloneNoAPIKeysAllowsModels(t *testing.T) {
+	sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+	homeaccess.Unregister()
+	t.Cleanup(func() {
+		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+		homeaccess.Unregister()
+	})
+
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	cfg := &proxyconfig.Config{
+		Port:          0,
+		AuthDir:       filepath.Join(tmpDir, "auth"),
+		LoggingToFile: false,
+	}
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	server := NewServer(cfg, authManager, accessManager, filepath.Join(tmpDir, "config.yaml"))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
 }
 
 func TestManagementResponseExposesPluginSupportHeaderForCORS(t *testing.T) {
@@ -205,6 +267,95 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+}
+
+// TestV1RoutesRejectInvalidAPIKey reproduces a real-world credential-stuffing
+// symptom: a client sends a non-configured bearer token (e.g. a leaked
+// "cli-..." key) to the OpenAI/Claude business routes. AuthMiddleware must
+// reject every /v1 route with 401 before any upstream call happens. If any of
+// these routes returns 502, AuthMiddleware is being bypassed and the request
+// reaches an upstream that re-authenticates it.
+func TestV1RoutesRejectInvalidAPIKey(t *testing.T) {
+	server := newTestServer(t)
+
+	// Sanity check: confirm the configured provider actually loaded into the
+	// manager, so a failure here is not just an empty-provider-list pass-through.
+	providers := server.accessManager.Providers()
+	if len(providers) == 0 {
+		t.Fatalf("access manager has no providers registered; invalid-key rejection requires the configured provider")
+	}
+	t.Logf("registered access providers: %d", len(providers))
+
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		authHeader string // full Authorization header value
+	}{
+		{
+			name:       "v1/responses POST with leaked cli- key",
+			method:     http.MethodPost,
+			path:       "/v1/responses",
+			body:       `{"model":"gpt-5.4","input":"你是谁？","max_output_tokens":256,"stream":true}`,
+			authHeader: "Bearer cli-ENiyNotARealKeyDeadbeef1234",
+		},
+		{
+			name:       "v1/chat/completions POST with leaked cli- key",
+			method:     http.MethodPost,
+			path:       "/v1/chat/completions",
+			body:       `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`,
+			authHeader: "Bearer cli-ENiyNotARealKeyDeadbeef1234",
+		},
+		{
+			name:       "v1/messages POST with leaked cli- key (Claude route)",
+			method:     http.MethodPost,
+			path:       "/v1/messages",
+			body:       `{"model":"claude-3-5-sonnet","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+			authHeader: "Bearer cli-ENiyNotARealKeyDeadbeef1234",
+		},
+		{
+			name:       "v1/models GET with leaked cli- key",
+			method:     http.MethodGet,
+			path:       "/v1/models",
+			body:       "",
+			authHeader: "Bearer cli-ENiyNotARealKeyDeadbeef1234",
+		},
+		{
+			name:       "v1beta Gemini route with key= query param",
+			method:     http.MethodPost,
+			path:       "/v1beta/models/gemini-pro:generateContent?key=ABC-not-real-3456",
+			body:       `{"contents":[{"parts":[{"text":"hi"}]}]}`,
+			authHeader: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body *strings.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			var bodyReader io.Reader
+			if body != nil {
+				bodyReader = body
+			}
+			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
+			req.Header.Set("Content-Type", "application/json")
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			t.Logf("path=%s status=%d body=%s", tc.path, rr.Code, rr.Body.String())
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want %d (AuthMiddleware should reject an invalid bearer before any upstream call); body=%s",
+					rr.Code, http.StatusUnauthorized, rr.Body.String())
+			}
+		})
 	}
 }
 

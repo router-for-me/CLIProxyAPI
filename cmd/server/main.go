@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	accessproviders "github.com/router-for-me/CLIProxyAPI/v7/internal/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -552,7 +552,7 @@ func main() {
 	}
 
 	// Register built-in access providers before constructing services.
-	configaccess.Register(&cfg.SDKConfig)
+	accessproviders.RegisterBuiltInProviders(cfg)
 	pluginHost.ApplyConfig(context.Background(), cfg)
 	if pluginHost.HasTriggeredCommandLineFlags() {
 		if exitCode, handled := pluginHost.ExecuteCommandLine(context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine); handled {

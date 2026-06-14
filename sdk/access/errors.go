@@ -82,6 +82,14 @@ func NewInternalAuthError(message string, cause error) *AuthError {
 	return newAuthError(AuthErrorCodeInternal, normalizedMessage, http.StatusInternalServerError, cause)
 }
 
+func NewServiceUnavailableAuthError(message string, cause error) *AuthError {
+	normalizedMessage := strings.TrimSpace(message)
+	if normalizedMessage == "" {
+		normalizedMessage = "Authentication service unavailable"
+	}
+	return newAuthError(AuthErrorCodeInternal, normalizedMessage, http.StatusServiceUnavailable, cause)
+}
+
 func IsAuthErrorCode(authErr *AuthError, code AuthErrorCode) bool {
 	if authErr == nil {
 		return false

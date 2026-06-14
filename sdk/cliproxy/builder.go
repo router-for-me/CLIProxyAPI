@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	accessproviders "github.com/router-for-me/CLIProxyAPI/v7/internal/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
@@ -213,7 +213,7 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager = sdkaccess.NewManager()
 	}
 
-	configaccess.Register(&b.cfg.SDKConfig)
+	accessproviders.RegisterBuiltInProviders(b.cfg)
 	pluginHost := b.pluginHost
 	if pluginHost == nil {
 		pluginHost = pluginhost.New()

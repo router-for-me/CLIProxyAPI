@@ -93,13 +93,21 @@ func RegisteredProviders() []Provider {
 		}
 	}
 	providers := make([]Provider, 0, len(order))
+	var anonymous Provider
 	for _, providerType := range order {
 		provider, exists := registry[providerType]
 		if !exists || provider == nil {
 			continue
 		}
+		if providerType == AccessProviderTypeAnonymous {
+			anonymous = provider
+			continue
+		}
 		providers = append(providers, provider)
 	}
 	registryMu.RUnlock()
+	if len(providers) == 0 && anonymous != nil {
+		return []Provider{anonymous}
+	}
 	return providers
 }

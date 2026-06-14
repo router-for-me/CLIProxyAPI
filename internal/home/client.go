@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -568,6 +569,60 @@ func newAuthDispatchRequest(requestedModel string, sessionID string, headers htt
 		SessionID: strings.TrimSpace(sessionID),
 		Headers:   headersToLowerMap(headers),
 	}
+}
+
+func queryToLowerMap(query url.Values) map[string]string {
+	if len(query) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(query))
+	for key, values := range query {
+		k := strings.ToLower(strings.TrimSpace(key))
+		if k == "" {
+			continue
+		}
+		if len(values) == 0 {
+			out[k] = ""
+			continue
+		}
+		out[k] = strings.TrimSpace(values[0])
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func newAccessAuthRequest(headers http.Header, query url.Values) accessAuthRequest {
+	return accessAuthRequest{
+		Type:    "auth-validate",
+		Headers: headersToLowerMap(headers),
+		Query:   queryToLowerMap(query),
+	}
+}
+
+func (c *Client) ValidateAccess(ctx context.Context, headers http.Header, query url.Values) ([]byte, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return nil, errClient
+	}
+	req := newAccessAuthRequest(headers, query)
+	keyBytes, err := json.Marshal(&req)
+	if err != nil {
+		return nil, err
+	}
+
+	raw, err := cmd.RPop(ctx, string(keyBytes)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrAuthNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, ErrEmptyResponse
+	}
+	return raw, nil
 }
 
 func (c *Client) RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error) {

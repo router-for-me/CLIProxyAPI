@@ -2196,6 +2196,39 @@ func TestRegisterFrontendAuthProvidersPrunesStaleKeys(t *testing.T) {
 	}
 }
 
+func TestRegisterFrontendAuthProvidersTakesPrecedenceOverAnonymousFallback(t *testing.T) {
+	const key = "plugin:auth-active:custom-auth"
+	sdkaccess.UnregisterProvider(key)
+	sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeAnonymous)
+	sdkaccess.ClearExclusiveProvider()
+	defer sdkaccess.UnregisterProvider(key)
+	defer sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeAnonymous)
+	defer sdkaccess.ClearExclusiveProvider()
+
+	sdkaccess.RegisterProvider(sdkaccess.AccessProviderTypeAnonymous, sdkaccess.NewAnonymousProvider(sdkaccess.DefaultAnonymousProviderName))
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-active",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			FrontendAuthProvider: frontendAuthProviderFunc{
+				identifier: "custom-auth",
+				authenticate: func(ctx context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
+					return pluginapi.FrontendAuthResponse{Authenticated: true}, nil
+				},
+			},
+		}},
+	})
+
+	host.RegisterFrontendAuthProviders()
+
+	providers := sdkaccess.RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != key {
+		t.Fatalf("RegisteredProviders()[0] = %q, want %q", providers[0].Identifier(), key)
+	}
+}
+
 func TestRegisterFrontendAuthProvidersIdentifierPanicFusesPlugin(t *testing.T) {
 	host := newHostWithRecords(capabilityRecord{
 		id: "auth-identifier-panic",

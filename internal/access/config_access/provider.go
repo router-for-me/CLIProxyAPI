@@ -59,62 +59,27 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	if len(p.keys) == 0 {
 		return nil, sdkaccess.NewNotHandledError()
 	}
-	authHeader := r.Header.Get("Authorization")
-	authHeaderGoogle := r.Header.Get("X-Goog-Api-Key")
-	authHeaderAnthropic := r.Header.Get("X-Api-Key")
-	queryKey := ""
-	queryAuthToken := ""
-	if r.URL != nil {
-		queryKey = r.URL.Query().Get("key")
-		queryAuthToken = r.URL.Query().Get("auth_token")
-	}
-	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" && queryAuthToken == "" {
+	candidates, ok := sdkaccess.CredentialCandidatesFromRequest(r)
+	if !ok {
 		return nil, sdkaccess.NewNoCredentialsError()
 	}
 
-	apiKey := extractBearerToken(authHeader)
-
-	candidates := []struct {
-		value  string
-		source string
-	}{
-		{apiKey, "authorization"},
-		{authHeaderGoogle, "x-goog-api-key"},
-		{authHeaderAnthropic, "x-api-key"},
-		{queryKey, "query-key"},
-		{queryAuthToken, "query-auth-token"},
-	}
-
 	for _, candidate := range candidates {
-		if candidate.value == "" {
+		if candidate.Value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		if _, ok := p.keys[candidate.Value]; ok {
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
-				Principal: candidate.value,
+				Principal: candidate.Value,
 				Metadata: map[string]string{
-					"source": candidate.source,
+					"source": candidate.Source,
 				},
 			}, nil
 		}
 	}
 
 	return nil, sdkaccess.NewInvalidCredentialError()
-}
-
-func extractBearerToken(header string) string {
-	if header == "" {
-		return ""
-	}
-	parts := strings.SplitN(header, " ", 2)
-	if len(parts) != 2 {
-		return header
-	}
-	if strings.ToLower(parts[0]) != "bearer" {
-		return header
-	}
-	return strings.TrimSpace(parts[1])
 }
 
 func normalizeKeys(keys []string) []string {

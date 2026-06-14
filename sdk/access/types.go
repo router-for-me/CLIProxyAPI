@@ -30,6 +30,12 @@ const (
 
 	// DefaultAccessProviderName is applied when no provider name is supplied.
 	DefaultAccessProviderName = "config-inline"
+
+	// AccessProviderTypeAnonymous explicitly preserves open access when no local API keys are configured.
+	AccessProviderTypeAnonymous = "anonymous"
+
+	// DefaultAnonymousProviderName is applied to the built-in anonymous provider.
+	DefaultAnonymousProviderName = "anonymous"
 )
 
 // MakeInlineAPIKeyProvider constructs an inline API key provider configuration.

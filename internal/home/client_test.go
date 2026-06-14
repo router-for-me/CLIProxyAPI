@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -32,6 +33,20 @@ func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
 
 	if req.Count != 1 {
 		t.Fatalf("count = %d, want 1", req.Count)
+	}
+}
+
+func TestAccessAuthRequestUsesFirstQueryCredentialValue(t *testing.T) {
+	req := newAccessAuthRequest(nil, url.Values{
+		"key":        {"client-key", "keep"},
+		"auth_token": {"auth-client-key", "auth-keep"},
+	})
+
+	if got := req.Query["key"]; got != "client-key" {
+		t.Fatalf("query key = %q, want client-key", got)
+	}
+	if got := req.Query["auth_token"]; got != "auth-client-key" {
+		t.Fatalf("query auth_token = %q, want auth-client-key", got)
 	}
 }
 

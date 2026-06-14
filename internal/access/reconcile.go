@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	log "github.com/sirupsen/logrus"
@@ -85,7 +84,7 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 	}
 
 	existing := manager.Providers()
-	configaccess.Register(&newCfg.SDKConfig)
+	RegisterBuiltInProviders(newCfg)
 	providers, added, updated, removed, err := ReconcileProviders(oldCfg, newCfg, existing)
 	if err != nil {
 		log.Errorf("failed to reconcile request auth providers: %v", err)

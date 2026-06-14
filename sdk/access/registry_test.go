@@ -79,3 +79,32 @@ func TestRegisteredProvidersIgnoresStaleExclusiveProvider(t *testing.T) {
 		t.Fatalf("RegisteredProviders()[0] = %q, want test-a", providers[0].Identifier())
 	}
 }
+
+func TestRegisteredProvidersUsesAnonymousOnlyAsFallback(t *testing.T) {
+	UnregisterProvider("test-a")
+	UnregisterProvider(AccessProviderTypeAnonymous)
+	ClearExclusiveProvider()
+	defer UnregisterProvider("test-a")
+	defer UnregisterProvider(AccessProviderTypeAnonymous)
+	defer ClearExclusiveProvider()
+
+	RegisterProvider(AccessProviderTypeAnonymous, NewAnonymousProvider(DefaultAnonymousProviderName))
+
+	providers := RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != DefaultAnonymousProviderName {
+		t.Fatalf("RegisteredProviders()[0] = %q, want %q", providers[0].Identifier(), DefaultAnonymousProviderName)
+	}
+
+	RegisterProvider("test-a", testProvider{id: "test-a"})
+
+	providers = RegisteredProviders()
+	if len(providers) != 1 {
+		t.Fatalf("RegisteredProviders() len = %d, want 1", len(providers))
+	}
+	if providers[0].Identifier() != "test-a" {
+		t.Fatalf("RegisteredProviders()[0] = %q, want test-a", providers[0].Identifier())
+	}
+}
