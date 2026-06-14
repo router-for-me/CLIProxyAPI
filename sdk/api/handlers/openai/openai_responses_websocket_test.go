@@ -1156,6 +1156,171 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesWebsocketTreatsResponseDoneAsTerminalWithoutRewriting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			errClose := conn.Close()
+			if errClose != nil {
+				serverErrCh <- errClose
+			}
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"response.done","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)
+		close(data)
+		close(errCh)
+
+		timelineLog := newInMemoryWebsocketTimelineLog()
+		completedOutput, completedResponseID, pendingToolCallIDs, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			timelineLog,
+			"session-1",
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if errMsg != nil {
+			serverErrCh <- fmt.Errorf("unexpected websocket error message: %v", errMsg.Error)
+			return
+		}
+		if gjson.GetBytes(completedOutput, "0.id").String() != "out-1" {
+			serverErrCh <- errors.New("done output not captured")
+			return
+		}
+		if completedResponseID != "resp-1" {
+			serverErrCh <- fmt.Errorf("completed response id = %q, want resp-1", completedResponseID)
+			return
+		}
+		if len(pendingToolCallIDs) != 0 {
+			serverErrCh <- fmt.Errorf("pending tool call ids = %v, want empty", pendingToolCallIDs)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.done" {
+		t.Fatalf("payload type = %s, want response.done; payload=%s", got, payload)
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestForwardResponsesWebsocketTreatsErrorPayloadAsTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			errClose := conn.Close()
+			if errClose != nil {
+				serverErrCh <- errClose
+			}
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"error","status":429,"error":{"message":"upstream failed"}}`)
+		close(data)
+		close(errCh)
+
+		_, _, _, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-1",
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if errMsg == nil {
+			serverErrCh <- errors.New("expected websocket error message")
+			return
+		}
+		if errMsg.StatusCode != http.StatusTooManyRequests {
+			serverErrCh <- fmt.Errorf("websocket error status = %d, want %d", errMsg.StatusCode, http.StatusTooManyRequests)
+			return
+		}
+		if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "upstream failed") {
+			serverErrCh <- fmt.Errorf("websocket error = %v, want upstream failed", errMsg.Error)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("payload type = %s, want %s; payload=%s", got, wsEventTypeError, payload)
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
 func TestRecordPendingToolCallIDsFromPayloadDropsSatisfiedCalls(t *testing.T) {
 	pending := map[string]struct{}{}
 	payload := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call-1","id":"fc-1"},{"type":"function_call_output","call_id":"call-1","id":"out-1"},{"type":"custom_tool_call","call_id":"call-2","id":"ctc-1"},{"type":"custom_tool_call_output","call_id":"call-2","id":"custom-out-1"}]}}`)

@@ -650,15 +650,35 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return
 			}
 
-			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
+			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
+			if cliproxyexecutor.DownstreamWebsocket(ctx) {
+				if eventType == "response.completed" || eventType == "response.done" {
+					if detail, ok := helps.ParseCodexUsage(payload); ok {
+						reporter.Publish(ctx, detail)
+					}
+				}
+				if !send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
+					terminateReason = "context_done"
+					terminateErr = ctx.Err()
+					return
+				}
+				if isTerminalEvent {
+					return
+				}
+				continue
+			}
+
+			payload = normalizeCodexWebsocketCompletion(payload)
+			eventType = gjson.GetBytes(payload, "type").String()
 			if eventType == "response.completed" || eventType == "response.done" {
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
 			}
 
-			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
+			clientPayload = applyCodexIdentityExposeResponsePayload(payload, identityState)
 			line := encodeCodexWebsocketAsSSE(clientPayload)
 			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, clientBody, clientBody, line, &param)
 			for i := range chunks {
