@@ -1,98 +1,66 @@
-# AGENTS.md
+# AGENTS.md — Known Pitfalls & Solutions
 
-Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with OAuth and round-robin load balancing.
+Auto-generated knowledge base for AI agents and developers.
+Report unexpected issues here so future collaborators don't step into the same trap.
 
-## Repository
-- GitHub: https://github.com/router-for-me/CLIProxyAPI
+---
 
-## Commands
-```bash
-gofmt -w . # Format (required after Go changes)
-go build -o cli-proxy-api ./cmd/server # Build
-go run ./cmd/server # Run dev server
-go test ./... # Run all tests
-go test -v -run TestName ./path/to/pkg # Run single test
-go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
+### [Go Toolchain] go1.26.4 auto-downloaded toolchain cache is incomplete (missing src/)
+
+**Date**: 2026-06-14  
+**Discovered by**: commit `6121199d` build attempt
+
+**Problem Description**:
+
+The project's `go.mod` specifies `go 1.26.0` with `toolchain go1.26.4`. When `GOTOOLCHAIN=auto` (default), Go attempts to auto-download `go1.26.4` to the module cache at:
 ```
-- Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
+%GOPATH%\pkg\mod\golang.org\toolchain@v0.0.1-go1.26.4.windows-amd64
+```
 
-## Config
-- Default config: `config.yaml` (template: `config.example.yaml`)
-- `.env` is auto-loaded from the working directory
-- Auth material defaults under `auths/`
-- Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)
+However, due to network restrictions (can't reach `proxy.golang.org`), the download is **incomplete** — the cache only contains `bin/go.exe` without the `src/` directory (standard library source files). This causes **all** compilation to fail with dozens of errors like:
 
-## Architecture
-- `cmd/server/` — Server entrypoint
-- `internal/api/` — Gin HTTP API (routes, middleware, modules)
-- `internal/api/modules/amp/` — Amp integration (Amp-style routes + reverse proxy)
-- `internal/thinking/` — Main thinking/reasoning pipeline. `ApplyThinking()` (apply.go) parses suffixes (`suffix.go`, suffix overrides body), normalizes config to canonical `ThinkingConfig` (`types.go`), normalizes and validates centrally (`validate.go`/`convert.go`), then applies provider-specific output via `ProviderApplier`. Do not break this "canonical representation → per-provider translation" architecture.
-- `internal/runtime/executor/` — Per-provider runtime executors (incl. Codex WebSocket)
-- `internal/translator/` — Provider protocol translators (and shared `common`)
-- `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates
-- `internal/store/` — Storage implementations and secret resolution
-- `internal/managementasset/` — Config snapshots and management assets
-- `internal/cache/` — Request signature caching
-- `internal/watcher/` — Config hot-reload and watchers
-- `internal/wsrelay/` — WebSocket relay sessions
-- `internal/usage/` — Usage and token accounting
-- `internal/tui/` — Bubbletea terminal UI (`--tui`, `--standalone`)
-- `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
-- `test/` — Cross-module integration tests
+```
+package net/http is not in std (C:\Users\...\toolchain@v0.0.1-go1.26.4.windows-amd64\src\net\http)
+package encoding/json is not in std (...)
+package sync is not in std (...)
+... (all standard library packages fail)
+```
 
-## Code Conventions
-- Keep changes small and simple (KISS)
-- Comments in English only
-- If editing code that already contains non-English comments, translate them to English (don’t add new non-English comments)
-- For user-visible strings, keep the existing language used in that file/area
-- New Markdown docs should be in English unless the file is explicitly language-specific (e.g. `README_CN.md`)
-- As a rule, do not make standalone changes to `internal/translator/`. You may modify it only as part of broader changes elsewhere.
-- If a task requires changing only `internal/translator/`, run `gh repo view --json viewerPermission -q .viewerPermission` to confirm you have `WRITE`, `MAINTAIN`, or `ADMIN`. If you do, you may proceed; otherwise, file a GitHub issue including the goal, rationale, and the intended implementation code, then stop further work.
-- `internal/runtime/executor/` should contain executors and their unit tests only. Place any helper/supporting files under `internal/runtime/executor/helps/`.
-- Follow `gofmt`; keep imports goimports-style; wrap errors with context where helpful
-- Do not use `log.Fatal`/`log.Fatalf` (terminates the process); prefer returning errors and logging via logrus
-- Shadowed variables: use method suffix (`errStart := server.Start()`)
-- Wrap defer errors: `defer func() { if err := f.Close(); err != nil { log.Errorf(...) } }()`
-- Use logrus structured logging; avoid leaking secrets/tokens in logs
-- Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
-- Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
+**Impact**: Any `go build`, `go test`, `go mod tidy`, etc. will fail. The system-installed Go at `C:\Program Files\Go` (go1.26.2) has the full standard library, but `GOTOOLCHAIN=auto` causes Go to prefer the broken cached toolchain.
 
-### [Testing] Baseline full-suite failures can be unrelated to the current patch
-Detailed description:
-Running `go test ./...` on `fix/preserve-reasoning-content` surfaced existing failures outside the Responses reasoning follow-up work:
-- `internal/registry`: `TestCodexFreeModelsExcludeGPT55`
-- `internal/runtime/executor`: `TestEnsureAccessToken_WarmTokenLoadsCreditsHint`
-- `internal/runtime/executor`: `TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent`
-These failures can block "green full suite" expectations even when the modified package under review is passing.
+**Root Cause Summary**:
 
-Impact scope:
-AI agents reviewing or preparing commits for narrowly scoped translator/request fixes may incorrectly assume their patch caused unrelated red tests, delaying or broadening the change unnecessarily.
+| Component | Value |
+|-----------|-------|
+| go.mod `toolchain` directive | `go1.26.4` |
+| System-installed Go | `go1.26.2` (at `C:\Program Files\Go`) |
+| `GOTOOLCHAIN` env (Process) | `auto` (may override go env config) |
+| `GOTOOLCHAIN` go env config | `local` (in `%APPDATA%\go\env`) |
+| Network access to `proxy.golang.org` | Blocked |
+| Cached toolchain | Incomplete — only `bin/`, no `src/` |
 
-Suggested solutions:
-- Record both the full-suite result and the package-scoped result when reporting verification.
-- For Responses reasoning fixes, verify at minimum `go test ./internal/translator/openai/openai/responses` and `go build -o test-output ./cmd/server`.
-- Treat unrelated full-suite failures as baseline noise unless the diff touches the failing package.
+**Permanent Fix (applied)**:
 
-### [Change Scope] Do not mix unverified local executor refactors into Responses-only fixes
-Detailed description:
-The working tree may contain extra local edits under `internal/runtime/executor/` that are not required for a Responses translator issue. In this session, `internal/runtime/executor/reasoning_preserve.go` included a separate strategy change that rebuilds the entire `messages` array after patching reasoning fields. That implementation detail is broader than the Responses follow-up fix and needs its own dedicated validation before inclusion.
+1. **`build-optimized.ps1`** now sets `$env:GOTOOLCHAIN = "local"` at the top and validates `$GOROOT\src\net\http` exists before building.
+2. **`go env -w GOTOOLCHAIN=local`** has been set in `%APPDATA%\go\env`. However, this can be overridden by a process-level `GOTOOLCHAIN` environment variable — the build script handles this explicitly.
 
-Impact scope:
-If an agent stages all modified files blindly, a small Responses bugfix commit can accidentally absorb executor behavior changes that were not part of the same root cause or acceptance scope.
+**Quick Fix if it happens again**:
 
-Suggested solutions:
-- Stage only files directly tied to the issue being fixed.
-- When executor-side reasoning preservation logic changes independently, add focused tests for the specific reconstruction strategy before committing it.
-- Call out excluded local files explicitly in the handoff or commit summary.
+```powershell
+# Delete the broken toolchain cache
+Remove-Item -Recurse -Force "$env:GOPATH\pkg\mod\golang.org\toolchain@*"
 
-### [Retry Handling] OpenAI-compatible 429 errors currently drop upstream Retry-After hints
-Detailed description:
-`internal/runtime/executor/openai_compat_executor.go` uses `statusErr` for non-2xx responses, and `statusErr` already supports `RetryAfter()`. However, the 429 branches currently populate only `code` and `msg` and do not copy or parse any upstream `Retry-After` header/body hint into `retryAfter`. The auth conductor therefore falls back to the generic per-model quota cooldown ladder (`1s`, `2s`, `4s`, ...) instead of honoring provider guidance when available.
+# Force using system Go
+$env:GOTOOLCHAIN = "local"
+go build ./...
+```
 
-Impact scope:
-Agents debugging repeated OpenAI-compatible 429 loops may misclassify the behavior as purely upstream instability. In practice, provider throttling can be amplified by overly short local retries, causing the same request ID to cycle across the same credentials and generate noisy `Marked model ... quota exceeded` logs before one credential finally succeeds.
+**Long-term fix** (when network is available):
 
-Suggested solutions:
-- When constructing `statusErr` in the OpenAI-compatible executor, parse and attach `Retry-After` when the upstream provides it.
-- If provider-specific bodies encode quota reset timing, consider parsing those hints as a fallback when headers are absent.
-- During incident analysis, distinguish the upstream 429 root cause from the local retry amplification caused by missing retry-after propagation.
+```powershell
+# Install go1.26.4 properly
+go install golang.org/dl/go1.26.4@latest
+go1.26.4 download
+
+# Or download the MSI from https://go.dev/dl/ and install manually
+```

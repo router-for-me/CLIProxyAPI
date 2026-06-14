@@ -83,7 +83,11 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 				}
 				msgBytes = patched
 			}
-			msgsArray, _ = sjson.SetRawBytes(msgsArray, "-1", msgBytes)
+			var errAppend error
+			msgsArray, errAppend = sjson.SetRawBytes(msgsArray, "-1", msgBytes)
+			if errAppend != nil {
+				return translated, fmt.Errorf("preserveReasoningContent: failed to append message at index %d: %w", i, errAppend)
+			}
 		}
 		result, err := sjson.SetRawBytes(out, "messages", msgsArray)
 		if err != nil {
@@ -129,18 +133,21 @@ func preserveReasoningContent(original, translated []byte) ([]byte, error) {
 //     (unless it's empty, in which case only the thinking block is emitted).
 //  3. If existing content is already an array, prepend the thinking block.
 //  4. Keep the top-level reasoning_content field (dual-format compatibility).
-func convertReasoningToThinkingContent(payload []byte) []byte {
+//
+// Error contract: on any sjson failure, the function returns the unmodified input
+// payload along with the error, so the caller never receives a partially-patched payload.
+func convertReasoningToThinkingContent(payload []byte) ([]byte, error) {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return payload
+		return payload, nil
 	}
 
 	if !isThinkingModeActive(payload) {
-		return payload
+		return payload, nil
 	}
 
 	msgs := gjson.GetBytes(payload, "messages")
 	if !msgs.Exists() || !msgs.IsArray() {
-		return payload
+		return payload, nil
 	}
 
 	msgArr := msgs.Array()
@@ -163,7 +170,7 @@ func convertReasoningToThinkingContent(payload []byte) []byte {
 	}
 
 	if !needsRewrite {
-		return payload
+		return payload, nil
 	}
 
 	outMsgs := []byte("[]")
@@ -171,57 +178,94 @@ func convertReasoningToThinkingContent(payload []byte) []byte {
 		msgBytes := []byte(msg.Raw)
 
 		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
-			outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
+			var errAppend error
+			outMsgs, errAppend = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
+			if errAppend != nil {
+				return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append non-assistant message: %w", errAppend)
+			}
 			continue
 		}
 
 		rc := msg.Get(reasoningContentKey)
 		if !rc.Exists() || strings.TrimSpace(rc.String()) == "" {
-			outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
+			var errAppend error
+			outMsgs, errAppend = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
+			if errAppend != nil {
+				return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append assistant message without reasoning: %w", errAppend)
+			}
 			continue
 		}
 
 		reasoningText := rc.String()
 
 		thinkingBlock := []byte(`{"type":"thinking","thinking":""}`)
-		thinkingBlock, _ = sjson.SetBytes(thinkingBlock, "thinking", reasoningText)
+		var errSet error
+		thinkingBlock, errSet = sjson.SetBytes(thinkingBlock, "thinking", reasoningText)
+		if errSet != nil {
+			return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to set thinking text: %w", errSet)
+		}
 
 		content := msg.Get("content")
 		var newContent []byte
 
 		if content.Exists() && content.IsArray() {
 			newContent = []byte("[]")
-			newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			var errAppend error
+			newContent, errAppend = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			if errAppend != nil {
+				return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append thinking block to content array: %w", errAppend)
+			}
 			for _, part := range content.Array() {
-				newContent, _ = sjson.SetRawBytes(newContent, "-1", []byte(part.Raw))
+				newContent, errAppend = sjson.SetRawBytes(newContent, "-1", []byte(part.Raw))
+				if errAppend != nil {
+					return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append content part: %w", errAppend)
+				}
 			}
 		} else if content.Exists() && content.Type == gjson.String {
 			text := content.String()
 			newContent = []byte("[]")
-			newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			var errAppend error
+			newContent, errAppend = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			if errAppend != nil {
+				return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append thinking block to string content: %w", errAppend)
+			}
 			if text != "" {
 				textBlock := []byte(`{"type":"text","text":""}`)
-				textBlock, _ = sjson.SetBytes(textBlock, "text", text)
-				newContent, _ = sjson.SetRawBytes(newContent, "-1", textBlock)
+				var errSetText error
+				textBlock, errSetText = sjson.SetBytes(textBlock, "text", text)
+				if errSetText != nil {
+					return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to set text block: %w", errSetText)
+				}
+				newContent, errAppend = sjson.SetRawBytes(newContent, "-1", textBlock)
+				if errAppend != nil {
+					return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append text block: %w", errAppend)
+				}
 			}
 		} else {
 			newContent = []byte("[]")
-			newContent, _ = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			var errAppend error
+			newContent, errAppend = sjson.SetRawBytes(newContent, "-1", thinkingBlock)
+			if errAppend != nil {
+				return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append thinking block to empty content: %w", errAppend)
+			}
 		}
 
 		updated, err := sjson.SetRawBytes(msgBytes, "content", newContent)
 		if err != nil {
-			outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", msgBytes)
-			continue
+			return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to set content on message: %w", err)
 		}
-		outMsgs, _ = sjson.SetRawBytes(outMsgs, "-1", updated)
+		var errAppend error
+		outMsgs, errAppend = sjson.SetRawBytes(outMsgs, "-1", updated)
+		if errAppend != nil {
+			return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to append updated message: %w", errAppend)
+		}
 	}
 
 	result, err := sjson.SetRawBytes(payload, "messages", outMsgs)
 	if err != nil {
-		return payload
+		return payload, fmt.Errorf("convertReasoningToThinkingContent: failed to update messages: %w", err)
 	}
-	return result
+	return result, nil
 }
 
 // isThinkingModeActive checks whether the payload has thinking mode enabled

@@ -403,7 +403,10 @@ func TestConvertReasoningToThinkingContent_NoOpWhenThinkingModeInactive(t *testi
 		]
 	}`)
 
-	out := convertReasoningToThinkingContent(payload)
+	out, err := convertReasoningToThinkingContent(payload)
+	if err != nil {
+		t.Fatalf("convertReasoningToThinkingContent() returned error = %v", err)
+	}
 
 	rc := gjson.GetBytes(out, "messages.1.reasoning_content").String()
 	if rc != "thinking..." {
@@ -424,7 +427,10 @@ func TestConvertReasoningToThinkingContent_ConvertsWhenReasoningEffortSet(t *tes
 		]
 	}`)
 
-	out := convertReasoningToThinkingContent(payload)
+	out, err := convertReasoningToThinkingContent(payload)
+	if err != nil {
+		t.Fatalf("convertReasoningToThinkingContent() returned error = %v", err)
+	}
 
 	rc := gjson.GetBytes(out, "messages.1.reasoning_content").String()
 	if rc != "I need to think about this" {
@@ -459,7 +465,10 @@ func TestConvertReasoningToThinkingContent_ConvertsWhenThinkingTypeEnabled(t *te
 		]
 	}`)
 
-	out := convertReasoningToThinkingContent(payload)
+	out, err := convertReasoningToThinkingContent(payload)
+	if err != nil {
+		t.Fatalf("convertReasoningToThinkingContent() returned error = %v", err)
+	}
 
 	rc := gjson.GetBytes(out, "messages.1.reasoning_content").String()
 	if rc != "my reasoning" {
@@ -485,7 +494,10 @@ func TestConvertReasoningToThinkingContent_PreservesContentArray(t *testing.T) {
 		]
 	}`)
 
-	out := convertReasoningToThinkingContent(payload)
+	out, err := convertReasoningToThinkingContent(payload)
+	if err != nil {
+		t.Fatalf("convertReasoningToThinkingContent() returned error = %v", err)
+	}
 
 	numParts := len(gjson.GetBytes(out, "messages.1.content").Array())
 	if numParts != 3 {
@@ -512,7 +524,10 @@ func TestConvertReasoningToThinkingContent_SkipsEmptyReasoning(t *testing.T) {
 		]
 	}`)
 
-	out := convertReasoningToThinkingContent(payload)
+	out, err := convertReasoningToThinkingContent(payload)
+	if err != nil {
+		t.Fatalf("convertReasoningToThinkingContent() returned error = %v", err)
+	}
 
 	if gjson.GetBytes(out, "messages.1.content").IsArray() {
 		t.Fatalf("empty reasoning_content should not trigger conversion to content array")
@@ -528,7 +543,10 @@ func TestConvertReasoningToThinkingContent_SkipsNonAssistantMessages(t *testing.
 		]
 	}`)
 
-	out := convertReasoningToThinkingContent(payload)
+	out, err := convertReasoningToThinkingContent(payload)
+	if err != nil {
+		t.Fatalf("convertReasoningToThinkingContent() returned error = %v", err)
+	}
 
 	userRC := gjson.GetBytes(out, "messages.0.reasoning_content")
 	if !userRC.Exists() {
