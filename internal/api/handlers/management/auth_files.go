@@ -2278,8 +2278,12 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			"email":      tokenStorage.Email,
 			"account_id": tokenStorage.AccountID,
 		}
+		// Bound this best-effort lookup so a slow/unresponsive ChatGPT backend
+		// cannot block the token save and OAuth session completion. Mirrors the
+		// SDK device-flow path (sdk/auth/codex_device.go).
+		enrichCtx, cancelEnrich := context.WithTimeout(ctx, 20*time.Second)
 		if _, errEnrich := openaiAuth.EnrichSubscriptionMetadata(
-			ctx,
+			enrichCtx,
 			metadata,
 			tokenStorage.IDToken,
 			tokenStorage.AccessToken,
@@ -2287,6 +2291,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		); errEnrich != nil {
 			log.Warnf("Codex subscription metadata enrichment failed: %v", errEnrich)
 		}
+		cancelEnrich()
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "codex",

@@ -276,7 +276,9 @@ func parseAccountsCheckSnapshot(payload map[string]any, preferredAccountID strin
 		for _, record := range records {
 			accountRecord := accountObjectFromRecord(record.node)
 			candidateID := firstJSONScalar(accountRecord, "account_id", "id", "chatgpt_account_id", "workspace_id")
-			if candidateID == preferredAccountID {
+			// Object-keyed responses carry the account id as the map key, which
+			// may not be repeated inside the value; match on it too.
+			if candidateID == preferredAccountID || strings.TrimSpace(record.key) == preferredAccountID {
 				selected = record
 				break
 			}
@@ -291,7 +293,10 @@ func parseAccountsCheckSnapshot(payload map[string]any, preferredAccountID strin
 	entitlement, _ := node["entitlement"].(map[string]any)
 
 	return &SubscriptionSnapshot{
-		AccountID: firstJSONScalar(accountRecord, "account_id", "id", "chatgpt_account_id", "workspace_id"),
+		AccountID: firstNonEmptyString(
+			firstJSONScalar(accountRecord, "account_id", "id", "chatgpt_account_id", "workspace_id"),
+			strings.TrimSpace(selected.key),
+		),
 		PlanType: firstNonEmptyString(
 			firstJSONScalar(entitlement, "subscription_plan"),
 			firstJSONScalar(accountRecord, "plan_type", "planType"),

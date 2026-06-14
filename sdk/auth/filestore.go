@@ -330,15 +330,17 @@ func writeAuthMetadataFile(path string, metadata map[string]any) error {
 	if errMarshal != nil {
 		return errMarshal
 	}
-	file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-	if errOpen != nil {
-		return errOpen
+	// Write to a sibling temp file and atomically rename into place so a crash
+	// or concurrent read never observes a truncated/empty credential file.
+	tmpPath := path + ".tmp"
+	if errWrite := os.WriteFile(tmpPath, raw, 0o600); errWrite != nil {
+		return errWrite
 	}
-	defer func() {
-		_ = file.Close()
-	}()
-	_, errWrite := file.Write(raw)
-	return errWrite
+	if errRename := os.Rename(tmpPath, path); errRename != nil {
+		_ = os.Remove(tmpPath)
+		return errRename
+	}
+	return nil
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

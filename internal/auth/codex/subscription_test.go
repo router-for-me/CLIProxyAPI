@@ -232,6 +232,27 @@ func TestParseAccountsCheckSnapshot(t *testing.T) {
 			t.Fatalf("expected nil, got %#v", snap)
 		}
 	})
+
+	t.Run("selects object-keyed account by its map key", func(t *testing.T) {
+		// accounts is keyed by account id; the values do not repeat account_id,
+		// so selection must fall back to the map key.
+		payload := map[string]any{
+			"accounts": map[string]any{
+				"acc-1": map[string]any{"entitlement": map[string]any{"subscription_plan": "free", "expires_at": "2030-01-01T00:00:00Z"}},
+				"acc-2": map[string]any{"entitlement": map[string]any{"subscription_plan": "pro", "expires_at": "2031-01-01T00:00:00Z"}},
+			},
+		}
+		snap := parseAccountsCheckSnapshot(payload, "acc-2")
+		if snap == nil {
+			t.Fatalf("expected snapshot")
+		}
+		if snap.PlanType != "pro" {
+			t.Fatalf("PlanType=%q, want pro (selected wrong keyed account)", snap.PlanType)
+		}
+		if snap.AccountID != "acc-2" {
+			t.Fatalf("AccountID=%q, want acc-2 (should fall back to map key)", snap.AccountID)
+		}
+	})
 }
 
 func TestFetchSubscriptionStatus_AccountsCheckPrimary(t *testing.T) {
