@@ -37,6 +37,8 @@ func (h *Handler) PutBackupConfig(c *gin.Context) {
 	}
 
 	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	h.cfg.Backup.Enabled = newConfig.Enabled
 	h.cfg.Backup.Schedule = strings.TrimSpace(newConfig.Schedule)
 	h.cfg.Backup.Storage = strings.TrimSpace(string(newConfig.Storage))
@@ -57,7 +59,6 @@ func (h *Handler) PutBackupConfig(c *gin.Context) {
 	h.cfg.Backup.WebDAV.Username = strings.TrimSpace(newConfig.WebDAV.Username)
 	h.cfg.Backup.WebDAV.Password = strings.TrimSpace(newConfig.WebDAV.Password)
 	h.cfg.Backup.WebDAV.Path = strings.TrimSpace(newConfig.WebDAV.Path)
-	h.mu.Unlock()
 
 	if !h.persist(c) {
 		return
@@ -103,14 +104,22 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 		var lastErr error
 		var uploadedInfo backup.BackupInfo
 
+		// Lock once to read maxBackups configuration
+		h.mu.Lock()
+		maxBackups := h.cfg.Backup.MaxBackups
+		h.mu.Unlock()
+
 		for _, storageType := range types {
 			storageType = strings.TrimSpace(storageType)
 			if storageType == "" {
 				continue
 			}
 
-			// Create storage for this type
+			// Create storage for this type (with lock held inside)
+			h.mu.Lock()
 			storage, err := h.createBackupStorageByType(storageType)
+			h.mu.Unlock()
+
 			if err != nil {
 				log.WithError(err).Warnf("failed to create storage for %s", storageType)
 				lastErr = err
@@ -134,9 +143,9 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 			log.Infof("backup uploaded to %s successfully", storageType)
 
 			// Cleanup old backups for this storage
-			if h.cfg.Backup.MaxBackups > 0 {
+			if maxBackups > 0 {
 				manager := backup.NewManager(h.configFilePath, h.cfg.AuthDir, logsDir, storage)
-				if err := manager.CleanupOldBackups(h.cfg.Backup.MaxBackups); err != nil {
+				if err := manager.CleanupOldBackups(maxBackups); err != nil {
 					log.WithError(err).Warnf("failed to cleanup old backups for %s", storageType)
 				}
 			}
@@ -548,12 +557,9 @@ func (h *Handler) RestoreBackup(c *gin.Context) {
 		return
 	}
 
-	// Create backup manager
-	manager, err := h.createBackupManager()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建备份管理器失败", "message": err.Error()})
-		return
-	}
+	// Create backup manager without storage (restore doesn't need it)
+	logsDir := h.getLogDirectory()
+	manager := backup.NewManager(h.configFilePath, h.cfg.AuthDir, logsDir, nil)
 
 	// Restore backup
 	if err := manager.Restore(data); err != nil {

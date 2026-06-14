@@ -336,7 +336,9 @@ func (m *Manager) extractFile(file *zip.File) error {
 		if err != nil {
 			return fmt.Errorf("failed to resolve auth directory: %w", err)
 		}
-		if !strings.HasPrefix(absTarget, absAuthDir) {
+		// Use filepath.Rel to properly validate path is within directory
+		rel, err := filepath.Rel(absAuthDir, absTarget)
+		if err != nil || strings.HasPrefix(rel, "..") {
 			return fmt.Errorf("attempted to extract file outside auth directory: %s", file.Name)
 		}
 	}
