@@ -25,7 +25,6 @@ var aiAPIPrefixes = []string{
 	"/v1/messages",
 	"/v1/responses",
 	"/v1beta/models/",
-	"/api/provider/",
 	"/backend-api/codex/",
 }
 
