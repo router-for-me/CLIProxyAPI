@@ -1288,20 +1288,19 @@ func (h *Handler) mergeAuthFileStatusMetadata(auth *coreauth.Auth, requestMetada
 	if auth == nil {
 		return nil
 	}
+	// Layer the sources so later ones win: on-disk metadata (the persisted
+	// baseline) is overlaid by in-memory updates (e.g. a token refresh not yet
+	// flushed), then by the explicit request metadata.
 	merged := make(map[string]any)
-	diskFound := false
 	if diskMetadata, errRead := h.readAuthMetadataForStatusPatch(auth); errRead == nil {
 		for key, value := range diskMetadata {
 			merged[key] = value
 		}
-		diskFound = true
 	} else if !errors.Is(errRead, os.ErrNotExist) {
 		return errRead
 	}
-	if !diskFound {
-		for key, value := range auth.Metadata {
-			merged[key] = value
-		}
+	for key, value := range auth.Metadata {
+		merged[key] = value
 	}
 	for key, value := range requestMetadata {
 		merged[key] = value

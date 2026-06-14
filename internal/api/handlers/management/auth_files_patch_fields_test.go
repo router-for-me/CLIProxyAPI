@@ -280,3 +280,65 @@ func TestPatchAuthFileFields_ArbitraryFieldsPersistToFile(t *testing.T) {
 		t.Fatalf("fgh.ijk = %#v, want true", got)
 	}
 }
+
+// Regression: clearing all custom headers via a fields patch must persist to
+// disk. Previously the file token store re-merged on-disk metadata on save,
+// which resurrected the just-removed "headers" key after the write.
+func TestPatchAuthFileFields_ClearingHeadersPersistsToDisk(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "codex.json"
+	filePath := filepath.Join(authDir, fileName)
+
+	store := fileauth.NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	manager := coreauth.NewManager(store, nil, nil)
+	// Register with the full metadata the manager would hold after loading the
+	// file from disk, including the access token and the custom header.
+	record := &coreauth.Auth{
+		ID:         fileName,
+		FileName:   fileName,
+		Provider:   "codex",
+		Attributes: map[string]string{"path": filePath, "header:X-Old": "old"},
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "access",
+			"headers":      map[string]any{"X-Old": "old"},
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	// Clear the only custom header.
+	body := `{"name":"codex.json","headers":{"X-Old":""}}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	raw, errRead := os.ReadFile(filePath)
+	if errRead != nil {
+		t.Fatalf("read auth file: %v", errRead)
+	}
+	var data map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &data); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth file: %v; raw=%s", errUnmarshal, string(raw))
+	}
+	if _, ok := data["headers"]; ok {
+		t.Fatalf("headers should be removed from disk after clearing; raw=%s", string(raw))
+	}
+	if got := data["access_token"]; got != "access" {
+		t.Fatalf("access_token=%#v, want preserved access; raw=%s", got, string(raw))
+	}
+}
