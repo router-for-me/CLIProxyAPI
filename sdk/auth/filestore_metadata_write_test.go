@@ -71,3 +71,30 @@ func TestList_HonorsContextCancellationDuringCodexEnrichment(t *testing.T) {
 		t.Fatal("List did not return promptly under a cancelled context (enrichment ignored ctx)")
 	}
 }
+
+func TestList_CopiesCodexPlanTypeIntoAttributes(t *testing.T) {
+	dir := t.TempDir()
+	// Future expiry keeps enrichment offline (no backend call) while still
+	// exercising the attribute copy.
+	future := time.Now().UTC().Add(30 * 24 * time.Hour).Format("2006-01-02T15:04:05Z")
+	seed := `{"type":"codex","access_token":"a","plan_type":"plus","subscription_active_until":"` + future + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "codex.json"), []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("want 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["plan_type"]; got != "plus" {
+		t.Fatalf("Attributes[plan_type] = %q, want plus (runtime catalog selection)", got)
+	}
+	if got := auths[0].Attributes["subscription_active_until"]; got != future {
+		t.Fatalf("Attributes[subscription_active_until] = %q, want %s", got, future)
+	}
+}

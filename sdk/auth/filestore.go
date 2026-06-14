@@ -326,6 +326,19 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	// Mirror the Codex subscription fields into attributes the runtime reads
+	// (sdk/cliproxy/service.go selects the model catalog from
+	// Attributes["plan_type"]). Without this, a Plus/Free/Team account loaded
+	// through the file store would be treated as the default plan even after
+	// enrichment normalized and wrote plan_type into metadata.
+	if provider == "codex" {
+		if planType, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(planType) != "" {
+			auth.Attributes["plan_type"] = strings.TrimSpace(planType)
+		}
+		if expiry, ok := metadata["subscription_active_until"].(string); ok && strings.TrimSpace(expiry) != "" {
+			auth.Attributes["subscription_active_until"] = strings.TrimSpace(expiry)
+		}
+	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
 }
