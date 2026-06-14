@@ -311,11 +311,14 @@ func (h *Handler) enablePluginConfigLocked(id string) error {
 }
 
 func (h *Handler) pluginStoreSnapshot() (bool, string, string, []string, map[string]config.PluginInstanceConfig, *pluginhost.Host) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
 		return false, "plugins", "", nil, map[string]config.PluginInstanceConfig{}, nil
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return false, "plugins", "", nil, map[string]config.PluginInstanceConfig{}, nil
+	}
 	pluginsEnabled := h.cfg.Plugins.Enabled
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	proxyURL := strings.TrimSpace(h.cfg.ProxyURL)
