@@ -143,9 +143,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if !okID {
 		return
 	}
+	installCtx := c.Request.Context()
 	pluginsEnabled, pluginsDir, proxyURL, _, host := h.pluginStoreSnapshot()
 	client := h.newPluginStoreClient(proxyURL)
-	registry, errRegistry := client.FetchRegistry(c.Request.Context())
+	registry, errRegistry := client.FetchRegistry(installCtx)
 	if errRegistry != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": errRegistry.Error()})
 		return
@@ -158,7 +159,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 
 	pluginIsLoaded := func() bool { return pluginLoaded(host, id) }
 	unloadedBeforeWrite := false
-	result, errInstall := client.Install(c.Request.Context(), plugin, pluginstore.InstallOptions{
+	result, errInstall := client.Install(installCtx, plugin, pluginstore.InstallOptions{
 		PluginsDir:   pluginsDir,
 		GOOS:         goos,
 		GOARCH:       goarch,

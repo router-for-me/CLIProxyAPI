@@ -2,8 +2,10 @@ package management
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -297,6 +299,87 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 	h.persistLocked(c)
 }
 
+// DeletePlugin removes the selected local plugin file and its saved config.
+func (h *Handler) DeletePlugin(c *gin.Context) {
+	id, okID := pluginIDFromRequest(c)
+	if !okID {
+		return
+	}
+	if h == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return
+	}
+
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return
+	}
+	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	_, configured := h.cfg.Plugins.Configs[id]
+	host := h.pluginHost
+	h.mu.Unlock()
+
+	path, errPath := pluginFilePath(pluginsDir, id)
+	if errPath != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errPath.Error()})
+		return
+	}
+	if path == "" && !configured {
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return
+	}
+
+	if pluginLoaded(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginLoaded(host, id) {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":            "plugin_delete_requires_restart",
+			"message":          "loaded plugin cannot be deleted while the server is running",
+			"restart_required": true,
+		})
+		return
+	}
+
+	fileDeleted := false
+	if path != "" {
+		if errRemove := os.Remove(path); errRemove != nil {
+			if !errors.Is(errRemove, os.ErrNotExist) {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_delete_failed", "message": errRemove.Error()})
+				return
+			}
+		} else {
+			fileDeleted = true
+		}
+	}
+
+	h.mu.Lock()
+	delete(h.cfg.Plugins.Configs, id)
+	if configured {
+		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+			h.mu.Unlock()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":        "config_save_failed",
+				"message":      fmt.Sprintf("plugin deleted but saving config failed: %s", errSave.Error()),
+				"file_deleted": fileDeleted,
+				"path":         path,
+			})
+			return
+		}
+	}
+	reloadCfg := h.cfg
+	h.mu.Unlock()
+
+	h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
+	c.JSON(http.StatusOK, gin.H{
+		"status":             "deleted",
+		"id":                 htmlsanitize.String(id),
+		"path":               htmlsanitize.String(path),
+		"file_deleted":       fileDeleted,
+		"configured_removed": configured,
+		"restart_required":   false,
+	})
+}
+
 func normalizedPluginsDir(dir string) string {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -335,6 +418,19 @@ func pluginDiscovered(pluginsDir string, id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func pluginFilePath(pluginsDir string, id string) (string, error) {
+	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir)
+	if errDiscover != nil {
+		return "", errDiscover
+	}
+	for _, file := range files {
+		if file.ID == id {
+			return file.Path, nil
+		}
+	}
+	return "", nil
 }
 
 func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo {

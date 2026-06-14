@@ -178,10 +178,11 @@ The host still performs the real HTTP request, so proxy handling, transport poli
 
 ## Management API
 
-The native plugin management endpoints remain:
+The native plugin management endpoints are:
 
 ```text
 GET /v0/management/plugins
+DELETE /v0/management/plugins/{pluginID}
 PATCH /v0/management/plugins/{pluginID}/enabled
 GET /v0/management/plugins/{pluginID}/config
 PUT /v0/management/plugins/{pluginID}/config

@@ -17,6 +17,8 @@ type SDKConfig struct {
 	//     and returns 404 for /v1/images/generations and /v1/images/edits.
 	//   - "chat": disable image_generation injection for all non-images endpoints (e.g. /v1/responses, /v1/chat/completions),
 	//     while keeping /v1/images/generations and /v1/images/edits enabled and preserving image_generation there.
+	//   - "passthrough": do not modify the tool list on non-images endpoints — keep image_generation if the client
+	//     sent it and do not inject it otherwise; on /v1/images/generations and /v1/images/edits behave like "chat".
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
 	// GPTImage2BaseModel sets the base (mainline) model used when proxying GPT Image 2
