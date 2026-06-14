@@ -212,17 +212,22 @@ func (m *Manager) addRecentLogsToZip(zipWriter *zip.Writer, logsDir, zipBasePath
 		return fmt.Errorf("failed to read logs directory: %w", err)
 	}
 
-	// Limit to last 10 log files
-	start := 0
-	if len(entries) > 10 {
-		start = len(entries) - 10
+	// Filter out directories, keep only files
+	var logFiles []os.DirEntry
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			logFiles = append(logFiles, entry)
+		}
 	}
 
-	for i := start; i < len(entries); i++ {
-		entry := entries[i]
-		if entry.IsDir() {
-			continue
-		}
+	// Limit to last 10 log files
+	start := 0
+	if len(logFiles) > 10 {
+		start = len(logFiles) - 10
+	}
+
+	for i := start; i < len(logFiles); i++ {
+		entry := logFiles[i]
 
 		logPath := filepath.Join(logsDir, entry.Name())
 		zipPath := filepath.Join(zipBasePath, entry.Name())
@@ -245,12 +250,41 @@ func (m *Manager) Restore(data []byte) error {
 		return fmt.Errorf("failed to open zip file: %w", err)
 	}
 
+	// Track critical file restoration
+	criticalFiles := map[string]bool{
+		"config.yaml": false,
+	}
+	var extractionErrors []string
+
 	// Extract files from zip
 	for _, file := range zipReader.File {
 		if err := m.extractFile(file); err != nil {
+			errMsg := fmt.Sprintf("%s: %v", file.Name, err)
 			log.WithError(err).Warnf("failed to extract file: %s", file.Name)
-			// Continue with other files even if one fails
+
+			// Track critical file failures
+			if file.Name == "config.yaml" {
+				extractionErrors = append(extractionErrors, errMsg)
+			}
+		} else {
+			// Mark critical files as successfully restored
+			if file.Name == "config.yaml" {
+				criticalFiles["config.yaml"] = true
+			}
+			log.Infof("restored file: %s", file.Name)
 		}
+	}
+
+	// Check if critical files were restored
+	for filename, restored := range criticalFiles {
+		if !restored {
+			extractionErrors = append(extractionErrors, fmt.Sprintf("%s: not found in backup", filename))
+		}
+	}
+
+	// Return error if critical files failed
+	if len(extractionErrors) > 0 {
+		return fmt.Errorf("critical file restoration failed: %s", strings.Join(extractionErrors, "; "))
 	}
 
 	log.Info("backup restored successfully")
@@ -264,6 +298,12 @@ func (m *Manager) extractFile(file *zip.File) error {
 		return fmt.Errorf("failed to open file in zip: %w", err)
 	}
 	defer rc.Close()
+
+	// Security: Validate file name to prevent directory traversal (Zip Slip)
+	if strings.Contains(file.Name, "..") {
+		log.Warnf("skipping file with directory traversal sequence: %s", file.Name)
+		return fmt.Errorf("invalid file path in zip (directory traversal attempt): %s", file.Name)
+	}
 
 	// Determine target path
 	var targetPath string
@@ -282,6 +322,23 @@ func (m *Manager) extractFile(file *zip.File) error {
 		// Unknown file, skip
 		log.Warnf("skipping unknown file during restore: %s", file.Name)
 		return nil
+	}
+
+	// Security: Verify target path is within allowed directory
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve target path: %w", err)
+	}
+
+	// Check if extracting to auth directory
+	if strings.HasPrefix(file.Name, "auths/") {
+		absAuthDir, err := filepath.Abs(m.authDir)
+		if err != nil {
+			return fmt.Errorf("failed to resolve auth directory: %w", err)
+		}
+		if !strings.HasPrefix(absTarget, absAuthDir) {
+			return fmt.Errorf("attempted to extract file outside auth directory: %s", file.Name)
+		}
 	}
 
 	// Create directory if needed

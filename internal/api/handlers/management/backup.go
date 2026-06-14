@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
@@ -62,7 +63,8 @@ func (h *Handler) PutBackupConfig(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "backup configuration updated"})
+	// persist() already writes JSON response, so we're done
+}
 }
 
 // CreateBackup creates a new backup immediately.
@@ -75,20 +77,18 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 	// Check if "download" query parameter is set
 	downloadMode := c.Query("download") == "true"
 
+	// Determine log directory
+	logsDir := h.getLogDirectory()
+
+	// Create backup data once (no storage needed for download mode)
+	data, filename, err := backup.NewManager(h.configFilePath, h.cfg.AuthDir, logsDir, nil).Create()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建备份失败", "message": err.Error()})
+		return
+	}
+
 	if downloadMode {
-		// Create backup and stream directly to client
-		manager, err := h.createBackupManager()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "创建备份管理器失败", "message": err.Error()})
-			return
-		}
-
-		data, filename, errCreate := manager.Create()
-		if errCreate != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "创建备份失败", "message": errCreate.Error()})
-			return
-		}
-
+		// Stream directly to client
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		c.Data(http.StatusOK, "application/zip", data)
 	} else {
@@ -109,21 +109,38 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 				continue
 			}
 
-			// Create manager for this specific storage type
-			manager, err := h.createBackupManagerForType(storageType)
+			// Create storage for this type
+			storage, err := h.createBackupStorageByType(storageType)
 			if err != nil {
-				log.WithError(err).Warnf("failed to create backup manager for %s", storageType)
+				log.WithError(err).Warnf("failed to create storage for %s", storageType)
 				lastErr = err
 				continue
 			}
 
-			// Upload to this storage
-			info, err := manager.Upload()
-			if err != nil {
+			// Upload the same backup data to this storage
+			if err := storage.Upload(filename, data); err != nil {
 				log.WithError(err).Warnf("failed to upload backup to %s", storageType)
 				lastErr = err
 				continue
 			}
+
+			uploadedInfo = backup.BackupInfo{
+				Name:      filename,
+				Timestamp: time.Now(),
+				Size:      int64(len(data)),
+				Location:  filename,
+			}
+			successCount++
+			log.Infof("backup uploaded to %s successfully", storageType)
+
+			// Cleanup old backups for this storage
+			if h.cfg.Backup.MaxBackups > 0 {
+				manager := backup.NewManager(h.configFilePath, h.cfg.AuthDir, logsDir, storage)
+				if err := manager.CleanupOldBackups(h.cfg.Backup.MaxBackups); err != nil {
+					log.WithError(err).Warnf("failed to cleanup old backups for %s", storageType)
+				}
+			}
+		}
 
 			uploadedInfo = info
 			successCount++
@@ -313,18 +330,48 @@ func (h *Handler) TestBackupConnection(c *gin.Context) {
 		return
 	}
 
-	storage, err := h.createBackupStorage()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "创建存储失败", "message": err.Error()})
-		return
+	storageTypes := strings.ToLower(strings.TrimSpace(h.cfg.Backup.Storage))
+	if storageTypes == "" {
+		storageTypes = "local"
 	}
 
-	if err := storage.TestConnection(); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "连接测试失败", "message": err.Error()})
-		return
+	types := strings.Split(storageTypes, ",")
+	results := make(map[string]string)
+	hasFailure := false
+
+	// Test all configured storage backends
+	for _, storageType := range types {
+		storageType = strings.TrimSpace(storageType)
+		if storageType == "" {
+			continue
+		}
+
+		storage, err := h.createBackupStorageByType(storageType)
+		if err != nil {
+			results[storageType] = fmt.Sprintf("创建失败: %v", err)
+			hasFailure = true
+			continue
+		}
+
+		if err := storage.TestConnection(); err != nil {
+			results[storageType] = fmt.Sprintf("连接失败: %v", err)
+			hasFailure = true
+		} else {
+			results[storageType] = "连接成功"
+		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "连接成功"})
+	if hasFailure {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "部分存储后端连接失败",
+			"results": results,
+		})
+	} else {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "所有存储后端连接成功",
+			"results": results,
+		})
+	}
 }
 
 // createBackupManager creates a backup manager based on current configuration.
