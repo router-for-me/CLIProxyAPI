@@ -296,23 +296,17 @@ func (a *CodexAuthenticator) buildAuthRecord(ctx context.Context, authSvc *codex
 		fmt.Println("Codex API key obtained and stored")
 	}
 
-	// Prefer the enriched/normalized plan from metadata over the pre-enrichment
-	// JWT claim, so SDK callers that use this record before a file reload get
-	// the correct Codex catalog (sdk/cliproxy/service.go reads plan_type here).
-	attributes := map[string]string{"plan_type": planType}
-	if pt, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(pt) != "" {
-		attributes["plan_type"] = strings.TrimSpace(pt)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: a.Provider(),
+		FileName: fileName,
+		Storage:  tokenStorage,
+		Metadata: metadata,
+		// Seed with the pre-enrichment JWT plan; the shared helper overrides it
+		// with the enriched/normalized value from metadata when available, so
+		// SDK callers select the correct Codex catalog before a file reload.
+		Attributes: map[string]string{"plan_type": planType},
 	}
-	if expiry, ok := metadata["subscription_active_until"].(string); ok && strings.TrimSpace(expiry) != "" {
-		attributes["subscription_active_until"] = strings.TrimSpace(expiry)
-	}
-
-	return &coreauth.Auth{
-		ID:         fileName,
-		Provider:   a.Provider(),
-		FileName:   fileName,
-		Storage:    tokenStorage,
-		Metadata:   metadata,
-		Attributes: attributes,
-	}, nil
+	coreauth.ApplyCodexSubscriptionAttributes(record)
+	return record, nil
 }
