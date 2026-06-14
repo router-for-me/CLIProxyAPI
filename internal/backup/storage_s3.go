@@ -86,9 +86,12 @@ func (s *S3Storage) List() ([]BackupInfo, error) {
 	})
 
 	var backups []BackupInfo
+	var lastErr error
+
 	for object := range objectCh {
 		if object.Err != nil {
 			log.WithError(object.Err).Warn("error listing S3 objects")
+			lastErr = object.Err
 			continue
 		}
 
@@ -105,6 +108,11 @@ func (s *S3Storage) List() ([]BackupInfo, error) {
 			Storage:   StorageTypeS3,
 			Location:  object.Key,
 		})
+	}
+
+	// Return error if listing had errors
+	if lastErr != nil {
+		return backups, fmt.Errorf("S3 listing completed with errors: %w", lastErr)
 	}
 
 	// Sort by name (which includes timestamp)
@@ -166,6 +174,13 @@ func (s *S3Storage) TestConnection() error {
 
 // objectName constructs the full S3 object key with prefix.
 func (s *S3Storage) objectName(filename string) string {
+	// Security: validate filename to prevent path traversal
+	if strings.Contains(filename, "..") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+		log.Warnf("rejecting filename with path traversal attempt: %s", filename)
+		// Return a safe default - caller should handle invalid filenames
+		return "invalid-filename.zip"
+	}
+
 	if s.prefix == "" {
 		return filename
 	}

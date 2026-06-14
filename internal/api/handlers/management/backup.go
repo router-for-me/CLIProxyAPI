@@ -60,11 +60,12 @@ func (h *Handler) PutBackupConfig(c *gin.Context) {
 	h.cfg.Backup.WebDAV.Password = strings.TrimSpace(newConfig.WebDAV.Password)
 	h.cfg.Backup.WebDAV.Path = strings.TrimSpace(newConfig.WebDAV.Path)
 
-	if !h.persist(c) {
+	// Use persistLocked since we already hold the lock
+	if !h.persistLocked(c) {
 		return
 	}
 
-	// persist() already writes JSON response, so we're done
+	// persistLocked() already writes JSON response, so we're done
 }
 
 // CreateBackup creates a new backup immediately.

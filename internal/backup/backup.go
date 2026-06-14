@@ -44,9 +44,10 @@ func (m *Manager) Create() ([]byte, string, error) {
 	buf := new(bytes.Buffer)
 	zipWriter := zip.NewWriter(buf)
 
-	// Backup config.yaml
+	// Backup config.yaml - CRITICAL, fail if missing
 	if err := m.addFileToZip(zipWriter, m.configPath, "config.yaml"); err != nil {
-		log.WithError(err).Warn("failed to backup config.yaml")
+		zipWriter.Close()
+		return nil, "", fmt.Errorf("failed to backup config.yaml (critical): %w", err)
 	}
 
 	// Backup auth directory (OAuth files)
@@ -348,8 +349,8 @@ func (m *Manager) extractFile(file *zip.File) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Create target file
-	outFile, err := os.Create(targetPath)
+	// Create target file with restrictive permissions (0600) to protect credentials
+	outFile, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create target file: %w", err)
 	}

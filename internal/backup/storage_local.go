@@ -38,7 +38,8 @@ func NewLocalStorage(baseDir string) (*LocalStorage, error) {
 func (s *LocalStorage) Upload(filename string, data []byte) error {
 	path := filepath.Join(s.baseDir, filename)
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// Use restrictive permissions (0600) to protect credentials
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write backup file: %w", err)
 	}
 

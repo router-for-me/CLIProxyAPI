@@ -210,6 +210,13 @@ func (s *WebDAVStorage) TestConnection() error {
 
 // fileURL constructs the full WebDAV file URL.
 func (s *WebDAVStorage) fileURL(filename string) string {
+	// Security: validate filename to prevent path traversal
+	if strings.Contains(filename, "..") || strings.Contains(filename, "\\") {
+		log.Warnf("rejecting filename with path traversal attempt: %s", filename)
+		// Return a safe default - caller should handle invalid filenames
+		filename = "invalid-filename.zip"
+	}
+
 	if s.basePath == "" {
 		return fmt.Sprintf("%s/%s", s.url, filename)
 	}
