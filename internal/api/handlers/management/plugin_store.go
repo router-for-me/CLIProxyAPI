@@ -37,10 +37,29 @@ type pluginReleaseCacheEntry struct {
 type pluginStoreListResponse struct {
 	PluginsEnabled bool                   `json:"plugins_enabled"`
 	PluginsDir     string                 `json:"plugins_dir"`
+	Sources        []pluginStoreSource    `json:"sources"`
+	SourceErrors   []pluginStoreSourceErr `json:"source_errors,omitempty"`
 	Plugins        []pluginStoreListEntry `json:"plugins"`
 }
 
+type pluginStoreSource struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+type pluginStoreSourceErr struct {
+	SourceID   string `json:"source_id"`
+	SourceName string `json:"source_name"`
+	SourceURL  string `json:"source_url"`
+	Message    string `json:"message"`
+}
+
 type pluginStoreListEntry struct {
+	StoreID          string   `json:"store_id"`
+	SourceID         string   `json:"source_id"`
+	SourceName       string   `json:"source_name"`
+	SourceURL        string   `json:"source_url"`
 	ID               string   `json:"id"`
 	Name             string   `json:"name"`
 	Description      string   `json:"description"`
@@ -63,6 +82,9 @@ type pluginStoreListEntry struct {
 
 type pluginInstallResponse struct {
 	Status          string `json:"status"`
+	SourceID        string `json:"source_id"`
+	SourceName      string `json:"source_name"`
+	SourceURL       string `json:"source_url"`
 	ID              string `json:"id"`
 	Version         string `json:"version"`
 	Path            string `json:"path"`
@@ -80,12 +102,21 @@ type pluginLocalStatus struct {
 	EffectiveEnabled bool
 }
 
+type sourcedPlugin struct {
+	source pluginstore.Source
+	plugin pluginstore.Plugin
+}
+
 func (h *Handler) ListPluginStore(c *gin.Context) {
-	pluginsEnabled, pluginsDir, proxyURL, configs, host := h.pluginStoreSnapshot()
-	client := h.newPluginStoreClient(proxyURL)
-	registry, errRegistry := client.FetchRegistry(c.Request.Context())
-	if errRegistry != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": errRegistry.Error()})
+	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, configs, host := h.pluginStoreSnapshot()
+	sources, errSources := h.pluginStoreSources(sourceConfigs)
+	if errSources != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
+		return
+	}
+	plugins, sourceErrors := h.fetchSourcedPlugins(c.Request.Context(), proxyURL, sources)
+	if len(plugins) == 0 && len(sourceErrors) > 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": sourceErrors[0].Message})
 		return
 	}
 	statuses, errStatus := pluginLocalStatuses(pluginsEnabled, pluginsDir, configs, host)
@@ -94,10 +125,16 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		return
 	}
 
-	latestVersions := h.latestPluginVersions(c.Request.Context(), client, registry.Plugins)
+	latestInput := make([]pluginstore.Plugin, 0, len(plugins))
+	for _, item := range plugins {
+		latestInput = append(latestInput, item.plugin)
+	}
+	client := h.newPluginStoreClient(proxyURL, "")
+	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
 
-	entries := make([]pluginStoreListEntry, 0, len(registry.Plugins))
-	for index, plugin := range registry.Plugins {
+	entries := make([]pluginStoreListEntry, 0, len(plugins))
+	for index, item := range plugins {
+		plugin := item.plugin
 		status := statuses[plugin.ID]
 		installedVersion := status.InstalledVersion
 		// Fall back to the registry version when the latest release is unknown.
@@ -106,6 +143,10 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			storeVersion = latestVersions[index]
 		}
 		entries = append(entries, pluginStoreListEntry{
+			StoreID:          htmlsanitize.String(item.source.ID + "/" + plugin.ID),
+			SourceID:         htmlsanitize.String(item.source.ID),
+			SourceName:       htmlsanitize.String(item.source.Name),
+			SourceURL:        htmlsanitize.String(item.source.URL),
 			ID:               htmlsanitize.String(plugin.ID),
 			Name:             htmlsanitize.String(plugin.Name),
 			Description:      htmlsanitize.String(plugin.Description),
@@ -130,6 +171,8 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 	c.JSON(http.StatusOK, pluginStoreListResponse{
 		PluginsEnabled: pluginsEnabled,
 		PluginsDir:     htmlsanitize.String(pluginsDir),
+		Sources:        sanitizePluginStoreSources(sources),
+		SourceErrors:   sanitizePluginStoreSourceErrors(sourceErrors),
 		Plugins:        entries,
 	})
 }
@@ -144,16 +187,14 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	installCtx := c.Request.Context()
-	pluginsEnabled, pluginsDir, proxyURL, _, host := h.pluginStoreSnapshot()
-	client := h.newPluginStoreClient(proxyURL)
-	registry, errRegistry := client.FetchRegistry(installCtx)
-	if errRegistry != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": errRegistry.Error()})
+	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, _, host := h.pluginStoreSnapshot()
+	sources, errSources := h.pluginStoreSources(sourceConfigs)
+	if errSources != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
 		return
 	}
-	plugin, okPlugin := registry.PluginByID(id)
+	source, plugin, client, okPlugin := h.findPluginStoreInstallTarget(installCtx, proxyURL, sources, id, c.Query("source"), c)
 	if !okPlugin {
-		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found in registry"})
 		return
 	}
 
@@ -236,6 +277,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
 	log.WithFields(log.Fields{
 		"plugin_id":   result.ID,
+		"source_id":   source.ID,
 		"version":     result.Version,
 		"path":        result.Path,
 		"overwritten": result.Overwritten,
@@ -243,6 +285,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 
 	c.JSON(http.StatusOK, pluginInstallResponse{
 		Status:          "installed",
+		SourceID:        htmlsanitize.String(source.ID),
+		SourceName:      htmlsanitize.String(source.Name),
+		SourceURL:       htmlsanitize.String(source.URL),
 		ID:              htmlsanitize.String(result.ID),
 		Version:         htmlsanitize.String(result.Version),
 		Path:            htmlsanitize.String(result.Path),
@@ -265,27 +310,44 @@ func (h *Handler) enablePluginConfigLocked(id string) error {
 	return nil
 }
 
-func (h *Handler) pluginStoreSnapshot() (bool, string, string, map[string]config.PluginInstanceConfig, *pluginhost.Host) {
+func (h *Handler) pluginStoreSnapshot() (bool, string, string, []config.PluginStoreSource, map[string]config.PluginInstanceConfig, *pluginhost.Host) {
 	if h == nil || h.cfg == nil {
-		return false, "plugins", "", map[string]config.PluginInstanceConfig{}, nil
+		return false, "plugins", "", nil, map[string]config.PluginInstanceConfig{}, nil
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	pluginsEnabled := h.cfg.Plugins.Enabled
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	proxyURL := strings.TrimSpace(h.cfg.ProxyURL)
+	sourceConfigs := append([]config.PluginStoreSource(nil), h.cfg.Plugins.StoreSources...)
 	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
 	for id, item := range h.cfg.Plugins.Configs {
 		configs[id] = item
 	}
-	return pluginsEnabled, pluginsDir, proxyURL, configs, h.pluginHost
+	return pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, configs, h.pluginHost
 }
 
-func (h *Handler) newPluginStoreClient(proxyURL string) pluginstore.Client {
-	registryURL := ""
+func (h *Handler) pluginStoreSources(sourceConfigs []config.PluginStoreSource) ([]pluginstore.Source, error) {
+	if h != nil && strings.TrimSpace(h.pluginStoreRegistryURL) != "" {
+		source := pluginstore.DefaultSource()
+		source.URL = strings.TrimSpace(h.pluginStoreRegistryURL)
+		return []pluginstore.Source{source}, nil
+	}
+	sources := make([]pluginstore.Source, 0, len(sourceConfigs))
+	for _, source := range sourceConfigs {
+		sources = append(sources, pluginstore.Source{
+			ID:   source.ID,
+			Name: source.Name,
+			URL:  source.URL,
+		})
+	}
+	return pluginstore.NormalizeSources(sources)
+}
+
+func (h *Handler) newPluginStoreClient(proxyURL string, registryURL string) pluginstore.Client {
+	registryURL = strings.TrimSpace(registryURL)
 	var httpClient pluginstore.HTTPDoer
 	if h != nil {
-		registryURL = strings.TrimSpace(h.pluginStoreRegistryURL)
 		httpClient = h.pluginStoreHTTPClient
 	}
 	if registryURL == "" {
@@ -299,6 +361,115 @@ func (h *Handler) newPluginStoreClient(proxyURL string) pluginstore.Client {
 		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}, client)
 	}
 	return pluginstore.Client{HTTPClient: client, RegistryURL: registryURL}
+}
+
+func (h *Handler) fetchSourcedPlugins(ctx context.Context, proxyURL string, sources []pluginstore.Source) ([]sourcedPlugin, []pluginStoreSourceErr) {
+	plugins := make([]sourcedPlugin, 0)
+	sourceErrors := make([]pluginStoreSourceErr, 0)
+	for _, source := range sources {
+		client := h.newPluginStoreClient(proxyURL, source.URL)
+		registry, errRegistry := client.FetchRegistry(ctx)
+		if errRegistry != nil {
+			sourceErrors = append(sourceErrors, pluginStoreSourceErr{
+				SourceID:   source.ID,
+				SourceName: source.Name,
+				SourceURL:  source.URL,
+				Message:    errRegistry.Error(),
+			})
+			continue
+		}
+		for _, plugin := range registry.Plugins {
+			plugins = append(plugins, sourcedPlugin{source: source, plugin: plugin})
+		}
+	}
+	return plugins, sourceErrors
+}
+
+func (h *Handler) findPluginStoreInstallTarget(ctx context.Context, proxyURL string, sources []pluginstore.Source, id string, requestedSourceID string, c *gin.Context) (pluginstore.Source, pluginstore.Plugin, pluginstore.Client, bool) {
+	requestedSourceID = strings.TrimSpace(requestedSourceID)
+	if requestedSourceID != "" {
+		for _, source := range sources {
+			if source.ID != requestedSourceID {
+				continue
+			}
+			client := h.newPluginStoreClient(proxyURL, source.URL)
+			registry, errRegistry := client.FetchRegistry(ctx)
+			if errRegistry != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": errRegistry.Error()})
+				return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+			}
+			plugin, okPlugin := registry.PluginByID(id)
+			if !okPlugin {
+				c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found in registry source"})
+				return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+			}
+			return source, plugin, client, true
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_store_source_not_found", "message": "plugin store source not found"})
+		return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+	}
+
+	plugins, sourceErrors := h.fetchSourcedPlugins(ctx, proxyURL, sources)
+	matches := make([]sourcedPlugin, 0)
+	for _, item := range plugins {
+		if item.plugin.ID == id {
+			matches = append(matches, item)
+		}
+	}
+	if len(matches) == 0 {
+		if len(plugins) == 0 && len(sourceErrors) > 0 {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": sourceErrors[0].Message})
+			return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found in registry"})
+		return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+	}
+	if len(matches) > 1 {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "plugin_store_source_required",
+			"message": "multiple plugin store sources contain this plugin id; specify source",
+			"sources": sanitizePluginStoreSources(sourcedPluginSources(matches)),
+		})
+		return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+	}
+	match := matches[0]
+	return match.source, match.plugin, h.newPluginStoreClient(proxyURL, match.source.URL), true
+}
+
+func sourcedPluginSources(plugins []sourcedPlugin) []pluginstore.Source {
+	sources := make([]pluginstore.Source, 0, len(plugins))
+	for _, item := range plugins {
+		sources = append(sources, item.source)
+	}
+	return sources
+}
+
+func sanitizePluginStoreSources(sources []pluginstore.Source) []pluginStoreSource {
+	out := make([]pluginStoreSource, 0, len(sources))
+	for _, source := range sources {
+		out = append(out, pluginStoreSource{
+			ID:   htmlsanitize.String(source.ID),
+			Name: htmlsanitize.String(source.Name),
+			URL:  htmlsanitize.String(source.URL),
+		})
+	}
+	return out
+}
+
+func sanitizePluginStoreSourceErrors(sourceErrors []pluginStoreSourceErr) []pluginStoreSourceErr {
+	if len(sourceErrors) == 0 {
+		return nil
+	}
+	out := make([]pluginStoreSourceErr, 0, len(sourceErrors))
+	for _, sourceError := range sourceErrors {
+		out = append(out, pluginStoreSourceErr{
+			SourceID:   htmlsanitize.String(sourceError.SourceID),
+			SourceName: htmlsanitize.String(sourceError.SourceName),
+			SourceURL:  htmlsanitize.String(sourceError.SourceURL),
+			Message:    htmlsanitize.String(sourceError.Message),
+		})
+	}
+	return out
 }
 
 // latestPluginVersions resolves the latest release version of each registry

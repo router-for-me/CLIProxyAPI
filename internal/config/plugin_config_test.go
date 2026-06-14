@@ -31,6 +31,29 @@ plugins: {}
 	}
 }
 
+func TestParseConfigBytes_PluginStoreSources(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+plugins:
+  store-sources:
+    - id: " community "
+      name: " Community "
+      url: " https://community.example/registry.json "
+    - id: empty
+      url: ""
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+
+	if len(cfg.Plugins.StoreSources) != 1 {
+		t.Fatalf("Plugins.StoreSources len = %d, want 1", len(cfg.Plugins.StoreSources))
+	}
+	source := cfg.Plugins.StoreSources[0]
+	if source.ID != "community" || source.Name != "Community" || source.URL != "https://community.example/registry.json" {
+		t.Fatalf("Plugins.StoreSources[0] = %#v", source)
+	}
+}
+
 func TestParseConfigBytes_PluginInstanceEmptyRawYAML(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`
 plugins:

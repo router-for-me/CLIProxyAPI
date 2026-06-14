@@ -13,10 +13,19 @@ import (
 
 const (
 	DefaultRegistryURL = "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI-Plugins-Store/main/registry.json"
+	DefaultSourceID    = "official"
+	DefaultSourceName  = "Official"
 	SchemaVersion      = 1
 )
 
 var pluginVersionPattern = regexp.MustCompile(`^[0-9][0-9A-Za-z.+-]*$`)
+var sourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+type Source struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
 
 type Registry struct {
 	SchemaVersion int      `json:"schema_version"`
@@ -34,6 +43,42 @@ type Plugin struct {
 	Homepage    string   `json:"homepage,omitempty"`
 	License     string   `json:"license,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+}
+
+func DefaultSource() Source {
+	return Source{
+		ID:   DefaultSourceID,
+		Name: DefaultSourceName,
+		URL:  DefaultRegistryURL,
+	}
+}
+
+func NormalizeSources(sources []Source) ([]Source, error) {
+	out := []Source{DefaultSource()}
+	seen := map[string]struct{}{DefaultSourceID: {}}
+	for index, source := range sources {
+		source.ID = strings.TrimSpace(source.ID)
+		source.Name = strings.TrimSpace(source.Name)
+		source.URL = strings.TrimSpace(source.URL)
+		if source.URL == "" {
+			continue
+		}
+		if source.ID == "" {
+			source.ID = fmt.Sprintf("source-%d", index+1)
+		}
+		if !sourceIDPattern.MatchString(source.ID) {
+			return nil, fmt.Errorf("invalid plugin store source id %q", source.ID)
+		}
+		if _, exists := seen[source.ID]; exists {
+			return nil, fmt.Errorf("duplicate plugin store source id %q", source.ID)
+		}
+		seen[source.ID] = struct{}{}
+		if source.Name == "" {
+			source.Name = source.ID
+		}
+		out = append(out, source)
+	}
+	return out, nil
 }
 
 func ParseRegistry(data []byte) (Registry, error) {
