@@ -683,13 +683,13 @@ func extractCodexSubscriptionMetadata(auth *coreauth.Auth) gin.H {
 	copyMetadataValue(result, auth.Metadata, "chatgpt_subscription_active_until")
 	// Derive the expired flag from the expiry at response time rather than
 	// exposing the cached boolean, which goes stale once the stored expiry
-	// passes without a reload/enrichment.
-	activeUntil := strings.TrimSpace(valueAsString(auth.Metadata["subscription_active_until"]))
-	if activeUntil == "" {
-		activeUntil = strings.TrimSpace(valueAsString(auth.Metadata["chatgpt_subscription_active_until"]))
-	}
-	if activeUntil != "" {
-		result["subscription_expired"] = codex.IsSubscriptionExpired(activeUntil)
+	// passes without a reload/enrichment. Pass the raw metadata value (which may
+	// be a JSON number for Unix timestamps) so IsSubscriptionExpired can apply
+	// the same scalar normalization the enrichment uses, instead of a stringified
+	// float in scientific notation.
+	rawActiveUntil := metadataActiveUntilValue(auth.Metadata)
+	if rawActiveUntil != nil {
+		result["subscription_expired"] = codex.IsSubscriptionExpired(rawActiveUntil)
 	} else {
 		copyMetadataValue(result, auth.Metadata, "subscription_expired")
 	}
@@ -698,6 +698,23 @@ func extractCodexSubscriptionMetadata(auth *coreauth.Auth) gin.H {
 		return nil
 	}
 	return result
+}
+
+// metadataActiveUntilValue returns the raw subscription expiry value (string or
+// JSON number) from metadata, preferring subscription_active_until, or nil when
+// neither key holds a usable value.
+func metadataActiveUntilValue(metadata map[string]any) any {
+	for _, key := range []string{"subscription_active_until", "chatgpt_subscription_active_until"} {
+		value, ok := metadata[key]
+		if !ok || value == nil {
+			continue
+		}
+		if text, isString := value.(string); isString && strings.TrimSpace(text) == "" {
+			continue
+		}
+		return value
+	}
+	return nil
 }
 
 func copyMetadataValue(dst gin.H, metadata map[string]any, key string) {

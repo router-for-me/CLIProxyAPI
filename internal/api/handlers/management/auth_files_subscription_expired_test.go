@@ -41,4 +41,18 @@ func TestExtractCodexSubscriptionMetadata_RecomputesExpired(t *testing.T) {
 			t.Fatalf("subscription_expired=%v, want false (recomputed from future expiry)", got["subscription_expired"])
 		}
 	})
+	t.Run("numeric unix-seconds expiry parses without scientific notation", func(t *testing.T) {
+		futureUnix := float64(time.Now().UTC().Add(24 * time.Hour).Unix())
+		auth := &coreauth.Auth{
+			Provider: "codex",
+			Metadata: map[string]any{
+				"subscription_active_until": futureUnix, // JSON number, not string
+				"subscription_expired":      true,       // stale cached value
+			},
+		}
+		got := extractCodexSubscriptionMetadata(auth)
+		if v, _ := got["subscription_expired"].(bool); v {
+			t.Fatalf("subscription_expired=%v, want false (numeric future expiry)", got["subscription_expired"])
+		}
+	})
 }
