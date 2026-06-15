@@ -31,6 +31,12 @@ const (
 )
 
 // GetLogs returns log lines with optional incremental loading.
+//
+// The legacy timestamp path keeps line-count as the total scanned line count for
+// compatibility. Cursor and tail reads avoid scanning older files, so line-count
+// is the number of returned lines there. A cursor emitted by the legacy path
+// points at the latest complete log boundary; combining after with limit is
+// therefore tail semantics and does not replay lines trimmed by limit.
 func (h *Handler) GetLogs(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -756,6 +762,8 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 		if matches && !truncated {
 			if shouldDeferEmptyMainCursorToRotated(files, cursor) {
 				deferEmptyMainMatch = true
+			} else if shouldResetAmbiguousEmptyMainCursor(files, index, cursor) {
+				return 0, false, nil
 			} else {
 				return index, true, nil
 			}
@@ -798,6 +806,32 @@ func shouldDeferEmptyMainCursorToRotated(files []string, cursor logCursor) bool 
 			continue
 		}
 		if logFileChangedAfterCursor(files[i], cursor) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldResetAmbiguousEmptyMainCursor(files []string, mainIndex int, cursor logCursor) bool {
+	if cursor.File != defaultLogFileName || cursor.Offset != 0 || cursor.Size != 0 {
+		return false
+	}
+	info, errStat := os.Stat(files[mainIndex])
+	if errStat != nil || info.IsDir() {
+		return false
+	}
+	if info.Size() == cursor.Size && info.ModTime().UnixNano() == cursorModTimeUnixNano(cursor) {
+		return false
+	}
+	for i := range files {
+		if i == mainIndex || filepath.Base(files[i]) == defaultLogFileName {
+			continue
+		}
+		rotatedInfo, errRotated := os.Stat(files[i])
+		if errRotated != nil || rotatedInfo.IsDir() || rotatedInfo.Size() == 0 {
+			continue
+		}
+		if !logFileChangedAfterCursor(files[i], cursor) {
 			return true
 		}
 	}

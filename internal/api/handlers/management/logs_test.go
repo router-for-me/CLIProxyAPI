@@ -474,6 +474,53 @@ func TestGetLogsZeroOffsetCursorWithEmptyFileReadsAcrossRotation(t *testing.T) {
 	}
 }
 
+func TestGetLogsZeroOffsetCursorWithEmptyFileResetsWhenRotationModTimeAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, defaultLogFileName)
+	fixedModTime := time.Date(2026, 6, 15, 10, 0, 0, 0, time.Local)
+	writeMainLog(t, dir, "")
+	if err := os.Chtimes(mainPath, fixedModTime, fixedModTime); err != nil {
+		t.Fatalf("set initial main mtime: %v", err)
+	}
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+	if initial.NextCursor == "" {
+		t.Fatal("initial next-cursor is empty")
+	}
+	cursor, errCursor := decodeLogCursor(initial.NextCursor)
+	if errCursor != nil {
+		t.Fatalf("decode initial cursor: %v", errCursor)
+	}
+	if cursor.Offset != 0 || cursor.Size != 0 {
+		t.Fatalf("cursor offset/size = %d/%d, want empty zero offset", cursor.Offset, cursor.Size)
+	}
+
+	first := "[2026-06-15 10:00:01] first"
+	second := "[2026-06-15 10:00:02] second"
+	appendMainLog(t, dir, first+"\n")
+	if err := os.Chtimes(mainPath, fixedModTime, fixedModTime); err != nil {
+		t.Fatalf("set rotated mtime: %v", err)
+	}
+	if err := os.Rename(mainPath, filepath.Join(dir, defaultLogFileName+".1")); err != nil {
+		t.Fatalf("rotate main log: %v", err)
+	}
+	writeMainLog(t, dir, second+"\n")
+	if err := os.Chtimes(mainPath, fixedModTime, fixedModTime); err != nil {
+		t.Fatalf("set new main mtime: %v", err)
+	}
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=2")
+	wantLines := []string{first, second}
+	if !reflect.DeepEqual(resp.Lines, wantLines) {
+		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
+	}
+	if !resp.CursorReset {
+		t.Fatal("cursor-reset = false, want true for ambiguous empty cursor rotation")
+	}
+	if resp.LineCount != len(wantLines) {
+		t.Fatalf("line-count = %d, want returned line count %d", resp.LineCount, len(wantLines))
+	}
+}
+
 func TestGetLogsInvalidCursorResetsToTail(t *testing.T) {
 	dir := t.TempDir()
 	lines := []string{
