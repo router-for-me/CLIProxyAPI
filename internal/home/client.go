@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -25,7 +26,6 @@ import (
 const (
 	redisKeyConfig     = "config"
 	redisChannelConfig = "config"
-	redisKeyModels     = "models"
 	redisKeyUsage      = "usage"
 	redisKeyRequestLog = "request-log"
 	redisKeyAppLog     = "app-log"
@@ -57,6 +57,13 @@ type clusterNode struct {
 type clusterNodesEnvelope struct {
 	OK    bool          `json:"ok"`
 	Nodes []clusterNode `json:"nodes"`
+}
+
+type KVSetOptions struct {
+	EX time.Duration
+	PX time.Duration
+	NX bool
+	XX bool
 }
 
 type Client struct {
@@ -513,12 +520,21 @@ func (c *Client) GetConfig(ctx context.Context) ([]byte, error) {
 	return raw, nil
 }
 
-func (c *Client) GetModels(ctx context.Context) ([]byte, error) {
+func (c *Client) GetModels(ctx context.Context, headers http.Header, query url.Values) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
 	}
-	raw, err := cmd.Get(ctx, redisKeyModels).Bytes()
+	req := modelsRequest{
+		Type:    "models",
+		Headers: headersToLowerMap(headers),
+		Query:   queryToLowerMap(query),
+	}
+	keyBytes, err := json.Marshal(&req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := cmd.Get(ctx, string(keyBytes)).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return nil, ErrModelsNotFound
 	}
@@ -531,12 +547,219 @@ func (c *Client) GetModels(ctx context.Context) ([]byte, error) {
 	return raw, nil
 }
 
+func buildKVSetArgs(key string, value []byte, opts KVSetOptions) ([]any, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, fmt.Errorf("home kv: key is empty")
+	}
+	if opts.EX > 0 && opts.PX > 0 {
+		return nil, fmt.Errorf("home kv: EX and PX are mutually exclusive")
+	}
+	if opts.EX < 0 || opts.PX < 0 {
+		return nil, fmt.Errorf("home kv: ttl must not be negative")
+	}
+	if opts.NX && opts.XX {
+		return nil, fmt.Errorf("home kv: NX and XX are mutually exclusive")
+	}
+
+	args := []any{key, append([]byte(nil), value...)}
+	if opts.EX > 0 {
+		args = append(args, "EX", durationCeil(opts.EX, time.Second))
+	}
+	if opts.PX > 0 {
+		args = append(args, "PX", durationCeil(opts.PX, time.Millisecond))
+	}
+	if opts.NX {
+		args = append(args, "NX")
+	}
+	if opts.XX {
+		args = append(args, "XX")
+	}
+	return args, nil
+}
+
+func durationCeil(value time.Duration, unit time.Duration) int64 {
+	if value <= 0 || unit <= 0 {
+		return 0
+	}
+	return int64((value + unit - 1) / unit)
+}
+
+func (c *Client) KVGet(ctx context.Context, key string) ([]byte, bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return nil, false, errClient
+	}
+	raw, errGet := cmd.Get(ctx, key).Bytes()
+	if errors.Is(errGet, redis.Nil) {
+		return nil, false, nil
+	}
+	if errGet != nil {
+		return nil, false, errGet
+	}
+	return append([]byte(nil), raw...), true, nil
+}
+
+func (c *Client) KVSet(ctx context.Context, key string, value []byte, opts KVSetOptions) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	args, errArgs := buildKVSetArgs(key, value, opts)
+	if errArgs != nil {
+		return false, errArgs
+	}
+	result, errSet := cmd.Do(ctx, append([]any{"SET"}, args...)...).Result()
+	if errors.Is(errSet, redis.Nil) {
+		return false, nil
+	}
+	if errSet != nil {
+		return false, errSet
+	}
+	if result == nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (c *Client) KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
+	opts := KVSetOptions{NX: true}
+	if ttl > 0 {
+		opts.EX = ttl
+	}
+	return c.KVSet(ctx, key, value, opts)
+}
+
+func (c *Client) KVDel(ctx context.Context, keys ...string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return 0, errClient
+	}
+	return cmd.Del(ctx, keys...).Result()
+}
+
+func (c *Client) KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return false, errClient
+	}
+	return cmd.Expire(ctx, key, ttl).Result()
+}
+
+func (c *Client) KVTTL(ctx context.Context, key string) (time.Duration, bool, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return 0, false, errClient
+	}
+	ttl, errTTL := cmd.TTL(ctx, key).Result()
+	if errTTL != nil {
+		return 0, false, errTTL
+	}
+	switch {
+	case ttl <= -2*time.Second:
+		return 0, false, nil
+	case ttl == -1*time.Second:
+		return 0, true, nil
+	default:
+		return ttl, true, nil
+	}
+}
+
+func (c *Client) KVIncrBy(ctx context.Context, key string, delta int64) (int64, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return 0, errClient
+	}
+	return cmd.IncrBy(ctx, key, delta).Result()
+}
+
+func (c *Client) KVMGet(ctx context.Context, keys ...string) ([][]byte, []bool, error) {
+	if len(keys) == 0 {
+		return nil, nil, nil
+	}
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return nil, nil, errClient
+	}
+	items, errMGet := cmd.MGet(ctx, keys...).Result()
+	if errMGet != nil {
+		return nil, nil, errMGet
+	}
+	values := make([][]byte, len(items))
+	found := make([]bool, len(items))
+	for i, item := range items {
+		switch typed := item.(type) {
+		case nil:
+			continue
+		case string:
+			values[i] = []byte(typed)
+			found[i] = true
+		case []byte:
+			values[i] = append([]byte(nil), typed...)
+			found[i] = true
+		default:
+			return nil, nil, fmt.Errorf("home kv: unsupported MGET item type %T", item)
+		}
+	}
+	return values, found, nil
+}
+
+func (c *Client) KVMSet(ctx context.Context, pairs map[string][]byte) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return errClient
+	}
+	keys := make([]string, 0, len(pairs))
+	for key := range pairs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	args := make([]any, 0, 1+len(keys)*2)
+	args = append(args, "MSET")
+	for _, key := range keys {
+		args = append(args, key, append([]byte(nil), pairs[key]...))
+	}
+	return cmd.Do(ctx, args...).Err()
+}
+
 func headersToLowerMap(headers http.Header) map[string]string {
 	if len(headers) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(headers))
 	for key, values := range headers {
+		k := strings.ToLower(strings.TrimSpace(key))
+		if k == "" {
+			continue
+		}
+		if len(values) == 0 {
+			out[k] = ""
+			continue
+		}
+		trimmed := make([]string, 0, len(values))
+		for _, v := range values {
+			trimmed = append(trimmed, strings.TrimSpace(v))
+		}
+		out[k] = strings.Join(trimmed, ", ")
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func queryToLowerMap(query url.Values) map[string]string {
+	if len(query) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(query))
+	for key, values := range query {
 		k := strings.ToLower(strings.TrimSpace(key))
 		if k == "" {
 			continue

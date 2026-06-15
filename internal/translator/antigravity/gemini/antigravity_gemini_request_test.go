@@ -388,8 +388,7 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 }
 
 func TestFixCLIToolResponse_BackfillsEmptyFunctionResponseName(t *testing.T) {
-	// When the Amp client sends functionResponse with an empty name,
-	// fixCLIToolResponse should backfill it from the corresponding functionCall.
+	// Empty functionResponse names are backfilled from the corresponding functionCall.
 	input := `{
 		"model": "gemini-3-pro-preview",
 		"request": {

@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -166,6 +167,24 @@ func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, cfg *conf
 	if host != nil {
 		host.ApplyConfig(ctx, cfg)
 	}
+}
+
+func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, cfg *config.Config) {
+	if h == nil || cfg == nil {
+		return
+	}
+	reloadCtx := context.Background()
+	if ctx != nil {
+		reloadCtx = context.WithoutCancel(ctx)
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.WithField("panic", recovered).Error("management: async config reload panicked")
+			}
+		}()
+		h.reloadConfigAfterManagementSave(reloadCtx, cfg)
+	}()
 }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.

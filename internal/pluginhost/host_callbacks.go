@@ -119,6 +119,14 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostStreamClose(request)
 	case pluginabi.MethodHostLog:
 		return h.callHostLog(ctx, request)
+	case pluginabi.MethodHostAuthList:
+		return h.callHostAuthList(ctx, request)
+	case pluginabi.MethodHostAuthGet:
+		return h.callHostAuthGet(ctx, request)
+	case pluginabi.MethodHostAuthGetRuntime:
+		return h.callHostAuthGetRuntime(ctx, request)
+	case pluginabi.MethodHostAuthSave:
+		return h.callHostAuthSave(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}

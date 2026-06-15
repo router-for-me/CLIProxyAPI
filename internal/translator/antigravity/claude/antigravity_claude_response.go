@@ -100,7 +100,7 @@ var toolUseIDCounter uint64
 //
 // Returns:
 //   - [][]byte: A slice of bytes, each containing a Claude Code-compatible SSE payload.
-func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &Params{
 			HasFirstResponse: false,
@@ -134,7 +134,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			return
 		}
 		if params.CurrentThinkingText.Len() > 0 {
-			cache.CacheSignature(modelName, params.CurrentThinkingText.String(), signature)
+			cache.CacheSignatureBestEffort(ctx, modelName, params.CurrentThinkingText.String(), signature)
 			params.CurrentThinkingText.Reset()
 		}
 		sigValue := formatClaudeSignatureValue(modelName, signature)

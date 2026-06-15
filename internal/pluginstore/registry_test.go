@@ -160,6 +160,42 @@ func TestValidateRegistryRejectsInvalidEntries(t *testing.T) {
 	}
 }
 
+func TestNormalizeSourcesAppendsURLsToDefaultSource(t *testing.T) {
+	t.Parallel()
+
+	sources, errNormalize := NormalizeSources([]string{" https://community.example/registry.json "})
+	if errNormalize != nil {
+		t.Fatalf("NormalizeSources() error = %v", errNormalize)
+	}
+	if len(sources) != 2 {
+		t.Fatalf("sources len = %d, want 2", len(sources))
+	}
+	if sources[0].ID != DefaultSourceID || sources[0].URL != DefaultRegistryURL {
+		t.Fatalf("default source = %#v", sources[0])
+	}
+	if sources[1].ID != SourceID("https://community.example/registry.json") ||
+		sources[1].Name != "community.example" ||
+		sources[1].URL != "https://community.example/registry.json" {
+		t.Fatalf("third-party source = %#v", sources[1])
+	}
+}
+
+func TestNormalizeSourcesSkipsDuplicates(t *testing.T) {
+	t.Parallel()
+
+	sources, errNormalize := NormalizeSources([]string{
+		DefaultRegistryURL,
+		"https://community.example/registry.json",
+		"https://community.example/registry.json",
+	})
+	if errNormalize != nil {
+		t.Fatalf("NormalizeSources() error = %v", errNormalize)
+	}
+	if len(sources) != 2 {
+		t.Fatalf("sources len = %d, want 2: %#v", len(sources), sources)
+	}
+}
+
 func TestGitHubRepositoryPartsRejectsNonRepositoryURLs(t *testing.T) {
 	t.Parallel()
 
