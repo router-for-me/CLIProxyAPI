@@ -3292,15 +3292,16 @@ func isRequestInvalidError(err error) bool {
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
-		msg := err.Error()
+		msg := strings.ToLower(err.Error())
 		if strings.Contains(msg, "credit balance") ||
 			strings.Contains(msg, "insufficient balance") ||
-			strings.Contains(msg, "balance is too low") {
+			strings.Contains(msg, "balance is too low") ||
+			strings.Contains(msg, "insufficient_quota") {
 			return false
 		}
 		return strings.Contains(msg, "invalid_request_error") ||
-			strings.Contains(msg, "INVALID_ARGUMENT") ||
-			strings.Contains(msg, "FAILED_PRECONDITION")
+			strings.Contains(msg, "invalid_argument") ||
+			strings.Contains(msg, "failed_precondition")
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
