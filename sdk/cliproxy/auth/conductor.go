@@ -2849,6 +2849,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
+						case 400:
+							if isInsufficientBalanceResultError(result.Error) {
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(30 * time.Minute)
+									state.NextRetryAfter = next
+									suspendReason = "insufficient_balance"
+									shouldSuspendModel = true
+								}
+							} else {
+								state.NextRetryAfter = time.Time{}
+							}
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -3247,6 +3260,19 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+// isInsufficientBalanceResultError returns true if the error indicates the
+// API key or account has insufficient credit balance to process the request.
+func isInsufficientBalanceResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Message))
+	return strings.Contains(lower, "credit balance") ||
+		strings.Contains(lower, "insufficient balance") ||
+		strings.Contains(lower, "balance is too low") ||
+		strings.Contains(lower, "insufficient_quota")
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
@@ -3267,6 +3293,11 @@ func isRequestInvalidError(err error) bool {
 	switch status {
 	case http.StatusBadRequest:
 		msg := err.Error()
+		if strings.Contains(msg, "credit balance") ||
+			strings.Contains(msg, "insufficient balance") ||
+			strings.Contains(msg, "balance is too low") {
+			return false
+		}
 		return strings.Contains(msg, "invalid_request_error") ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
 			strings.Contains(msg, "FAILED_PRECONDITION")
