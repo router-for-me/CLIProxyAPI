@@ -198,10 +198,11 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		if !okCall {
 			continue
 		}
+		plugin.Metadata = clonePluginMetadata(plugin.Metadata)
 		records = append(records, capabilityRecord{
 			id:       file.ID,
 			priority: item.Priority,
-			meta:     plugin.Metadata,
+			meta:     clonePluginMetadata(plugin.Metadata),
 			plugin:   plugin,
 		})
 	}
@@ -413,6 +414,7 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.AuthProvider != nil ||
 		caps.FrontendAuthProvider != nil ||
 		caps.Scheduler != nil ||
+		caps.ModelRouter != nil ||
 		caps.Executor != nil ||
 		caps.RequestTranslator != nil ||
 		caps.RequestNormalizer != nil ||

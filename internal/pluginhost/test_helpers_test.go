@@ -37,6 +37,8 @@ type testSymbolLookup struct {
 	shutdownCalls       int
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
+	schemaVersion       uint32
+	lastLifecycle       rpcLifecycleRequest
 }
 
 func newTestSymbolLookup(plugin *testPlugin) *testSymbolLookup {
@@ -134,6 +136,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errPick
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodModelRoute:
+		if l.active.Capabilities.ModelRouter == nil {
+			return nil, fmt.Errorf("missing model router")
+		}
+		var req pluginapi.ModelRouteRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errRoute := l.active.Capabilities.ModelRouter.RouteModel(ctx, req)
+		if errRoute != nil {
+			return nil, errRoute
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodUsageHandle:
 		if l.active.Capabilities.UsagePlugin == nil {
 			return marshalRPCResult(rpcEmptyResponse{})
@@ -158,6 +173,7 @@ func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, e
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
+	l.lastLifecycle = req
 	var plugin pluginapi.Plugin
 	if reload {
 		if l.reconfigureOverride != nil {
@@ -173,8 +189,12 @@ func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, e
 		}
 	}
 	l.active = plugin
+	schemaVersion := l.schemaVersion
+	if schemaVersion == 0 {
+		schemaVersion = pluginabi.SchemaVersion
+	}
 	return marshalRPCResult(rpcRegistration{
-		SchemaVersion: pluginabi.SchemaVersion,
+		SchemaVersion: schemaVersion,
 		Metadata:      plugin.Metadata,
 		Capabilities:  rpcCapabilitiesFromPlugin(plugin),
 	})
@@ -266,6 +286,15 @@ type schedulerFunc func(context.Context, pluginapi.SchedulerPickRequest) (plugin
 func (f schedulerFunc) Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
 	if f == nil {
 		return pluginapi.SchedulerPickResponse{}, fmt.Errorf("missing scheduler callback")
+	}
+	return f(ctx, req)
+}
+
+type modelRouterFunc func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error)
+
+func (f modelRouterFunc) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+	if f == nil {
+		return pluginapi.ModelRouteResponse{}, fmt.Errorf("missing model router callback")
 	}
 	return f(ctx, req)
 }

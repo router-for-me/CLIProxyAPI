@@ -81,4 +81,7 @@ func TestSchedulerPickMethodName(t *testing.T) {
 	if MethodSchedulerPick != "scheduler.pick" {
 		t.Fatalf("MethodSchedulerPick = %q", MethodSchedulerPick)
 	}
+	if MethodModelRoute != "model.route" {
+		t.Fatalf("MethodModelRoute = %q", MethodModelRoute)
+	}
 }

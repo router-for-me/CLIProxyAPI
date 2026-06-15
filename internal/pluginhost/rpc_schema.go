@@ -8,7 +8,8 @@ import (
 )
 
 type rpcLifecycleRequest struct {
-	ConfigYAML []byte `json:"config_yaml"`
+	ConfigYAML    []byte `json:"config_yaml"`
+	SchemaVersion uint32 `json:"schema_version"`
 }
 
 type rpcRegistration struct {
@@ -24,6 +25,7 @@ type rpcCapabilities struct {
 	FrontendAuthProvider          bool                         `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool                         `json:"frontend_auth_provider_exclusive"`
 	Scheduler                     bool                         `json:"scheduler"`
+	ModelRouter                   bool                         `json:"model_router"`
 	Executor                      bool                         `json:"executor"`
 	ExecutorModelScope            pluginapi.ExecutorModelScope `json:"executor_model_scope"`
 	ExecutorInputFormats          []string                     `json:"executor_input_formats,omitempty"`
@@ -87,6 +89,11 @@ type rpcRequestInterceptRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type rpcModelRouteRequest struct {
+	pluginapi.ModelRouteRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcResponseInterceptRequest struct {
 	pluginapi.ResponseInterceptRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`
@@ -123,6 +130,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		FrontendAuthProvider:          caps.FrontendAuthProvider != nil,
 		FrontendAuthProviderExclusive: caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
 		Scheduler:                     caps.Scheduler != nil,
+		ModelRouter:                   caps.ModelRouter != nil,
 		Executor:                      caps.Executor != nil,
 		ExecutorModelScope:            normalizedExecutorModelScope(caps),
 		ExecutorInputFormats:          append([]string(nil), caps.ExecutorInputFormats...),
