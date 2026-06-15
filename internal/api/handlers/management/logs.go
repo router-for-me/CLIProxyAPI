@@ -527,6 +527,7 @@ type logCursor struct {
 	Offset          int64  `json:"offset"`
 	Size            int64  `json:"size"`
 	ModTime         int64  `json:"modTime"`
+	ModTimeUnixNano int64  `json:"modTimeUnixNano,omitempty"`
 	LatestTimestamp int64  `json:"latestTimestamp"`
 	Fingerprint     string `json:"fingerprint"`
 }
@@ -808,6 +809,7 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 	for i := range files {
 		nameToIndex[filepath.Base(files[i])] = i
 	}
+	deferEmptyMainMatch := false
 	if index, ok := nameToIndex[cursor.File]; ok {
 		matches, truncated, errMatch := logFileMatchesCursor(files[index], cursor)
 		if errMatch != nil {
@@ -817,15 +819,22 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 			return 0, false, errMatch
 		}
 		if matches && !truncated {
-			return index, true, nil
+			if shouldDeferEmptyMainCursorToRotated(files, cursor) {
+				deferEmptyMainMatch = true
+			} else {
+				return index, true, nil
+			}
 		}
 	}
 
-	if cursor.File != defaultLogFileName || cursor.Offset == 0 {
+	if cursor.File != defaultLogFileName || (cursor.Offset == 0 && cursor.Size == 0 && !deferEmptyMainMatch) {
 		return 0, false, nil
 	}
-	for i := range files {
+	for i := len(files) - 1; i >= 0; i-- {
 		if filepath.Base(files[i]) == defaultLogFileName {
+			continue
+		}
+		if cursor.Offset == 0 && cursor.Size == 0 && !logFileChangedAfterCursor(files[i], cursor) {
 			continue
 		}
 		matches, truncated, errMatch := logFileMatchesCursor(files[i], cursor)
@@ -845,6 +854,29 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 	return 0, false, nil
 }
 
+func shouldDeferEmptyMainCursorToRotated(files []string, cursor logCursor) bool {
+	if cursor.File != defaultLogFileName || cursor.Offset != 0 || cursor.Size != 0 {
+		return false
+	}
+	for i := range files {
+		if filepath.Base(files[i]) == defaultLogFileName {
+			continue
+		}
+		if logFileChangedAfterCursor(files[i], cursor) {
+			return true
+		}
+	}
+	return false
+}
+
+func logFileChangedAfterCursor(path string, cursor logCursor) bool {
+	info, errStat := os.Stat(path)
+	if errStat != nil || info.IsDir() || info.Size() == 0 {
+		return false
+	}
+	return info.ModTime().UnixNano() > cursorModTimeUnixNano(cursor)
+}
+
 func logFileMatchesCursor(path string, cursor logCursor) (bool, bool, error) {
 	info, errStat := os.Stat(path)
 	if errStat != nil {
@@ -856,7 +888,11 @@ func logFileMatchesCursor(path string, cursor logCursor) (bool, bool, error) {
 	if info.Size() < cursor.Offset {
 		return false, true, nil
 	}
-	fingerprint, errFingerprint := logFileFingerprint(path, cursor.Offset)
+	boundary := cursorFingerprintBoundary(cursor)
+	if info.Size() < boundary {
+		return false, true, nil
+	}
+	fingerprint, errFingerprint := logFileFingerprint(path, boundary)
 	if errFingerprint != nil {
 		return false, false, errFingerprint
 	}
@@ -953,7 +989,11 @@ func newLogCursor(path string, offset, latest int64) (string, error) {
 	if offset < 0 || offset > info.Size() {
 		return "", fmt.Errorf("invalid cursor offset")
 	}
-	fingerprint, errFingerprint := logFileFingerprint(path, offset)
+	fingerprintCursor := logCursor{
+		Offset: offset,
+		Size:   info.Size(),
+	}
+	fingerprint, errFingerprint := logFileFingerprint(path, cursorFingerprintBoundary(fingerprintCursor))
 	if errFingerprint != nil {
 		return "", errFingerprint
 	}
@@ -963,9 +1003,24 @@ func newLogCursor(path string, offset, latest int64) (string, error) {
 		Offset:          offset,
 		Size:            info.Size(),
 		ModTime:         info.ModTime().Unix(),
+		ModTimeUnixNano: info.ModTime().UnixNano(),
 		LatestTimestamp: latest,
 		Fingerprint:     fingerprint,
 	})
+}
+
+func cursorFingerprintBoundary(cursor logCursor) int64 {
+	if cursor.Offset == 0 && cursor.Size > 0 {
+		return cursor.Size
+	}
+	return cursor.Offset
+}
+
+func cursorModTimeUnixNano(cursor logCursor) int64 {
+	if cursor.ModTimeUnixNano > 0 {
+		return cursor.ModTimeUnixNano
+	}
+	return cursor.ModTime * int64(time.Second)
 }
 
 func logFileFingerprint(path string, boundary int64) (string, error) {
