@@ -413,7 +413,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			if !gjson.GetBytes(out, "generationConfig").Exists() {
 				out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
 			}
-			out, _ = sjson.SetBytes(out, "generationConfig.response_mime_type", "application/json")
+			out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
 
 			// Set responseJsonSchema from the schema field, normalizing it for Gemini's
 			// supported JSON Schema subset (removes unsupported keywords like pattern,
@@ -568,7 +568,12 @@ func normalizeSchemaForGemini(schema interface{}) interface{} {
 
 			case "additionalProperties":
 				// Preserve additionalProperties - Gemini JSON Schema mode supports it
-				result[key] = val
+				// Normalize if it's a schema, pass through booleans as-is
+				if boolVal, ok := val.(bool); ok {
+					result[key] = boolVal
+				} else {
+					result[key] = normalizeSchemaForGemini(val)
+				}
 
 			case "type":
 				// Handle nullable types: convert ["string", "null"] to "string" + "nullable": true
