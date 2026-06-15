@@ -773,11 +773,32 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 	if cursor.File != defaultLogFileName || (cursor.Offset == 0 && cursor.Size == 0 && !deferEmptyMainMatch) {
 		return 0, false, nil
 	}
+	if cursor.Offset == 0 && cursor.Size == 0 {
+		for i := range files {
+			if filepath.Base(files[i]) == defaultLogFileName {
+				continue
+			}
+			if !logFileChangedAfterCursor(files[i], cursor) {
+				continue
+			}
+			matches, truncated, errMatch := logFileMatchesCursor(files[i], cursor)
+			if errMatch != nil {
+				if errors.Is(errMatch, os.ErrNotExist) {
+					continue
+				}
+				return 0, false, errMatch
+			}
+			if truncated {
+				continue
+			}
+			if matches {
+				return i, true, nil
+			}
+		}
+		return 0, false, nil
+	}
 	for i := len(files) - 1; i >= 0; i-- {
 		if filepath.Base(files[i]) == defaultLogFileName {
-			continue
-		}
-		if cursor.Offset == 0 && cursor.Size == 0 && !logFileChangedAfterCursor(files[i], cursor) {
 			continue
 		}
 		matches, truncated, errMatch := logFileMatchesCursor(files[i], cursor)

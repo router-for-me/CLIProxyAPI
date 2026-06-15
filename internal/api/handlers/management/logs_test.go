@@ -474,6 +474,71 @@ func TestGetLogsZeroOffsetCursorWithEmptyFileReadsAcrossRotation(t *testing.T) {
 	}
 }
 
+func TestGetLogsZeroOffsetCursorWithEmptyFileReadsAcrossTwoRotations(t *testing.T) {
+	dir := t.TempDir()
+	writeMainLog(t, dir, "")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+	if initial.NextCursor == "" {
+		t.Fatal("initial next-cursor is empty")
+	}
+	cursor, errCursor := decodeLogCursor(initial.NextCursor)
+	if errCursor != nil {
+		t.Fatalf("decode initial cursor: %v", errCursor)
+	}
+	if cursor.Offset != 0 || cursor.Size != 0 {
+		t.Fatalf("cursor offset/size = %d/%d, want empty zero offset", cursor.Offset, cursor.Size)
+	}
+
+	mainPath := filepath.Join(dir, defaultLogFileName)
+	firstRotatedPath := filepath.Join(dir, defaultLogFileName+".1")
+	secondRotatedPath := filepath.Join(dir, defaultLogFileName+".2")
+	firstModTime := time.Unix(0, cursorModTimeUnixNano(cursor)+int64(time.Second))
+	secondModTime := time.Unix(0, cursorModTimeUnixNano(cursor)+2*int64(time.Second))
+
+	appendMainLog(t, dir, "first\n")
+	if err := os.Chtimes(mainPath, firstModTime, firstModTime); err != nil {
+		t.Fatalf("update first main log mtime: %v", err)
+	}
+	if err := os.Rename(mainPath, firstRotatedPath); err != nil {
+		t.Fatalf("rotate first main log: %v", err)
+	}
+	writeMainLog(t, dir, "second\n")
+	if err := os.Chtimes(mainPath, secondModTime, secondModTime); err != nil {
+		t.Fatalf("update second main log mtime: %v", err)
+	}
+	if err := os.Rename(firstRotatedPath, secondRotatedPath); err != nil {
+		t.Fatalf("advance first rotated log: %v", err)
+	}
+	if err := os.Rename(mainPath, firstRotatedPath); err != nil {
+		t.Fatalf("rotate second main log: %v", err)
+	}
+	writeMainLog(t, dir, "third\n")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=1")
+	if !reflect.DeepEqual(resp.Lines, []string{"first"}) {
+		t.Fatalf("lines = %#v, want oldest rotated line", resp.Lines)
+	}
+	if resp.CursorReset {
+		t.Fatal("cursor-reset = true, want false")
+	}
+
+	next := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(resp.NextCursor)+"&limit=1")
+	if !reflect.DeepEqual(next.Lines, []string{"second"}) {
+		t.Fatalf("next lines = %#v, want newer rotated line", next.Lines)
+	}
+	if next.CursorReset {
+		t.Fatal("next cursor-reset = true, want false")
+	}
+
+	latest := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(next.NextCursor)+"&limit=1")
+	if !reflect.DeepEqual(latest.Lines, []string{"third"}) {
+		t.Fatalf("latest lines = %#v, want main line", latest.Lines)
+	}
+	if latest.CursorReset {
+		t.Fatal("latest cursor-reset = true, want false")
+	}
+}
+
 func TestGetLogsZeroOffsetCursorWithEmptyFileResetsWhenRotationModTimeAmbiguous(t *testing.T) {
 	dir := t.TempDir()
 	mainPath := filepath.Join(dir, defaultLogFileName)
