@@ -507,7 +507,7 @@ func openAIResponsesGeminiThoughtSignature(rawSignature string) string {
 // This function:
 // 1. Preserves additionalProperties (Gemini JSON Schema mode supports it)
 // 2. Merges allOf before iteration to avoid non-deterministic map iteration overwrites
-// 3. Converts oneOf to anyOf, nullable type arrays to type + nullable
+// 3. Converts oneOf to anyOf, preserves nullable type arrays as-is
 // 4. Removes unsupported keywords: pattern, minLength, maxLength, multipleOf, exclusiveMinimum,
 //    exclusiveMaximum, uniqueItems, contains, const, default
 // 5. Filters format to only date-time, date, time
@@ -576,7 +576,10 @@ func normalizeSchemaForGemini(schema interface{}) interface{} {
 				}
 
 			case "type":
-				// Handle nullable types: convert ["string", "null"] to "string" + "nullable": true
+				// Preserve type arrays with null (e.g., ["string", "null"]) for downstream handling
+				// - Gemini/Vertex support type arrays natively
+				// - CLI/Antigravity paths use CleanJSONSchemaForGemini which converts to description hints
+				// Only flatten non-null type arrays (e.g., ["string", "integer"]) to anyOf
 				if typeArray, ok := val.([]interface{}); ok {
 					var nonNullTypes []string
 					hasNull := false
@@ -589,12 +592,12 @@ func normalizeSchemaForGemini(schema interface{}) interface{} {
 							}
 						}
 					}
-					// If only one non-null type remains, use it as string
-					if len(nonNullTypes) == 1 {
+					// If contains null, preserve the array as-is
+					if hasNull {
+						result[key] = val
+					} else if len(nonNullTypes) == 1 {
+						// Single non-null type - use scalar
 						result["type"] = nonNullTypes[0]
-						if hasNull {
-							result["nullable"] = true
-						}
 					} else if len(nonNullTypes) > 1 {
 						// Multiple non-null types - use anyOf
 						var anyOfSchemas []map[string]interface{}
@@ -603,12 +606,6 @@ func normalizeSchemaForGemini(schema interface{}) interface{} {
 							anyOfSchemas = append(anyOfSchemas, schema)
 						}
 						result["anyOf"] = anyOfSchemas
-						if hasNull {
-							result["nullable"] = true
-						}
-					} else if hasNull {
-						// Only null type
-						result["type"] = "null"
 					}
 				} else {
 					// Keep single type as-is
