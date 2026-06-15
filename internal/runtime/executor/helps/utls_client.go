@@ -57,39 +57,39 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	}
 }
 
-func (t *utlsRoundTripper) getOrCreateConnection(hostname, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
 	t.mu.Lock()
 
-	if h2Conn, ok := t.connections[addr]; ok && h2Conn.CanTakeNewRequest() {
+	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
 		t.mu.Unlock()
 		return h2Conn, nil
 	}
 
-	if cond, ok := t.pending[addr]; ok {
+	if cond, ok := t.pending[host]; ok {
 		cond.Wait()
-		if h2Conn, ok := t.connections[addr]; ok && h2Conn.CanTakeNewRequest() {
+		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
 			t.mu.Unlock()
 			return h2Conn, nil
 		}
 	}
 
 	cond := sync.NewCond(&t.mu)
-	t.pending[addr] = cond
+	t.pending[host] = cond
 	t.mu.Unlock()
 
-	h2Conn, err := t.createConnection(hostname, addr)
+	h2Conn, err := t.createConnection(host, addr)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	delete(t.pending, addr)
+	delete(t.pending, host)
 	cond.Broadcast()
 
 	if err != nil {
 		return nil, err
 	}
 
-	t.connections[addr] = h2Conn
+	t.connections[host] = h2Conn
 	return h2Conn, nil
 }
 
@@ -119,7 +119,11 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	hostname := req.URL.Hostname()
-	addr := utlsConnectionKey(hostname, req.URL.Port())
+	port := req.URL.Port()
+	if port == "" {
+		port = "443"
+	}
+	addr := net.JoinHostPort(hostname, port)
 
 	h2Conn, err := t.getOrCreateConnection(hostname, addr)
 	if err != nil {
@@ -129,21 +133,14 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
 		t.mu.Lock()
-		if cached, ok := t.connections[addr]; ok && cached == h2Conn {
-			delete(t.connections, addr)
+		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
+			delete(t.connections, hostname)
 		}
 		t.mu.Unlock()
 		return nil, err
 	}
 
 	return resp, nil
-}
-
-func utlsConnectionKey(hostname, port string) string {
-	if port == "" {
-		port = "443"
-	}
-	return net.JoinHostPort(hostname, port)
 }
 
 // utlsProtectedHosts contains the hosts that should use utls Chrome TLS fingerprint

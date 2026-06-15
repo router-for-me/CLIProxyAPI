@@ -127,21 +127,6 @@ func TestNewUtlsHTTPClientDoesNotGrowCachePastLimit(t *testing.T) {
 	}
 }
 
-func TestUtlsConnectionKeyIncludesPort(t *testing.T) {
-	defaultPortKey := utlsConnectionKey("chatgpt.com", "")
-	customPortKey := utlsConnectionKey("chatgpt.com", "8443")
-
-	if defaultPortKey != "chatgpt.com:443" {
-		t.Fatalf("default port key = %q, want chatgpt.com:443", defaultPortKey)
-	}
-	if customPortKey != "chatgpt.com:8443" {
-		t.Fatalf("custom port key = %q, want chatgpt.com:8443", customPortKey)
-	}
-	if defaultPortKey == customPortKey {
-		t.Fatal("expected different ports for the same host to use different connection keys")
-	}
-}
-
 func utlsClientRoundTrippers(t *testing.T, client *http.Client) (http.RoundTripper, http.RoundTripper) {
 	t.Helper()
 
