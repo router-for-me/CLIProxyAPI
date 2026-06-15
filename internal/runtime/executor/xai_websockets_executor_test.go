@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -242,6 +243,170 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDForDownstream(t *te
 	thirdUpstreamPrevious := <-capturedPreviousIDs
 	if thirdUpstreamPrevious != "resp-real" {
 		t.Fatalf("third upstream previous_response_id = %q, want resp-real", thirdUpstreamPrevious)
+	}
+}
+
+func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedContext(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedWebsocketPayload := make(chan []byte, 1)
+	capturedCompactPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Errorf("upgrade websocket: %v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+
+			for i := 0; i < 2; i++ {
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, payload, errRead := conn.ReadMessage()
+				if errRead != nil {
+					t.Errorf("read upstream websocket message: %v", errRead)
+					return
+				}
+				capturedWebsocketPayload <- bytes.Clone(payload)
+				completed := []byte(`{"type":"response.completed","response":{"id":"resp-real","output":[{"type":"message","id":"out-1","role":"assistant","content":"first answer"}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+				if i == 1 {
+					completed = []byte(`{"type":"response.completed","response":{"id":"resp-after-compact","output":[{"type":"message","id":"out-2","role":"assistant","content":"second answer"}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+				}
+				if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+					t.Errorf("write completed websocket message: %v", errWrite)
+					return
+				}
+			}
+		case "/responses/compact":
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+				return
+			}
+			capturedCompactPayload <- bytes.Clone(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_compact","model":"grok-4.3","output":[{"type":"compaction","encrypted_content":"opaque"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+		default:
+			t.Errorf("path = %q, want /responses", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-compaction",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-compaction-session",
+		},
+	}
+
+	result, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","stream":true,"input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream first turn error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-capturedWebsocketPayload:
+		if got := gjson.GetBytes(payload, "type").String(); got != "response.create" {
+			t.Fatalf("type = %q, want response.create; payload=%s", got, payload)
+		}
+		input := gjson.GetBytes(payload, "input")
+		if !input.IsArray() || len(input.Array()) != 1 {
+			t.Fatalf("input = %s, want one first-turn item", input.Raw)
+		}
+		if gjson.GetBytes(payload, "stream").Exists() {
+			t.Fatalf("stream must be omitted for xAI websocket payload: %s", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+
+	compactResult, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","stream":true,"previous_response_id":"resp-real-xai-1","input":[{"type":"compaction_trigger"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream compaction trigger error: %v", err)
+	}
+	for chunk := range compactResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("compact stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-capturedCompactPayload:
+		if xaiInputHasItemType(payload, "compaction_trigger") {
+			t.Fatalf("compaction_trigger reached xai compact body: %s", payload)
+		}
+		input := gjson.GetBytes(payload, "input")
+		if !input.IsArray() || len(input.Array()) != 2 {
+			t.Fatalf("compact input = %s, want first request input plus response output", input.Raw)
+		}
+		if got := input.Array()[0].Get("id").String(); got != "msg-1" {
+			t.Fatalf("compact input[0].id = %q, want msg-1; payload=%s", got, payload)
+		}
+		if got := input.Array()[1].Get("id").String(); got != "out-1" {
+			t.Fatalf("compact input[1].id = %q, want out-1; payload=%s", got, payload)
+		}
+		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "" {
+			t.Fatalf("compact previous_response_id = %q, want empty; payload=%s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for compact HTTP payload")
+	}
+
+	nextResult, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","stream":true,"previous_response_id":"resp_compact","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream post-compaction turn error: %v", err)
+	}
+	for chunk := range nextResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("post-compaction stream chunk error = %v", chunk.Err)
+		}
+	}
+	select {
+	case payload := <-capturedWebsocketPayload:
+		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "" {
+			t.Fatalf("post-compaction previous_response_id = %q, want empty; payload=%s", got, payload)
+		}
+		input := gjson.GetBytes(payload, "input")
+		if !input.IsArray() || len(input.Array()) != 2 {
+			t.Fatalf("post-compaction input = %s, want compaction item plus new message", input.Raw)
+		}
+		if got := input.Array()[0].Get("type").String(); got != "compaction" {
+			t.Fatalf("post-compaction input[0].type = %q, want compaction; payload=%s", got, payload)
+		}
+		if got := input.Array()[1].Get("id").String(); got != "msg-2" {
+			t.Fatalf("post-compaction input[1].id = %q, want msg-2; payload=%s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for post-compaction websocket payload")
 	}
 }
 
