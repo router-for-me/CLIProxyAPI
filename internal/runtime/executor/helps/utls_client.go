@@ -40,6 +40,10 @@ var utlsRoundTripperCache = struct {
 	items: make(map[string]cachedUtlsRoundTripper),
 }
 
+var newUtlsTLSConfig = func(host string) *tls.Config {
+	return &tls.Config{ServerName: host}
+}
+
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
@@ -99,8 +103,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
-	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	tlsConn := tls.UClient(conn, newUtlsTLSConfig(host), tls.HelloChrome_Auto)
 
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()

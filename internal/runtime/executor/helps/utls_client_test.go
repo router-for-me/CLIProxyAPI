@@ -4,17 +4,31 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
+	tls "github.com/refraction-networking/utls"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"golang.org/x/net/http2"
 )
 
 type utlsClientRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f utlsClientRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type staticAddressDialer struct {
+	address string
+}
+
+func (d staticAddressDialer) Dial(network, _ string) (net.Conn, error) {
+	return net.Dial(network, d.address)
 }
 
 func TestNewUtlsHTTPClientReusesCachedRoundTrippers(t *testing.T) {
@@ -90,6 +104,94 @@ func TestNewUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) 
 	}
 }
 
+func TestNewUtlsHTTPClientReusesSingleUtlsConnectionForConcurrentProtectedRequests(t *testing.T) {
+	resetUtlsRoundTripperCache(t)
+
+	var acceptedConnections atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Host != "api.anthropic.com" {
+			t.Errorf("host = %q, want api.anthropic.com", req.Host)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "{}")
+	}))
+	server.EnableHTTP2 = true
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			acceptedConnections.Add(1)
+		}
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	serverTLSConfig := server.Client().Transport.(*http.Transport).TLSClientConfig
+	serverHost, _, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split server address: %v", err)
+	}
+	restoreTLSConfig := overrideUtlsTLSConfig(t, func(_ string) *tls.Config {
+		return &tls.Config{
+			ServerName: serverHost,
+			RootCAs:    serverTLSConfig.RootCAs,
+			NextProtos: []string{"h2"},
+		}
+	})
+	defer restoreTLSConfig()
+
+	utlsRT := &utlsRoundTripper{
+		connections: make(map[string]*http2.ClientConn),
+		pending:     make(map[string]*sync.Cond),
+		dialer:      staticAddressDialer{address: server.Listener.Addr().String()},
+	}
+	utlsRoundTripperCache.mu.Lock()
+	utlsRoundTripperCache.items[""] = cachedUtlsRoundTripper{
+		utls:     utlsRT,
+		fallback: http.DefaultTransport,
+	}
+	utlsRoundTripperCache.mu.Unlock()
+
+	const requestCount = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, requestCount)
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := NewUtlsHTTPClient(context.Background(), nil, nil, 0)
+			resp, err := client.Get("https://api.anthropic.com/v1/messages")
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer func() {
+				if errClose := resp.Body.Close(); errClose != nil {
+					errs <- errClose
+				}
+			}()
+			if resp.StatusCode != http.StatusOK {
+				errs <- fmt.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := acceptedConnections.Load(); got != 1 {
+		t.Fatalf("accepted connections = %d, want 1", got)
+	}
+	utlsRT.mu.Lock()
+	cachedConnections := len(utlsRT.connections)
+	utlsRT.mu.Unlock()
+	if cachedConnections != 1 {
+		t.Fatalf("cached uTLS connections = %d, want 1", cachedConnections)
+	}
+}
+
 func TestNewUtlsHTTPClientDoesNotGrowCachePastLimit(t *testing.T) {
 	resetUtlsRoundTripperCache(t)
 
@@ -124,6 +226,16 @@ func TestNewUtlsHTTPClientDoesNotGrowCachePastLimit(t *testing.T) {
 	}
 	if overflowCached {
 		t.Fatal("expected overflow proxy key not to be cached")
+	}
+}
+
+func overrideUtlsTLSConfig(t *testing.T, next func(string) *tls.Config) func() {
+	t.Helper()
+
+	previous := newUtlsTLSConfig
+	newUtlsTLSConfig = next
+	return func() {
+		newUtlsTLSConfig = previous
 	}
 }
 
