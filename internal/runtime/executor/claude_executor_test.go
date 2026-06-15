@@ -636,6 +636,36 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	}
 }
 
+func TestSanitizeClaudeWebSearchDomains(t *testing.T) {
+	// Mirrors the litellm payload from issue #2681: a non-empty allowed_domains
+	// alongside an empty blocked_domains, which Anthropic rejects as ambiguous.
+	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search","allowed_domains":["anthropic.com"],"blocked_domains":[],"max_uses":8}]}`)
+	out := sanitizeClaudeWebSearchDomains(input)
+
+	if gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+		t.Fatalf("empty blocked_domains should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.allowed_domains").Array(); len(got) != 1 || got[0].String() != "anthropic.com" {
+		t.Fatalf("non-empty allowed_domains should be preserved: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.max_uses").Int(); got != 8 {
+		t.Fatalf("max_uses should be preserved: got %d", got)
+	}
+}
+
+func TestSanitizeClaudeWebSearchDomains_LeavesNonBuiltinAndNonEmpty(t *testing.T) {
+	// Empty arrays on non-web_search tools must be left untouched.
+	input := []byte(`{"tools":[{"type":"custom","name":"x","blocked_domains":[]},{"type":"web_search_20250305","name":"web_search","blocked_domains":["evil.com"]}]}`)
+	out := sanitizeClaudeWebSearchDomains(input)
+
+	if !gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+		t.Fatalf("non-web_search tool fields should be untouched: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.blocked_domains").Array(); len(got) != 1 || got[0].String() != "evil.com" {
+		t.Fatalf("non-empty blocked_domains should be preserved: %s", string(out))
+	}
+}
+
 func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
