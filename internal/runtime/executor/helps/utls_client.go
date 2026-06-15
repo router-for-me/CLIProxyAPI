@@ -26,6 +26,18 @@ type utlsRoundTripper struct {
 	dialer      proxy.Dialer
 }
 
+type cachedUtlsRoundTripper struct {
+	utls     http.RoundTripper
+	fallback http.RoundTripper
+}
+
+var utlsRoundTripperCache = struct {
+	mu    sync.RWMutex
+	items map[string]cachedUtlsRoundTripper
+}{
+	items: make(map[string]cachedUtlsRoundTripper),
+}
+
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
@@ -152,6 +164,33 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return f.fallback.RoundTrip(req)
 }
 
+func cachedUtlsRoundTrippers(proxyURL string) cachedUtlsRoundTripper {
+	utlsRoundTripperCache.mu.RLock()
+	cached, ok := utlsRoundTripperCache.items[proxyURL]
+	utlsRoundTripperCache.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	cached = cachedUtlsRoundTripper{
+		utls:     newUtlsRoundTripper(proxyURL),
+		fallback: http.DefaultTransport,
+	}
+	if proxyURL != "" {
+		if transport := buildProxyTransport(proxyURL); transport != nil {
+			cached.fallback = transport
+		}
+	}
+
+	utlsRoundTripperCache.mu.Lock()
+	defer utlsRoundTripperCache.mu.Unlock()
+	if existing, ok := utlsRoundTripperCache.items[proxyURL]; ok {
+		return existing
+	}
+	utlsRoundTripperCache.items[proxyURL] = cached
+	return cached
+}
+
 // NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
 // Use this for provider requests that need a Chrome-like TLS fingerprint.
 // Falls back to standard transport for non-HTTPS requests.
@@ -169,21 +208,20 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
-	var standardTransport http.RoundTripper = http.DefaultTransport
-	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
-			standardTransport = transport
+	var roundTrippers cachedUtlsRoundTripper
+	if proxyURL == "" && ctxRoundTripper != nil {
+		roundTrippers = cachedUtlsRoundTripper{
+			utls:     ctxRoundTripper,
+			fallback: ctxRoundTripper,
 		}
-	} else if ctxRoundTripper != nil {
-		utlsRT = ctxRoundTripper
-		standardTransport = ctxRoundTripper
+	} else {
+		roundTrippers = cachedUtlsRoundTrippers(proxyURL)
 	}
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{
-			utls:     utlsRT,
-			fallback: standardTransport,
+			utls:     roundTrippers.utls,
+			fallback: roundTrippers.fallback,
 		},
 	}
 	if timeout > 0 {
