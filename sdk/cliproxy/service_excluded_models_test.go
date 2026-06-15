@@ -183,6 +183,26 @@ func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinkingSupportFromAl
 	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high", "xhigh"})
 }
 
+func TestBuildOpenAICompatibilityConfigModelsUsesSharedThinkingForDuplicateAlias(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "gpt-5.5", Alias: "shared-model"},
+			{Name: "not-a-static-model", Alias: "shared-model"},
+		},
+	})
+
+	if len(models) != 2 {
+		t.Fatalf("models length = %d, want 2", len(models))
+	}
+	for _, model := range models {
+		if model.ID != "shared-model" {
+			t.Fatalf("model ID = %q, want shared-model", model.ID)
+		}
+		requireThinkingLevels(t, model.Thinking, []string{"low", "medium", "high"})
+	}
+}
+
 func TestBuildOpenAICompatibilityConfigModelsUsesDefaultThinkingForStaticBudgetOnlyModel(t *testing.T) {
 	staticModel := internalregistry.LookupStaticModelInfo("gemini-2.5-pro")
 	if staticModel == nil || staticModel.Thinking == nil || len(staticModel.Thinking.Levels) > 0 || staticModel.Thinking.Max == 0 {

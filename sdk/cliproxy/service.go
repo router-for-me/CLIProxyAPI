@@ -2237,14 +2237,18 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	if compat == nil || len(compat.Models) == 0 {
 		return nil
 	}
+	modelCounts := make(map[string]int, len(compat.Models))
+	for i := range compat.Models {
+		if modelID := openAICompatibilityModelID(compat.Models[i]); modelID != "" {
+			modelCounts[modelID]++
+		}
+	}
+	pooledThinkingLevels := openAICompatibilityPooledThinkingLevels(compat.Models, modelCounts)
 	now := time.Now().Unix()
 	models := make([]*ModelInfo, 0, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
-		modelID := strings.TrimSpace(model.Alias)
-		if modelID == "" {
-			modelID = strings.TrimSpace(model.Name)
-		}
+		modelID := openAICompatibilityModelID(model)
 		if modelID == "" {
 			continue
 		}
@@ -2253,6 +2257,9 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			modelType = registry.OpenAIImageModelType
 		}
 		thinking := openAICompatibilityModelThinking(model, modelID)
+		if levels, ok := pooledThinkingLevels[modelID]; ok && !model.Image {
+			thinking = &registry.ThinkingSupport{Levels: append([]string(nil), levels...)}
+		}
 		models = append(models, &ModelInfo{
 			ID:          modelID,
 			Object:      "model",
@@ -2265,6 +2272,37 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		})
 	}
 	return models
+}
+
+func openAICompatibilityModelID(model config.OpenAICompatibilityModel) string {
+	modelID := strings.TrimSpace(model.Alias)
+	if modelID == "" {
+		modelID = strings.TrimSpace(model.Name)
+	}
+	return modelID
+}
+
+func openAICompatibilityPooledThinkingLevels(models []config.OpenAICompatibilityModel, modelCounts map[string]int) map[string][]string {
+	pooled := make(map[string][]string)
+	for i := range models {
+		model := models[i]
+		modelID := openAICompatibilityModelID(model)
+		if modelID == "" || modelCounts[modelID] <= 1 || model.Image {
+			continue
+		}
+		levels := openAICompatibilityModelThinkingLevels(model, modelID)
+		if existing, ok := pooled[modelID]; ok {
+			pooled[modelID] = intersectThinkingLevels(existing, levels)
+		} else {
+			pooled[modelID] = append([]string(nil), levels...)
+		}
+	}
+	for modelID, levels := range pooled {
+		if len(levels) == 0 {
+			pooled[modelID] = defaultOpenAICompatibilityThinkingLevels()
+		}
+	}
+	return pooled
 }
 
 func openAICompatibilityModelThinking(model config.OpenAICompatibilityModel, modelID string) *registry.ThinkingSupport {
@@ -2283,7 +2321,36 @@ func openAICompatibilityModelThinking(model config.OpenAICompatibilityModel, mod
 			return cloneThinkingLevels(upstream.Thinking)
 		}
 	}
-	return &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+	return &registry.ThinkingSupport{Levels: defaultOpenAICompatibilityThinkingLevels()}
+}
+
+func openAICompatibilityModelThinkingLevels(model config.OpenAICompatibilityModel, modelID string) []string {
+	thinking := openAICompatibilityModelThinking(model, modelID)
+	if thinking == nil || len(thinking.Levels) == 0 {
+		return defaultOpenAICompatibilityThinkingLevels()
+	}
+	return append([]string(nil), thinking.Levels...)
+}
+
+func intersectThinkingLevels(left, right []string) []string {
+	out := make([]string, 0, len(left))
+	for _, candidate := range left {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		for _, supported := range right {
+			if strings.EqualFold(candidate, strings.TrimSpace(supported)) {
+				out = append(out, candidate)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func defaultOpenAICompatibilityThinkingLevels() []string {
+	return []string{"low", "medium", "high"}
 }
 
 func cloneThinkingLevels(thinking *registry.ThinkingSupport) *registry.ThinkingSupport {
