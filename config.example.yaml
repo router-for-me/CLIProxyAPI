@@ -129,6 +129,10 @@ disable-image-generation: false
 # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
 # gpt-image-2-base-model: "gpt-5.4-mini"
 
+# How long video IDs returned by /openai/v1/videos and xAI video creation stay bound
+# to the credential that created them. Default: 3h.
+video-result-auth-cache-ttl: "3h"
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
