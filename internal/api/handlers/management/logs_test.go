@@ -149,8 +149,8 @@ func TestGetLogsTailLimitReturnsRecentLinesWithCursor(t *testing.T) {
 	if !reflect.DeepEqual(resp.Lines, wantLines) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
-	if resp.LineCount != 4 {
-		t.Fatalf("line-count = %d, want full scan count 4", resp.LineCount)
+	if resp.LineCount != len(wantLines) {
+		t.Fatalf("line-count = %d, want returned line count %d", resp.LineCount, len(wantLines))
 	}
 	if resp.NextCursor == "" {
 		t.Fatal("next-cursor is empty")
@@ -158,6 +158,24 @@ func TestGetLogsTailLimitReturnsRecentLinesWithCursor(t *testing.T) {
 	wantLatest := time.Date(2026, 6, 15, 10, 0, 3, 0, time.Local).Unix()
 	if resp.LatestTimestamp != wantLatest {
 		t.Fatalf("latest-timestamp = %d, want %d", resp.LatestTimestamp, wantLatest)
+	}
+}
+
+func TestGetLogsTailLimitDoesNotScanOlderFilesForLineCount(t *testing.T) {
+	dir := t.TempDir()
+	rotatedPath := filepath.Join(dir, defaultLogFileName+".1")
+	if err := os.WriteFile(rotatedPath, []byte(strings.Repeat("x", logScannerMaxBuffer+1)+"\n"), 0o644); err != nil {
+		t.Fatalf("write rotated log: %v", err)
+	}
+	writeMainLog(t, dir, "[2026-06-15 10:00:00] current\n")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+	wantLines := []string{"[2026-06-15 10:00:00] current"}
+	if !reflect.DeepEqual(resp.Lines, wantLines) {
+		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
+	}
+	if resp.LineCount != len(wantLines) {
+		t.Fatalf("line-count = %d, want returned line count %d", resp.LineCount, len(wantLines))
 	}
 }
 
