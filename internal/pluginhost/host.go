@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -40,6 +41,7 @@ type Host struct {
 	loaded                 map[string]*loadedPlugin
 	fused                  map[string]string
 	runtimeConfig          *config.Config
+	authManager            *coreauth.Manager
 	modelExecutor          modelExecutor
 	modelClientIDs         map[string]struct{}
 	executorModelClientIDs map[string]struct{}

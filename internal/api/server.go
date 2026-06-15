@@ -318,6 +318,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.handlers.SetPluginHost(optionState.pluginHost)
 	if optionState.pluginHost != nil {
 		optionState.pluginHost.SetModelExecutor(s.handlers)
+		optionState.pluginHost.SetAuthManager(authManager)
 	}
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -434,7 +435,7 @@ func (s *Server) setupRoutes() {
 		v1.POST("/embeddings", openaiHandlers.Embeddings)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
 		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
-		v1.POST("/videos", openaiHandlers.VideosCreate)
+		v1.POST("/videos", openaiHandlers.XAIVideosGenerations)
 		v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
 		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
 		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
@@ -444,6 +445,14 @@ func (s *Server) setupRoutes() {
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+	}
+
+	openaiV1 := s.engine.Group("/openai/v1")
+	openaiV1.Use(AuthMiddleware(s.accessManager))
+	{
+		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
+		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
+		openaiV1.GET("/videos/:video_id", openaiHandlers.VideosRetrieve)
 	}
 
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
@@ -1158,12 +1167,22 @@ func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 		return nil, false
 	}
 
-	raw, errGet := client.GetModels(c.Request.Context())
+	raw, errGet := client.GetModels(c.Request.Context(), c.Request.Header, c.Request.URL.Query())
 	if errGet != nil {
 		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: errGet.Error(),
 				Type:    "server_error",
+			},
+		})
+		return nil, false
+	}
+
+	if statusCode, ok := homeModelsAuthStatus(raw); ok {
+		c.JSON(statusCode, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: homeModelsErrorMessage(raw),
+				Type:    "authentication_error",
 			},
 		})
 		return nil, false
@@ -1216,6 +1235,70 @@ func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
 	normalizedAction := strings.TrimPrefix(action, "models/")
 	normalizedID := strings.TrimPrefix(id, "models/")
 	return action == id || action == "models/"+id || normalizedAction == normalizedID
+}
+
+// homeModelsAuthStatus inspects a home models response for an authentication/error envelope.
+// It returns the HTTP status code to surface (401 for credential issues, 502 otherwise)
+// and true when the payload is an error response rather than model data.
+func homeModelsAuthStatus(raw []byte) (int, bool) {
+	errType := homeModelsErrorType(raw)
+	if errType == "" {
+		return 0, false
+	}
+	if errType == "no_credentials" || errType == "invalid_credential" {
+		return http.StatusUnauthorized, true
+	}
+	return http.StatusBadGateway, true
+}
+
+func homeModelsErrorType(raw []byte) string {
+	top, ok := unmarshalHomeModelsTopLevel(raw)
+	if !ok {
+		return ""
+	}
+	rawErr, exists := top["error"]
+	if !exists {
+		return ""
+	}
+	var errObj struct {
+		Type string `json:"type"`
+	}
+	if errUnmarshal := json.Unmarshal(rawErr, &errObj); errUnmarshal != nil {
+		return ""
+	}
+	return strings.TrimSpace(errObj.Type)
+}
+
+func homeModelsErrorMessage(raw []byte) string {
+	top, ok := unmarshalHomeModelsTopLevel(raw)
+	if !ok {
+		return "home models request failed"
+	}
+	rawErr, exists := top["error"]
+	if !exists {
+		return "home models request failed"
+	}
+	var errObj struct {
+		Message string `json:"message"`
+	}
+	if errUnmarshal := json.Unmarshal(rawErr, &errObj); errUnmarshal != nil {
+		return "home models request failed"
+	}
+	if msg := strings.TrimSpace(errObj.Message); msg != "" {
+		return msg
+	}
+	return "home models request failed"
+}
+
+func unmarshalHomeModelsTopLevel(raw []byte) (map[string]json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var top map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &top); errUnmarshal != nil {
+		return nil, false
+	}
+	return top, true
 }
 
 func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
@@ -1577,6 +1660,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.handlers.SetPluginHost(s.pluginHost)
 	if s.pluginHost != nil {
 		s.pluginHost.SetModelExecutor(s.handlers)
+		s.pluginHost.SetAuthManager(s.handlers.AuthManager)
 	}
 
 	if s.mgmt != nil {

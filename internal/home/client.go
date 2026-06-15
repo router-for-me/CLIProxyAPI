@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -25,7 +26,6 @@ import (
 const (
 	redisKeyConfig     = "config"
 	redisChannelConfig = "config"
-	redisKeyModels     = "models"
 	redisKeyUsage      = "usage"
 	redisKeyRequestLog = "request-log"
 	redisKeyAppLog     = "app-log"
@@ -520,12 +520,21 @@ func (c *Client) GetConfig(ctx context.Context) ([]byte, error) {
 	return raw, nil
 }
 
-func (c *Client) GetModels(ctx context.Context) ([]byte, error) {
+func (c *Client) GetModels(ctx context.Context, headers http.Header, query url.Values) ([]byte, error) {
 	cmd, errClient := c.commandClient()
 	if errClient != nil {
 		return nil, errClient
 	}
-	raw, err := cmd.Get(ctx, redisKeyModels).Bytes()
+	req := modelsRequest{
+		Type:    "models",
+		Headers: headersToLowerMap(headers),
+		Query:   queryToLowerMap(query),
+	}
+	keyBytes, err := json.Marshal(&req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := cmd.Get(ctx, string(keyBytes)).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return nil, ErrModelsNotFound
 	}
@@ -725,6 +734,32 @@ func headersToLowerMap(headers http.Header) map[string]string {
 	}
 	out := make(map[string]string, len(headers))
 	for key, values := range headers {
+		k := strings.ToLower(strings.TrimSpace(key))
+		if k == "" {
+			continue
+		}
+		if len(values) == 0 {
+			out[k] = ""
+			continue
+		}
+		trimmed := make([]string, 0, len(values))
+		for _, v := range values {
+			trimmed = append(trimmed, strings.TrimSpace(v))
+		}
+		out[k] = strings.Join(trimmed, ", ")
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func queryToLowerMap(query url.Values) map[string]string {
+	if len(query) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(query))
+	for key, values := range query {
 		k := strings.ToLower(strings.TrimSpace(key))
 		if k == "" {
 			continue

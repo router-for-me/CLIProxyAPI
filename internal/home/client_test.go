@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -398,4 +399,76 @@ func readRedisCommand(reader *bufio.Reader) ([]string, error) {
 		args = append(args, string(payload[:size]))
 	}
 	return args, nil
+}
+
+func TestModelsRequestSerializationCarriesCredentials(t *testing.T) {
+	req := modelsRequest{
+		Type:    "models",
+		Headers: headersToLowerMap(http.Header{"Authorization": {"Bearer test-key"}}),
+		Query:   queryToLowerMap(url.Values{"key": {"gemini-key"}}),
+	}
+
+	raw, err := json.Marshal(&req)
+	if err != nil {
+		t.Fatalf("marshal models request: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal models request: %v", err)
+	}
+	if payload["type"] != "models" {
+		t.Fatalf("type = %v, want models", payload["type"])
+	}
+	headers, ok := payload["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("headers missing or wrong type: %v", payload["headers"])
+	}
+	if headers["authorization"] != "Bearer test-key" {
+		t.Fatalf("headers.authorization = %v, want Bearer test-key", headers["authorization"])
+	}
+	query, ok := payload["query"].(map[string]any)
+	if !ok {
+		t.Fatalf("query missing or wrong type: %v", payload["query"])
+	}
+	if query["key"] != "gemini-key" {
+		t.Fatalf("query.key = %v, want gemini-key", query["key"])
+	}
+}
+
+func TestModelsRequestOmitsEmptyCredentials(t *testing.T) {
+	req := modelsRequest{Type: "models"}
+
+	raw, err := json.Marshal(&req)
+	if err != nil {
+		t.Fatalf("marshal models request: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal models request: %v", err)
+	}
+	if _, exists := payload["headers"]; exists {
+		t.Fatalf("headers should be omitted when empty, got %v", payload["headers"])
+	}
+	if _, exists := payload["query"]; exists {
+		t.Fatalf("query should be omitted when empty, got %v", payload["query"])
+	}
+}
+
+func TestQueryToLowerMap(t *testing.T) {
+	got := queryToLowerMap(url.Values{
+		"Key":   {"v1", "v2"},
+		"Token": {"abc"},
+	})
+	if got["key"] != "v1, v2" {
+		t.Fatalf("key = %q, want %q", got["key"], "v1, v2")
+	}
+	if got["token"] != "abc" {
+		t.Fatalf("token = %q, want %q", got["token"], "abc")
+	}
+
+	if nilMap := queryToLowerMap(nil); nilMap != nil {
+		t.Fatalf("queryToLowerMap(nil) = %v, want nil", nilMap)
+	}
 }
