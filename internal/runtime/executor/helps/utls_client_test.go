@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -17,7 +18,7 @@ func (f utlsClientRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, e
 }
 
 func TestNewUtlsHTTPClientReusesCachedRoundTrippers(t *testing.T) {
-	t.Parallel()
+	resetUtlsRoundTripperCache(t)
 
 	first := NewUtlsHTTPClient(context.Background(), nil, nil, 0)
 	second := NewUtlsHTTPClient(context.Background(), nil, nil, 0)
@@ -33,7 +34,7 @@ func TestNewUtlsHTTPClientReusesCachedRoundTrippers(t *testing.T) {
 }
 
 func TestNewUtlsHTTPClientReusesCachedRoundTrippersForProxyKeys(t *testing.T) {
-	t.Parallel()
+	resetUtlsRoundTripperCache(t)
 
 	tests := []struct {
 		name     string
@@ -45,8 +46,6 @@ func TestNewUtlsHTTPClientReusesCachedRoundTrippersForProxyKeys(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
 			auth := &cliproxyauth.Auth{ProxyURL: tt.proxyURL}
 			first := NewUtlsHTTPClient(context.Background(), nil, auth, 0)
 			second := NewUtlsHTTPClient(context.Background(), nil, auth, 0)
@@ -64,8 +63,6 @@ func TestNewUtlsHTTPClientReusesCachedRoundTrippersForProxyKeys(t *testing.T) {
 }
 
 func TestNewUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) {
-	t.Parallel()
-
 	called := false
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", utlsClientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		called = true
@@ -93,6 +90,58 @@ func TestNewUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) 
 	}
 }
 
+func TestNewUtlsHTTPClientDoesNotGrowCachePastLimit(t *testing.T) {
+	resetUtlsRoundTripperCache(t)
+
+	for i := 0; i < maxCachedUtlsRoundTrippers; i++ {
+		auth := &cliproxyauth.Auth{ProxyURL: fmt.Sprintf("http://proxy-%d.example.com:8080", i)}
+		NewUtlsHTTPClient(context.Background(), nil, auth, 0)
+	}
+
+	utlsRoundTripperCache.mu.RLock()
+	cachedCount := len(utlsRoundTripperCache.items)
+	utlsRoundTripperCache.mu.RUnlock()
+	if cachedCount != maxCachedUtlsRoundTrippers {
+		t.Fatalf("cached round trippers = %d, want %d", cachedCount, maxCachedUtlsRoundTrippers)
+	}
+
+	overflowAuth := &cliproxyauth.Auth{ProxyURL: "http://overflow.example.com:8080"}
+	client := NewUtlsHTTPClient(context.Background(), nil, overflowAuth, 0)
+	overflowUtls, overflowFallback := utlsClientRoundTrippers(t, client)
+	if overflowUtls == nil {
+		t.Fatal("expected overflow uTLS RoundTripper to be returned")
+	}
+	if overflowFallback == nil {
+		t.Fatal("expected overflow fallback RoundTripper to be returned")
+	}
+
+	utlsRoundTripperCache.mu.RLock()
+	cachedCount = len(utlsRoundTripperCache.items)
+	_, overflowCached := utlsRoundTripperCache.items[overflowAuth.ProxyURL]
+	utlsRoundTripperCache.mu.RUnlock()
+	if cachedCount != maxCachedUtlsRoundTrippers {
+		t.Fatalf("cached round trippers after overflow = %d, want %d", cachedCount, maxCachedUtlsRoundTrippers)
+	}
+	if overflowCached {
+		t.Fatal("expected overflow proxy key not to be cached")
+	}
+}
+
+func TestUtlsConnectionKeyIncludesPort(t *testing.T) {
+	defaultPortKey := utlsConnectionKey("chatgpt.com", "")
+	customPortKey := utlsConnectionKey("chatgpt.com", "8443")
+
+	if defaultPortKey != "chatgpt.com:443" {
+		t.Fatalf("default port key = %q, want chatgpt.com:443", defaultPortKey)
+	}
+	if customPortKey != "chatgpt.com:8443" {
+		t.Fatalf("custom port key = %q, want chatgpt.com:8443", customPortKey)
+	}
+	if defaultPortKey == customPortKey {
+		t.Fatal("expected different ports for the same host to use different connection keys")
+	}
+}
+
 func utlsClientRoundTrippers(t *testing.T, client *http.Client) (http.RoundTripper, http.RoundTripper) {
 	t.Helper()
 
@@ -101,4 +150,19 @@ func utlsClientRoundTrippers(t *testing.T, client *http.Client) (http.RoundTripp
 		t.Fatalf("transport type = %T, want *fallbackRoundTripper", client.Transport)
 	}
 	return fallback.utls, fallback.fallback
+}
+
+func resetUtlsRoundTripperCache(t *testing.T) {
+	t.Helper()
+
+	utlsRoundTripperCache.mu.Lock()
+	previous := utlsRoundTripperCache.items
+	utlsRoundTripperCache.items = make(map[string]cachedUtlsRoundTripper)
+	utlsRoundTripperCache.mu.Unlock()
+
+	t.Cleanup(func() {
+		utlsRoundTripperCache.mu.Lock()
+		utlsRoundTripperCache.items = previous
+		utlsRoundTripperCache.mu.Unlock()
+	})
 }
