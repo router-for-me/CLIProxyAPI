@@ -816,10 +816,7 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 			}
 			return 0, false, errMatch
 		}
-		if truncated {
-			return 0, false, nil
-		}
-		if matches {
+		if matches && !truncated {
 			return index, true, nil
 		}
 	}

@@ -351,6 +351,37 @@ func TestGetLogsCursorReadsAcrossRotation(t *testing.T) {
 	}
 }
 
+func TestGetLogsCursorReadsRotatedFileWhenNewMainIsSmaller(t *testing.T) {
+	dir := t.TempDir()
+	line1 := "[2026-06-15 10:00:00] first line with enough bytes"
+	line2 := "[2026-06-15 10:00:01] second"
+	line3 := "new"
+	writeMainLog(t, dir, line1+"\n")
+	initial := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=1")
+
+	appendMainLog(t, dir, line2+"\n")
+	if err := os.Rename(filepath.Join(dir, defaultLogFileName), filepath.Join(dir, defaultLogFileName+".1")); err != nil {
+		t.Fatalf("rotate main log: %v", err)
+	}
+	writeMainLog(t, dir, line3+"\n")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(initial.NextCursor)+"&limit=1")
+	if !reflect.DeepEqual(resp.Lines, []string{line2}) {
+		t.Fatalf("lines = %#v, want rotated unread line", resp.Lines)
+	}
+	if resp.CursorReset {
+		t.Fatal("cursor-reset = true, want false")
+	}
+
+	next := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(resp.NextCursor)+"&limit=1")
+	if !reflect.DeepEqual(next.Lines, []string{line3}) {
+		t.Fatalf("next lines = %#v, want new main line", next.Lines)
+	}
+	if next.CursorReset {
+		t.Fatal("next cursor-reset = true, want false")
+	}
+}
+
 func TestGetLogsInvalidCursorResetsToTail(t *testing.T) {
 	dir := t.TempDir()
 	lines := []string{
