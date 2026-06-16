@@ -44,9 +44,15 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if client == nil {
 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
 	}
-	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{ConfigYAML: bytes.Clone(configYAML)})
+	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
+		ConfigYAML:    bytes.Clone(configYAML),
+		SchemaVersion: pluginabi.SchemaVersion,
+	})
 	if errCall != nil {
 		return pluginapi.Plugin{}, errCall
+	}
+	if resp.SchemaVersion > pluginabi.SchemaVersion {
+		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
 	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
 	plugin := pluginapi.Plugin{
@@ -72,6 +78,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.Scheduler {
 		plugin.Capabilities.Scheduler = adapter
+	}
+	if resp.Capabilities.ModelRouter {
+		plugin.Capabilities.ModelRouter = adapter
 	}
 	if resp.Capabilities.Executor {
 		plugin.Capabilities.Executor = rpcProviderExecutor{rpcPluginAdapter: adapter}
@@ -156,6 +165,9 @@ func sanitizePluginRequest(request any) any {
 			req.Candidates[index].Metadata = sanitizePluginMetadata(req.Candidates[index].Metadata)
 		}
 		return req
+	case pluginapi.ModelRouteRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case pluginapi.ExecutorRequest:
 		req.HTTPClient = nil
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
@@ -170,6 +182,9 @@ func sanitizePluginRequest(request any) any {
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcRequestInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcModelRouteRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcResponseInterceptRequest:
@@ -309,6 +324,15 @@ func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPick
 	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
 }
 
+func (a *rpcPluginAdapter) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.ModelRouteResponse](ctx, a.client, pluginabi.MethodModelRoute, rpcModelRouteRequest{
+		ModelRouteRequest: req,
+		HostCallbackID:    callbackID,
+	})
+}
+
 func callPluginIdentifier(client pluginClient, method string) string {
 	resp, errCall := callPlugin[rpcIdentifierResponse](context.Background(), client, method, rpcEmptyResponse{})
 	if errCall != nil {
@@ -375,35 +399,6 @@ func (a *rpcPluginAdapter) Execute(ctx context.Context, req pluginapi.ExecutorRe
 		ExecutorRequest: req,
 		HostCallbackID:  callbackID,
 	})
-}
-
-func (a *rpcPluginAdapter) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-	if a == nil || a.host == nil || a.host.streams == nil {
-		return pluginapi.ExecutorStreamResponse{}, fmt.Errorf("plugin stream bridge is unavailable")
-	}
-	streamID, chunks, cleanup := a.host.streams.open(ctx)
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
-	defer closeCallback()
-	rpcReq := rpcExecutorRequest{
-		ExecutorRequest: req,
-		StreamID:        streamID,
-		HostCallbackID:  callbackID,
-	}
-	resp, errCall := callPlugin[rpcExecutorStreamResponse](ctx, a.client, pluginabi.MethodExecutorExecuteStream, rpcReq)
-	if errCall != nil {
-		cleanup()
-		return pluginapi.ExecutorStreamResponse{}, errCall
-	}
-	if len(resp.Chunks) > 0 {
-		cleanup()
-		out := make(chan pluginapi.ExecutorStreamChunk, len(resp.Chunks))
-		for _, chunk := range resp.Chunks {
-			out <- chunk
-		}
-		close(out)
-		return pluginapi.ExecutorStreamResponse{Headers: resp.Headers, Chunks: out}, nil
-	}
-	return pluginapi.ExecutorStreamResponse{Headers: resp.Headers, Chunks: chunks}, nil
 }
 
 func (a *rpcPluginAdapter) CountTokens(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {

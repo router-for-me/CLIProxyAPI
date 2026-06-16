@@ -19,6 +19,7 @@ type modelExecutionOptions struct {
 	Query                   url.Values
 	InternalSource          bool
 	SkipInterceptorPluginID string
+	SkipRouterPluginID      string
 }
 
 // ModelExecutionRequest describes an internal model execution request.
@@ -32,6 +33,7 @@ type ModelExecutionRequest struct {
 	Query                   url.Values
 	Alt                     string
 	SkipInterceptorPluginID string
+	SkipRouterPluginID      string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -74,8 +76,8 @@ func (e *ModelExecutionStreamError) Error() string {
 
 // ExecuteModel executes an internal non-streaming model request.
 // Host model callbacks are non-recursive for their caller: when
-// SkipInterceptorPluginID is set, that plugin's interceptors are skipped for the
-// nested model execution while other plugins may still run.
+// skip plugin IDs are set, that plugin's interceptors and router are skipped
+// for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionRequest) (ModelExecutionResponse, *interfaces.ErrorMessage) {
 	if req.Stream {
 		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteModel requires Stream=false")
@@ -85,6 +87,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 		Query:                   req.Query,
 		InternalSource:          true,
 		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
+		SkipRouterPluginID:      req.SkipRouterPluginID,
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -98,8 +101,8 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 
 // ExecuteModelStream executes an internal streaming model request.
 // Host model callbacks are non-recursive for their caller: when
-// SkipInterceptorPluginID is set, that plugin's interceptors are skipped for the
-// nested model execution while other plugins may still run.
+// skip plugin IDs are set, that plugin's interceptors and router are skipped
+// for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecutionRequest) (ModelExecutionStream, *interfaces.ErrorMessage) {
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
@@ -109,6 +112,7 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		Query:                   req.Query,
 		InternalSource:          true,
 		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
+		SkipRouterPluginID:      req.SkipRouterPluginID,
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {
@@ -137,6 +141,17 @@ func modelExecutionHeaders(ctx context.Context, headers http.Header) http.Header
 		return cloneHeader(headers)
 	}
 	return headersFromContext(ctx)
+}
+
+// modelExecutionQuery prefers an explicitly provided query and otherwise falls
+// back to the inbound query embedded in the request context. This lets model
+// routers observe query parameters for plain HTTP requests even when callers
+// do not populate execOptions.Query (mirrors modelExecutionHeaders).
+func modelExecutionQuery(ctx context.Context, query url.Values) url.Values {
+	if len(query) > 0 {
+		return cloneURLValues(query)
+	}
+	return queryFromContext(ctx)
 }
 
 func cloneURLValues(src url.Values) url.Values {

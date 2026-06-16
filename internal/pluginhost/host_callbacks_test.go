@@ -323,6 +323,9 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 	if got.SkipInterceptorPluginID != "origin-plugin" {
 		t.Fatalf("SkipInterceptorPluginID = %q, want origin-plugin", got.SkipInterceptorPluginID)
 	}
+	if got.SkipRouterPluginID != "origin-plugin" {
+		t.Fatalf("SkipRouterPluginID = %q, want origin-plugin", got.SkipRouterPluginID)
+	}
 }
 
 func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {

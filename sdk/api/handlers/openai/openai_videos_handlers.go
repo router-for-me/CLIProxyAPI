@@ -559,6 +559,9 @@ func buildVideosRetrieveAPIResponseFromXAI(videoID string, payload []byte, fallb
 	} else if duration := gjson.GetBytes(payload, "video.duration"); duration.Exists() {
 		out, _ = sjson.SetBytes(out, "seconds", duration.String())
 	}
+	if videoURL := strings.TrimSpace(gjson.GetBytes(payload, "video.url").String()); videoURL != "" {
+		out, _ = sjson.SetBytes(out, "video_url", videoURL)
+	}
 	out = setOpenAIVideoErrorFromXAI(out, payload)
 	return out, nil
 }

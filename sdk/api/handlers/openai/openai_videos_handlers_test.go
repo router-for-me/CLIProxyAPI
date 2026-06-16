@@ -317,6 +317,9 @@ func TestBuildVideosRetrieveAPIResponseFromXAI(t *testing.T) {
 	if got := gjson.GetBytes(out, "seconds").String(); got != "4" {
 		t.Fatalf("seconds = %q, want 4", got)
 	}
+	if got := gjson.GetBytes(out, "video_url").String(); got != "https://vidgen.x.ai/xai-vidgen-bucket/xai-video-08609066-e7e9-43ba-bd8d-bd29cb6221d9.mp4" {
+		t.Fatalf("video_url = %q", got)
+	}
 	if gjson.GetBytes(out, "video").Exists() {
 		t.Fatalf("video field must not be exposed in OpenAI retrieve response: %s", string(out))
 	}
