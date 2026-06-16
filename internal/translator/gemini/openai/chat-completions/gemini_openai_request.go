@@ -333,7 +333,8 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						// "GenerateContentRequest.tools[].function_declarations[].parameters.required[].property is not defined" errors.
 						schemaNode := gjson.Get(fnRaw, "parametersJsonSchema")
 						if schemaNode.Exists() {
-							fnRaw = string(util.CleanJSONSchemaForGemini(fnRaw))
+							cleaned := util.CleanJSONSchemaForGemini(schemaNode.Raw)
+							fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", cleaned)
 						}
 					} else {
 						var errSet error
