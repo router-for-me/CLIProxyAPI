@@ -384,14 +384,9 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
 				}
 				if params := tool.Get("parameters"); params.Exists() {
-					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(params.Raw))
+					cleaned := util.CleanJSONSchemaForGemini(params.Raw)
+					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(cleaned))
 				}
-
-				// Sanitize the function declaration for Gemini API compatibility.
-				// Strips unsupported keywords, flattens complex unions, and removes required
-				// entries that do not exist in properties to avoid
-				// "GenerateContentRequest.tools[].function_declarations[].parameters.required[].property is not defined" errors.
-				funcDecl = []byte(util.CleanJSONSchemaForGemini(string(funcDecl)))
 
 				geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
 			}
