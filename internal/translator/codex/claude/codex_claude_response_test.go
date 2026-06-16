@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -505,6 +506,43 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 	}
 	if !foundText {
 		t.Fatalf("expected fallback content from response.output_item.done message; outputs=%q", outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsClaudeServerToolBlocks(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
+		"messages":[{"role":"user","content":"search weather"}]
+	}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"web_search_call","id":"ws_123","status":"searching","action":{"type":"search","query":"search weather"}}}`),
+		[]byte(`data: {"type":"response.web_search_call.completed","item_id":"ws_123"}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2}}}`),
+	}
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	for _, needle := range []string{
+		`"type":"server_tool_use"`,
+		`"id":"ws_123"`,
+		`"type":"web_search_tool_result"`,
+		`event: message_stop`,
+	} {
+		if !strings.Contains(outputText, needle) {
+			t.Fatalf("stream output missing %s:\n%s", needle, outputText)
+		}
+	}
+	serverToolIndex := strings.Index(outputText, `"type":"server_tool_use"`)
+	resultIndex := strings.Index(outputText, `"type":"web_search_tool_result"`)
+	if serverToolIndex < 0 || resultIndex < 0 || resultIndex < serverToolIndex {
+		t.Fatalf("web_search_tool_result must follow server_tool_use:\n%s", outputText)
 	}
 }
 
