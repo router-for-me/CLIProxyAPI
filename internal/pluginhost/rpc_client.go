@@ -377,35 +377,6 @@ func (a *rpcPluginAdapter) Execute(ctx context.Context, req pluginapi.ExecutorRe
 	})
 }
 
-func (a *rpcPluginAdapter) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-	if a == nil || a.host == nil || a.host.streams == nil {
-		return pluginapi.ExecutorStreamResponse{}, fmt.Errorf("plugin stream bridge is unavailable")
-	}
-	streamID, chunks, cleanup := a.host.streams.open(ctx)
-	callbackID, closeCallback := a.openHostCallbackContext(ctx)
-	defer closeCallback()
-	rpcReq := rpcExecutorRequest{
-		ExecutorRequest: req,
-		StreamID:        streamID,
-		HostCallbackID:  callbackID,
-	}
-	resp, errCall := callPlugin[rpcExecutorStreamResponse](ctx, a.client, pluginabi.MethodExecutorExecuteStream, rpcReq)
-	if errCall != nil {
-		cleanup()
-		return pluginapi.ExecutorStreamResponse{}, errCall
-	}
-	if len(resp.Chunks) > 0 {
-		cleanup()
-		out := make(chan pluginapi.ExecutorStreamChunk, len(resp.Chunks))
-		for _, chunk := range resp.Chunks {
-			out <- chunk
-		}
-		close(out)
-		return pluginapi.ExecutorStreamResponse{Headers: resp.Headers, Chunks: out}, nil
-	}
-	return pluginapi.ExecutorStreamResponse{Headers: resp.Headers, Chunks: chunks}, nil
-}
-
 func (a *rpcPluginAdapter) CountTokens(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
 	defer closeCallback()
