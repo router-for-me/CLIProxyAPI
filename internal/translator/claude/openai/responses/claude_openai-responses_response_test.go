@@ -246,3 +246,103 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ReportsCacheTokens(t *t
 		t.Fatalf("non-stream usage total_tokens = %d, want %d", got, 22048)
 	}
 }
+
+func TestConvertClaudeResponseToOpenAIResponses_RestoresNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__node_repl",
+				"tools":[{"type":"function","name":"js","parameters":{"type":"object","properties":{}}}]
+			}
+		]
+	}`)
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_abc","name":"mcp__node_repl__js","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{"code":"nodeRepl.write('hello')"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var added gjson.Result
+	var done gjson.Result
+	var completed gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", originalRequest, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "function_call" {
+					added = data
+				}
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "function_call" {
+					done = data
+				}
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		label string
+		got   gjson.Result
+	}{
+		{"added", added},
+		{"done", done},
+	} {
+		if !tc.got.Exists() {
+			t.Fatalf("expected function_call %s event", tc.label)
+		}
+		if got := tc.got.Get("item.name").String(); got != "js" {
+			t.Fatalf("%s item.name = %q, want js", tc.label, got)
+		}
+		if got := tc.got.Get("item.namespace").String(); got != "mcp__node_repl" {
+			t.Fatalf("%s item.namespace = %q, want mcp__node_repl", tc.label, got)
+		}
+	}
+
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("response.output.0.name").String(); got != "js" {
+		t.Fatalf("completed output name = %q, want js", got)
+	}
+	if got := completed.Get("response.output.0.namespace").String(); got != "mcp__node_repl" {
+		t.Fatalf("completed output namespace = %q, want mcp__node_repl", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__node_repl",
+				"tools":[{"type":"function","name":"js","parameters":{"type":"object","properties":{}}}]
+			}
+		]
+	}`)
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_abc","name":"mcp__node_repl__js","input":{}}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"code\":\"nodeRepl.write('hello')\"}"}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", originalRequest, nil, raw, nil)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("output.0.name").String(); got != "js" {
+		t.Fatalf("non-stream output name = %q, want js", got)
+	}
+	if got := root.Get("output.0.namespace").String(); got != "mcp__node_repl" {
+		t.Fatalf("non-stream output namespace = %q, want mcp__node_repl", got)
+	}
+}
