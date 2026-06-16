@@ -241,6 +241,10 @@ func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 		},
 		configFilePath: writeTestConfigFile(t),
 	}
+	reloads := make(chan *config.Config, 1)
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+		reloads <- cfg
+	})
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -252,6 +256,9 @@ func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if cfg := waitForAsyncReload(t, reloads); cfg != h.cfg {
+		t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
 	}
 	if h.cfg.Plugins.Enabled {
 		t.Fatal("global Plugins.Enabled changed to true")

@@ -274,7 +274,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	reloadCfg := h.cfg
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), reloadCfg)
 	log.WithFields(log.Fields{
 		"plugin_id":   result.ID,
 		"source_id":   source.ID,

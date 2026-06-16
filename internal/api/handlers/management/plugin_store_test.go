@@ -511,12 +511,9 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
 		},
 	}
-	reloads := 0
+	reloads := make(chan *config.Config, 1)
 	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
-		reloads++
-		if cfg != h.cfg {
-			t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
-		}
+		reloads <- cfg
 	})
 
 	rec := httptest.NewRecorder()
@@ -529,8 +526,8 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if reloads != 1 {
-		t.Fatalf("reloads = %d, want 1", reloads)
+	if cfg := waitForAsyncReload(t, reloads); cfg != h.cfg {
+		t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
 	}
 	data, errRead := os.ReadFile(existingPath)
 	if errRead != nil {

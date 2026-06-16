@@ -215,18 +215,27 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	ensurePluginConfigMap(h.cfg)
 	item := h.cfg.Plugins.Configs[id]
 	node := pluginConfigNode(item)
 	setYAMLMappingValue(node, "enabled", boolYAMLNode(*body.Enabled))
 	updated, errConfig := pluginInstanceConfigFromNode(node)
 	if errConfig != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
 		return
 	}
 	h.cfg.Plugins.Configs[id] = updated
-	h.persistLocked(c)
+	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		h.mu.Unlock()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+		return
+	}
+	reloadCfg := h.cfg
+	h.mu.Unlock()
+
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), reloadCfg)
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // PutPluginConfig replaces plugins.configs.<id> with the request object.
