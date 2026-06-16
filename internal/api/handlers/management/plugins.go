@@ -90,7 +90,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		entries[file.ID] = pluginListEntry{
 			ID:           htmlsanitize.String(file.ID),
 			Path:         htmlsanitize.String(file.Path),
-			Enabled:      true,
+			Enabled:      false,
 			ConfigFields: []pluginConfigFieldInfo{},
 			Menus:        []pluginMenuInfo{},
 		}
@@ -118,10 +118,6 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			entry.Menus = pluginMenus(info.Menus)
 			entry.Metadata = pluginMetadata(info.Metadata)
-			_, configured := configs[info.ID]
-			if !configured && !entry.Enabled {
-				entry.Enabled = true
-			}
 			entries[info.ID] = entry
 		}
 	}
@@ -397,7 +393,7 @@ func normalizedPluginsDir(dir string) string {
 
 func pluginInstanceEnabled(item config.PluginInstanceConfig) bool {
 	if item.Enabled == nil {
-		return true
+		return false
 	}
 	return *item.Enabled
 }

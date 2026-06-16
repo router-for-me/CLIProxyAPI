@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var defaultRuntimeConfigYAML = []byte("enabled: true\npriority: 0\n")
+var defaultRuntimeConfigYAML = []byte("enabled: false\npriority: 0\n")
 
 type runtimeConfig struct {
 	Enabled bool
@@ -48,7 +48,7 @@ func runtimeConfigFromConfig(cfg *config.Config) runtimeConfig {
 
 	for _, id := range ids {
 		item := cfg.Plugins.Configs[id]
-		enabled := true
+		enabled := false
 		if item.Enabled != nil {
 			enabled = *item.Enabled
 		}
@@ -66,7 +66,7 @@ func runtimeConfigFromConfig(cfg *config.Config) runtimeConfig {
 func defaultRuntimeItemConfig(id string) runtimeItemConfig {
 	return runtimeItemConfig{
 		ID:         id,
-		Enabled:    true,
+		Enabled:    false,
 		Priority:   0,
 		ConfigYAML: append([]byte(nil), defaultRuntimeConfigYAML...),
 	}

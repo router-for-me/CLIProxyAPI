@@ -548,7 +548,7 @@ func pluginLocalStatuses(pluginsEnabled bool, pluginsDir string, configs map[str
 			status.Registered = true
 			status.InstalledVersion = strings.TrimSpace(info.Metadata.Version)
 			if _, configured := configs[info.ID]; !configured && !status.Enabled {
-				status.Enabled = true
+				status.Enabled = false
 			}
 			statuses[info.ID] = status
 		}

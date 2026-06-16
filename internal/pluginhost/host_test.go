@@ -16,6 +16,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func enabledPluginConfigs(ids ...string) map[string]config.PluginInstanceConfig {
+	enabled := true
+	configs := make(map[string]config.PluginInstanceConfig, len(ids))
+	for _, id := range ids {
+		configs[id] = config.PluginInstanceConfig{Enabled: &enabled}
+	}
+	return configs
+}
+
 func TestHostApplyConfig_DisabledGlobalSkipsSnapshot(t *testing.T) {
 	loader := newTestSymbolLoader()
 	h := NewForTest(loader)
@@ -67,6 +76,30 @@ func TestHostApplyConfig_DisabledPluginSkipsCapability(t *testing.T) {
 	}
 }
 
+func TestHostApplyConfig_DefaultDisabledPluginSkipsLoad(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+		},
+	})
+
+	if plugin.registerCalls != 0 || loader.openCalls != 0 {
+		t.Fatalf("calls = register %d open %d, want 0", plugin.registerCalls, loader.openCalls)
+	}
+	if len(h.Snapshot().records) != 0 {
+		t.Fatalf("Snapshot records = %d, want 0", len(h.Snapshot().records))
+	}
+}
+
 func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	disabled := false
 	loader := newTestSymbolLoader()
@@ -83,6 +116,7 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     pluginsDir,
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -136,6 +170,7 @@ func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha", "bravo"),
+			Configs: enabledPluginConfigs("alpha", "bravo"),
 		},
 	}
 
@@ -191,6 +226,7 @@ func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 	t.Cleanup(func() {
@@ -240,6 +276,7 @@ func TestHostApplyConfigRegistersInterceptorOnlyPlugin(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -282,6 +319,7 @@ func TestHostApplyConfigDispatchesInterceptorRPCMethods(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -488,6 +526,7 @@ func TestHostApplyConfig_ReconfigureCalledOnReload(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 
@@ -529,6 +568,7 @@ func TestRegisteredPluginsIncludesMetadataAndOAuthCapability(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -589,6 +629,7 @@ func TestHostApplyConfig_PanicFusesPluginForProcessLifetime(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 
@@ -674,6 +715,7 @@ func TestHostApplyConfigSerializesLifecycleCalls(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 
@@ -896,6 +938,7 @@ func newBlockingOpenHost(t *testing.T) (*Host, *config.Config, <-chan struct{}, 
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 	return h, cfg, openStarted, releaseOpen
@@ -928,6 +971,7 @@ func newBlockingRegisterHost(t *testing.T) (*Host, *config.Config, <-chan struct
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 	return h, cfg, registerStarted, releaseRegister

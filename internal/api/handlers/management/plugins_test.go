@@ -158,7 +158,7 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 			t.Fatalf("unregistered plugin entry has runtime fields: %#v", item)
 		}
 	}
-	if got, ok := entries["scanned"]; !ok || got.Configured || !got.Enabled || got.EffectiveEnabled || got.Path == "" {
+	if got, ok := entries["scanned"]; !ok || got.Configured || got.Enabled || got.EffectiveEnabled || got.Path == "" {
 		t.Fatalf("scanned entry = %#v, exists=%v", got, ok)
 	}
 	if got, ok := entries["configured-only"]; !ok || !got.Configured || got.Enabled || got.EffectiveEnabled || got.Path != "" {
