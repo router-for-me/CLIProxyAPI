@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -556,5 +559,76 @@ func TestExecuteCountWithAuthManagerPropagatesRouterSkipAndQuery(t *testing.T) {
 	}
 	if routerHost.lastReq == nil || routerHost.lastReq.Query.Get("session") != "abc" {
 		t.Fatalf("route query = %#v, want session=abc", routerHost.lastReq)
+	}
+}
+
+func TestHandlerModelRouterDirectExecutorPropagatesQueryFromContext(t *testing.T) {
+	originalModel := "handler-router-query-model"
+	targetPluginID := "query-plugin"
+	host := &handlerDirectExecutorRouteHost{}
+	host.hasRouters = true
+	host.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(host)
+	ctx := contextWithQuery(url.Values{"session": []string{"abc"}})
+
+	_, _, errMsg := handler.ExecuteWithAuthManager(ctx, "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q}`, originalModel)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+	if host.lastOptions.Query == nil || host.lastOptions.Query.Get("session") != "abc" {
+		t.Fatalf("executor query = %#v, want session=abc from gin context", host.lastOptions.Query)
+	}
+}
+
+type handlerStuckPluginStreamHost struct {
+	handlerDirectExecutorRouteHost
+}
+
+func (h *handlerStuckPluginStreamHost) ExecutePluginExecutorStream(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	chunks := make(chan coreexecutor.StreamChunk)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func TestStreamWithPluginExecutorExitsOnContextCancel(t *testing.T) {
+	originalModel := "handler-router-stream-cancel-model"
+	targetPluginID := "stuck-stream-plugin"
+	host := &handlerStuckPluginStreamHost{}
+	host.hasRouters = true
+	host.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(host)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, originalModel)), "")
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-dataChan:
+			if !ok {
+				if errMsg := <-errChan; errMsg != nil {
+					t.Fatalf("unexpected stream error: %+v", errMsg)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("plugin executor stream goroutine did not exit after context cancel")
+		}
+	}
+}
+
+func TestQueryFromContextNilURLDoesNotPanic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = &http.Request{Header: make(http.Header)}
+	ctx := context.WithValue(context.Background(), "gin", c)
+	if got := queryFromContext(ctx); got != nil {
+		t.Fatalf("queryFromContext() = %#v, want nil when URL is nil", got)
 	}
 }

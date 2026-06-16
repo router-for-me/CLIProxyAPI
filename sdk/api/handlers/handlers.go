@@ -338,7 +338,7 @@ func queryFromContext(ctx context.Context) url.Values {
 	if ctx == nil {
 		return nil
 	}
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil && ginCtx.Request.URL != nil {
 		return ginCtx.Request.URL.Query()
 	}
 	return nil
@@ -738,7 +738,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		SourceFormat:                sdktranslator.FromString(entryProtocol),
 		ResponseFormat:              sdktranslator.FromString(responseProtocol),
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:                       cloneURLValues(execOptions.Query),
+		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
@@ -802,7 +802,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		OriginalRequest:             rawJSON,
 		SourceFormat:                sdktranslator.FromString(handlerType),
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:                       cloneURLValues(execOptions.Query),
+		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
@@ -885,7 +885,7 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 		SourceFormat:    sdktranslator.FromString(entryProtocol),
 		ResponseFormat:  sdktranslator.FromString(responseProtocol),
 		Headers:         modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:           cloneURLValues(execOptions.Query),
+		Query:           modelExecutionQuery(ctx, execOptions.Query),
 		Metadata:        reqMeta,
 	}
 	return req, opts
@@ -1022,7 +1022,14 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		defer close(errChan)
 		chunkIndex := 0
 		var historyChunks [][]byte
-		for chunk := range chunks {
+		for {
+			chunk, ok, canceled := nextStreamChunk(ctx, nil, nil, chunks)
+			if canceled {
+				return
+			}
+			if !ok {
+				return
+			}
 			if chunk.Err != nil {
 				select {
 				case errChan <- executionErrorMessage(chunk.Err):
@@ -1121,7 +1128,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		SourceFormat:                sdktranslator.FromString(entryProtocol),
 		ResponseFormat:              sdktranslator.FromString(responseProtocol),
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:                       cloneURLValues(execOptions.Query),
+		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta

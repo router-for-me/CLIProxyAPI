@@ -202,7 +202,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		records = append(records, capabilityRecord{
 			id:       file.ID,
 			priority: item.Priority,
-			meta:     clonePluginMetadata(plugin.Metadata),
+			meta:     plugin.Metadata,
 			plugin:   plugin,
 		})
 	}
