@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -19,6 +20,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
+
+func waitForAsyncReload(t *testing.T, reloads <-chan *config.Config) *config.Config {
+	t.Helper()
+	select {
+	case cfg := <-reloads:
+		return cfg
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async config reload")
+		return nil
+	}
+}
 
 func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	t.Parallel()
@@ -342,12 +354,12 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 		},
 		configFilePath: writeTestConfigFile(t),
 	}
-	reloads := 0
+	reloads := make(chan *config.Config, 1)
+	releaseReload := make(chan struct{})
+	defer close(releaseReload)
 	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
-		reloads++
-		if cfg != h.cfg {
-			t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
-		}
+		reloads <- cfg
+		<-releaseReload
 	})
 
 	path, errPath := pluginFilePath(pluginsDir, "sample")
@@ -363,7 +375,17 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: "sample"}}
 	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample", nil)
 
-	h.DeletePlugin(c)
+	done := make(chan struct{})
+	go func() {
+		h.DeletePlugin(c)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("DeletePlugin blocked waiting for config reload")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -374,8 +396,8 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
 		t.Fatalf("plugin file stat error = %v, want not exist", errStat)
 	}
-	if reloads != 1 {
-		t.Fatalf("reloads = %d, want 1", reloads)
+	if cfg := waitForAsyncReload(t, reloads); cfg != h.cfg {
+		t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
 	}
 }
 

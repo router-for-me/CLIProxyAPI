@@ -107,3 +107,80 @@ func TestConvertClaudeRequestToCLI_ConvertsMessageSystemRoleToUserContent(t *tes
 		t.Fatalf("Unexpected first system part: %q", got)
 	}
 }
+
+func TestConvertClaudeRequestToCLI_StructuredToolResult(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "json-call-1", "name": "json", "input": {"ok": true}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "json-call-1",
+						"content": [
+							{"type": "text", "text": "alpha"},
+							{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
+
+	fr := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse")
+	if !fr.Exists() {
+		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "request.contents").Raw)
+	}
+	// The text block must remain structured JSON, not a double-encoded string blob.
+	if got := fr.Get("response.result.text").String(); got != "alpha" {
+		t.Fatalf("expected structured result text 'alpha', got result=%s", fr.Get("response.result").Raw)
+	}
+	// The image block must be emitted as a separate inlineData part, not embedded in result.
+	img := gjson.GetBytes(output, "request.contents.1.parts.1.inlineData")
+	if got := img.Get("mime_type").String(); got != "image/png" {
+		t.Fatalf("expected image mime type 'image/png', got '%s'", got)
+	}
+	if got := img.Get("data").String(); got != "aGVsbG8=" {
+		t.Fatalf("expected image data 'aGVsbG8=', got '%s'", got)
+	}
+}
+
+func TestConvertClaudeRequestToCLI_StringToolResult(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "json-call-1", "name": "json", "input": {"ok": true}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "json-call-1", "content": "alpha"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
+
+	fr := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse")
+	if !fr.Exists() {
+		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "request.contents").Raw)
+	}
+	// String content must not be double-encoded: result should be exactly "alpha".
+	if got := fr.Get("response.result").String(); got != "alpha" {
+		t.Fatalf("expected result 'alpha', got '%s' (raw=%s)", got, fr.Get("response.result").Raw)
+	}
+}
