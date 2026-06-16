@@ -33,7 +33,7 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 		return nil, modelExecutionError(errMsg)
 	}
 	streamID := ""
-	if h != nil && h.modelStreams != nil {
+	if h.modelStreams != nil {
 		streamID = h.modelStreams.open(req.HostCallbackID, stream.Chunks, cancel)
 	}
 	if streamID == "" {

@@ -38,7 +38,7 @@ func (a *rpcPluginAdapter) ExecuteStream(ctx context.Context, req pluginapi.Exec
 	// Async streaming plugins can return before they finish emitting chunks, so keep callbacks alive until the stream ends.
 	return pluginapi.ExecutorStreamResponse{
 		Headers: resp.Headers,
-		Chunks:  closeCallbackWhenStreamDone(ctx, chunks, closeCallback),
+		Chunks:  cleanupWhenStreamDone(ctx, chunks, cleanup),
 	}, nil
 }
 
@@ -55,12 +55,12 @@ func combinedCleanup(cleanups ...func()) func() {
 	}
 }
 
-func closeCallbackWhenStreamDone(ctx context.Context, chunks <-chan pluginapi.ExecutorStreamChunk, closeCallback func()) <-chan pluginapi.ExecutorStreamChunk {
+func cleanupWhenStreamDone(ctx context.Context, chunks <-chan pluginapi.ExecutorStreamChunk, cleanup func()) <-chan pluginapi.ExecutorStreamChunk {
 	out := make(chan pluginapi.ExecutorStreamChunk)
 	go func() {
 		defer func() {
-			if closeCallback != nil {
-				closeCallback()
+			if cleanup != nil {
+				cleanup()
 			}
 			close(out)
 		}()
