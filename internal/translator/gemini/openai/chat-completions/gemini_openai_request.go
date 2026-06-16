@@ -327,6 +327,14 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						} else {
 							fnRaw = renamed
 						}
+						// Sanitize the renamed parametersJsonSchema for Gemini API compatibility.
+						// Removes unsupported keywords, flattens anyOf/oneOf/allOf, normalizes enums,
+						// and strips required entries that do not exist in properties to avoid
+						// "GenerateContentRequest.tools[].function_declarations[].parameters.required[].property is not defined" errors.
+						schemaNode := gjson.Get(fnRaw, "parametersJsonSchema")
+						if schemaNode.Exists() {
+							fnRaw = string(util.CleanJSONSchemaForGemini(fnRaw))
+						}
 					} else {
 						var errSet error
 						fnRawBytes := []byte(fnRaw)
