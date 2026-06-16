@@ -128,6 +128,14 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// DisableClaudeCloakMode globally disables Claude request cloaking when true.
+	// Cloaking disguises requests as the official Claude Code CLI and replaces the
+	// system prompt. When true, every Claude credential defaults to no cloaking
+	// ("never"); a specific credential can still re-enable or override it via its own
+	// cloak settings (the per claude-api-key "cloak" block, or a "cloak_mode" value in
+	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
+	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 

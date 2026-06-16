@@ -119,6 +119,13 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# When true, globally disable Claude request cloaking (the Claude Code CLI disguise and
+# system prompt replacement), so the original system prompt is passed through to Claude as-is.
+# Individual credentials can still override this: a claude-api-key entry via its "cloak.mode",
+# or a Claude OAuth/token file via a "cloak_mode" value. Default false keeps the per-client
+# "auto" behavior (cloak only non-Claude-Code clients).
+disable-claude-cloak-mode: false
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
@@ -249,6 +256,10 @@ nonstream-keepalive-interval: 0
 #       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
 #                                    # "always": always apply cloaking
 #                                    # "never": never apply cloaking
+#       # This "cloak" block applies to this claude-api-key entry only. For Claude OAuth
+#       # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
+#       # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id". The top-level
+#       # "disable-claude-cloak-mode: true" disables cloaking for all Claude credentials at once.
 #       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
 #                                    # true: strip all user system messages, keep only Claude Code prompt
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
