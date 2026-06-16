@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -508,6 +509,74 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsClaudeServerToolBlocks(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
+		"messages":[{"role":"user","content":"search weather"}]
+	}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"id":"ws_123","type":"web_search_call","status":"in_progress"}}`),
+		[]byte(`data: {"type":"response.web_search_call.searching","item_id":"ws_123"}`),
+		[]byte(`data: {"type":"response.web_search_call.completed","item_id":"ws_123"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"search weather"}}}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2}}}`),
+	}
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	for _, needle := range []string{
+		`"type":"server_tool_use"`,
+		`"id":"ws_123"`,
+		`"type":"web_search_tool_result"`,
+		`event: message_stop`,
+	} {
+		if !strings.Contains(outputText, needle) {
+			t.Fatalf("stream output missing %s:\n%s", needle, outputText)
+		}
+	}
+	serverToolIndex := strings.Index(outputText, `"type":"server_tool_use"`)
+	resultIndex := strings.Index(outputText, `"type":"web_search_tool_result"`)
+	if serverToolIndex < 0 || resultIndex < 0 || resultIndex < serverToolIndex {
+		t.Fatalf("web_search_tool_result must follow server_tool_use:\n%s", outputText)
+	}
+	if !strings.Contains(outputText, `partial_json`) || !strings.Contains(outputText, "search weather") {
+		t.Fatalf("expected web search query delta after populated output_item.done:\n%s", outputText)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamWebSearchCallReusesFallbackToolUseID(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"web_search_call","status":"in_progress"}}`),
+		[]byte(`data: {"type":"response.web_search_call.completed","item_id":"ws_from_upstream"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_from_upstream","type":"web_search_call","status":"completed","action":{"type":"search","query":"search weather"}}}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2}}}`),
+	}
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	if strings.Count(outputText, `"type":"server_tool_use"`) != 1 {
+		t.Fatalf("expected exactly one server_tool_use block, got output:\n%s", outputText)
+	}
+	if !strings.Contains(outputText, `"tool_use_id":"ws_from_upstream"`) {
+		t.Fatalf("expected web_search_tool_result to reuse fallback tool_use_id:\n%s", outputText)
+	}
+}
+
 func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 	longCallID := "call_" + strings.Repeat("a", 62)
 	if len(longCallID) <= 64 {
@@ -646,6 +715,63 @@ func TestConvertCodexResponseToClaude_StreamStopSequenceMapping(t *testing.T) {
 	}
 	if got := messageDelta.Get("delta.stop_sequence").String(); got != "\nEND" {
 		t.Fatalf("stop_sequence = %q, want newline END. Outputs=%q", got, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_WebSearchCallEmitsServerToolBlocks(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+	types := []string{}
+	parsed.Get("content").ForEach(func(_, value gjson.Result) bool {
+		types = append(types, value.Get("type").String())
+		return true
+	})
+	for _, want := range []string{"server_tool_use", "web_search_tool_result", "text"} {
+		found := false
+		for _, got := range types {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			found = strings.Contains(string(out), `"type":"`+want+`"`)
+		}
+		if !found {
+			t.Fatalf("missing content type %s in %s", want, string(out))
+		}
+	}
+	if parsed.Get("content.0.input.query").String() != "search weather" {
+		if !strings.Contains(string(out), "search weather") {
+			t.Fatalf("expected web search query in non-stream output: %s", string(out))
+		}
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_WebSearchStopReasonEndTurn(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+	if got := parsed.Get("stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn when only server web_search and text are present", got)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_WebSearchDedupesEmptyOpenPageItems(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"q"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"open_page"}},{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	if strings.Count(string(out), `"type":"server_tool_use"`) != 1 {
+		t.Fatalf("expected one server_tool_use after dedupe, got %s", string(out))
+	}
+	if !strings.Contains(string(out), "weather") {
+		t.Fatalf("expected populated query item to be kept: %s", string(out))
 	}
 }
 
