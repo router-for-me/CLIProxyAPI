@@ -7,16 +7,18 @@ import (
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 // executorPluginReady reports whether the named plugin can actually execute a
 // request right now: it must declare an executor capability AND resolve a
 // non-empty provider identifier (the same requirement enforced by
-// executorAdapterForPlugin at execution time). Routing pre-checks use this so
-// that targets which would fail at execution are treated as unhandled and fall
+// executorAdapterForPlugin at execution time), and its declared formats must be
+// compatible with the current request. Routing pre-checks use this so that
+// targets which would fail at execution are treated as unhandled and fall
 // through to lower-priority routers instead of returning handled then 500ing.
-func (h *Host) executorPluginReady(pluginID string) bool {
+func (h *Host) executorPluginReady(pluginID string, routeReq pluginapi.ModelRouteRequest) bool {
 	if h == nil {
 		return false
 	}
@@ -32,10 +34,39 @@ func (h *Host) executorPluginReady(pluginID string) bool {
 		if executor == nil {
 			return false
 		}
-		_, ok := h.executorProvider(record, executor)
-		return ok
+		provider, okProvider := h.executorProvider(record, executor)
+		if !okProvider {
+			return false
+		}
+		adapter := newExecutorAdapterRegistration(h, record, provider, executor).adapter
+		return adapter.supportsExecutorFormats(
+			coreexecutor.Request{Model: routeReq.RequestedModel, Payload: routeReq.Body},
+			coreexecutor.Options{
+				Stream:          routeReq.Stream,
+				OriginalRequest: routeReq.Body,
+				SourceFormat:    sdktranslator.FromString(routeReq.SourceFormat),
+				ResponseFormat:  sdktranslator.FromString(routeReq.SourceFormat),
+				Headers:         cloneHeader(routeReq.Headers),
+				Query:           cloneValues(routeReq.Query),
+				Metadata:        cloneInterceptorMetadata(routeReq.Metadata),
+			},
+		)
 	}
 	return false
+}
+
+func (a *executorAdapter) supportsExecutorFormats(req coreexecutor.Request, opts coreexecutor.Options) bool {
+	if a == nil {
+		return false
+	}
+	inputRequested := executorInputFormat(req, opts)
+	requestedFormat := executorRequestedFormat(req, opts)
+	inputFormat, errInput := a.selectExecutorInputFormat(inputRequested)
+	if errInput != nil {
+		return false
+	}
+	_, errOutput := a.selectExecutorOutputFormat(requestedFormat, inputFormat)
+	return errOutput == nil
 }
 
 // PluginExecutorRequestToFormat reports the executor input format selected for a direct plugin executor route.

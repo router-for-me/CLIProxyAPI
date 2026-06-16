@@ -11,9 +11,25 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+func newRouteModelHostWithRecords(records ...capabilityRecord) *Host {
+	for i := range records {
+		caps := &records[i].plugin.Capabilities
+		if caps.Executor == nil {
+			continue
+		}
+		if len(caps.ExecutorInputFormats) == 0 {
+			caps.ExecutorInputFormats = []string{"openai"}
+		}
+		if len(caps.ExecutorOutputFormats) == 0 {
+			caps.ExecutorOutputFormats = []string{"openai"}
+		}
+	}
+	return newHostWithRecords(records...)
+}
+
 func TestHostRouteModelUsesHighestPriorityFirstMatch(t *testing.T) {
 	var lowCalled bool
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id:       "low",
 			priority: 1,
@@ -52,7 +68,7 @@ func TestHostRouteModelUsesHighestPriorityFirstMatch(t *testing.T) {
 
 func TestHostRouteModelContinuesAfterUnhandled(t *testing.T) {
 	var lowCalled bool
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id:       "low",
 			priority: 1,
@@ -86,7 +102,7 @@ func TestHostRouteModelContinuesAfterUnhandled(t *testing.T) {
 }
 
 func TestHostRouteModelAllowsExplicitExecutorPluginTarget(t *testing.T) {
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id: "executor",
 			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
@@ -122,7 +138,7 @@ func TestHostExecutePluginExecutorByPluginIDPreservesModel(t *testing.T) {
 			return pluginapi.ExecutorResponse{Payload: []byte("plugin-ok")}, nil
 		},
 	}
-	host := newHostWithRecords(capabilityRecord{
+	host := newRouteModelHostWithRecords(capabilityRecord{
 		id: "executor",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 			Executor:              executor,
@@ -147,7 +163,7 @@ func TestHostExecutePluginExecutorByPluginIDPreservesModel(t *testing.T) {
 }
 
 func TestHostRouteModelDefaultsHandledRouterToOwnExecutor(t *testing.T) {
-	host := newHostWithRecords(capabilityRecord{
+	host := newRouteModelHostWithRecords(capabilityRecord{
 		id: "router",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 			Executor: &fakeExecutor{identifier: "fake-provider"},
@@ -165,7 +181,7 @@ func TestHostRouteModelDefaultsHandledRouterToOwnExecutor(t *testing.T) {
 
 func TestHostRouteModelSkipsUnavailableExecutorTargets(t *testing.T) {
 	calls := 0
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id:       "fallback",
 			priority: 1,
@@ -210,7 +226,7 @@ func TestHostRouteModelSkipsUnavailableExecutorTargets(t *testing.T) {
 }
 
 func TestHostRouteModelErrorAndPanicDoNotBreakFallback(t *testing.T) {
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id:       "fallback",
 			priority: 1,
@@ -253,7 +269,7 @@ func TestHostRouteModelErrorAndPanicDoNotBreakFallback(t *testing.T) {
 }
 
 func TestHostHasModelRoutersReportsAvailableRouters(t *testing.T) {
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id: "router",
 			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
@@ -274,7 +290,7 @@ func TestHostHasModelRoutersReportsAvailableRouters(t *testing.T) {
 }
 
 func TestHostRouteModelClonesPluginMetadata(t *testing.T) {
-	host := newHostWithRecords(capabilityRecord{
+	host := newRouteModelHostWithRecords(capabilityRecord{
 		id: "router",
 		meta: pluginapi.Metadata{
 			Name: "Router",
@@ -305,7 +321,7 @@ func TestHostRouteModelClonesPluginMetadata(t *testing.T) {
 
 func TestHostRouteModelSkipsOriginatingPlugin(t *testing.T) {
 	var originCalled bool
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id:       "origin",
 			priority: 10,
@@ -342,7 +358,7 @@ func TestHostRouteModelSkipsOriginatingPlugin(t *testing.T) {
 // provider keys, so built-in provider routing can be exercised.
 func newHostWithAuthProviders(t *testing.T, providers []string, records ...capabilityRecord) *Host {
 	t.Helper()
-	host := newHostWithRecords(records...)
+	host := newRouteModelHostWithRecords(records...)
 	manager := coreauth.NewManager(nil, nil, nil)
 	for i, provider := range providers {
 		auth := &coreauth.Auth{ID: fmt.Sprintf("auth-%s-%d", provider, i), Provider: provider}
@@ -483,7 +499,7 @@ func TestHostBuiltinProviderLookup(t *testing.T) {
 
 func TestHostRouteModelSkipsExecutorWithoutProviderIdentifier(t *testing.T) {
 	var fallbackCalled bool
-	host := newHostWithRecords(
+	host := newRouteModelHostWithRecords(
 		capabilityRecord{
 			id:       "fallback",
 			priority: 1,
@@ -512,6 +528,43 @@ func TestHostRouteModelSkipsExecutorWithoutProviderIdentifier(t *testing.T) {
 	resp, ok := host.RouteModel(context.Background(), pluginapi.ModelRouteRequest{RequestedModel: "original-model"})
 	if !fallbackCalled {
 		t.Fatal("fallback router was not called after executor without provider identifier was skipped")
+	}
+	if !ok || resp.Target != "fallback" {
+		t.Fatalf("RouteModel() = %#v, %v; want fallback executor handled", resp, ok)
+	}
+}
+
+func TestHostRouteModelSkipsExecutorWithUnsupportedFormats(t *testing.T) {
+	var fallbackCalled bool
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "fallback",
+			priority: 1,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				Executor:              &fakeExecutor{identifier: "fallback-provider"},
+				ExecutorInputFormats:  []string{"openai"},
+				ExecutorOutputFormats: []string{"openai"},
+				ModelRouter: modelRouterFunc(func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+					fallbackCalled = true
+					return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetSelf}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "unsupported-formats",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				Executor: &fakeExecutor{identifier: "unsupported-provider"},
+				ModelRouter: modelRouterFunc(func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+					return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetSelf}, nil
+				}),
+			}},
+		},
+	)
+
+	resp, ok := host.RouteModel(context.Background(), pluginapi.ModelRouteRequest{RequestedModel: "original-model", SourceFormat: "openai"})
+	if !fallbackCalled {
+		t.Fatal("fallback router was not called after executor with unsupported formats was skipped")
 	}
 	if !ok || resp.Target != "fallback" {
 		t.Fatalf("RouteModel() = %#v, %v; want fallback executor handled", resp, ok)

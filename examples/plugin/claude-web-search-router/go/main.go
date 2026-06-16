@@ -234,7 +234,7 @@ func defaultPluginConfig() pluginConfig {
 }
 
 func decodeConfig(raw []byte) (pluginConfig, error) {
-	var cfg pluginConfig
+	cfg := defaultPluginConfig()
 	if errUnmarshal := yaml.Unmarshal(raw, &cfg); errUnmarshal != nil {
 		return pluginConfig{}, errUnmarshal
 	}
