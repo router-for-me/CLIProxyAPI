@@ -14,10 +14,11 @@ import (
 // executorPluginReady reports whether the named plugin can actually execute a
 // request right now: it must declare an executor capability AND resolve a
 // non-empty provider identifier (the same requirement enforced by
-// executorAdapterForPlugin at execution time), and its declared formats must be
-// compatible with the current request. Routing pre-checks use this so that
-// targets which would fail at execution are treated as unhandled and fall
-// through to lower-priority routers instead of returning handled then 500ing.
+// executorAdapterForPlugin at execution time), allow static execution without
+// selected auth, and declare formats compatible with the current request.
+// Routing pre-checks use this so that targets which would fail at execution are
+// treated as unhandled and fall through to lower-priority routers instead of
+// returning handled then 500ing.
 func (h *Host) executorPluginReady(pluginID string, routeReq pluginapi.ModelRouteRequest) bool {
 	if h == nil {
 		return false
@@ -32,6 +33,9 @@ func (h *Host) executorPluginReady(pluginID string, routeReq pluginapi.ModelRout
 		}
 		executor := record.plugin.Capabilities.Executor
 		if executor == nil {
+			return false
+		}
+		if !executorScopeAllowsStaticModels(record.plugin.Capabilities) {
 			return false
 		}
 		provider, okProvider := h.executorProvider(record, executor)

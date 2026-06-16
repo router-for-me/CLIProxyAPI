@@ -570,3 +570,44 @@ func TestHostRouteModelSkipsExecutorWithUnsupportedFormats(t *testing.T) {
 		t.Fatalf("RouteModel() = %#v, %v; want fallback executor handled", resp, ok)
 	}
 }
+
+func TestHostRouteModelSkipsOAuthOnlyExecutorTargets(t *testing.T) {
+	var fallbackCalled bool
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "fallback",
+			priority: 1,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				Executor:              &fakeExecutor{identifier: "fallback-provider"},
+				ExecutorModelScope:    pluginapi.ExecutorModelScopeStatic,
+				ExecutorInputFormats:  []string{"openai"},
+				ExecutorOutputFormats: []string{"openai"},
+				ModelRouter: modelRouterFunc(func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+					fallbackCalled = true
+					return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetSelf}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "oauth-only",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				Executor:              &fakeExecutor{identifier: "oauth-provider"},
+				ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
+				ExecutorInputFormats:  []string{"openai"},
+				ExecutorOutputFormats: []string{"openai"},
+				ModelRouter: modelRouterFunc(func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+					return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetSelf}, nil
+				}),
+			}},
+		},
+	)
+
+	resp, ok := host.RouteModel(context.Background(), pluginapi.ModelRouteRequest{RequestedModel: "original-model", SourceFormat: "openai"})
+	if !fallbackCalled {
+		t.Fatal("fallback router was not called after OAuth-only executor target was skipped")
+	}
+	if !ok || resp.Target != "fallback" {
+		t.Fatalf("RouteModel() = %#v, %v; want fallback executor handled", resp, ok)
+	}
+}
