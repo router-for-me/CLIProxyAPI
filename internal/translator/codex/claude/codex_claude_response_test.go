@@ -546,6 +546,31 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsClaudeServerToolBl
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamWebSearchCallReusesFallbackToolUseID(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"web_search_call","status":"searching","action":{"type":"search","query":"search weather"}}}`),
+		[]byte(`data: {"type":"response.web_search_call.completed","item_id":"ws_from_upstream"}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2}}}`),
+	}
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	if strings.Count(outputText, `"type":"server_tool_use"`) != 1 {
+		t.Fatalf("expected exactly one server_tool_use block, got output:\n%s", outputText)
+	}
+	if !strings.Contains(outputText, `"tool_use_id":"web_search_0"`) {
+		t.Fatalf("expected web_search_tool_result to reuse fallback tool_use_id:\n%s", outputText)
+	}
+}
+
 func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 	longCallID := "call_" + strings.Repeat("a", 62)
 	if len(longCallID) <= 64 {

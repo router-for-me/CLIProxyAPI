@@ -34,6 +34,7 @@ type ConvertCodexResponseToClaudeParams struct {
 	ThinkingSummarySeen       bool
 	WebSearchToolUseIDs       map[string]struct{}
 	WebSearchToolResultIDs    map[string]struct{}
+	LastWebSearchToolUseID    string
 }
 
 // ConvertCodexResponseToClaude performs sophisticated streaming response format conversion.

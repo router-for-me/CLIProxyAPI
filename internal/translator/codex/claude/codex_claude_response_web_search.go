@@ -70,11 +70,14 @@ func appendCodexWebSearchToolResult(output []byte, params *ConvertCodexResponseT
 	output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", stop, 2)
 	params.WebSearchToolResultIDs[toolUseID] = struct{}{}
 	params.BlockIndex++
+	if toolUseID == params.LastWebSearchToolUseID {
+		params.LastWebSearchToolUseID = ""
+	}
 	return output
 }
 
 func codexWebSearchToolUseID(params *ConvertCodexResponseToClaudeParams, root, item gjson.Result) string {
-	for _, path := range []string{"id", "item_id", "output_item_id", "call_id"} {
+	for _, path := range []string{"id", "output_item_id", "call_id"} {
 		if value := strings.TrimSpace(item.Get(path).String()); value != "" {
 			return value
 		}
@@ -82,7 +85,20 @@ func codexWebSearchToolUseID(params *ConvertCodexResponseToClaudeParams, root, i
 			return value
 		}
 	}
-	return fmt.Sprintf("web_search_%d", params.BlockIndex)
+	if params.LastWebSearchToolUseID != "" {
+		return params.LastWebSearchToolUseID
+	}
+	for _, path := range []string{"item_id"} {
+		if value := strings.TrimSpace(item.Get(path).String()); value != "" {
+			return value
+		}
+		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	id := fmt.Sprintf("web_search_%d", params.BlockIndex)
+	params.LastWebSearchToolUseID = id
+	return id
 }
 
 func codexWebSearchQuery(root, item gjson.Result) string {
