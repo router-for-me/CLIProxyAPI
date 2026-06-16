@@ -706,7 +706,6 @@ func performGetLogs(t *testing.T, h *Handler, target string) logsAPIResponse {
 
 func performGetLogsRaw(t *testing.T, h *Handler, target string) (int, string) {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
