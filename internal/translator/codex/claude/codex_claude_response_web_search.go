@@ -151,3 +151,26 @@ func codexWebSearchResultContent(root, item gjson.Result) []byte {
 	})
 	return content
 }
+
+func appendCodexWebSearchNonStreamContent(out []byte, item gjson.Result) ([]byte, bool) {
+	id := strings.TrimSpace(item.Get("id").String())
+	if id == "" {
+		return out, false
+	}
+	emptyRoot := gjson.Result{}
+	useBlock := []byte(`{"type":"server_tool_use","id":"","name":"web_search","input":{}}`)
+	useBlock, _ = sjson.SetBytes(useBlock, "id", id)
+	if query := codexWebSearchQuery(emptyRoot, item); query != "" {
+		input, _ := json.Marshal(map[string]string{"query": query})
+		useBlock, _ = sjson.SetRawBytes(useBlock, "input", input)
+	}
+	out, _ = sjson.SetRawBytes(out, "content.-1", useBlock)
+
+	resultBlock := []byte(`{"type":"web_search_tool_result","tool_use_id":"","content":[]}`)
+	resultBlock, _ = sjson.SetBytes(resultBlock, "tool_use_id", id)
+	if content := codexWebSearchResultContent(emptyRoot, item); len(content) > 0 {
+		resultBlock, _ = sjson.SetRawBytes(resultBlock, "content", content)
+	}
+	out, _ = sjson.SetRawBytes(out, "content.-1", resultBlock)
+	return out, true
+}

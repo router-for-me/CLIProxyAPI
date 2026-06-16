@@ -388,6 +388,12 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 						}
 					}
 				}
+			case "web_search_call":
+				var appended bool
+				out, appended = appendCodexWebSearchNonStreamContent(out, item)
+				if appended {
+					hasToolCall = true
+				}
 			case "function_call":
 				hasToolCall = true
 				name := item.Get("name").String()

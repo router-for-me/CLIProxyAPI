@@ -718,6 +718,39 @@ func TestConvertCodexResponseToClaude_StreamStopSequenceMapping(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToClaudeNonStream_WebSearchCallEmitsServerToolBlocks(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+	types := []string{}
+	parsed.Get("content").ForEach(func(_, value gjson.Result) bool {
+		types = append(types, value.Get("type").String())
+		return true
+	})
+	for _, want := range []string{"server_tool_use", "web_search_tool_result", "text"} {
+		found := false
+		for _, got := range types {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			found = strings.Contains(string(out), `"type":"`+want+`"`)
+		}
+		if !found {
+			t.Fatalf("missing content type %s in %s", want, string(out))
+		}
+	}
+	if parsed.Get("content.0.input.query").String() != "search weather" {
+		if !strings.Contains(string(out), "search weather") {
+			t.Fatalf("expected web search query in non-stream output: %s", string(out))
+		}
+	}
+}
+
 func TestConvertCodexResponseToClaudeNonStream_StopReasonMapping(t *testing.T) {
 	tests := []struct {
 		name       string
