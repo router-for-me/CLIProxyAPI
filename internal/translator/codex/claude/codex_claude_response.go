@@ -320,6 +320,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	}
 
 	hasToolCall := false
+	webSearchSeen := make(map[string]struct{})
 
 	if output := responseData.Get("output"); output.Exists() && output.IsArray() {
 		output.ForEach(func(_, item gjson.Result) bool {
@@ -389,11 +390,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 					}
 				}
 			case "web_search_call":
-				var appended bool
-				out, appended = appendCodexWebSearchNonStreamContent(out, item)
-				if appended {
-					hasToolCall = true
-				}
+				out = appendCodexWebSearchNonStreamContent(out, item, webSearchSeen)
 			case "function_call":
 				hasToolCall = true
 				name := item.Get("name").String()

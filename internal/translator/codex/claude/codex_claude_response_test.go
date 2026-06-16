@@ -751,6 +751,30 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchCallEmitsServerToolBlock
 	}
 }
 
+func TestConvertCodexResponseToClaudeNonStream_WebSearchStopReasonEndTurn(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+	if got := parsed.Get("stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn when only server web_search and text are present", got)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_WebSearchDedupesEmptyOpenPageItems(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"q"}]}`)
+	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"open_page"}},{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	if strings.Count(string(out), `"type":"server_tool_use"`) != 1 {
+		t.Fatalf("expected one server_tool_use after dedupe, got %s", string(out))
+	}
+	if !strings.Contains(string(out), "weather") {
+		t.Fatalf("expected populated query item to be kept: %s", string(out))
+	}
+}
+
 func TestConvertCodexResponseToClaudeNonStream_StopReasonMapping(t *testing.T) {
 	tests := []struct {
 		name       string
