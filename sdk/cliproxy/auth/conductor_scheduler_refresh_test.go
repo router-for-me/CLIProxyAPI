@@ -85,7 +85,7 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	if manager.shouldRefresh(updated, now) {
 		t.Fatal("expected unauthorized auth to stop refresh attempts")
 	}
-	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
+	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second, 0); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
 	}
 }

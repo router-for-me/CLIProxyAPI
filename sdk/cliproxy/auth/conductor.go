@@ -204,6 +204,11 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 
 	requestPrepareLocks sync.Map
+
+	// providerRefreshSems limits concurrent token refreshes per provider.
+	// Map key is lowercase provider name; value is a chan struct{} semaphore.
+	providerRefreshSems   map[string]chan struct{}
+	providerRefreshSemsMu sync.RWMutex
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -447,6 +452,95 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		m.clearHomeRuntimeAuths()
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.rebuildProviderRefreshSems(cfg)
+}
+
+const defaultMaxConcurrentRefreshPerProvider = 3
+
+// rebuildProviderRefreshSems recreates per-provider semaphores based on config.
+// Called on SetConfig; existing semaphores (and goroutines waiting on them) are
+// replaced; in-flight refreshes that already acquired the old semaphore finish
+// normally because the defer still releases the channel they hold.
+func (m *Manager) rebuildProviderRefreshSems(cfg *internalconfig.Config) {
+	limit := defaultMaxConcurrentRefreshPerProvider
+	if cfg != nil && cfg.AuthMaxConcurrentRefreshPerProvider > 0 {
+		limit = cfg.AuthMaxConcurrentRefreshPerProvider
+	}
+	// Build semaphores keyed by provider from the executors map (keys are already provider names).
+	m.mu.RLock()
+	providers := make([]string, 0, len(m.executors))
+	for provider := range m.executors {
+		providers = append(providers, strings.ToLower(provider))
+	}
+	m.mu.RUnlock()
+
+	sems := make(map[string]chan struct{}, len(providers))
+	for _, p := range providers {
+		if _, exists := sems[p]; !exists {
+			sems[p] = make(chan struct{}, limit)
+		}
+	}
+	m.providerRefreshSemsMu.Lock()
+	m.providerRefreshSems = sems
+	m.providerRefreshSemsMu.Unlock()
+}
+
+// providerRefreshSem returns the semaphore channel for the given provider,
+// or nil if no limit is configured.
+func (m *Manager) providerRefreshSem(provider string) chan struct{} {
+	if m == nil {
+		return nil
+	}
+	m.providerRefreshSemsMu.RLock()
+	sem := m.providerRefreshSems[strings.ToLower(provider)]
+	m.providerRefreshSemsMu.RUnlock()
+	return sem
+}
+
+const (
+	defaultCircuitBreakerThreshold       = 5
+	defaultCircuitBreakerCooldownMinutes = 10
+)
+
+// applyCircuitBreaker checks whether auth has accumulated enough consecutive transient
+// failures to open the circuit. Must be called with m.mu held.
+func (m *Manager) applyCircuitBreaker(auth *Auth, statusCode int, now time.Time) {
+	if auth == nil || m == nil {
+		return
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	threshold := defaultCircuitBreakerThreshold
+	cooldown := defaultCircuitBreakerCooldownMinutes * time.Minute
+	if cfg != nil {
+		if cfg.AuthCircuitBreakerThreshold < 0 {
+			return // disabled
+		}
+		if cfg.AuthCircuitBreakerThreshold > 0 {
+			threshold = cfg.AuthCircuitBreakerThreshold
+		}
+		if cfg.AuthCircuitBreakerCooldownMinutes > 0 {
+			cooldown = time.Duration(cfg.AuthCircuitBreakerCooldownMinutes) * time.Minute
+		}
+	}
+
+	switch statusCode {
+	case 408, 500, 502, 503, 504:
+		// transient — count toward circuit breaker
+	default:
+		// non-transient error: reset counter so isolated 401/429 doesn't accumulate
+		auth.ConsecutiveTransientFailures = 0
+		return
+	}
+
+	auth.ConsecutiveTransientFailures++
+	if auth.ConsecutiveTransientFailures >= threshold {
+		next := now.Add(cooldown)
+		if auth.NextRetryAfter.IsZero() || auth.NextRetryAfter.Before(next) {
+			auth.NextRetryAfter = next
+			log.Warnf("circuit breaker opened: %s/%s after %d consecutive transient failures, retry after %s",
+				auth.Provider, auth.ID, auth.ConsecutiveTransientFailures, next.Format(time.RFC3339))
+		}
+	}
 }
 
 // HomeEnabled reports whether the home control plane integration is enabled in the runtime config.
@@ -2754,11 +2848,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 				}
+				auth.ConsecutiveTransientFailures = 0
 				auth.UpdatedAt = now
 				shouldResumeModel = true
 				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
+				auth.ConsecutiveTransientFailures = 0
 			}
 		} else {
 			if result.Model != "" {
@@ -2864,9 +2960,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
+					m.applyCircuitBreaker(auth, statusCodeFromResult(result.Error), now)
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				m.applyCircuitBreaker(auth, statusCodeFromResult(result.Error), now)
 			}
 		}
 
@@ -4762,6 +4860,17 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if auth == nil || exec == nil {
 		return
 	}
+
+	// Acquire per-provider semaphore to limit concurrent refresh storms.
+	if sem := m.providerRefreshSem(auth.Provider); sem != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
+		defer func() { <-sem }()
+	}
+
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)

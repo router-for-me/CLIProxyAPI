@@ -84,6 +84,25 @@ type Config struct {
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 
+	// AuthRefreshJitterMinutes adds a per-credential random jitter (0..N minutes) to refresh
+	// scheduling. Spreads simultaneous refreshes when many credentials share similar expiry
+	// times (e.g. after bulk onboarding). When <= 0, no jitter is applied.
+	AuthRefreshJitterMinutes int `yaml:"auth-refresh-jitter-minutes" json:"auth-refresh-jitter-minutes"`
+
+	// AuthMaxConcurrentRefreshPerProvider limits how many token refresh operations can run
+	// simultaneously for the same provider. Prevents bursts of refreshes from overwhelming
+	// provider token endpoints. When <= 0, the default (3) is used.
+	AuthMaxConcurrentRefreshPerProvider int `yaml:"auth-max-concurrent-refresh-per-provider" json:"auth-max-concurrent-refresh-per-provider"`
+
+	// AuthCircuitBreakerThreshold is the number of consecutive transient errors (5xx/408)
+	// required before a credential's circuit is opened. When <= 0, the default (5) is used.
+	// Set to -1 to disable the circuit breaker entirely.
+	AuthCircuitBreakerThreshold int `yaml:"auth-circuit-breaker-threshold" json:"auth-circuit-breaker-threshold"`
+
+	// AuthCircuitBreakerCooldownMinutes is how long (in minutes) to hold a credential in the
+	// open-circuit state before allowing it to be retried. When <= 0, the default (10) is used.
+	AuthCircuitBreakerCooldownMinutes int `yaml:"auth-circuit-breaker-cooldown-minutes" json:"auth-circuit-breaker-cooldown-minutes"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
