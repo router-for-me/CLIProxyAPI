@@ -226,7 +226,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if errInstall != nil {
 		if unloadedBeforeWrite {
 			h.mu.Lock()
-			cfgSnapshot := h.snapshotConfigLocked()
+			cfgSnapshot := h.reloadSnapshotConfigLocked()
 			h.mu.Unlock()
 			h.reloadConfigAfterManagementSave(c.Request.Context(), cfgSnapshot)
 		}
@@ -271,7 +271,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		})
 		return
 	}
-	cfgSnapshot := h.snapshotConfigLocked()
+	cfgSnapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
 
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)

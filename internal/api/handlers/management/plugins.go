@@ -373,7 +373,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 			return
 		}
 	}
-	cfgSnapshot := h.snapshotConfigLocked()
+	cfgSnapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
 
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)

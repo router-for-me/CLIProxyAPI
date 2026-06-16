@@ -51,6 +51,39 @@ func captureConfigReload(h *Handler) (<-chan *config.Config, <-chan struct{}) {
 	return reloads, done
 }
 
+func TestConfigReloadGenerationSkipsOlderSnapshot(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample": pluginConfigFromYAML(t, "enabled: true\nmode: old\n"),
+				},
+			},
+		},
+	}
+	reloadedModes := make([]string, 0, 1)
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+		reloadedModes = append(reloadedModes, pluginRawScalarValue(t, cfg.Plugins.Configs["sample"], "mode"))
+	})
+
+	h.mu.Lock()
+	older := h.reloadSnapshotConfigLocked()
+	item := h.cfg.Plugins.Configs["sample"]
+	setPluginRawScalarValue(t, &item.Raw, "mode", "new")
+	h.cfg.Plugins.Configs["sample"] = item
+	newer := h.reloadSnapshotConfigLocked()
+	h.mu.Unlock()
+
+	h.reloadConfigAfterManagementSave(context.Background(), newer)
+	h.reloadConfigAfterManagementSave(context.Background(), older)
+
+	if len(reloadedModes) != 1 || reloadedModes[0] != "new" {
+		t.Fatalf("reloaded modes = %#v, want only new snapshot", reloadedModes)
+	}
+}
+
 func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	t.Parallel()
 
