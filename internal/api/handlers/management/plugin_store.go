@@ -226,9 +226,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if errInstall != nil {
 		if unloadedBeforeWrite {
 			h.mu.Lock()
-			reloadCfg := h.cfg
+			cfgSnapshot := h.snapshotConfigLocked()
 			h.mu.Unlock()
-			h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
+			h.reloadConfigAfterManagementSave(c.Request.Context(), cfgSnapshot)
 		}
 		if errors.Is(errInstall, pluginstore.ErrLoadedPluginLocked) {
 			c.JSON(http.StatusConflict, gin.H{
@@ -271,10 +271,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		})
 		return
 	}
-	reloadCfg := h.cfg
+	cfgSnapshot := h.snapshotConfigLocked()
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), reloadCfg)
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
 	log.WithFields(log.Fields{
 		"plugin_id":   result.ID,
 		"source_id":   source.ID,

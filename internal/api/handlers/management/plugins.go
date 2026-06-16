@@ -226,15 +226,13 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 		return
 	}
 	h.cfg.Plugins.Configs[id] = updated
-	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
-		h.mu.Unlock()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+	cfgSnapshot, okSnapshot := h.saveConfigAndSnapshotLocked(c)
+	h.mu.Unlock()
+	if !okSnapshot {
 		return
 	}
-	reloadCfg := h.cfg
-	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), reloadCfg)
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
@@ -375,10 +373,10 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 			return
 		}
 	}
-	reloadCfg := h.cfg
+	cfgSnapshot := h.snapshotConfigLocked()
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), reloadCfg)
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{
 		"status":             "deleted",
 		"id":                 htmlsanitize.String(id),

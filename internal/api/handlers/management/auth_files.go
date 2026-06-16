@@ -28,7 +28,6 @@ import (
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -1267,13 +1266,11 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "config api key entry not found"})
 			return
 		}
-		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
-			h.mu.Unlock()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+		cfgSnapshot, okSnapshot := h.saveConfigAndSnapshotLocked(c)
+		h.mu.Unlock()
+		if !okSnapshot {
 			return
 		}
-		cfgSnapshot := h.cfg
-		h.mu.Unlock()
 		h.reloadConfigAfterManagementSave(ctx, cfgSnapshot)
 		if h.tokenStore != nil {
 			_ = h.tokenStore.Delete(ctx, targetAuth.ID)
