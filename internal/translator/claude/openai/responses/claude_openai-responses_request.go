@@ -354,13 +354,40 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 				}
 
-				asst := []byte(`{"role":"assistant","content":[]}`)
-				for _, partJSON := range pendingReasoningParts {
-					asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+				// FIX (parallel-tool-merge): If the last message in the array is already
+				// an assistant message whose content is an array (i.e., a tool_use container),
+				// append this tool_use to that message instead of creating a new assistant
+				// message. This avoids producing consecutive same-role messages, which violate
+				// the Anthropic Messages API requirement that user/assistant strictly alternate
+				// and which AWS Bedrock rejects as TOOL_USE_RESULT_MISMATCH (HTTP 400).
+				appendedToolUse := false
+				if msgsCount := gjson.GetBytes(out, "messages.#").Int(); msgsCount > 0 {
+					lastIdx := msgsCount - 1
+					lastRole := gjson.GetBytes(out, fmt.Sprintf("messages.%d.role", lastIdx)).String()
+					lastContent := gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
+					if lastRole == "assistant" && lastContent.IsArray() {
+						// Attach any pending (signed) reasoning blocks to THIS assistant
+						// message BEFORE the tool_use, then clear them. Otherwise they
+						// linger and get flushed later (e.g. just before the
+						// function_call_output), moving the signed thinking block after
+						// the tool call/result instead of before the call.
+						for _, partJSON := range pendingReasoningParts {
+							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), []byte(partJSON))
+						}
+						pendingReasoningParts = nil
+						out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), toolUse)
+						appendedToolUse = true
+					}
 				}
-				pendingReasoningParts = nil
-				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				if !appendedToolUse {
+					asst := []byte(`{"role":"assistant","content":[]}`)
+					for _, partJSON := range pendingReasoningParts {
+						asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+					}
+					pendingReasoningParts = nil
+					asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
+					out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				}
 
 			case "function_call_output":
 				flushPendingReasoning()
@@ -371,9 +398,30 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
 				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
 
-				usr := []byte(`{"role":"user","content":[]}`)
-				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+				// FIX (parallel-tool-merge): Mirror of the function_call branch.
+				// If the last message is already a user message whose content is an array
+				// (i.e., a tool_result container), append this tool_result instead of creating
+				// a new user message, to keep user/assistant strictly alternating.
+				appendedToolResult := false
+				if msgsCount := gjson.GetBytes(out, "messages.#").Int(); msgsCount > 0 {
+					lastIdx := msgsCount - 1
+					lastRole := gjson.GetBytes(out, fmt.Sprintf("messages.%d.role", lastIdx)).String()
+					lastContent := gjson.GetBytes(out, fmt.Sprintf("messages.%d.content", lastIdx))
+					// Only append into the previous user message when it is a genuine
+					// tool_result container (every block is a tool_result). A user array
+					// holding multi-part text / image / document input is NOT a
+					// tool_result container; appending a tool_result into it would create
+					// an invalid mixed-content turn, so fall through to a new user message.
+					if lastRole == "user" && lastContent.IsArray() && isAllToolResultBlocks(lastContent) {
+						out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", lastIdx), toolResult)
+						appendedToolResult = true
+					}
+				}
+				if !appendedToolResult {
+					usr := []byte(`{"role":"user","content":[]}`)
+					usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
+					out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+				}
 			}
 			return true
 		})
@@ -436,7 +484,33 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
+	// Defense-in-depth pairing sanitization: reorder any non-tool message that
+	// got wedged between an assistant tool_use and its matching user tool_result
+	// so the pair stays contiguous. AWS Bedrock rejects unpaired/interleaved
+	// tool_use/tool_result sequences with HTTP 400.
+	out = reorderClaudeToolUseResultPairs(out)
+
 	return out
+}
+
+// isAllToolResultBlocks reports whether every block in a (user message) content
+// array is a tool_result. Used to decide whether a tool_result may be appended
+// into the previous user message: a multi-part text/image/document user array is
+// NOT a tool_result container and must not absorb a tool_result block.
+func isAllToolResultBlocks(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	blocks := content.Array()
+	if len(blocks) == 0 {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Get("type").String() != "tool_result" {
+			return false
+		}
+	}
+	return true
 }
 
 func convertResponsesReasoningToClaudeThinking(item gjson.Result) []byte {
