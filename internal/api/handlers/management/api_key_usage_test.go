@@ -24,7 +24,6 @@ func sumRecentRequestBuckets(buckets []coreauth.RecentRequestBucket) (int64, int
 
 func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{

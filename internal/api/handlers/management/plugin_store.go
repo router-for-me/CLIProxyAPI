@@ -198,15 +198,15 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 
-	pluginIsLoaded := func() bool { return pluginLoaded(host, id) }
+	pluginIsBusy := func() bool { return pluginBusy(host, id) }
 	unloadedBeforeWrite := false
 	result, errInstall := client.Install(installCtx, plugin, pluginstore.InstallOptions{
 		PluginsDir:   pluginsDir,
 		GOOS:         goos,
 		GOARCH:       goarch,
-		PluginLoaded: pluginIsLoaded,
+		PluginLoaded: pluginIsBusy,
 		BeforeWrite: func() error {
-			if !pluginIsLoaded() {
+			if !pluginIsBusy() {
 				return nil
 			}
 			if host == nil {
@@ -215,8 +215,8 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			log.WithFields(log.Fields{
 				"plugin_id": id,
 				"version":   plugin.Version,
-			}).Info("pluginstore: unloading loaded plugin before install")
-			if !host.UnloadPlugin(id) && pluginIsLoaded() {
+			}).Info("pluginstore: unloading busy plugin before install")
+			if !host.UnloadPlugin(id) && pluginIsBusy() {
 				return pluginstore.ErrLoadedPluginLocked
 			}
 			unloadedBeforeWrite = true
@@ -226,9 +226,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if errInstall != nil {
 		if unloadedBeforeWrite {
 			h.mu.Lock()
-			reloadCfg := h.cfg
+			cfgSnapshot := h.reloadSnapshotConfigLocked()
 			h.mu.Unlock()
-			h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
+			h.reloadConfigAfterManagementSave(c.Request.Context(), cfgSnapshot)
 		}
 		if errors.Is(errInstall, pluginstore.ErrLoadedPluginLocked) {
 			c.JSON(http.StatusConflict, gin.H{
@@ -271,10 +271,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		})
 		return
 	}
-	reloadCfg := h.cfg
+	cfgSnapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSave(c.Request.Context(), reloadCfg)
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
 	log.WithFields(log.Fields{
 		"plugin_id":   result.ID,
 		"source_id":   source.ID,
@@ -560,9 +560,9 @@ func pluginLocalStatuses(pluginsEnabled bool, pluginsDir string, configs map[str
 	return statuses, nil
 }
 
-func pluginLoaded(host *pluginhost.Host, id string) bool {
+func pluginBusy(host *pluginhost.Host, id string) bool {
 	if host == nil {
 		return false
 	}
-	return host.PluginLoaded(id)
+	return host.PluginBusy(id)
 }
