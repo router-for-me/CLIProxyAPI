@@ -18,17 +18,24 @@ func appendCodexWebSearchServerToolUse(output []byte, params *ConvertCodexRespon
 	if params.WebSearchToolUseIDs == nil {
 		params.WebSearchToolUseIDs = make(map[string]struct{})
 	}
+	query := codexWebSearchQuery(root, item)
+	alreadyStarted := false
 	if _, ok := params.WebSearchToolUseIDs[toolUseID]; ok {
-		return output
+		alreadyStarted = true
+		if query == "" {
+			return output
+		}
 	}
 
-	output = append(output, finalizeCodexThinkingBlock(params)...)
-	template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`)
-	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
-	template, _ = sjson.SetBytes(template, "content_block.id", toolUseID)
-	output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
+	if !alreadyStarted {
+		output = append(output, finalizeCodexThinkingBlock(params)...)
+		template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`)
+		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+		template, _ = sjson.SetBytes(template, "content_block.id", toolUseID)
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
+	}
 
-	if query := codexWebSearchQuery(root, item); query != "" {
+	if query != "" {
 		partialJSON, _ := json.Marshal(map[string]string{"query": query})
 		delta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 		delta, _ = sjson.SetBytes(delta, "index", params.BlockIndex)
@@ -36,11 +43,13 @@ func appendCodexWebSearchServerToolUse(output []byte, params *ConvertCodexRespon
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", delta, 2)
 	}
 
-	stop := []byte(`{"type":"content_block_stop","index":0}`)
-	stop, _ = sjson.SetBytes(stop, "index", params.BlockIndex)
-	output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", stop, 2)
-	params.WebSearchToolUseIDs[toolUseID] = struct{}{}
-	params.BlockIndex++
+	if !alreadyStarted {
+		stop := []byte(`{"type":"content_block_stop","index":0}`)
+		stop, _ = sjson.SetBytes(stop, "index", params.BlockIndex)
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", stop, 2)
+		params.WebSearchToolUseIDs[toolUseID] = struct{}{}
+		params.BlockIndex++
+	}
 	return output
 }
 
@@ -54,6 +63,9 @@ func appendCodexWebSearchToolResult(output []byte, params *ConvertCodexResponseT
 		params.WebSearchToolResultIDs = make(map[string]struct{})
 	}
 	if _, ok := params.WebSearchToolResultIDs[toolUseID]; ok {
+		return output
+	}
+	if codexWebSearchQuery(root, item) == "" && len(codexWebSearchResultContent(root, item)) == 0 && item.Get("action").Exists() == false {
 		return output
 	}
 

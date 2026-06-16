@@ -123,10 +123,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		params.BlockIndex++
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
-	case "response.web_search_call.searching":
-		output = appendCodexWebSearchServerToolUse(output, params, rootResult, rootResult)
-	case "response.web_search_call.completed":
-		output = appendCodexWebSearchToolResult(output, params, rootResult, rootResult)
+	case "response.web_search_call.searching", "response.web_search_call.completed", "response.web_search_call.in_progress":
+		// Wait for populated web_search_call items on output_item.done.
 	case "response.completed", "response.incomplete":
 		template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 		responseData := rootResult.Get("response")
@@ -171,7 +169,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.ThinkingSummarySeen = false
 			params.ThinkingSignature = itemResult.Get("encrypted_content").String()
 		case "web_search_call":
-			output = appendCodexWebSearchServerToolUse(output, params, rootResult, itemResult)
+			// Defer server_tool_use until output_item.done carries action/query.
 		}
 	case "response.output_item.done":
 		itemResult := rootResult.Get("item")

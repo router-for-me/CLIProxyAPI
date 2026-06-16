@@ -518,9 +518,11 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsClaudeServerToolBl
 	var param any
 
 	chunks := [][]byte{
-		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
-		[]byte(`data: {"type":"response.output_item.added","item":{"type":"web_search_call","id":"ws_123","status":"searching","action":{"type":"search","query":"search weather"}}}`),
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"id":"ws_123","type":"web_search_call","status":"in_progress"}}`),
+		[]byte(`data: {"type":"response.web_search_call.searching","item_id":"ws_123"}`),
 		[]byte(`data: {"type":"response.web_search_call.completed","item_id":"ws_123"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"search weather"}}}`),
 		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2}}}`),
 	}
 	var outputs [][]byte
@@ -544,6 +546,9 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallEmitsClaudeServerToolBl
 	if serverToolIndex < 0 || resultIndex < 0 || resultIndex < serverToolIndex {
 		t.Fatalf("web_search_tool_result must follow server_tool_use:\n%s", outputText)
 	}
+	if !strings.Contains(outputText, `partial_json`) || !strings.Contains(outputText, "search weather") {
+		t.Fatalf("expected web search query delta after populated output_item.done:\n%s", outputText)
+	}
 }
 
 func TestConvertCodexResponseToClaude_StreamWebSearchCallReusesFallbackToolUseID(t *testing.T) {
@@ -553,8 +558,9 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallReusesFallbackToolUseID
 
 	chunks := [][]byte{
 		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
-		[]byte(`data: {"type":"response.output_item.added","item":{"type":"web_search_call","status":"searching","action":{"type":"search","query":"search weather"}}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"web_search_call","status":"in_progress"}}`),
 		[]byte(`data: {"type":"response.web_search_call.completed","item_id":"ws_from_upstream"}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_from_upstream","type":"web_search_call","status":"completed","action":{"type":"search","query":"search weather"}}}`),
 		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2}}}`),
 	}
 	var outputs [][]byte
@@ -566,7 +572,7 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallReusesFallbackToolUseID
 	if strings.Count(outputText, `"type":"server_tool_use"`) != 1 {
 		t.Fatalf("expected exactly one server_tool_use block, got output:\n%s", outputText)
 	}
-	if !strings.Contains(outputText, `"tool_use_id":"web_search_0"`) {
+	if !strings.Contains(outputText, `"tool_use_id":"ws_from_upstream"`) {
 		t.Fatalf("expected web_search_tool_result to reuse fallback tool_use_id:\n%s", outputText)
 	}
 }
