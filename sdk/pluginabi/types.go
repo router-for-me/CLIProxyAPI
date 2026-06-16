@@ -3,7 +3,11 @@ package pluginabi
 import "encoding/json"
 
 const (
-	ABIVersion    uint32 = 1
+	// ABIVersion tracks the native C ABI shape (native plugin exports).
+	ABIVersion uint32 = 1
+	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
+	// Increment only for breaking RPC changes. New capabilities such as ModelRouter
+	// are gated by capability flags and method names while the version stays at 1.
 	SchemaVersion uint32 = 1
 )
 
@@ -27,6 +31,8 @@ const (
 
 	// MethodSchedulerPick asks a scheduler plugin to select an auth candidate.
 	MethodSchedulerPick = "scheduler.pick"
+	// MethodModelRoute asks a router plugin to select a plugin executor for a matching request.
+	MethodModelRoute = "model.route"
 
 	MethodExecutorIdentifier    = "executor.identifier"
 	MethodExecutorExecute       = "executor.execute"

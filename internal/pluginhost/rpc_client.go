@@ -44,9 +44,15 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if client == nil {
 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
 	}
-	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{ConfigYAML: bytes.Clone(configYAML)})
+	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
+		ConfigYAML:    bytes.Clone(configYAML),
+		SchemaVersion: pluginabi.SchemaVersion,
+	})
 	if errCall != nil {
 		return pluginapi.Plugin{}, errCall
+	}
+	if resp.SchemaVersion > pluginabi.SchemaVersion {
+		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
 	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
 	plugin := pluginapi.Plugin{
@@ -72,6 +78,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.Scheduler {
 		plugin.Capabilities.Scheduler = adapter
+	}
+	if resp.Capabilities.ModelRouter {
+		plugin.Capabilities.ModelRouter = adapter
 	}
 	if resp.Capabilities.Executor {
 		plugin.Capabilities.Executor = rpcProviderExecutor{rpcPluginAdapter: adapter}
@@ -156,6 +165,9 @@ func sanitizePluginRequest(request any) any {
 			req.Candidates[index].Metadata = sanitizePluginMetadata(req.Candidates[index].Metadata)
 		}
 		return req
+	case pluginapi.ModelRouteRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case pluginapi.ExecutorRequest:
 		req.HTTPClient = nil
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
@@ -170,6 +182,9 @@ func sanitizePluginRequest(request any) any {
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcRequestInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcModelRouteRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcResponseInterceptRequest:
@@ -307,6 +322,15 @@ func (a *rpcPluginAdapter) ModelsForAuth(ctx context.Context, req pluginapi.Auth
 
 func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
 	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
+}
+
+func (a *rpcPluginAdapter) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.ModelRouteResponse](ctx, a.client, pluginabi.MethodModelRoute, rpcModelRouteRequest{
+		ModelRouteRequest: req,
+		HostCallbackID:    callbackID,
+	})
 }
 
 func callPluginIdentifier(client pluginClient, method string) string {

@@ -302,6 +302,7 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 		Query:                   cloneValues(req.Query),
 		Alt:                     req.Alt,
 		SkipInterceptorPluginID: skipPluginID,
+		SkipRouterPluginID:      skipPluginID,
 	}
 }
 

@@ -79,6 +79,9 @@ type Capabilities struct {
 	FrontendAuthProviderExclusive bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
+	// or a built-in provider before model-to-provider resolution and auth selection.
+	ModelRouter ModelRouter
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -456,6 +459,12 @@ type Scheduler interface {
 	Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error)
 }
 
+// ModelRouter routes matching requests to a plugin executor, the router's own executor,
+// or a built-in provider before model-to-provider resolution and auth selection.
+type ModelRouter interface {
+	RouteModel(context.Context, ModelRouteRequest) (ModelRouteResponse, error)
+}
+
 // SchedulerPickRequest describes the routing context offered to a scheduler plugin.
 type SchedulerPickRequest struct {
 	// Plugin is the metadata of the plugin being executed.
@@ -506,6 +515,62 @@ type SchedulerPickResponse struct {
 	DelegateBuiltin string
 	// Handled reports whether the plugin made a scheduling decision.
 	Handled bool
+}
+
+// ModelRouteRequest describes the original request context offered to a model router plugin.
+type ModelRouteRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata
+	// PluginID is the host-local plugin identifier for the router being executed.
+	PluginID string
+	// SourceFormat is the original client protocol format.
+	SourceFormat string
+	// RequestedModel is the client-requested model before provider/auth selection.
+	RequestedModel string
+	// Stream reports whether the request expects streaming output.
+	Stream bool
+	// Headers contains inbound request headers.
+	Headers http.Header
+	// Query contains inbound query parameters.
+	Query url.Values
+	// Body contains the raw client request payload.
+	Body []byte
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
+	Metadata map[string]any
+	// AvailableProviders lists built-in provider keys that currently have auth registered.
+	// A router may target one of them via TargetKind=provider to run the request through the
+	// built-in auth/executor path. Treat as read-only.
+	AvailableProviders []string
+}
+
+// ModelRouteTargetKind selects the execution target for a handled model route decision.
+type ModelRouteTargetKind string
+
+const (
+	// ModelRouteTargetSelf routes to the router plugin's own executor.
+	ModelRouteTargetSelf ModelRouteTargetKind = "self"
+	// ModelRouteTargetExecutor routes to a specific plugin executor.
+	ModelRouteTargetExecutor ModelRouteTargetKind = "executor"
+	// ModelRouteTargetProvider routes through the built-in auth/executor path.
+	ModelRouteTargetProvider ModelRouteTargetKind = "provider"
+)
+
+// ModelRouteResponse returns a model router plugin decision.
+//
+// When Handled is true, set TargetKind to one of self, executor, or provider.
+// Target carries the plugin id for executor routes and the provider key for provider routes.
+type ModelRouteResponse struct {
+	// Handled reports whether the plugin made a routing decision.
+	Handled bool
+	// TargetKind selects the execution target when Handled is true.
+	TargetKind ModelRouteTargetKind
+	// Target is the plugin executor id for executor routes and the provider key for provider routes.
+	Target string
+	// TargetModel is the model name used on the provider path. When empty, the host keeps
+	// the original client-requested model. Only meaningful with TargetKind=provider.
+	TargetModel string
+	// Reason is an optional diagnostic reason for the route decision.
+	Reason string
 }
 
 // ProviderExecutor handles model execution, streaming, HTTP bridging, and token counting.

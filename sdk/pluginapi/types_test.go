@@ -16,6 +16,7 @@ var _ ModelProvider = (*compileTimePlugin)(nil)
 var _ AuthProvider = (*compileTimePlugin)(nil)
 var _ FrontendAuthProvider = (*compileTimePlugin)(nil)
 var _ Scheduler = (*compileTimePlugin)(nil)
+var _ ModelRouter = (*compileTimePlugin)(nil)
 var _ ProviderExecutor = (*compileTimePlugin)(nil)
 var _ HostHTTPClient = (*compileTimePlugin)(nil)
 var _ RequestTranslator = (*compileTimePlugin)(nil)
@@ -327,6 +328,51 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	}
 }
 
+func TestModelRouteTypesExposeRoutingFields(t *testing.T) {
+	request := ModelRouteRequest{
+		Plugin:         Metadata{Name: "router-plugin"},
+		PluginID:       "router-plugin-id",
+		SourceFormat:   "anthropic",
+		RequestedModel: "claude-sonnet",
+		Stream:         true,
+		Headers:        http.Header{"X-Test": []string{"1"}},
+		Query:          url.Values{"beta": []string{"true"}},
+		Body:           []byte(`{"model":"claude-sonnet"}`),
+		Metadata:       map[string]any{"tenant": "demo"},
+	}
+	response := ModelRouteResponse{
+		Handled:    true,
+		TargetKind: ModelRouteTargetExecutor,
+		Target:     "claude-websearch-plugin",
+		Reason:     "typed websearch",
+	}
+
+	if request.Plugin.Name != "router-plugin" {
+		t.Fatalf("Plugin.Name = %q", request.Plugin.Name)
+	}
+	if request.PluginID != "router-plugin-id" {
+		t.Fatalf("PluginID = %q", request.PluginID)
+	}
+	if request.SourceFormat != "anthropic" || request.RequestedModel != "claude-sonnet" || !request.Stream {
+		t.Fatalf("request main fields = %#v", request)
+	}
+	if request.Headers.Get("X-Test") != "1" {
+		t.Fatalf("Headers = %#v", request.Headers)
+	}
+	if request.Query.Get("beta") != "true" {
+		t.Fatalf("Query = %#v", request.Query)
+	}
+	if string(request.Body) != `{"model":"claude-sonnet"}` {
+		t.Fatalf("Body = %q", request.Body)
+	}
+	if request.Metadata["tenant"] != "demo" {
+		t.Fatalf("Metadata = %#v", request.Metadata)
+	}
+	if !response.Handled || response.Target != "claude-websearch-plugin" || response.Reason != "typed websearch" {
+		t.Fatalf("ModelRouteResponse = %#v", response)
+	}
+}
+
 func (compileTimePlugin) RegisterModels(context.Context, ModelRegistrationRequest) (ModelRegistrationResponse, error) {
 	return ModelRegistrationResponse{}, nil
 }
@@ -363,6 +409,10 @@ func (compileTimePlugin) Authenticate(context.Context, FrontendAuthRequest) (Fro
 
 func (compileTimePlugin) Pick(context.Context, SchedulerPickRequest) (SchedulerPickResponse, error) {
 	return SchedulerPickResponse{}, nil
+}
+
+func (compileTimePlugin) RouteModel(context.Context, ModelRouteRequest) (ModelRouteResponse, error) {
+	return ModelRouteResponse{}, nil
 }
 
 func (compileTimePlugin) Execute(context.Context, ExecutorRequest) (ExecutorResponse, error) {

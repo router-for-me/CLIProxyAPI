@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 
@@ -180,6 +181,21 @@ func contextWithHeaders(headers http.Header) context.Context {
 			c.Request.Header.Add(key, value)
 		}
 	}
+	return context.WithValue(context.Background(), "gin", c)
+}
+
+// contextWithQuery builds a context whose embedded gin request carries the given
+// query parameters, mirroring how plain HTTP requests expose inbound query to
+// queryFromContext.
+func contextWithQuery(query url.Values) context.Context {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	target := "/v1/chat/completions"
+	if encoded := query.Encode(); encoded != "" {
+		target = target + "?" + encoded
+	}
+	c.Request = httptest.NewRequest(http.MethodPost, target, nil)
 	return context.WithValue(context.Background(), "gin", c)
 }
 

@@ -16,6 +16,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `request-normalizer/`: request normalization capability only.
 - `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.5` requests to the priority service tier when enabled.
 - `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
+- `claude-web-search-router/`: ModelRouter + executor for Claude Code built-in `web_search` (antigravity / codex / xai / Tavily). See `claude-web-search-router/README.md`.
 - `response-translator/`: response translation capability only.
 - `response-normalizer/`: response normalization capability only.
 - `thinking/`: thinking applier capability only.
