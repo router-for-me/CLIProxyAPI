@@ -707,6 +707,63 @@ func TestHostApplyConfigSerializesLifecycleCalls(t *testing.T) {
 	}
 }
 
+func TestHostPluginBusyReportsLoadingPlugin(t *testing.T) {
+	h, cfg, openStarted, releaseOpen := newBlockingOpenHost(t)
+	t.Cleanup(h.ShutdownAll)
+
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, openStarted, "plugin open start")
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false while plugin is still loading")
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false, want true while plugin is loading")
+	}
+
+	releaseOpen()
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+	if !h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = false, want true after load")
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false, want true after load")
+	}
+}
+
+func TestHostUnloadWaitsForBlockingLoad(t *testing.T) {
+	h, cfg, openStarted, releaseOpen := newBlockingOpenHost(t)
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, openStarted, "plugin open start")
+
+	unloadDone := make(chan bool)
+	go func() {
+		unloadDone <- h.UnloadPlugin("alpha")
+	}()
+	select {
+	case <-unloadDone:
+		t.Fatal("UnloadPlugin completed while ApplyConfig was still loading")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseOpen()
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+	if ok := waitForHostTestBool(t, unloadDone, "UnloadPlugin completion"); !ok {
+		t.Fatal("UnloadPlugin returned false, want true after loading completes")
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true, want false after unload")
+	}
+}
+
 func TestHostUnloadAndShutdownWaitForBlockingRegister(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -800,6 +857,49 @@ func (c *capturePluginClient) Call(ctx context.Context, method string, request [
 }
 
 func (c *capturePluginClient) Shutdown() {}
+
+type blockingOpenLoader struct {
+	inner     *testSymbolLoader
+	started   chan struct{}
+	release   <-chan struct{}
+	startOnce sync.Once
+}
+
+func (l *blockingOpenLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
+	l.startOnce.Do(func() { close(l.started) })
+	<-l.release
+	return l.inner.Open(file, host)
+}
+
+func newBlockingOpenHost(t *testing.T) (*Host, *config.Config, <-chan struct{}, func()) {
+	t.Helper()
+
+	inner := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	inner.lookups["alpha"] = newTestSymbolLookup(plugin)
+
+	openStarted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseOpen := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseOpen)
+
+	h := NewForTest(&blockingOpenLoader{
+		inner:   inner,
+		started: openStarted,
+		release: release,
+	})
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+		},
+	}
+	return h, cfg, openStarted, releaseOpen
+}
 
 func newBlockingRegisterHost(t *testing.T) (*Host, *config.Config, <-chan struct{}, func()) {
 	t.Helper()

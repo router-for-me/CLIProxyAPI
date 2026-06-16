@@ -338,7 +338,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	if pluginLoaded(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginLoaded(host, id) {
+	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":            "plugin_delete_requires_restart",
 			"message":          "loaded plugin cannot be deleted while the server is running",

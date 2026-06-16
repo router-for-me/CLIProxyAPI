@@ -39,6 +39,7 @@ type Host struct {
 	mu                     sync.Mutex
 	loader                 pluginLoader
 	loaded                 map[string]*loadedPlugin
+	loading                map[string]struct{}
 	fused                  map[string]string
 	runtimeConfig          *config.Config
 	authManager            *coreauth.Manager
@@ -65,6 +66,7 @@ func New() *Host {
 	h := &Host{
 		loader:                 defaultPluginLoader(),
 		loaded:                 make(map[string]*loadedPlugin),
+		loading:                make(map[string]struct{}),
 		fused:                  make(map[string]string),
 		modelClientIDs:         make(map[string]struct{}),
 		executorModelClientIDs: make(map[string]struct{}),
@@ -137,6 +139,24 @@ func (h *Host) PluginLoaded(id string) bool {
 	return ok
 }
 
+// PluginBusy reports whether a plugin dynamic library is loaded or being loaded.
+func (h *Host) PluginBusy(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.loaded[id]; ok {
+		return true
+	}
+	_, ok := h.loading[id]
+	return ok
+}
+
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	if h == nil {
 		return
@@ -189,12 +209,18 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		}
 
 		if lp == nil {
+			h.mu.Lock()
+			h.loading[file.ID] = struct{}{}
+			h.mu.Unlock()
+
 			loaded, errLoad := h.load(file)
+			h.mu.Lock()
+			delete(h.loading, file.ID)
 			if errLoad != nil {
+				h.mu.Unlock()
 				log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, errLoad)
 				continue
 			}
-			h.mu.Lock()
 			// ApplyConfig, UnloadPlugin, and ShutdownAll are serialized by applyMu,
 			// so a nil read cannot race into a duplicate load.
 			lp = loaded
@@ -301,6 +327,7 @@ func (h *Host) ShutdownAll() {
 		})
 	}
 	h.loaded = make(map[string]*loadedPlugin)
+	h.loading = make(map[string]struct{})
 	h.modelClientIDs = make(map[string]struct{})
 	h.executorModelClientIDs = make(map[string]struct{})
 	h.modelProviders = make(map[string]string)
