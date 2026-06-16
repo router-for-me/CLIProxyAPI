@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -335,14 +336,20 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					pendingReasoningParts = append(pendingReasoningParts, string(thinkingPart))
 				}
 
-			case "function_call":
-				// Map to assistant tool_use
+			case "function_call", "custom_tool_call":
+				// Map to assistant tool_use. custom_tool_call is the freeform
+				// form (apply_patch) carrying a bare `input` text instead of
+				// JSON `arguments`; wrap it back into the {"input": ...} object
+				// the downgraded function tool expects.
 				callID := item.Get("call_id").String()
 				if callID == "" {
 					callID = genToolCallID()
 				}
 				name := item.Get("name").String()
 				argsStr := item.Get("arguments").String()
+				if typ == "custom_tool_call" {
+					argsStr = translatorcommon.WrapCustomToolInput(item.Get("input").String())
+				}
 
 				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
@@ -362,7 +369,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
 
-			case "function_call_output":
+			case "function_call_output", "custom_tool_call_output":
 				flushPendingReasoning()
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
@@ -483,6 +490,17 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 			}
 			return [][]byte{tJSON}
 		}
+	case "custom":
+		// apply_patch and other freeform `custom` tools have no Claude-native
+		// equivalent. Downgrade to a regular function tool carrying a single
+		// string `input` argument; the response side re-emits the model's
+		// tool_use as a custom_tool_call with the bare input text.
+		if tJSON, ok := convertResponsesCustomToolToClaude(tool); ok {
+			if name := gjson.GetBytes(tJSON, "name").String(); name != "" {
+				toolNameMap[name] = name
+			}
+			return [][]byte{tJSON}
+		}
 	default:
 		if isUnsupportedOpenAIBuiltinToolType(toolType) {
 			return nil
@@ -492,6 +510,20 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 		}
 	}
 	return nil
+}
+
+// convertResponsesCustomToolToClaude downgrades a freeform `custom` tool into a
+// Claude function tool with a single string `input` parameter.
+func convertResponsesCustomToolToClaude(tool gjson.Result) ([]byte, bool) {
+	name := responsesToolName(tool)
+	if name == "" {
+		return nil, false
+	}
+	tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON, _ = sjson.SetBytes(tJSON, "description", translatorcommon.CustomToolDescription(responsesToolDescription(tool)))
+	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", translatorcommon.CustomToolFunctionSchema())
+	return tJSON, true
 }
 
 func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[string]string) [][]byte {
