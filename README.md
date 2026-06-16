@@ -46,6 +46,10 @@ PackyCode provides special discounts for our software users: register using <a h
 <td width="180"><a href="https://unity2.ai/register?source=cliproxyapi"><img src="./assets/unity2.jpg" alt="Unity2" width="150"></a></td>
 <td>Thanks to Unity2.ai for sponsoring this project! Unity2.ai is a high-performance AI model API relay platform for individual developers, teams, and enterprises. It has long served leading domestic enterprises, handles more than 30 billion token calls per day, and supports high concurrency at the 5000 RPM level. It supports balance billing, first top-up bonuses, bundled subscriptions, enterprise invoicing, and dedicated integration support. Register through <a href="https://unity2.ai/register?source=cliproxyapi">this link</a> to receive a $2 balance, then join the official group to get another $10 balance, for up to $12 in free credit.</td>
 </tr>
+<tr>
+<td width="180"><a href="https://catapi.ai/sign-up"><img src="./assets/catapi.png" alt="CatAPI" width="150"></a></td>
+<td>Cat API is an AI model aggregation platform built for individual developers and teams, integrating leading large language models into a single simple, stable, and easy-to-use entry point. It provides an API fully compatible with OpenAI, Claude, and Gemini that plugs seamlessly into mainstream AI IDEs and coding tools such as Claude Code, Cursor, Windsurf, Cline, Roo Code, Continue, Codex, and Trae, and features dedicated CN2 high-speed routing for low-latency, highly reliable access. <a href="https://catapi.ai/sign-up">Sign up</a> to claim 1$ in free credits.</td>
+</tr>
 </tbody>
 </table>
 
