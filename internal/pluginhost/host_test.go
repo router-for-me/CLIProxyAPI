@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -605,6 +608,168 @@ func TestHostApplyConfig_PanicFusesPluginForProcessLifetime(t *testing.T) {
 	}
 }
 
+func TestHostApplyConfigDoesNotHoldHostMuDuringRegister(t *testing.T) {
+	h, cfg, registerStarted, releaseRegister := newBlockingRegisterHost(t)
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, registerStarted, "register start")
+	probeDone := make(chan struct{})
+	go func() {
+		_ = h.currentModelExecutor()
+		close(probeDone)
+	}()
+	waitForHostTestSignal(t, probeDone, "Host.mu probe")
+
+	releaseRegister()
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+
+	snap := h.Snapshot()
+	if !snap.enabled || len(snap.records) != 1 || snap.records[0].id != "alpha" {
+		t.Fatalf("Snapshot() = %+v, want alpha registered", snap)
+	}
+}
+
+func TestHostApplyConfigSerializesLifecycleCalls(t *testing.T) {
+	loader := newTestSymbolLoader()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	secondEntered := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFirst)
+
+	var startOnce sync.Once
+	var secondOnce sync.Once
+	var lifecycleCalls int32
+	var activeLifecycleCalls int32
+	var concurrentLifecycleCalls int32
+	lifecycle := func([]byte) pluginapi.Plugin {
+		if active := atomic.AddInt32(&activeLifecycleCalls, 1); active > 1 {
+			atomic.StoreInt32(&concurrentLifecycleCalls, 1)
+		}
+		call := atomic.AddInt32(&lifecycleCalls, 1)
+		if call == 1 {
+			startOnce.Do(func() { close(started) })
+			<-release
+		} else {
+			secondOnce.Do(func() { close(secondEntered) })
+		}
+		atomic.AddInt32(&activeLifecycleCalls, -1)
+		return validTestPlugin("alpha")
+	}
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	lookup := newTestSymbolLookup(plugin)
+	lookup.registerOverride = lifecycle
+	lookup.reconfigureOverride = lifecycle
+	loader.lookups["alpha"] = lookup
+	h := NewForTest(loader)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+		},
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, started, "first register start")
+
+	secondDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(secondDone)
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("second ApplyConfig entered plugin lifecycle before first ApplyConfig finished")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseFirst()
+	waitForHostTestSignal(t, firstDone, "first ApplyConfig completion")
+	waitForHostTestSignal(t, secondDone, "second ApplyConfig completion")
+
+	if got := atomic.LoadInt32(&lifecycleCalls); got != 2 {
+		t.Fatalf("lifecycle calls = %d, want 2", got)
+	}
+	if atomic.LoadInt32(&concurrentLifecycleCalls) != 0 {
+		t.Fatal("plugin lifecycle calls ran concurrently")
+	}
+}
+
+func TestHostUnloadAndShutdownWaitForBlockingRegister(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     func(*Host) bool
+		assertDone func(*testing.T, *Host)
+	}{
+		{
+			name: "unload",
+			action: func(h *Host) bool {
+				return h.UnloadPlugin("alpha")
+			},
+			assertDone: func(t *testing.T, h *Host) {
+				t.Helper()
+				if h.PluginLoaded("alpha") {
+					t.Fatal("PluginLoaded(alpha) = true, want false after unload")
+				}
+			},
+		},
+		{
+			name: "shutdown",
+			action: func(h *Host) bool {
+				h.ShutdownAll()
+				return true
+			},
+			assertDone: func(t *testing.T, h *Host) {
+				t.Helper()
+				if h.PluginLoaded("alpha") {
+					t.Fatal("PluginLoaded(alpha) = true, want false after shutdown")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, cfg, registerStarted, releaseRegister := newBlockingRegisterHost(t)
+			applyDone := make(chan struct{})
+			go func() {
+				h.ApplyConfig(context.Background(), cfg)
+				close(applyDone)
+			}()
+			waitForHostTestSignal(t, registerStarted, "register start")
+
+			actionDone := make(chan bool)
+			go func() {
+				actionDone <- tt.action(h)
+			}()
+			select {
+			case <-actionDone:
+				t.Fatalf("%s completed while ApplyConfig was still registering", tt.name)
+			case <-time.After(200 * time.Millisecond):
+			}
+
+			releaseRegister()
+			waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+			if ok := waitForHostTestBool(t, actionDone, tt.name+" completion"); !ok {
+				t.Fatalf("%s returned false, want true", tt.name)
+			}
+			tt.assertDone(t, h)
+		})
+	}
+}
+
 func TestSortRecordsPriorityDescendingAndIDTieBreak(t *testing.T) {
 	records := []capabilityRecord{
 		{id: "charlie", priority: 1},
@@ -635,3 +800,55 @@ func (c *capturePluginClient) Call(ctx context.Context, method string, request [
 }
 
 func (c *capturePluginClient) Shutdown() {}
+
+func newBlockingRegisterHost(t *testing.T) (*Host, *config.Config, <-chan struct{}, func()) {
+	t.Helper()
+
+	loader := newTestSymbolLoader()
+	registerStarted := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	var releaseOnce sync.Once
+	releaseRegister := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseRegister)
+
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	lookup := newTestSymbolLookup(plugin)
+	lookup.registerOverride = func([]byte) pluginapi.Plugin {
+		startOnce.Do(func() { close(registerStarted) })
+		<-release
+		return validTestPlugin("alpha")
+	}
+	loader.lookups["alpha"] = lookup
+	h := NewForTest(loader)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+		},
+	}
+	return h, cfg, registerStarted, releaseRegister
+}
+
+func waitForHostTestSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func waitForHostTestBool(t *testing.T, ch <-chan bool, name string) bool {
+	t.Helper()
+	select {
+	case ok := <-ch:
+		return ok
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+		return false
+	}
+}
