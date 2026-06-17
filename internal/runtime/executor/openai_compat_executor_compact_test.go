@@ -152,6 +152,51 @@ func TestOpenAICompatExecutorThinkingUsesRequestedAliasCapabilities(t *testing.T
 	}
 }
 
+func TestOpenAICompatExecutorThinkingPreservesResolvedSuffixForAlias(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-openai-compat-resolved-suffix-thinking", "openai-compatibility", []*registry.ModelInfo{{
+		ID:       "fast",
+		Object:   "model",
+		Type:     "openai-compatibility",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("test-openai-compat-resolved-suffix-thinking")
+	})
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"fast","messages":[{"role":"user","content":"hi"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5(xhigh)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "fast",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "reasoning_effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning_effort = %q, want xhigh; body=%s", got, string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	var gotPath string
 	var gotBody []byte

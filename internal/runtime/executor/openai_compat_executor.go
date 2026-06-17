@@ -46,6 +46,22 @@ func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatE
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
 }
 
+func openAICompatThinkingModel(requestedModel, resolvedModel string) string {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return strings.TrimSpace(resolvedModel)
+	}
+	resolvedSuffix := thinking.ParseSuffix(resolvedModel)
+	if resolvedSuffix.HasSuffix && resolvedSuffix.RawSuffix != "" {
+		requestedBase := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
+		if requestedBase == "" {
+			requestedBase = requestedModel
+		}
+		return requestedBase + "(" + resolvedSuffix.RawSuffix + ")"
+	}
+	return requestedModel
+}
+
 // Identifier implements cliproxyauth.ProviderExecutor.
 func (e *OpenAICompatExecutor) Identifier() string { return e.provider }
 
@@ -114,8 +130,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	thinkingModel := openAICompatThinkingModel(requestedModel, req.Model)
 
-	translated, err = thinking.ApplyThinking(translated, requestedModel, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, thinkingModel, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -315,8 +332,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	thinkingModel := openAICompatThinkingModel(requestedModel, req.Model)
 
-	translated, err = thinking.ApplyThinking(translated, requestedModel, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, thinkingModel, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +604,8 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	modelForCounting := baseModel
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	translated, err := thinking.ApplyThinking(translated, requestedModel, from.String(), to.String(), e.Identifier())
+	thinkingModel := openAICompatThinkingModel(requestedModel, req.Model)
+	translated, err := thinking.ApplyThinking(translated, thinkingModel, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

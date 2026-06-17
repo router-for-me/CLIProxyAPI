@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
@@ -2316,6 +2317,7 @@ func openAICompatibilityModelThinking(model config.OpenAICompatibilityModel, mod
 	if staticModelID == "" {
 		staticModelID = strings.TrimSpace(modelID)
 	}
+	staticModelID = strings.TrimSpace(thinking.ParseSuffix(staticModelID).ModelName)
 	if upstream := registry.LookupStaticModelInfo(staticModelID); upstream != nil && upstream.Thinking != nil {
 		if len(upstream.Thinking.Levels) > 0 {
 			return cloneThinkingLevels(upstream.Thinking)

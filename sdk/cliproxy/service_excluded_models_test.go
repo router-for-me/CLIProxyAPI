@@ -183,6 +183,23 @@ func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinkingSupportFromAl
 	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high", "xhigh"})
 }
 
+func TestBuildOpenAICompatibilityConfigModelsStripsSuffixForStaticThinkingLookup(t *testing.T) {
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "gpt-5.5(xhigh)", Alias: "fast"},
+		},
+	})
+
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	if models[0].ID != "fast" {
+		t.Fatalf("model ID = %q, want fast", models[0].ID)
+	}
+	requireThinkingLevels(t, models[0].Thinking, []string{"low", "medium", "high", "xhigh"})
+}
+
 func TestBuildOpenAICompatibilityConfigModelsUsesSharedThinkingForDuplicateAlias(t *testing.T) {
 	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
 		Name: "compat",
