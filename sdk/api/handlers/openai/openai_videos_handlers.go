@@ -14,8 +14,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -738,7 +741,11 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 
 	c.Header("Content-Type", "application/json")
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	selectedAuthID := ""
 	cliCtx = h.contextWithVideoAuthBinding(cliCtx, videoID)
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = authID
+	})
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, defaultXAIVideosModel, payload, "")
 	stopKeepAlive()
@@ -760,6 +767,7 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 		return
 	}
 
+	videoAuthBindings.set(videoID, selectedAuthID, h.videoAuthBindingTTL())
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(out)
 	cliCancel(nil)
@@ -795,7 +803,11 @@ func (h *OpenAIAPIHandler) VideosContent(c *gin.Context) {
 	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	selectedAuthID := ""
 	cliCtx = h.contextWithVideoAuthBinding(cliCtx, videoID)
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = authID
+	})
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, _, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, defaultXAIVideosModel, payload, "")
 	stopKeepAlive()
@@ -809,6 +821,7 @@ func (h *OpenAIAPIHandler) VideosContent(c *gin.Context) {
 		return
 	}
 
+	videoAuthBindings.set(videoID, selectedAuthID, h.videoAuthBindingTTL())
 	contentURL, err := xaiVideoContentURLFromPayload(resp)
 	if err != nil {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
@@ -832,7 +845,8 @@ func (h *OpenAIAPIHandler) writeVideoContentFromURL(c *gin.Context, contentURL s
 		return err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := h.videoContentHTTPClient(c)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
@@ -862,6 +876,37 @@ func (h *OpenAIAPIHandler) writeVideoContentFromURL(c *gin.Context, contentURL s
 	c.Status(resp.StatusCode)
 	_, err = io.Copy(c.Writer, resp.Body)
 	return err
+}
+
+func (h *OpenAIAPIHandler) videoContentHTTPClient(c *gin.Context) *http.Client {
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	var cfg *config.Config
+	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
+		cfg = &config.Config{SDKConfig: *h.Cfg}
+	}
+	return helps.NewProxyAwareHTTPClient(ctx, cfg, h.videoContentDownloadAuth(c), 0)
+}
+
+func (h *OpenAIAPIHandler) videoContentDownloadAuth(c *gin.Context) *coreauth.Auth {
+	if h == nil || h.BaseAPIHandler == nil || h.AuthManager == nil || c == nil {
+		return nil
+	}
+	videoID := strings.TrimSpace(c.Param("video_id"))
+	if videoID == "" {
+		return nil
+	}
+	authID, ok := videoAuthBindings.get(videoID)
+	if !ok {
+		return nil
+	}
+	auth, ok := h.AuthManager.GetByID(authID)
+	if !ok {
+		return nil
+	}
+	return auth
 }
 
 func copyVideoContentHeaders(dst http.Header, src http.Header) {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -62,9 +63,10 @@ func performVideosRouteRequest(t *testing.T, method string, routePath string, re
 }
 
 type videoAuthCaptureExecutor struct {
-	mu        sync.Mutex
-	requestID string
-	authIDs   []string
+	mu         sync.Mutex
+	requestID  string
+	contentURL string
+	authIDs    []string
 }
 
 func (e *videoAuthCaptureExecutor) Identifier() string { return "xai" }
@@ -82,7 +84,11 @@ func (e *videoAuthCaptureExecutor) Execute(_ context.Context, auth *coreauth.Aut
 	if requestID == "" {
 		requestID = e.requestID
 	}
-	payload := []byte(`{"request_id":"` + requestID + `","status":"completed","progress":100,"video":{"url":"https://vidgen.x.ai/video.mp4","duration":4}}`)
+	contentURL := strings.TrimSpace(e.contentURL)
+	if contentURL == "" {
+		contentURL = "https://vidgen.x.ai/video.mp4"
+	}
+	payload := []byte(`{"request_id":` + strconv.Quote(requestID) + `,"status":"completed","progress":100,"video":{"url":` + strconv.Quote(contentURL) + `,"duration":4}}`)
 	return coreexecutor.Response{Payload: payload}, nil
 }
 
@@ -394,7 +400,8 @@ func TestWriteVideoContentFromURL(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(resp)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_123/content", nil)
 
-	handler := &OpenAIAPIHandler{}
+	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler := NewOpenAIAPIHandler(base)
 	if err := handler.writeVideoContentFromURL(ctx, upstream.URL+"/video.mp4"); err != nil {
 		t.Fatalf("writeVideoContentFromURL() error = %v", err)
 	}
@@ -410,6 +417,151 @@ func TestWriteVideoContentFromURL(t *testing.T) {
 	}
 	if got := resp.Body.String(); got != "video-bytes" {
 		t.Fatalf("body = %q, want video-bytes", got)
+	}
+}
+
+func TestWriteVideoContentFromURLUsesPinnedAuthProxy(t *testing.T) {
+	resetVideoAuthBindingsForTest(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("video-bytes"))
+	}))
+	defer upstream.Close()
+
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	authID := "video-content-auth"
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+		ProxyURL: "direct",
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register() error = %v", errRegister)
+	}
+
+	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	videoAuthBindings.set("video_123", authID, time.Hour)
+
+	gin.SetMode(gin.TestMode)
+	resp := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(resp)
+	ctx.Params = gin.Params{{Key: "video_id", Value: "video_123"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_123/content", nil)
+
+	if err := handler.writeVideoContentFromURL(ctx, upstream.URL+"/video.mp4"); err != nil {
+		t.Fatalf("writeVideoContentFromURL() error = %v", err)
+	}
+
+	client := handler.videoContentHTTPClient(ctx)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected pinned auth direct proxy to bypass global proxy")
+	}
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+}
+
+func TestWriteVideoContentFromURLFallsBackToGlobalProxy(t *testing.T) {
+	resetVideoAuthBindingsForTest(t)
+
+	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}, nil)
+	handler := NewOpenAIAPIHandler(base)
+
+	gin.SetMode(gin.TestMode)
+	resp := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(resp)
+	ctx.Params = gin.Params{{Key: "video_id", Value: "video_456"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_456/content", nil)
+
+	client := handler.videoContentHTTPClient(ctx)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com/video.mp4", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest() error = %v", errRequest)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("transport.Proxy() error = %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://global-proxy.example.com:8080" {
+		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
+	}
+}
+
+func TestVideosContentUsesSelectedAuthProxyForDownload(t *testing.T) {
+	resetVideoAuthBindingsForTest(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("video-bytes"))
+	}))
+	defer upstream.Close()
+
+	var proxyMu sync.Mutex
+	proxyHits := 0
+	globalProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyMu.Lock()
+		proxyHits++
+		proxyMu.Unlock()
+		http.Error(w, "unexpected proxy", http.StatusBadGateway)
+	}))
+	defer globalProxy.Close()
+
+	videoID := "video-content-selected"
+	authID := "video-content-selected-auth"
+	executor := &videoAuthCaptureExecutor{
+		requestID:  videoID,
+		contentURL: upstream.URL + "/video.mp4",
+	}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+		ProxyURL: "direct",
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register() error = %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{{ID: defaultXAIVideosModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ProxyURL: globalProxy.URL}, manager)
+	handler := NewOpenAIAPIHandler(base)
+
+	resp := performVideosRouteRequest(t, http.MethodGet, openAIVideosPath+"/:video_id/content", openAIVideosPath+"/"+videoID+"/content", "", nil, handler.VideosContent)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("content status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := resp.Body.String(); got != "video-bytes" {
+		t.Fatalf("content body = %q, want video-bytes", got)
+	}
+	authIDs := executor.AuthIDs()
+	if len(authIDs) != 1 || authIDs[0] != authID {
+		t.Fatalf("authIDs = %v, want [%s]", authIDs, authID)
+	}
+	if boundAuthID, ok := videoAuthBindings.get(videoID); !ok || boundAuthID != authID {
+		t.Fatalf("bound auth = %q ok=%v, want %s", boundAuthID, ok, authID)
+	}
+	proxyMu.Lock()
+	gotProxyHits := proxyHits
+	proxyMu.Unlock()
+	if gotProxyHits != 0 {
+		t.Fatalf("global proxy hits = %d, want 0", gotProxyHits)
 	}
 }
 
