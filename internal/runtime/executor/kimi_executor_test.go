@@ -270,3 +270,224 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
 	}
 }
+
+func TestNormalizeKimiEmptyTextContent_DropsEmptyTextParts(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":""},{"type":"text","text":"world"}]},
+			{"role":"assistant","content":"ok"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	parts := messages[0].Get("content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("messages.0.content length = %d, want 2", len(parts))
+	}
+	if got := parts[0].Get("text").String(); got != "hello" {
+		t.Fatalf("messages.0.content.0.text = %q, want %q", got, "hello")
+	}
+	if got := parts[1].Get("text").String(); got != "world" {
+		t.Fatalf("messages.0.content.1.text = %q, want %q", got, "world")
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_DropsMessageWithAllEmptyParts(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":""}]},
+			{"role":"assistant","content":"ok"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := messages[0].Get("content").String(); got != "ok" {
+		t.Fatalf("messages.0.content = %q, want %q", got, "ok")
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_FlattensSingleTextPart(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hello"}]},
+			{"role":"assistant","content":"ok"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := messages[0].Get("content").String(); got != "hello" {
+		t.Fatalf("messages.0.content = %q, want %q", got, "hello")
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_PreservesNonTextParts(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://example.com/img.png"}},{"type":"text","text":""}]},
+			{"role":"assistant","content":"ok"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	parts := messages[0].Get("content").Array()
+	if len(parts) != 1 {
+		t.Fatalf("messages.0.content length = %d, want 1", len(parts))
+	}
+	if got := parts[0].Get("type").String(); got != "image_url" {
+		t.Fatalf("messages.0.content.0.type = %q, want %q", got, "image_url")
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_PreservesStringContent(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"ok"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	if string(out) != string(body) {
+		t.Fatalf("output should be unchanged for string content, got %s", out)
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_MixedRolesWithEmptyDeveloper(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"developer","content":[{"type":"text","text":""}]},
+			{"role":"user","content":[{"type":"text","text":"ping"}]},
+			{"role":"developer","content":[{"type":"text","text":""}]}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := messages[0].Get("content").String(); got != "ping" {
+		t.Fatalf("messages.0.content = %q, want %q", got, "ping")
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_PreservesAssistantWithToolCalls(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"do it"},
+			{"role":"assistant","content":[{"type":"text","text":""}],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"[]"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("messages length = %d, want 3, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if !messages[1].Get("tool_calls").Exists() {
+		t.Fatalf("messages.1.tool_calls should exist")
+	}
+	if got := messages[1].Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("messages.1.tool_calls.0.id = %q, want %q", got, "call_1")
+	}
+	if got := messages[2].Get("tool_call_id").String(); got != "call_1" {
+		t.Fatalf("messages.2.tool_call_id = %q, want %q", got, "call_1")
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_PreservesAssistantWithLegacyFunctionCall(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"do it"},
+			{"role":"assistant","content":[{"type":"text","text":""}],"function_call":{"name":"list_directory","arguments":"{}"}},
+			{"role":"tool","tool_call_id":"call_1","content":"[]"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("messages length = %d, want 3, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if !messages[1].Get("function_call").Exists() {
+		t.Fatalf("messages.1.function_call should exist")
+	}
+	if got := messages[1].Get("function_call.name").String(); got != "list_directory" {
+		t.Fatalf("messages.1.function_call.name = %q, want %q", got, "list_directory")
+	}
+}
+
+func TestNormalizeKimiEmptyTextContent_DropsEmptyAssistantWithoutToolCalls(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"do it"},
+			{"role":"assistant","content":[{"type":"text","text":""}]},
+			{"role":"user","content":"next"}
+		]
+	}`)
+
+	out, err := normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiEmptyTextContent() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := messages[0].Get("content").String(); got != "do it" {
+		t.Fatalf("messages.0.content = %q, want %q", got, "do it")
+	}
+	if got := messages[1].Get("content").String(); got != "next" {
+		t.Fatalf("messages.1.content = %q, want %q", got, "next")
+	}
+}

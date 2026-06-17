@@ -115,6 +115,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if err != nil {
 		return resp, err
 	}
+	body, err = normalizeKimiEmptyTextContent(body)
+	if err != nil {
+		return resp, err
+	}
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
@@ -225,6 +229,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, err = normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		return nil, err
+	}
+	body, err = normalizeKimiEmptyTextContent(body)
 	if err != nil {
 		return nil, err
 	}
@@ -570,6 +578,100 @@ func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string)
 	}
 
 	return "[reasoning unavailable]"
+}
+
+func normalizeKimiEmptyTextContent(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	msgs := messages.Array()
+	kept := make([]string, 0, len(msgs))
+	modified := false
+	for _, msg := range msgs {
+		content := msg.Get("content")
+		if !content.Exists() || content.Type == gjson.Null {
+			kept = append(kept, msg.Raw)
+			continue
+		}
+		if content.Type == gjson.String {
+			kept = append(kept, msg.Raw)
+			continue
+		}
+		if !content.IsArray() {
+			kept = append(kept, msg.Raw)
+			continue
+		}
+
+		parts := content.Array()
+		filtered := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if !part.IsObject() {
+				filtered = append(filtered, part.Raw)
+				continue
+			}
+			partType := strings.TrimSpace(part.Get("type").String())
+			if partType == "text" {
+				text := strings.TrimSpace(part.Get("text").String())
+				if text == "" {
+					modified = true
+					continue
+				}
+			}
+			filtered = append(filtered, part.Raw)
+		}
+		if len(filtered) == 0 {
+			// Don't drop assistant messages that still carry tool_calls or function_call
+			// even when their content is empty; dropping them would break the tool-call
+			// chain for the subsequent tool message.
+			if hasKimiToolCalls(msg) || hasKimiLegacyFunctionCall(msg) {
+				kept = append(kept, msg.Raw)
+				continue
+			}
+			modified = true
+			continue
+		}
+		if len(filtered) == 1 {
+			// If only one text part remains, flatten to string for better provider compatibility
+			single := gjson.Parse(filtered[0])
+			if strings.TrimSpace(single.Get("type").String()) == "text" && single.Get("text").Exists() {
+				newContent := single.Get("text").String()
+				newMsg, err := sjson.SetBytes([]byte(msg.Raw), "content", newContent)
+				if err != nil {
+					return body, fmt.Errorf("kimi executor: failed to flatten single text content: %w", err)
+				}
+				kept = append(kept, string(newMsg))
+				modified = true
+				continue
+			}
+		}
+		if len(filtered) != len(parts) {
+			newContent := "[" + strings.Join(filtered, ",") + "]"
+			newMsg, err := sjson.SetRawBytes([]byte(msg.Raw), "content", []byte(newContent))
+			if err != nil {
+				return body, fmt.Errorf("kimi executor: failed to filter empty text content: %w", err)
+			}
+			kept = append(kept, string(newMsg))
+			modified = true
+		} else {
+			kept = append(kept, msg.Raw)
+		}
+	}
+	if !modified {
+		return body, nil
+	}
+
+	rawMessages := []byte("[" + strings.Join(kept, ",") + "]")
+	out, err := sjson.SetRawBytes(body, "messages", rawMessages)
+	if err != nil {
+		return body, fmt.Errorf("kimi executor: failed to drop messages with empty text content: %w", err)
+	}
+	return out, nil
 }
 
 // Refresh refreshes the Kimi token using the refresh token.
