@@ -38,25 +38,33 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                    *config.Config
-	configFilePath         string
-	mu                     sync.Mutex
-	attemptsMu             sync.Mutex
-	failedAttempts         map[string]*attemptInfo // keyed by client IP
-	authManager            *coreauth.Manager
-	tokenStore             coreauth.Store
-	localPassword          string
-	allowRemoteOverride    bool
-	envSecret              string
-	logDir                 string
-	postAuthHook           coreauth.PostAuthHook
-	postAuthPersistHook    coreauth.PostAuthHook
-	pluginHost             *pluginhost.Host
-	configReloadHook       func(context.Context, *config.Config)
-	pluginStoreRegistryURL string
-	pluginStoreHTTPClient  pluginstore.HTTPDoer
-	pluginReleaseCacheMu   sync.Mutex
-	pluginReleaseCache     map[string]pluginReleaseCacheEntry
+	cfg                     *config.Config
+	configFilePath          string
+	mu                      sync.Mutex
+	reloadMu                sync.Mutex
+	reloadGeneration        uint64
+	appliedReloadGeneration uint64
+	attemptsMu              sync.Mutex
+	failedAttempts          map[string]*attemptInfo // keyed by client IP
+	authManager             *coreauth.Manager
+	tokenStore              coreauth.Store
+	localPassword           string
+	allowRemoteOverride     bool
+	envSecret               string
+	logDir                  string
+	postAuthHook            coreauth.PostAuthHook
+	postAuthPersistHook     coreauth.PostAuthHook
+	pluginHost              *pluginhost.Host
+	configReloadHook        func(context.Context, *config.Config)
+	pluginStoreRegistryURL  string
+	pluginStoreHTTPClient   pluginstore.HTTPDoer
+	pluginReleaseCacheMu    sync.Mutex
+	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+}
+
+type configReloadSnapshot struct {
+	cfg        *config.Config
+	generation uint64
 }
 
 // NewHandler creates a new management handler instance.
@@ -152,25 +160,63 @@ func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)
 	h.mu.Unlock()
 }
 
-func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, cfg *config.Config) {
-	if h == nil || cfg == nil {
+// reloadSnapshotConfigLocked clones the runtime config and assigns a reload generation.
+// Callers must hold h.mu.
+func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
+	if h == nil || h.cfg == nil {
+		return configReloadSnapshot{}
+	}
+	h.reloadGeneration++
+	return configReloadSnapshot{
+		cfg:        h.cfg.CloneForRuntime(),
+		generation: h.reloadGeneration,
+	}
+}
+
+// saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
+// Callers must hold h.mu.
+func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
+	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
+		return configReloadSnapshot{}, false
+	}
+	return h.reloadSnapshotConfigLocked(), true
+}
+
+// reloadConfigAfterManagementSave reloads from an independent config snapshot.
+// Callers must pass a full Config clone captured immediately after a successful save.
+func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot configReloadSnapshot) {
+	if h == nil || snapshot.cfg == nil || snapshot.generation == 0 {
 		return
 	}
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
 	h.mu.Lock()
+	if snapshot.generation < h.appliedReloadGeneration {
+		h.mu.Unlock()
+		return
+	}
 	hook := h.configReloadHook
 	host := h.pluginHost
 	h.mu.Unlock()
 	if hook != nil {
-		hook(ctx, cfg)
-		return
+		hook(ctx, snapshot.cfg)
+	} else if host != nil {
+		host.ApplyConfig(ctx, snapshot.cfg)
 	}
-	if host != nil {
-		host.ApplyConfig(ctx, cfg)
+
+	h.mu.Lock()
+	if snapshot.generation > h.appliedReloadGeneration {
+		h.appliedReloadGeneration = snapshot.generation
 	}
+	h.mu.Unlock()
 }
 
-func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, cfg *config.Config) {
-	if h == nil || cfg == nil {
+// reloadConfigAfterManagementSaveAsync reloads from an independent config snapshot.
+// Callers must pass a full Config clone captured immediately after a successful save.
+func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, snapshot configReloadSnapshot) {
+	if h == nil || snapshot.cfg == nil || snapshot.generation == 0 {
 		return
 	}
 	reloadCtx := context.Background()
@@ -183,7 +229,7 @@ func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, cfg 
 				log.WithField("panic", recovered).Error("management: async config reload panicked")
 			}
 		}()
-		h.reloadConfigAfterManagementSave(reloadCtx, cfg)
+		h.reloadConfigAfterManagementSave(reloadCtx, snapshot)
 	}()
 }
 

@@ -16,7 +16,6 @@ import (
 
 func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	fileName := "gemini-user@example.com-project-a.json"
@@ -55,7 +54,6 @@ func TestListAuthFiles_IncludesProjectIDFromManager(t *testing.T) {
 
 func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	filePath := filepath.Join(authDir, "gemini-user@example.com-project-a.json")
@@ -73,7 +71,6 @@ func TestListAuthFilesFromDisk_IncludesProjectID(t *testing.T) {
 
 func TestListAuthFiles_IncludesWebsocketsFromManager(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	fileName := "codex-user@example.com-pro.json"
@@ -111,7 +108,6 @@ func TestListAuthFiles_IncludesWebsocketsFromManager(t *testing.T) {
 
 func TestListAuthFilesFromDisk_IncludesWebsockets(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	filePath := filepath.Join(authDir, "codex-user@example.com-pro.json")

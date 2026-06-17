@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -12,6 +15,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
+
+func enabledPluginConfigs(ids ...string) map[string]config.PluginInstanceConfig {
+	enabled := true
+	configs := make(map[string]config.PluginInstanceConfig, len(ids))
+	for _, id := range ids {
+		configs[id] = config.PluginInstanceConfig{Enabled: &enabled}
+	}
+	return configs
+}
 
 func TestHostApplyConfig_DisabledGlobalSkipsSnapshot(t *testing.T) {
 	loader := newTestSymbolLoader()
@@ -64,6 +76,30 @@ func TestHostApplyConfig_DisabledPluginSkipsCapability(t *testing.T) {
 	}
 }
 
+func TestHostApplyConfig_DefaultDisabledPluginSkipsLoad(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+		},
+	})
+
+	if plugin.registerCalls != 0 || loader.openCalls != 0 {
+		t.Fatalf("calls = register %d open %d, want 0", plugin.registerCalls, loader.openCalls)
+	}
+	if len(h.Snapshot().records) != 0 {
+		t.Fatalf("Snapshot records = %d, want 0", len(h.Snapshot().records))
+	}
+}
+
 func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	disabled := false
 	loader := newTestSymbolLoader()
@@ -80,6 +116,7 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     pluginsDir,
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -133,6 +170,7 @@ func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha", "bravo"),
+			Configs: enabledPluginConfigs("alpha", "bravo"),
 		},
 	}
 
@@ -188,6 +226,7 @@ func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 	t.Cleanup(func() {
@@ -237,6 +276,7 @@ func TestHostApplyConfigRegistersInterceptorOnlyPlugin(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -279,6 +319,7 @@ func TestHostApplyConfigDispatchesInterceptorRPCMethods(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -485,6 +526,7 @@ func TestHostApplyConfig_ReconfigureCalledOnReload(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 
@@ -526,6 +568,7 @@ func TestRegisteredPluginsIncludesMetadataAndOAuthCapability(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	})
 
@@ -586,6 +629,7 @@ func TestHostApplyConfig_PanicFusesPluginForProcessLifetime(t *testing.T) {
 		Plugins: config.PluginsConfig{
 			Enabled: true,
 			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
 		},
 	}
 
@@ -602,6 +646,226 @@ func TestHostApplyConfig_PanicFusesPluginForProcessLifetime(t *testing.T) {
 	}
 	if len(h.Snapshot().records) != 0 {
 		t.Fatalf("Snapshot records = %d, want 0 after fuse", len(h.Snapshot().records))
+	}
+}
+
+func TestHostApplyConfigDoesNotHoldHostMuDuringRegister(t *testing.T) {
+	h, cfg, registerStarted, releaseRegister := newBlockingRegisterHost(t)
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, registerStarted, "register start")
+	probeDone := make(chan struct{})
+	go func() {
+		_ = h.currentModelExecutor()
+		close(probeDone)
+	}()
+	waitForHostTestSignal(t, probeDone, "Host.mu probe")
+
+	releaseRegister()
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+
+	snap := h.Snapshot()
+	if !snap.enabled || len(snap.records) != 1 || snap.records[0].id != "alpha" {
+		t.Fatalf("Snapshot() = %+v, want alpha registered", snap)
+	}
+}
+
+func TestHostApplyConfigSerializesLifecycleCalls(t *testing.T) {
+	loader := newTestSymbolLoader()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	secondEntered := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFirst)
+
+	var startOnce sync.Once
+	var secondOnce sync.Once
+	var lifecycleCalls int32
+	var activeLifecycleCalls int32
+	var concurrentLifecycleCalls int32
+	lifecycle := func([]byte) pluginapi.Plugin {
+		if active := atomic.AddInt32(&activeLifecycleCalls, 1); active > 1 {
+			atomic.StoreInt32(&concurrentLifecycleCalls, 1)
+		}
+		call := atomic.AddInt32(&lifecycleCalls, 1)
+		if call == 1 {
+			startOnce.Do(func() { close(started) })
+			<-release
+		} else {
+			secondOnce.Do(func() { close(secondEntered) })
+		}
+		atomic.AddInt32(&activeLifecycleCalls, -1)
+		return validTestPlugin("alpha")
+	}
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	lookup := newTestSymbolLookup(plugin)
+	lookup.registerOverride = lifecycle
+	lookup.reconfigureOverride = lifecycle
+	loader.lookups["alpha"] = lookup
+	h := NewForTest(loader)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, started, "first register start")
+
+	secondDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(secondDone)
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("second ApplyConfig entered plugin lifecycle before first ApplyConfig finished")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseFirst()
+	waitForHostTestSignal(t, firstDone, "first ApplyConfig completion")
+	waitForHostTestSignal(t, secondDone, "second ApplyConfig completion")
+
+	if got := atomic.LoadInt32(&lifecycleCalls); got != 2 {
+		t.Fatalf("lifecycle calls = %d, want 2", got)
+	}
+	if atomic.LoadInt32(&concurrentLifecycleCalls) != 0 {
+		t.Fatal("plugin lifecycle calls ran concurrently")
+	}
+}
+
+func TestHostPluginBusyReportsLoadingPlugin(t *testing.T) {
+	h, cfg, openStarted, releaseOpen := newBlockingOpenHost(t)
+	t.Cleanup(h.ShutdownAll)
+
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, openStarted, "plugin open start")
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false while plugin is still loading")
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false, want true while plugin is loading")
+	}
+
+	releaseOpen()
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+	if !h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = false, want true after load")
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false, want true after load")
+	}
+}
+
+func TestHostUnloadWaitsForBlockingLoad(t *testing.T) {
+	h, cfg, openStarted, releaseOpen := newBlockingOpenHost(t)
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, openStarted, "plugin open start")
+
+	unloadDone := make(chan bool)
+	go func() {
+		unloadDone <- h.UnloadPlugin("alpha")
+	}()
+	select {
+	case <-unloadDone:
+		t.Fatal("UnloadPlugin completed while ApplyConfig was still loading")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseOpen()
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+	if ok := waitForHostTestBool(t, unloadDone, "UnloadPlugin completion"); !ok {
+		t.Fatal("UnloadPlugin returned false, want true after loading completes")
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true, want false after unload")
+	}
+}
+
+func TestHostUnloadAndShutdownWaitForBlockingRegister(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     func(*Host) bool
+		assertDone func(*testing.T, *Host)
+	}{
+		{
+			name: "unload",
+			action: func(h *Host) bool {
+				return h.UnloadPlugin("alpha")
+			},
+			assertDone: func(t *testing.T, h *Host) {
+				t.Helper()
+				if h.PluginLoaded("alpha") {
+					t.Fatal("PluginLoaded(alpha) = true, want false after unload")
+				}
+			},
+		},
+		{
+			name: "shutdown",
+			action: func(h *Host) bool {
+				h.ShutdownAll()
+				return true
+			},
+			assertDone: func(t *testing.T, h *Host) {
+				t.Helper()
+				if h.PluginLoaded("alpha") {
+					t.Fatal("PluginLoaded(alpha) = true, want false after shutdown")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, cfg, registerStarted, releaseRegister := newBlockingRegisterHost(t)
+			applyDone := make(chan struct{})
+			go func() {
+				h.ApplyConfig(context.Background(), cfg)
+				close(applyDone)
+			}()
+			waitForHostTestSignal(t, registerStarted, "register start")
+
+			actionDone := make(chan bool)
+			go func() {
+				actionDone <- tt.action(h)
+			}()
+			select {
+			case <-actionDone:
+				t.Fatalf("%s completed while ApplyConfig was still registering", tt.name)
+			case <-time.After(200 * time.Millisecond):
+			}
+
+			releaseRegister()
+			waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+			if ok := waitForHostTestBool(t, actionDone, tt.name+" completion"); !ok {
+				t.Fatalf("%s returned false, want true", tt.name)
+			}
+			tt.assertDone(t, h)
+		})
 	}
 }
 
@@ -635,3 +899,100 @@ func (c *capturePluginClient) Call(ctx context.Context, method string, request [
 }
 
 func (c *capturePluginClient) Shutdown() {}
+
+type blockingOpenLoader struct {
+	inner     *testSymbolLoader
+	started   chan struct{}
+	release   <-chan struct{}
+	startOnce sync.Once
+}
+
+func (l *blockingOpenLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
+	l.startOnce.Do(func() { close(l.started) })
+	<-l.release
+	return l.inner.Open(file, host)
+}
+
+func newBlockingOpenHost(t *testing.T) (*Host, *config.Config, <-chan struct{}, func()) {
+	t.Helper()
+
+	inner := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	inner.lookups["alpha"] = newTestSymbolLookup(plugin)
+
+	openStarted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseOpen := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseOpen)
+
+	h := NewForTest(&blockingOpenLoader{
+		inner:   inner,
+		started: openStarted,
+		release: release,
+	})
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	}
+	return h, cfg, openStarted, releaseOpen
+}
+
+func newBlockingRegisterHost(t *testing.T) (*Host, *config.Config, <-chan struct{}, func()) {
+	t.Helper()
+
+	loader := newTestSymbolLoader()
+	registerStarted := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	var releaseOnce sync.Once
+	releaseRegister := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseRegister)
+
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	lookup := newTestSymbolLookup(plugin)
+	lookup.registerOverride = func([]byte) pluginapi.Plugin {
+		startOnce.Do(func() { close(registerStarted) })
+		<-release
+		return validTestPlugin("alpha")
+	}
+	loader.lookups["alpha"] = lookup
+	h := NewForTest(loader)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	}
+	return h, cfg, registerStarted, releaseRegister
+}
+
+func waitForHostTestSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func waitForHostTestBool(t *testing.T, ch <-chan bool, name string) bool {
+	t.Helper()
+	select {
+	case ok := <-ch:
+		return ok
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+		return false
+	}
+}

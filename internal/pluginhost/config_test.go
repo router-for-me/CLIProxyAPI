@@ -33,3 +33,19 @@ func TestRuntimeConfigYAMLAddsHostDefaultsToRawPluginConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeConfigYAMLDefaultsEnabledFalse(t *testing.T) {
+	item := config.PluginInstanceConfig{
+		Priority: 3,
+	}
+
+	got := string(runtimeConfigYAML(item, false))
+	for _, want := range []string{
+		"enabled: false",
+		"priority: 3",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runtimeConfigYAML() missing %q in:\n%s", want, got)
+		}
+	}
+}

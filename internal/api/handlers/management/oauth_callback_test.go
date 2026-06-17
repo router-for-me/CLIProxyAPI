@@ -14,7 +14,6 @@ import (
 )
 
 func TestPostOAuthCallbackCreatesMissingAuthDir(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	authDir := filepath.Join(t.TempDir(), "missing-auth")
 	state := "test-antigravity-state"

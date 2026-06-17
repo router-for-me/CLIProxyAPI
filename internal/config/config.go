@@ -181,7 +181,7 @@ type PluginsConfig struct {
 
 // PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
 type PluginInstanceConfig struct {
-	// Enabled toggles this plugin instance. Nil is normalized to true during YAML parsing.
+	// Enabled toggles this plugin instance. Nil is normalized to false during YAML parsing.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Priority controls plugin startup and routing order.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -196,7 +196,7 @@ func (c *PluginInstanceConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	c.Priority = 0
-	defaultEnabled := true
+	defaultEnabled := false
 	c.Enabled = &defaultEnabled
 
 	if value == nil || value.Kind == 0 {
@@ -1544,14 +1544,25 @@ func isZeroValueNode(node *yaml.Node) bool {
 
 // deepCopyNode creates a deep copy of a yaml.Node graph.
 func deepCopyNode(n *yaml.Node) *yaml.Node {
+	return deepCopyNodeSeen(n, map[*yaml.Node]*yaml.Node{})
+}
+
+func deepCopyNodeSeen(n *yaml.Node, seen map[*yaml.Node]*yaml.Node) *yaml.Node {
 	if n == nil {
 		return nil
 	}
+	if cp, ok := seen[n]; ok {
+		return cp
+	}
 	cp := *n
+	seen[n] = &cp
+	if n.Alias != nil {
+		cp.Alias = deepCopyNodeSeen(n.Alias, seen)
+	}
 	if len(n.Content) > 0 {
 		cp.Content = make([]*yaml.Node, len(n.Content))
 		for i := range n.Content {
-			cp.Content[i] = deepCopyNode(n.Content[i])
+			cp.Content[i] = deepCopyNodeSeen(n.Content[i], seen)
 		}
 	}
 	return &cp

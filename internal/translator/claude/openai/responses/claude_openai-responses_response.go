@@ -89,6 +89,23 @@ func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	return nil
 }
 
+func applyResponsesFunctionCallNamespaceFields(item []byte, requestRawJSON []byte, qualifiedName string, itemPath string) []byte {
+	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON, qualifiedName)
+	namePath := "name"
+	namespacePath := "namespace"
+	if itemPath != "" {
+		namePath = itemPath + ".name"
+		namespacePath = itemPath + ".namespace"
+	}
+	item, _ = sjson.SetBytes(item, namePath, name)
+	if namespace != "" {
+		item, _ = sjson.SetBytes(item, namespacePath, namespace)
+	} else {
+		item, _ = sjson.DeleteBytes(item, namespacePath)
+	}
+	return item
+}
+
 func emitEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
@@ -236,7 +253,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			item, _ = sjson.SetBytes(item, "output_index", idx)
 			item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 			item, _ = sjson.SetBytes(item, "item.call_id", st.CurrentFCID)
-			item, _ = sjson.SetBytes(item, "item.name", name)
+			item = applyResponsesFunctionCallNamespaceFields(item, pickRequestJSON(originalRequestRawJSON, requestRawJSON), name, "item")
 			out = append(out, emitEvent("response.output_item.added", item))
 			if st.FuncArgsBuf[idx] == nil {
 				st.FuncArgsBuf[idx] = &strings.Builder{}
@@ -350,7 +367,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 			itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
 			itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.CurrentFCID)
-			itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+			itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, pickRequestJSON(originalRequestRawJSON, requestRawJSON), st.FuncNames[idx], "item")
 			out = append(out, emitEvent("response.output_item.done", itemDone))
 			st.InFuncBlock = false
 		} else if st.ReasoningActive {
@@ -512,7 +529,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 				item, _ = sjson.SetBytes(item, "arguments", args)
 				item, _ = sjson.SetBytes(item, "call_id", callID)
-				item, _ = sjson.SetBytes(item, "name", name)
+				item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, name, "")
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 			}
 		}
@@ -794,7 +811,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", st.id))
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", st.id)
-			item, _ = sjson.SetBytes(item, "name", st.name)
+			item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, st.name, "")
 			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 		}
 	}

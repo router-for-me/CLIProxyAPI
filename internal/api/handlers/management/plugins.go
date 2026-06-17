@@ -90,7 +90,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		entries[file.ID] = pluginListEntry{
 			ID:           htmlsanitize.String(file.ID),
 			Path:         htmlsanitize.String(file.Path),
-			Enabled:      true,
+			Enabled:      false,
 			ConfigFields: []pluginConfigFieldInfo{},
 			Menus:        []pluginMenuInfo{},
 		}
@@ -118,10 +118,6 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			entry.Menus = pluginMenus(info.Menus)
 			entry.Metadata = pluginMetadata(info.Metadata)
-			_, configured := configs[info.ID]
-			if !configured && !entry.Enabled {
-				entry.Enabled = true
-			}
 			entries[info.ID] = entry
 		}
 	}
@@ -215,18 +211,25 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	ensurePluginConfigMap(h.cfg)
 	item := h.cfg.Plugins.Configs[id]
 	node := pluginConfigNode(item)
 	setYAMLMappingValue(node, "enabled", boolYAMLNode(*body.Enabled))
 	updated, errConfig := pluginInstanceConfigFromNode(node)
 	if errConfig != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
 		return
 	}
 	h.cfg.Plugins.Configs[id] = updated
-	h.persistLocked(c)
+	cfgSnapshot, okSnapshot := h.saveConfigAndSnapshotLocked(c)
+	h.mu.Unlock()
+	if !okSnapshot {
+		return
+	}
+
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // PutPluginConfig replaces plugins.configs.<id> with the request object.
@@ -331,7 +334,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	if pluginLoaded(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginLoaded(host, id) {
+	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":            "plugin_delete_requires_restart",
 			"message":          "loaded plugin cannot be deleted while the server is running",
@@ -366,10 +369,10 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 			return
 		}
 	}
-	reloadCfg := h.cfg
+	cfgSnapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), reloadCfg)
+	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{
 		"status":             "deleted",
 		"id":                 htmlsanitize.String(id),
@@ -390,7 +393,7 @@ func normalizedPluginsDir(dir string) string {
 
 func pluginInstanceEnabled(item config.PluginInstanceConfig) bool {
 	if item.Enabled == nil {
-		return true
+		return false
 	}
 	return *item.Enabled
 }

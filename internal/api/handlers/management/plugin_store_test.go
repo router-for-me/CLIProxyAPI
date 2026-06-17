@@ -3,7 +3,6 @@ package management
 import (
 	"archive/zip"
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,7 +24,6 @@ import (
 
 func TestListPluginStoreMergesInstalledStatus(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	pluginsDir := writeManagementPluginFile(t, "sample-provider")
 	h := &Handler{
@@ -84,7 +82,6 @@ func TestListPluginStoreMergesInstalledStatus(t *testing.T) {
 
 func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -150,7 +147,6 @@ func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
 
 func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	httpClient := &countingPluginStoreHTTPClient{responses: fakePluginStoreHTTPClient{
 		"https://registry.example/registry.json": registryJSON(t),
@@ -203,7 +199,6 @@ func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 
 func TestListPluginStoreFallsBackToRegistryVersion(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -242,7 +237,6 @@ func TestListPluginStoreFallsBackToRegistryVersion(t *testing.T) {
 
 func TestListPluginStoreIncludesThirdPartySources(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -304,7 +298,6 @@ func TestListPluginStoreIncludesThirdPartySources(t *testing.T) {
 
 func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	pluginsDir := t.TempDir()
 	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "library-data")
@@ -335,6 +328,7 @@ func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
 			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
 		},
 	}
+	reloads, reloadDone := captureConfigReload(h)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -345,6 +339,11 @@ func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	cfgSnapshot := waitForAsyncReload(t, reloads)
+	waitForReloadDone(t, reloadDone)
+	if cfgSnapshot == h.cfg {
+		t.Fatalf("reload config = handler config %p, want independent snapshot", h.cfg)
 	}
 	var body pluginInstallResponse
 	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
@@ -371,18 +370,27 @@ func TestInstallPluginFromStoreWritesFileAndEnablesConfig(t *testing.T) {
 	if item.Enabled == nil || !*item.Enabled {
 		t.Fatalf("plugin enabled = %#v, want true", item.Enabled)
 	}
+	snapshotItem := cfgSnapshot.Plugins.Configs["sample-provider"]
+	if snapshotItem.Enabled == nil || !*snapshotItem.Enabled {
+		t.Fatalf("snapshot plugin enabled = %#v, want true", snapshotItem.Enabled)
+	}
 	if h.cfg.Plugins.Enabled {
 		t.Fatal("global plugins.enabled changed to true")
+	}
+	if cfgSnapshot.Plugins.Enabled {
+		t.Fatal("snapshot global plugins.enabled changed to true")
 	}
 	raw := marshalPluginRaw(t, item)
 	if !strings.Contains(raw, "mode: fast") {
 		t.Fatalf("plugin raw config lost custom field:\n%s", raw)
 	}
+	if raw := marshalPluginRaw(t, snapshotItem); !strings.Contains(raw, "mode: fast") {
+		t.Fatalf("snapshot plugin raw config lost custom field:\n%s", raw)
+	}
 }
 
 func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	pluginsDir := t.TempDir()
 	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "third-party-library-data")
@@ -411,6 +419,7 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
 		},
 	}
+	reloads, reloadDone := captureConfigReload(h)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -422,6 +431,11 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	cfgSnapshot := waitForAsyncReload(t, reloads)
+	waitForReloadDone(t, reloadDone)
+	if cfgSnapshot == h.cfg {
+		t.Fatalf("reload config = handler config %p, want independent snapshot", h.cfg)
 	}
 	var body pluginInstallResponse
 	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
@@ -438,11 +452,14 @@ func TestInstallPluginFromStoreUsesRequestedThirdPartySource(t *testing.T) {
 	if string(data) != "third-party-library-data" {
 		t.Fatalf("installed file = %q, want third-party-library-data", data)
 	}
+	snapshotItem := cfgSnapshot.Plugins.Configs["sample-provider"]
+	if snapshotItem.Enabled == nil || !*snapshotItem.Enabled {
+		t.Fatalf("snapshot plugin enabled = %#v, want true", snapshotItem.Enabled)
+	}
 }
 
 func TestInstallPluginFromStoreRequiresSourceForDuplicateIDs(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -476,7 +493,6 @@ func TestInstallPluginFromStoreRequiresSourceForDuplicateIDs(t *testing.T) {
 
 func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	pluginsDir := t.TempDir()
 	existingPath := filepath.Join(pluginsDir, "sample-provider"+managementPluginExtension(runtime.GOOS))
@@ -511,13 +527,7 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
 		},
 	}
-	reloads := 0
-	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
-		reloads++
-		if cfg != h.cfg {
-			t.Fatalf("reload config = %p, want handler config %p", cfg, h.cfg)
-		}
-	})
+	reloads, reloadDone := captureConfigReload(h)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -529,8 +539,10 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if reloads != 1 {
-		t.Fatalf("reloads = %d, want 1", reloads)
+	cfgSnapshot := waitForAsyncReload(t, reloads)
+	waitForReloadDone(t, reloadDone)
+	if cfgSnapshot == h.cfg {
+		t.Fatalf("reload config = handler config %p, want independent snapshot", h.cfg)
 	}
 	data, errRead := os.ReadFile(existingPath)
 	if errRead != nil {
@@ -543,12 +555,22 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	if item.Enabled == nil || !*item.Enabled {
 		t.Fatalf("plugin enabled = %#v, want true", item.Enabled)
 	}
+	snapshotItem := cfgSnapshot.Plugins.Configs["sample-provider"]
+	if snapshotItem.Enabled == nil || !*snapshotItem.Enabled {
+		t.Fatalf("snapshot plugin enabled = %#v, want true", snapshotItem.Enabled)
+	}
 	if item.Priority != 5 {
 		t.Fatalf("plugin priority = %d, want 5", item.Priority)
+	}
+	if snapshotItem.Priority != 5 {
+		t.Fatalf("snapshot plugin priority = %d, want 5", snapshotItem.Priority)
 	}
 	raw := marshalPluginRaw(t, item)
 	if !strings.Contains(raw, "mode: fast") || !strings.Contains(raw, "extra: keep") {
 		t.Fatalf("plugin raw config lost custom fields:\n%s", raw)
+	}
+	if raw := marshalPluginRaw(t, snapshotItem); !strings.Contains(raw, "mode: fast") || !strings.Contains(raw, "extra: keep") {
+		t.Fatalf("snapshot plugin raw config lost custom fields:\n%s", raw)
 	}
 }
 
