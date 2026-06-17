@@ -86,3 +86,4 @@ func TestMiddlewareSetsSupportPluginHeader(t *testing.T) {
 		}
 	})
 }
+
