@@ -490,7 +490,7 @@ func (s *Server) setupRoutes() {
 					continue
 				}
 				if strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/") ||
-					strings.HasPrefix(path, "/backend-api/") {
+					strings.HasPrefix(path, "/backend-api/") || strings.HasPrefix(path, "/openai/") {
 					s.rootEndpoints = append(s.rootEndpoints, r.Method+" "+path)
 				}
 			}
