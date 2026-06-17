@@ -357,7 +357,7 @@ func isGeminiFamily(provider string) bool {
 
 func isOpenAIFamily(provider string) bool {
 	switch provider {
-	case "openai", "openai-response", "codex", "xai":
+	case "openai", "openai-response", "codex":
 		return true
 	default:
 		return false

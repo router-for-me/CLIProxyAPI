@@ -15,6 +15,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/geminicli"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/kimi"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/openai"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/xai"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -2238,6 +2239,186 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 	runThinkingTests(t, cases)
 }
 
+// TestThinkingE2ENewProviderTargets covers provider-specific targets that do not
+// have their own public translator format but do have ApplyThinking providers.
+func TestThinkingE2ENewProviderTargets(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("thinking-e2e-new-providers-%d", time.Now().UnixNano())
+
+	reg.RegisterClient(uid, "test", getTestModels())
+	defer reg.UnregisterClient(uid)
+
+	cases := []thinkingTestCase{
+		// Kimi target: enabled thinking uses reasoning_effort, explicit disable uses thinking.type=disabled.
+		{
+			name:        "K1",
+			from:        "openai",
+			to:          "kimi",
+			model:       "kimi-level-model(high)",
+			inputJSON:   `{"model":"kimi-level-model(high)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+		},
+		{
+			name:        "K2",
+			from:        "openai",
+			to:          "kimi",
+			model:       "kimi-level-model(none)",
+			inputJSON:   `{"model":"kimi-level-model(none)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+		},
+		{
+			name:        "K3",
+			from:        "gemini",
+			to:          "kimi",
+			model:       "kimi-level-model(32768)",
+			inputJSON:   `{"model":"kimi-level-model(32768)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+		},
+		{
+			name:        "K4",
+			from:        "claude",
+			to:          "kimi",
+			model:       "kimi-level-model(0)",
+			inputJSON:   `{"model":"kimi-level-model(0)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+		},
+		{
+			name:        "K5",
+			from:        "openai",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+		},
+		{
+			name:        "K6",
+			from:        "openai-response",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+		},
+		{
+			name:        "K7",
+			from:        "gemini",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+		},
+		{
+			name:        "K8",
+			from:        "claude",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+		},
+
+		// xAI target: Grok uses Responses-compatible reasoning.effort with Grok-specific levels.
+		{
+			name:        "X1",
+			from:        "openai",
+			to:          "xai",
+			model:       "xai-level-model(high)",
+			inputJSON:   `{"model":"xai-level-model(high)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+		{
+			name:        "X2",
+			from:        "openai",
+			to:          "xai",
+			model:       "xai-level-model(xhigh)",
+			inputJSON:   `{"model":"xai-level-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+		{
+			name:        "X3",
+			from:        "openai-response",
+			to:          "xai",
+			model:       "xai-level-model(max)",
+			inputJSON:   `{"model":"xai-level-model(max)","input":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+		{
+			name:        "X4",
+			from:        "gemini",
+			to:          "xai",
+			model:       "xai-level-model(512)",
+			inputJSON:   `{"model":"xai-level-model(512)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "low",
+		},
+		{
+			name:        "X5",
+			from:        "claude",
+			to:          "xai",
+			model:       "xai-level-model(0)",
+			inputJSON:   `{"model":"xai-level-model(0)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "none",
+		},
+		{
+			name:        "X6",
+			from:        "openai",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+		{
+			name:        "X7",
+			from:        "openai-response",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"minimal"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "low",
+		},
+		{
+			name:        "X8",
+			from:        "gemini",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+		{
+			name:        "X9",
+			from:        "claude",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField: "reasoning.effort",
+			expectValue: "none",
+		},
+		{
+			name:        "X10",
+			from:        "claude",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+	}
+
+	runThinkingTests(t, cases)
+}
+
 // TestThinkingE2EClaudeAdaptive_Body covers Group 3 cases in docs/thinking-e2e-test-cases.md.
 // It focuses on Claude 4.6 adaptive thinking and effort/level cross-protocol semantics (body-only).
 func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
@@ -2818,6 +2999,24 @@ func getTestModels() []*registry.ModelInfo {
 			Thinking:    &registry.ThinkingSupport{Min: 128, Max: 20000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
+			ID:          "kimi-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi Level Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "xai-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "xai",
+			Type:        "xai",
+			DisplayName: "xAI Level Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
 			ID:          "no-thinking-model",
 			Object:      "model",
 			Created:     1700000000,
@@ -2850,6 +3049,12 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 
 			translateTo := tc.to
 			applyTo := tc.to
+			switch applyTo {
+			case "kimi":
+				translateTo = "openai"
+			case "xai":
+				translateTo = "codex"
+			}
 
 			body := sdktranslator.TranslateRequest(
 				sdktranslator.FromString(tc.from),
