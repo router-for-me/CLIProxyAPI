@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -103,6 +104,51 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	}
 	if got := gjson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
 		t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, "low", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorThinkingUsesRequestedAliasCapabilities(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-openai-compat-requested-alias-thinking", "openai-compatibility", []*registry.ModelInfo{{
+		ID:       "shared-model",
+		Object:   "model",
+		Type:     "openai-compatibility",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("test-openai-compat-requested-alias-thinking")
+	})
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"shared-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5(xhigh)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "shared-model(xhigh)",
+		},
+	})
+	if err == nil {
+		t.Fatalf("Execute error = nil, want xhigh rejected for requested alias")
+	}
+	if gotBody != nil {
+		t.Fatalf("upstream received body despite invalid requested alias thinking: %s", string(gotBody))
 	}
 }
 
