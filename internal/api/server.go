@@ -615,16 +615,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
-		mgmt.GET("/plugins", s.mgmt.ListPlugins)
-<<<<<<< HEAD
-		mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
-		mgmt.POST("/plugin-store/:id/install", s.mgmt.InstallPluginFromStore)
-		mgmt.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
-=======
-		mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
->>>>>>> a72cc55b (Add management plugin config GET endpoint)
-		mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
-		mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
+			mgmt.GET("/plugins", s.mgmt.ListPlugins)
+			mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
+			mgmt.POST("/plugin-store/:id/install", s.mgmt.InstallPluginFromStore)
+			mgmt.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
+			mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
+			mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
 		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
 		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
 

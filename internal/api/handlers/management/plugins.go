@@ -232,38 +232,6 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// GetPluginConfig returns plugins.configs.<id> as a JSON object for editing.
-func (h *Handler) GetPluginConfig(c *gin.Context) {
-	id, okID := pluginIDFromRequest(c)
-	if !okID {
-		return
-	}
-
-	h.mu.Lock()
-	item := h.cfg.Plugins.Configs[id]
-	h.mu.Unlock()
-
-	node := pluginConfigNode(item)
-	if node == nil || node.Kind != yaml.MappingNode {
-		c.JSON(http.StatusOK, gin.H{})
-		return
-	}
-
-	body := make(map[string]any, len(node.Content)/2)
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key := node.Content[i]
-		value := node.Content[i+1]
-		if key == nil || key.Value == "" {
-			continue
-		}
-		body[key.Value] = yamlNodeToJSONValue(value)
-	}
-	if body == nil {
-		body = map[string]any{}
-	}
-	c.JSON(http.StatusOK, body)
-}
-
 // PutPluginConfig replaces plugins.configs.<id> with the request object.
 func (h *Handler) PutPluginConfig(c *gin.Context) {
 	id, okID := pluginIDFromRequest(c)
@@ -587,49 +555,6 @@ func yamlNodeFromJSONObject(body map[string]any) (*yaml.Node, error) {
 		setYAMLMappingValue(node, key, valueNode)
 	}
 	return node, nil
-}
-
-func yamlNodeToJSONValue(node *yaml.Node) any {
-	if node == nil {
-		return nil
-	}
-	switch node.Kind {
-	case yaml.MappingNode:
-		out := make(map[string]any, len(node.Content)/2)
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			key := node.Content[i]
-			value := node.Content[i+1]
-			if key == nil || key.Value == "" {
-				continue
-			}
-			out[key.Value] = yamlNodeToJSONValue(value)
-		}
-		return out
-	case yaml.SequenceNode:
-		out := make([]any, 0, len(node.Content))
-		for _, child := range node.Content {
-			out = append(out, yamlNodeToJSONValue(child))
-		}
-		return out
-	case yaml.ScalarNode:
-		switch node.Tag {
-		case "!!null":
-			return nil
-		case "!!bool":
-			return strings.EqualFold(node.Value, "true")
-		case "!!int":
-			if v, err := strconv.ParseInt(strings.TrimSpace(node.Value), 10, 64); err == nil {
-				return v
-			}
-		case "!!float":
-			if v, err := strconv.ParseFloat(strings.TrimSpace(node.Value), 64); err == nil {
-				return v
-			}
-		}
-		return node.Value
-	default:
-		return node.Value
-	}
 }
 
 func yamlNodeFromJSONValue(value any) (*yaml.Node, error) {
