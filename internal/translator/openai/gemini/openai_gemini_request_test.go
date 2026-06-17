@@ -6,6 +6,48 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func collectToolCallIDs(messages gjson.Result) ([]string, []string) {
+	var assistantToolCallIDs []string
+	var toolMessageIDs []string
+
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		switch msg.Get("role").String() {
+		case "assistant":
+			msg.Get("tool_calls").ForEach(func(_, toolCall gjson.Result) bool {
+				assistantToolCallIDs = append(assistantToolCallIDs, toolCall.Get("id").String())
+				return true
+			})
+		case "tool":
+			toolMessageIDs = append(toolMessageIDs, msg.Get("tool_call_id").String())
+		}
+		return true
+	})
+
+	return assistantToolCallIDs, toolMessageIDs
+}
+
+func assertDistinctToolCallIDs(t *testing.T, toolMessageIDs []string) {
+	t.Helper()
+
+	seen := make(map[string]bool)
+	for _, id := range toolMessageIDs {
+		if seen[id] {
+			t.Errorf("duplicate tool_call_id %q", id)
+		}
+		seen[id] = true
+	}
+}
+
+func assertToolCallIDsMatch(t *testing.T, assistantToolCallIDs, toolMessageIDs []string, count int) {
+	t.Helper()
+
+	for i := 0; i < count; i++ {
+		if assistantToolCallIDs[i] != toolMessageIDs[i] {
+			t.Errorf("mismatch at index %d: assistant tool call ID %q != tool message ID %q", i, assistantToolCallIDs[i], toolMessageIDs[i])
+		}
+	}
+}
+
 func TestConvertGeminiRequestToOpenAI_ToolCallIDMatching_MultipleCallsMultipleResponses(t *testing.T) {
 	// Two function calls (Bash, Read) followed by two function responses.
 	// Before the fix, both responses would reuse the last tool call ID (Read),
@@ -38,23 +80,17 @@ func TestConvertGeminiRequestToOpenAI_ToolCallIDMatching_MultipleCallsMultipleRe
 		t.Fatal("expected messages to be an array")
 	}
 
-	// Collect tool message tool_call_ids
-	var toolCallIDs []string
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		if msg.Get("role").String() == "tool" {
-			id := msg.Get("tool_call_id").String()
-			toolCallIDs = append(toolCallIDs, id)
-		}
-		return true
-	})
+	assistantToolCallIDs, toolMessageIDs := collectToolCallIDs(messages)
 
-	if len(toolCallIDs) != 2 {
-		t.Fatalf("expected 2 tool messages, got %d", len(toolCallIDs))
+	if len(assistantToolCallIDs) != 2 {
+		t.Fatalf("expected 2 assistant tool calls, got %d", len(assistantToolCallIDs))
+	}
+	if len(toolMessageIDs) != 2 {
+		t.Fatalf("expected 2 tool messages, got %d", len(toolMessageIDs))
 	}
 
-	if toolCallIDs[0] == toolCallIDs[1] {
-		t.Errorf("tool_call_ids must be distinct, got duplicate %q", toolCallIDs[0])
-	}
+	assertToolCallIDsMatch(t, assistantToolCallIDs, toolMessageIDs, 2)
+	assertDistinctToolCallIDs(t, toolMessageIDs)
 }
 
 func TestConvertGeminiRequestToOpenAI_ToolCallIDMatching_FIFOConsumption(t *testing.T) {
@@ -79,26 +115,17 @@ func TestConvertGeminiRequestToOpenAI_ToolCallIDMatching_FIFOConsumption(t *test
 	out := ConvertGeminiRequestToOpenAI("deepseek-v4-pro", input, false)
 
 	messages := gjson.GetBytes(out, "messages")
-	var toolCallIDs []string
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		if msg.Get("role").String() == "tool" {
-			id := msg.Get("tool_call_id").String()
-			toolCallIDs = append(toolCallIDs, id)
-		}
-		return true
-	})
+	assistantToolCallIDs, toolMessageIDs := collectToolCallIDs(messages)
 
-	if len(toolCallIDs) != 3 {
-		t.Fatalf("expected 3 tool messages, got %d", len(toolCallIDs))
+	if len(assistantToolCallIDs) != 3 {
+		t.Fatalf("expected 3 assistant tool calls, got %d", len(assistantToolCallIDs))
+	}
+	if len(toolMessageIDs) != 3 {
+		t.Fatalf("expected 3 tool messages, got %d", len(toolMessageIDs))
 	}
 
-	seen := make(map[string]bool)
-	for _, id := range toolCallIDs {
-		if seen[id] {
-			t.Errorf("duplicate tool_call_id %q", id)
-		}
-		seen[id] = true
-	}
+	assertToolCallIDsMatch(t, assistantToolCallIDs, toolMessageIDs, 3)
+	assertDistinctToolCallIDs(t, toolMessageIDs)
 }
 
 func TestConvertGeminiRequestToOpenAI_ToolCallIDMatching_NoFunctionCalls(t *testing.T) {
@@ -117,19 +144,15 @@ func TestConvertGeminiRequestToOpenAI_ToolCallIDMatching_NoFunctionCalls(t *test
 	out := ConvertGeminiRequestToOpenAI("deepseek-v4-pro", input, false)
 
 	messages := gjson.GetBytes(out, "messages")
-	var toolCallIDs []string
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		if msg.Get("role").String() == "tool" {
-			id := msg.Get("tool_call_id").String()
-			toolCallIDs = append(toolCallIDs, id)
-		}
-		return true
-	})
+	assistantToolCallIDs, toolMessageIDs := collectToolCallIDs(messages)
 
-	if len(toolCallIDs) != 1 {
-		t.Fatalf("expected 1 tool message, got %d", len(toolCallIDs))
+	if len(assistantToolCallIDs) != 0 {
+		t.Fatalf("expected 0 assistant tool calls, got %d", len(assistantToolCallIDs))
 	}
-	if toolCallIDs[0] == "" {
+	if len(toolMessageIDs) != 1 {
+		t.Fatalf("expected 1 tool message, got %d", len(toolMessageIDs))
+	}
+	if toolMessageIDs[0] == "" {
 		t.Error("tool_call_id should not be empty")
 	}
 }
@@ -155,24 +178,15 @@ func TestConvertGeminiRequestToOpenAI_ToolCallIDMatching_MoreResponsesThanCalls(
 	out := ConvertGeminiRequestToOpenAI("deepseek-v4-pro", input, false)
 
 	messages := gjson.GetBytes(out, "messages")
-	var toolCallIDs []string
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		if msg.Get("role").String() == "tool" {
-			id := msg.Get("tool_call_id").String()
-			toolCallIDs = append(toolCallIDs, id)
-		}
-		return true
-	})
+	assistantToolCallIDs, toolMessageIDs := collectToolCallIDs(messages)
 
-	if len(toolCallIDs) != 3 {
-		t.Fatalf("expected 3 tool messages, got %d", len(toolCallIDs))
+	if len(assistantToolCallIDs) != 2 {
+		t.Fatalf("expected 2 assistant tool calls, got %d", len(assistantToolCallIDs))
+	}
+	if len(toolMessageIDs) != 3 {
+		t.Fatalf("expected 3 tool messages, got %d", len(toolMessageIDs))
 	}
 
-	seen := make(map[string]bool)
-	for _, id := range toolCallIDs {
-		if seen[id] {
-			t.Errorf("duplicate tool_call_id %q", id)
-		}
-		seen[id] = true
-	}
+	assertToolCallIDsMatch(t, assistantToolCallIDs, toolMessageIDs, 2)
+	assertDistinctToolCallIDs(t, toolMessageIDs)
 }
