@@ -14,7 +14,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `protocol-format/`: minimal executor focused on input/output format declarations.
 - `request-translator/`: request translation capability only.
 - `request-normalizer/`: request normalization capability only.
-- `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.5` requests to the priority service tier when enabled.
+- `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.4` and `gpt-5.5` requests to the priority service tier when enabled.
 - `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
 - `claude-web-search-router/`: ModelRouter + executor for Claude Code built-in `web_search` (antigravity / codex / xai / Tavily). See `claude-web-search-router/README.md`.
 - `response-translator/`: response translation capability only.
@@ -31,7 +31,7 @@ Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectorie
 
 ## Codex Service Tier
 
-`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.5`.
+`codex-service-tier` declares the request normalization capability. When `fast` is `true`, it sets `service_tier` to `priority` for requests where `req.ToFormat` is `codex` and `req.Model` is `gpt-5.4` or `gpt-5.5`.
 
 ```yaml
 plugins:
