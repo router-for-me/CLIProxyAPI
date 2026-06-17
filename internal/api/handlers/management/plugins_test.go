@@ -99,6 +99,75 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	}
 }
 
+func TestGetPluginConfigReturnsExistingConfigAndDefaultsToEmptyObject(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample": pluginConfigFromYAML(t, "enabled: false\npriority: 2\nmode: safe\ncount: 3\nflags:\n  - fast\n  - stable\n"),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	t.Run("existing config", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Params = gin.Params{{Key: "id", Value: "sample"}}
+		c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/sample/config", nil)
+
+		h.GetPluginConfig(c)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+		}
+		if got, ok := body["enabled"].(bool); !ok || got {
+			t.Fatalf("enabled = %#v, want false", body["enabled"])
+		}
+		if got, ok := body["priority"].(float64); !ok || got != 2 {
+			t.Fatalf("priority = %#v, want 2", body["priority"])
+		}
+		if got, ok := body["mode"].(string); !ok || got != "safe" {
+			t.Fatalf("mode = %#v, want safe", body["mode"])
+		}
+		if got, ok := body["count"].(float64); !ok || got != 3 {
+			t.Fatalf("count = %#v, want 3", body["count"])
+		}
+		flags, ok := body["flags"].([]any)
+		if !ok || len(flags) != 2 {
+			t.Fatalf("flags = %#v, want [fast stable]", body["flags"])
+		}
+	})
+
+	t.Run("missing config", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Params = gin.Params{{Key: "id", Value: "missing"}}
+		c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/missing/config", nil)
+
+		h.GetPluginConfig(c)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+		}
+		if len(body) != 0 {
+			t.Fatalf("body = %#v, want empty object", body)
+		}
+	})
+}
+
 func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)

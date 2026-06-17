@@ -600,6 +600,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
 		mgmt.GET("/plugins", s.mgmt.ListPlugins)
+		mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
 		mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
 		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
 		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
