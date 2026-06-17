@@ -169,7 +169,7 @@ func pluginRegistration() registration {
 			ConfigFields: []pluginapi.ConfigField{{
 				Name:        "fast",
 				Type:        pluginapi.ConfigFieldTypeBoolean,
-				Description: "Sets Codex gpt-5.5 Responses requests to the priority service tier.",
+				Description: "Sets Codex gpt-5.4 and gpt-5.5 Responses requests to the priority service tier.",
 			}},
 		},
 		Capabilities: registrationCapability{
@@ -201,7 +201,7 @@ func shouldSetPriorityServiceTier(req pluginapi.RequestTransformRequest) bool {
 	if !strings.EqualFold(req.ToFormat, "codex") {
 		return false
 	}
-	return req.Model == "gpt-5.5"
+	return req.Model == "gpt-5.4" || req.Model == "gpt-5.5"
 }
 
 func decodeFastConfig(configYAML []byte) (bool, error) {
