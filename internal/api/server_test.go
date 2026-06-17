@@ -228,8 +228,8 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if got := rr.Header().Get("X-CPA-SUPPORT-PLUGIN"); got != "true" {
-		t.Fatalf("X-CPA-SUPPORT-PLUGIN header = %q, want %q", got, "true")
+	if got := rr.Header().Get("X-CPA-SUPPORT-PLUGIN"); got != pluginhost.SupportPluginHeaderValue() {
+		t.Fatalf("X-CPA-SUPPORT-PLUGIN header = %q, want %q", got, pluginhost.SupportPluginHeaderValue())
 	}
 
 	var payload struct {
