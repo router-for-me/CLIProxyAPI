@@ -125,6 +125,52 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsIncompatibleReasoningSignatu
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{
+				"type":"function_call",
+				"call_id":"call_00_awGuheXs4aRbtedNK8LE3743",
+				"name":"js",
+				"arguments":"{\"code\":\"nodeRepl.write('ok')\",\"title\":\"List Obsidian vault contents\"}"
+			},
+			{
+				"type":"message",
+				"role":"assistant",
+				"content":[{"type":"output_text","text":"I'll check your Obsidian vault for articles."}]
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_00_awGuheXs4aRbtedNK8LE3743",
+				"output":"Wall time: 0.1963 seconds\nOutput:\n[{\"type\":\"text\",\"text\":\"\"}]"
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.0.role").String(); got != "assistant" {
+		t.Fatalf("first message role = %q, want assistant. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.content").String(); got != "I'll check your Obsidian vault for articles." {
+		t.Fatalf("first message content = %q, want assistant text. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.content.0.type").String(); got != "tool_use" {
+		t.Fatalf("second message first content type = %q, want tool_use. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.content.0.id").String(); got != "call_00_awGuheXs4aRbtedNK8LE3743" {
+		t.Fatalf("tool_use id = %q, want call_00_awGuheXs4aRbtedNK8LE3743. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("third message first content type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.2.content.0.tool_use_id").String(); got != "call_00_awGuheXs4aRbtedNK8LE3743" {
+		t.Fatalf("tool_result id = %q, want call_00_awGuheXs4aRbtedNK8LE3743. Output: %s", got, string(out))
+	}
+}
+
 func testClaudeResponsesThinkingSignature(t *testing.T) (string, string) {
 	t.Helper()
 	channelBlock := []byte{}

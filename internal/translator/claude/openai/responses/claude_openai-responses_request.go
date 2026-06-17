@@ -170,6 +170,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	// input array processing
 	var pendingReasoningParts []string
+	type pendingToolUseMessage struct {
+		callID string
+		raw    []byte
+	}
+	var pendingToolUseMessages []pendingToolUseMessage
+	appendMessage := func(msg []byte) {
+		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+	}
 	flushPendingReasoning := func() {
 		if len(pendingReasoningParts) == 0 {
 			return
@@ -178,8 +186,27 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		for _, partJSON := range pendingReasoningParts {
 			asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
 		}
-		out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+		appendMessage(asst)
 		pendingReasoningParts = nil
+	}
+	flushPendingToolUses := func() {
+		for _, pending := range pendingToolUseMessages {
+			appendMessage(pending.raw)
+		}
+		pendingToolUseMessages = nil
+	}
+	flushPendingToolUseFor := func(callID string) {
+		if len(pendingToolUseMessages) == 0 {
+			return
+		}
+		for i, pending := range pendingToolUseMessages {
+			if pending.callID == callID {
+				appendMessage(pending.raw)
+				pendingToolUseMessages = append(pendingToolUseMessages[:i], pendingToolUseMessages[i+1:]...)
+				return
+			}
+		}
+		flushPendingToolUses()
 	}
 
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
@@ -294,6 +321,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 				hasReasoningParts := false
+				if role != "assistant" {
+					flushPendingToolUses()
+				}
 				if len(pendingReasoningParts) > 0 {
 					if role == "assistant" {
 						if len(partsJSON) == 0 && textAggregate.Len() > 0 {
@@ -322,12 +352,12 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
 						}
 					}
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					appendMessage(msg)
 				} else if textAggregate.Len() > 0 || role == "system" {
 					msg := []byte(`{"role":"","content":""}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
 					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					appendMessage(msg)
 				}
 
 			case "reasoning":
@@ -360,12 +390,16 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				pendingReasoningParts = nil
 				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				pendingToolUseMessages = append(pendingToolUseMessages, pendingToolUseMessage{
+					callID: callID,
+					raw:    asst,
+				})
 
 			case "function_call_output":
 				flushPendingReasoning()
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
+				flushPendingToolUseFor(callID)
 				outputStr := item.Get("output").String()
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
@@ -373,12 +407,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+				appendMessage(usr)
 			}
 			return true
 		})
 	}
 	flushPendingReasoning()
+	flushPendingToolUses()
 
 	includedToolNames := map[string]struct{}{}
 	toolNameMap := map[string]string{}
