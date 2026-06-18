@@ -4178,7 +4178,10 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 
 	raw, err := client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, count)
 	if err != nil {
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		if errors.Is(err, home.ErrAuthNotFound) {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: err.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		}
+		return nil, nil, "", &Error{Code: "home_unavailable", Message: err.Error(), Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
 	var env homeErrorEnvelope
