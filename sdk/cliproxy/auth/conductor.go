@@ -1845,7 +1845,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			m.bindSessionAffinitySuccess(execCtx, provider, routeModel, execOpts, auth.ID)
+			m.bindSessionAffinitySuccess(execCtx, provider, routeModel, opts, auth.ID)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1947,7 +1947,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			m.bindSessionAffinitySuccess(execCtx, provider, routeModel, execOpts, auth.ID)
+			m.bindSessionAffinitySuccess(execCtx, provider, routeModel, opts, auth.ID)
 			return resp, nil
 		}
 		if authErr != nil {
