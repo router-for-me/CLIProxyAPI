@@ -11,8 +11,6 @@ import (
 )
 
 func TestManagerExecute_SessionAffinityRebindsToSuccessfulFallbackAuth(t *testing.T) {
-	t.Parallel()
-
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		Fallback: &RoundRobinSelector{},
 		TTL:      time.Minute,
