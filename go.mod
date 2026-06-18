@@ -29,11 +29,7 @@ require (
 	github.com/tidwall/sjson v1.2.5
 	github.com/tiktoken-go/tokenizer v0.7.0
 	golang.org/x/crypto v0.51.0
-<<<<<<< HEAD
-	golang.org/x/net v0.53.0
-=======
 	golang.org/x/net v0.54.0
->>>>>>> origin/dependabot/go_modules/golang.org/x/net-0.54.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.43.0
