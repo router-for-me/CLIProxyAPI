@@ -148,6 +148,58 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
+	tests := []struct {
+		name            string
+		serviceTierJSON string
+		want            string
+		wantExists      bool
+	}{
+		{
+			name:            "Priority passes through",
+			serviceTierJSON: `"priority"`,
+			want:            "priority",
+			wantExists:      true,
+		},
+		{
+			name:            "Fast normalizes to priority",
+			serviceTierJSON: `"fast"`,
+			want:            "priority",
+			wantExists:      true,
+		},
+		{
+			name:            "Unsupported tier is omitted",
+			serviceTierJSON: `"default"`,
+		},
+		{
+			name:            "Non-string tier is omitted",
+			serviceTierJSON: `true`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := `{
+				"model": "gpt-5.4",
+				"service_tier": ` + tt.serviceTierJSON + `,
+				"messages": [{"role": "user", "content": "Reply with OK"}]
+			}`
+
+			result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+			serviceTierResult := gjson.GetBytes(result, "service_tier")
+			if serviceTierResult.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists = %v, want %v. Output: %s", serviceTierResult.Exists(), tt.wantExists, string(result))
+			}
+			if !tt.wantExists {
+				return
+			}
+			if got := serviceTierResult.String(); got != tt.want {
+				t.Fatalf("service_tier = %q, want %q. Output: %s", got, tt.want, string(result))
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
 	longID := "toolu_" + strings.Repeat("a", 62)
 	if len(longID) <= 64 {
