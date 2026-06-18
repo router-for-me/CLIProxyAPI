@@ -25,3 +25,9 @@ Post **Wave H3** (#1024): vibeproxy absorption documented; proxy plane canonical
 go build ./...
 go test ./...
 ```
+
+## Audit log (2026-06-18)
+
+- Script: `scripts/branch-prune-audit.ps1`
+- Merged: go.mod conflict fix #1027
+- Deleted: `fix/go-mod-merge-conflict` (post-merge, 0 ahead)
