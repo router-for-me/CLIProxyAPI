@@ -2859,7 +2859,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) && !isStaticFileNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -3353,6 +3353,21 @@ func isRequestScopedNotFoundMessage(message string) bool {
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
 }
 
+func isStaticFileNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, `"code":"not-found"`) && strings.Contains(msg, "failed to read static file")
+}
+
+func isStaticFileNotFoundResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return isStaticFileNotFoundError(err)
+}
+
 func isRequestScopedNotFoundResultError(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != http.StatusNotFound {
 		return false
@@ -3360,6 +3375,13 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+// isRequestInvalidError returns true if the error represents a client request
+// error that should not be retried. Specifically, it treats 400 responses with
+// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
+// all 422 responses, and context-window errors (any HTTP status) as request-shape
+// failures where switching auths or pooled upstream models will not help.
+// Model-support errors are excluded so routing can fall through to another auth
+// or upstream.
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
@@ -3378,6 +3400,9 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	if isContextWindowExceededError(err) {
+		return true
+	}
+	if isStaticFileNotFoundError(err) {
 		return true
 	}
 	status := statusCodeFromError(err)
@@ -3404,8 +3429,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) {
-		return
+	if isRequestScopedNotFoundResultError(resultErr) || isStaticFileNotFoundResultError(resultErr) {
 	}
 	disableCooling := quotaCooldownDisabledForAuth(auth)
 	auth.Unavailable = true
