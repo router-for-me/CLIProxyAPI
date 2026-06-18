@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
 )
 
@@ -706,6 +707,70 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	return h.executeWithAuthManagerFormats(ctx, handlerType, handlerType, modelName, rawJSON, alt, allowImageModel, modelExecutionOptions{})
 }
 
+// maybeFallbackClaudeOpusModel returns a fallback model name if the requested model
+// is a known claude-opus-4-8 or claude-opus-4-7 variant that should fall back to
+// claude-opus-4-6 when unavailable. The thinking suffix is preserved when present.
+func maybeFallbackClaudeOpusModel(model string) string {
+	parsed := thinking.ParseSuffix(model)
+	base := parsed.ModelName
+	if !strings.HasPrefix(base, "claude-opus-4-8") && !strings.HasPrefix(base, "claude-opus-4-7") {
+		return ""
+	}
+	if parsed.HasSuffix {
+		return "claude-opus-4-6(" + parsed.RawSuffix + ")"
+	}
+	return "claude-opus-4-6"
+}
+
+// withFallbackModelInPayload updates the "model" field in the raw JSON payload
+// when a fallback model is selected. If the payload is empty or does not contain
+// a "model" field, the original payload is returned unchanged.
+func withFallbackModelInPayload(rawJSON []byte, fallbackModel string) []byte {
+	if len(rawJSON) == 0 {
+		return rawJSON
+	}
+	if !gjson.GetBytes(rawJSON, "model").Exists() {
+		return rawJSON
+	}
+	updated, err := sjson.SetBytes(rawJSON, "model", fallbackModel)
+	if err != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+// restoreOriginalModelInBody overwrites the "model" field in a JSON response body
+// with the original model name the user requested. If the body is empty or does not
+// contain a "model" field, it is returned unchanged.
+func restoreOriginalModelInBody(body []byte, originalModel string) []byte {
+	if len(body) == 0 || originalModel == "" {
+		return body
+	}
+	if !gjson.GetBytes(body, "model").Exists() {
+		return body
+	}
+	updated, err := sjson.SetBytes(body, "model", originalModel)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// restoreOriginalModelInChunk overwrites the "model" field in a streaming chunk
+// with the original model name the user requested.
+func restoreOriginalModelInChunk(chunk []byte, originalModel string) []byte {
+	if len(chunk) == 0 || originalModel == "" {
+		return chunk
+	}
+	if !gjson.GetBytes(chunk, "model").Exists() {
+		return chunk
+	}
+	updated, err := sjson.SetBytes(chunk, "model", originalModel)
+	if err != nil {
+		return chunk
+	}
+	return updated
+}
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
@@ -715,6 +780,13 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision)
 	if errMsg != nil {
+		if fallbackModel := maybeFallbackClaudeOpusModel(modelName); fallbackModel != "" {
+			body, headers, err := h.executeWithAuthManagerFormats(ctx, entryProtocol, exitProtocol, fallbackModel, withFallbackModelInPayload(rawJSON, fallbackModel), alt, allowImageModel, execOptions)
+			if err == nil {
+				body = restoreOriginalModelInBody(body, originalRequestedModel)
+			}
+			return body, headers, err
+		}
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
@@ -745,6 +817,13 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
+		if fallbackModel := maybeFallbackClaudeOpusModel(modelName); fallbackModel != "" {
+			body, headers, err := h.executeWithAuthManagerFormats(ctx, entryProtocol, exitProtocol, fallbackModel, withFallbackModelInPayload(rawJSON, fallbackModel), alt, allowImageModel, execOptions)
+			if err == nil {
+				body = restoreOriginalModelInBody(body, originalRequestedModel)
+			}
+			return body, headers, err
+		}
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -1102,6 +1181,28 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision)
 	if errMsg != nil {
+		if fallbackModel := maybeFallbackClaudeOpusModel(modelName); fallbackModel != "" {
+			dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, entryProtocol, exitProtocol, fallbackModel, withFallbackModelInPayload(rawJSON, fallbackModel), alt, allowImageModel, execOptions)
+			wrapped := make(chan []byte)
+			go func(displayModel string) {
+				defer close(wrapped)
+				for chunk := range dataChan {
+					if len(chunk) > 0 {
+						chunk = restoreOriginalModelInChunk(chunk, displayModel)
+					}
+					if ctx == nil {
+						wrapped <- chunk
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case wrapped <- chunk:
+					}
+				}
+			}(originalRequestedModel)
+			return wrapped, headers, errChan
+		}
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
@@ -1135,6 +1236,28 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
+		if fallbackModel := maybeFallbackClaudeOpusModel(modelName); fallbackModel != "" {
+			dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, entryProtocol, exitProtocol, fallbackModel, withFallbackModelInPayload(rawJSON, fallbackModel), alt, allowImageModel, execOptions)
+			wrapped := make(chan []byte)
+			go func(displayModel string) {
+				defer close(wrapped)
+				for chunk := range dataChan {
+					if len(chunk) > 0 {
+						chunk = restoreOriginalModelInChunk(chunk, displayModel)
+					}
+					if ctx == nil {
+						wrapped <- chunk
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case wrapped <- chunk:
+					}
+				}
+			}(originalRequestedModel)
+			return wrapped, headers, errChan
+		}
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
