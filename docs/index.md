@@ -1,64 +1,60 @@
-# cliproxyapi-plusplus
+# cliproxyapi-plusplus — Documentation Index
 
-Welcome to the unified docs surface.
+This index lists the design notes, ADRs, and supporting documentation maintained alongside this repository.
 
-# cliproxyapi-plusplus Docs
+## Top-level documents
 
-`cliproxyapi-plusplus` is an OpenAI-compatible proxy that routes one client API surface to multiple upstream providers.
+- [`FEATURE_CHANGES_PLUSPLUS.md`](FEATURE_CHANGES_PLUSPLUS.md) — Feature Changes Plusplus
+- [`FUNCTIONAL_REQUIREMENTS.md`](FUNCTIONAL_REQUIREMENTS.md) — Functional Requirements
+- [`OPTIMIZATION_PLAN_2026-02-23.md`](OPTIMIZATION_PLAN_2026-02-23.md) — Optimization Plan 2026 02 23
+- [`PRD.md`](PRD.md) — Prd
+- [`README.md`](README.md) — Readme
+- [`SPEC.md`](SPEC.md) — Spec
+- [`SSOT.md`](SSOT.md) — Ssot
+- [`WORKLOG.md`](WORKLOG.md) — Worklog
+- [`changelog.md`](changelog.md) — Changelog
+- [`getting-started.md`](getting-started.md) — Getting Started
+- [`github-ownership-guard.md`](github-ownership-guard.md) — Github Ownership Guard
+- [`gitlab-duo.md`](gitlab-duo.md) — Gitlab Duo
+- [`gitlab-duo_CN.md`](gitlab-duo_CN.md) — Gitlab Duo Cn
+- [`install.md`](install.md) — Install
+- [`provider-catalog.md`](provider-catalog.md) — Provider Catalog
+- [`provider-operations.md`](provider-operations.md) — Provider Operations
+- [`provider-quickstarts.md`](provider-quickstarts.md) — Provider Quickstarts
+- [`provider-usage.md`](provider-usage.md) — Provider Usage
+- [`routing-reference.md`](routing-reference.md) — Routing Reference
+- [`sdk-access.md`](sdk-access.md) — Sdk Access
+- [`sdk-access_CN.md`](sdk-access_CN.md) — Sdk Access Cn
+- [`sdk-access_FA.md`](sdk-access_FA.md) — Sdk Access Fa
+- [`sdk-advanced.md`](sdk-advanced.md) — Sdk Advanced
+- [`sdk-advanced_CN.md`](sdk-advanced_CN.md) — Sdk Advanced Cn
+- [`sdk-advanced_FA.md`](sdk-advanced_FA.md) — Sdk Advanced Fa
+- [`sdk-usage.md`](sdk-usage.md) — Sdk Usage
+- [`sdk-usage_CN.md`](sdk-usage_CN.md) — Sdk Usage Cn
+- [`sdk-usage_FA.md`](sdk-usage_FA.md) — Sdk Usage Fa
+- [`sdk-watcher.md`](sdk-watcher.md) — Sdk Watcher
+- [`sdk-watcher_CN.md`](sdk-watcher_CN.md) — Sdk Watcher Cn
+- [`sdk-watcher_FA.md`](sdk-watcher_FA.md) — Sdk Watcher Fa
+- [`start-here.md`](start-here.md) — Start Here
+- [`troubleshooting.md`](troubleshooting.md) — Troubleshooting
 
-## Who This Documentation Is For
+## Subdirectories
 
-- Operators running a shared internal LLM gateway.
-- Platform engineers integrating existing OpenAI-compatible clients.
-- Developers embedding cliproxyapi-plusplus in Go services.
-- Incident responders who need health, logs, and management endpoints.
+- [`adr/`](adr/) — Adr (4 documents)
+- [`api/`](api/) — Api (4 documents)
+- [`explanation/`](explanation/) — Explanation (1 document)
+- [`guides/`](guides/) — Guides (8 documents)
+- [`how-to/`](how-to/) — How To (1 document)
+- [`journeys/`](journeys/) — Journeys (2 documents)
+- [`operations/`](operations/) — Operations (13 documents)
+- [`planning/`](planning/) — Planning (26 documents)
+- [`plans/`](plans/) — Plans (2 documents)
+- [`reference/`](reference/) — Reference (4 documents)
+- [`research/`](research/) — Research (1 document)
+- [`stories/`](stories/) — Stories (2 documents)
+- [`traceability/`](traceability/) — Traceability (1 document)
+- [`tutorials/`](tutorials/) — Tutorials (1 document)
 
-## What You Can Do
+---
 
-- Use one endpoint (`/v1/*`) across heterogeneous providers.
-- Configure routing and model-prefix behavior in `config.yaml`.
-- Manage credentials and runtime controls through management APIs.
-- Monitor health and per-provider metrics for operations.
-
-## Start Here
-
-1. [Getting Started](/getting-started) for first run and first request.
-2. [Install](/install) for Docker, binary, and source options.
-3. [Provider Usage](/provider-usage) for provider strategy and setup patterns.
-4. [Provider Quickstarts](/provider-quickstarts) for provider-specific 5-minute success paths.
-5. [Provider Catalog](/provider-catalog) for provider block reference.
-6. [Provider Operations](/provider-operations) for on-call runbook and incident workflows.
-7. [Routing and Models Reference](/routing-reference) for model resolution behavior.
-8. [Troubleshooting](/troubleshooting) for common failures and concrete fixes.
-9. [Planning Boards](/planning/) for source-linked execution tracking and import-ready board artifacts.
-
-## API Surfaces
-
-- [API Index](/api/) for endpoint map and when to use each surface.
-- [OpenAI-Compatible API](/api/openai-compatible) for `/v1/*` request patterns.
-- [Management API](/api/management) for runtime inspection and control.
-- [Operations API](/api/operations) for health and operational workflows.
-
-## Audience-Specific Guides
-
-- [Docsets](/docsets/) for user, developer, and agent-focused guidance.
-- [Feature Guides](/features/) for deeper behavior and implementation notes.
-- [Planning Boards](/planning/) for source-to-solution mapping across issues, PRs, discussions, and external requests.
-
-## Fast Verification Commands
-
-```bash
-# Basic process health
-curl -sS http://localhost:8317/health
-
-# List models exposed by your current auth + config
-curl -sS http://localhost:8317/v1/models | jq '.data[:5]'
-
-# Check provider-side rolling stats
-curl -sS http://localhost:8317/v1/metrics/providers | jq
-```
-
-## Project Links
-
-- [Main Repository README](https://github.com/kooshapari/cliproxyapi-plusplus/blob/main/README.md)
-- [Feature Changes in ++](./FEATURE_CHANGES_PLUSPLUS.md)
+_This index is auto-generated. To add new documents, place `.md` files in `docs/` and re-run the documentation indexer._

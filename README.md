@@ -129,6 +129,8 @@ Quality gates are enforced via repo CI workflows (build/lint/path guards).
 - `docs/provider-quickstarts.md` - Per-provider guides
 - `docs/api/` - API reference
 - `docs/sdk-usage.md` - SDK guides
+- [`AGENTS.md`](AGENTS.md) — operating instructions for AI agents and human contributors
+- [`docs/`](docs/) — design notes, ADRs, and supporting documentation (see [`docs/index.md`](docs/index.md))
 
 ## Environment
 
