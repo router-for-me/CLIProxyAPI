@@ -62,11 +62,36 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadInjectsCachedToolPart(t *
 	if !scope.valid() {
 		t.Fatal("scope invalid")
 	}
-	path := "request.contents.1.parts.0.thoughtSignature"
-	if got := gjson.GetBytes(out, path).String(); got != "sig-first" {
-		t.Fatalf("%s = %q, want sig-first; body=%s", path, got, string(out))
+	if gjson.GetBytes(out, "request.contents.1.role").String() != "model" {
+		t.Fatalf("functionCall replay must be model role at [1], got %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "sig-first" {
+		t.Fatalf("thoughtSignature = %q, want sig-first", got)
 	}
 	if !gjson.GetBytes(out, "request.contents.1.parts.0.functionCall").Exists() {
 		t.Fatalf("functionCall not injected: %s", string(out))
+	}
+	if !gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse").Exists() {
+		t.Fatalf("functionResponse should follow model functionCall at [2]: %s", string(out))
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayInsertsBeforeModelFunctionResponse(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
+	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-3", [][]byte{item})
+
+	payload := []byte(`{"sessionId":"sess-3","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gjson.GetBytes(out, "request.contents.1.parts.0.functionCall").Exists() || gjson.GetBytes(out, "request.contents.1.role").String() != "model" {
+		t.Fatalf("want model functionCall at [1]: %s", string(out))
+	}
+	if !gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse").Exists() {
+		t.Fatalf("functionResponse should be at [2]: %s", string(out))
 	}
 }
