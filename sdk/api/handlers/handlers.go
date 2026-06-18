@@ -1508,13 +1508,22 @@ func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageMode
 	if baseModel == "" {
 		baseModel = strings.TrimSpace(modelName)
 	}
-	if strings.EqualFold(routeModelBaseName(baseModel), "gpt-image-2") && !allowImageModel {
+	if isOpenAIImageOnlyModel(baseModel) && !allowImageModel {
 		return &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
 		}
 	}
 	return nil
+}
+
+func isOpenAIImageOnlyModel(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(routeModelBaseName(model))) {
+	case "gpt-image-1.5", "gpt-image-2":
+		return true
+	default:
+		return false
+	}
 }
 
 func routeModelBaseName(model string) string {
