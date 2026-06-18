@@ -1,0 +1,20 @@
+branch,sha,last_commit_date,ahead_of_main,behind_main,subject,disposition
+chore/main-snapshot-2026-06-10-v2,f7ca2a942ddf430aa670b571c70a06b856247650,2026-06-08 21:39:51 -0700,2,18,"chore(agent-17): auto-stage-1 commit",delete
+chore/pin-actions,523ffa4c3b56918b41f55ef44884f51201ad75f4,2026-06-06 14:11:46 -0700,7,23,"recovery/2026-06-06: cliproxyapi-plusplus/pin-actions-cliproxyapi-plusplus (2 WIP files, branch=chore/pin-actions)",delete
+chore/pin-github-actions-sha,4a7312ecf8fb55d7d557499858e6590f65be7bce,2026-05-02 04:38:18 -0700,2,43,"ci: SHA-pin GitHub Actions (normalize to canonical SHAs)",delete
+chore/push-main-snapshot-2026-06-10,f7ca2a942ddf430aa670b571c70a06b856247650,2026-06-08 21:39:51 -0700,2,18,"chore(agent-17): auto-stage-1 commit",delete
+chore/ubuntu-24-docs-yml,77e47b27b684aff05655020ae3e5552b0b03d3c9,2026-06-08 18:54:45 -0700,7,23,"chore: apply ubuntu-24 docs CI changes",delete
+chore/wave1-t16-cliproxy-ssot-2026-06-14,73b4047c05404291afbcb507b1106c7849ebcc99,2026-06-14 16:36:51 -0700,1,6,"Merge remote-tracking branch 'origin/dependabot/go_modules/golang.org/x/net-0.54.0' into chore/wave1-t16-cliproxy-ssot-2026-06-14",delete
+chore/workflow-hygiene-ubuntu-24,5f17af3da405be9f99c0b242a181c3bc9deb320a,2026-05-28 01:25:14 -0700,12,23,"chore(cliproxyapi-plusplus): workflow hygiene — ubuntu-24.04, permissions",delete
+chore/workflow-security-hardening,60514f5a82deb741571b60b8e4695c16f4da4fa8,2026-05-28 17:36:38 -0700,14,23,"chore(security): pin all GitHub Actions to commit SHAs",delete
+chore/worklog-seed-cliproxyapi-plusplus,d9963b07ab193335b3de67ff2db7e914d3636dc4,2026-06-06 14:11:47 -0700,7,23,"recovery/2026-06-06: cliproxyapi-plusplus/worklog-seed-cliproxyapi-plusplus (2 WIP files, branch=chore/worklog-seed-cliproxyapi-plusplus)",delete
+ci/add-golangci-lint,5f17af3da405be9f99c0b242a181c3bc9deb320a,2026-05-28 01:25:14 -0700,12,23,"chore(cliproxyapi-plusplus): workflow hygiene — ubuntu-24.04, permissions",delete
+convoy/agileplus-kilo-specs-cliproxyapi/3351a469/gt/polecat-27/268c64f7,f44d1fdd1f829a645da99a157e4f950f8e30b1fe,2026-03-31 21:48:32 -0700,3,129,"ci: add SAST tooling (semgrep, trufflehog)",delete
+cursor/kiro-fingerprint-config-application-e65a,91294737989b139d6034e7c0127b53e9384eaafe,2026-04-25 19:33:41 +0000,2,114,"fix: Apply global fingerprint config in generateFingerprint",delete
+cursor/workflow-and-docs-configuration-d82b,ca1cdef5e3c12639bc01238a157135109038e786,2026-05-29 00:53:09 +0000,15,23,"fix: resolve 13 critical workflow and configuration bugs",delete
+cursor/workflow-configuration-issues-e2ee,78fc7ca3949bae7912ccdf239c2d3a33d286f220,2026-05-29 00:35:15 +0000,15,23,"fix(workflows): remove runs-on from reusable workflow job and restore scorecard schedule trigger",delete
+cursor/workflow-yaml-issues-44be,90d565a23ebf831deecdc50e4a1199528ff613ea,2026-05-29 01:15:37 +0000,6,23,"fix: correct YAML syntax in workflow files",delete
+dependabot/go_modules/golang.org/x/text-0.37.0,ee2bc27453bce386f194a1266382972fc5e47651,2026-05-11 08:32:21 +0000,1,23,"build(deps): bump golang.org/x/text from 0.36.0 to 0.37.0",delete
+docs/sladge-badge,f62403ff2dd072bccab6953432d8c8c3feee9c39,2026-04-29 05:33:19 -0700,1,80,"docs: add sladge badge",delete
+feat/wave16-g16-boundary,,,,,Wave 16 G16 boundary lane (branch inventory + prune),keep
+main,866ca6dd49f7ba72c0e1349a235df4137b4e890c,,,,"Wave H3: document vibeproxy client absorption path (#1024)",keep
