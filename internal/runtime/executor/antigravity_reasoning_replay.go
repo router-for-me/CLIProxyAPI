@@ -27,6 +27,14 @@ func (s antigravityReasoningReplayScope) valid() bool {
 func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromPayload(payload)
 	if sessionID == "" {
+		if stable := strings.TrimSpace(generateStableSessionID(payload)); stable != "" {
+			sessionID = strings.TrimPrefix(stable, "-")
+			if sessionID == "" {
+				sessionID = stable
+			}
+		}
+	}
+	if sessionID == "" {
 		return antigravityReasoningReplayScope{}
 	}
 	return antigravityReasoningReplayScope{
@@ -155,8 +163,13 @@ func filterAntigravityReasoningReplayItemsForRequest(payload []byte, items [][]b
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "function_call_part":
 			keys := antigravityReplayToolCallKeys(itemResult)
-			if len(keys) == 0 || antigravityAnyKeyExists(existing, keys) {
+			if len(keys) == 0 {
 				continue
+			}
+			if antigravityAnyKeyExists(existing, keys) {
+				if !antigravityNeedsSignatureReplayForExistingFunctionCall(payload, itemResult) {
+					continue
+				}
 			}
 			if !antigravityRequestHasMatchingFunctionResponse(payload, itemResult) {
 				continue
@@ -197,6 +210,9 @@ func antigravityExistingToolCallKeys(payload []byte) map[string]bool {
 
 func antigravityReplayToolCallKeys(itemResult gjson.Result) []string {
 	callID := strings.TrimSpace(itemResult.Get("call_id").String())
+	if callID == "" {
+		callID = strings.TrimSpace(itemResult.Get("id").String())
+	}
 	name := strings.TrimSpace(itemResult.Get("name").String())
 	if name == "" {
 		return nil
@@ -229,6 +245,23 @@ func antigravityAnyKeyExists(existing map[string]bool, keys []string) bool {
 		}
 	}
 	return false
+}
+
+func antigravityNeedsSignatureReplayForExistingFunctionCall(payload []byte, itemResult gjson.Result) bool {
+	callID := strings.TrimSpace(itemResult.Get("call_id").String())
+	if callID == "" {
+		callID = strings.TrimSpace(itemResult.Get("id").String())
+	}
+	sig := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
+	if callID == "" || sig == "" {
+		return false
+	}
+	ci, pi, ok := antigravityFunctionCallPartLocation(payload, callID)
+	if !ok {
+		return false
+	}
+	pathSig := fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", ci, pi)
+	return strings.TrimSpace(gjson.GetBytes(payload, pathSig).String()) == ""
 }
 
 func antigravityRequestHasMatchingFunctionResponse(payload []byte, itemResult gjson.Result) bool {
@@ -265,27 +298,32 @@ func antigravityFunctionResponseContentIndex(payload []byte, callID string) (int
 }
 
 func antigravityPayloadHasFunctionCallID(payload []byte, callID string) bool {
+	_, _, ok := antigravityFunctionCallPartLocation(payload, callID)
+	return ok
+}
+
+func antigravityFunctionCallPartLocation(payload []byte, callID string) (contentIndex int, partIndex int, ok bool) {
 	callID = strings.TrimSpace(callID)
 	if callID == "" {
-		return false
+		return -1, -1, false
 	}
 	contents := gjson.GetBytes(payload, "request.contents")
 	if !contents.IsArray() {
-		return false
+		return -1, -1, false
 	}
-	for _, content := range contents.Array() {
+	for ci, content := range contents.Array() {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			continue
 		}
-		for _, part := range parts.Array() {
+		for pi, part := range parts.Array() {
 			fc := part.Get("functionCall")
 			if fc.Exists() && strings.TrimSpace(fc.Get("id").String()) == callID {
-				return true
+				return ci, pi, true
 			}
 		}
 	}
-	return false
+	return -1, -1, false
 }
 
 func insertAntigravityModelFunctionCallBeforeContent(payload []byte, beforeIndex int, name, callID, thoughtSig string, args gjson.Result) ([]byte, bool) {
@@ -376,10 +414,18 @@ func mergeAntigravityFunctionCallPartReplay(payload []byte, itemResult gjson.Res
 	if name == "" || !args.Exists() {
 		return payload, false
 	}
-	if callID != "" && antigravityPayloadHasFunctionCallID(payload, callID) {
-		return payload, false
-	}
 	if callID != "" {
+		if ci, pi, exists := antigravityFunctionCallPartLocation(payload, callID); exists {
+			if sig != "" {
+				pathSig := fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", ci, pi)
+				if strings.TrimSpace(gjson.GetBytes(payload, pathSig).String()) == "" {
+					if updated, err := sjson.SetBytes(payload, pathSig, sig); err == nil {
+						return updated, true
+					}
+				}
+			}
+			return payload, false
+		}
 		if frIndex, ok := antigravityFunctionResponseContentIndex(payload, callID); ok {
 			return insertAntigravityModelFunctionCallBeforeContent(payload, frIndex, name, callID, sig, args)
 		}

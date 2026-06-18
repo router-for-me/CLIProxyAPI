@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -93,5 +94,46 @@ func TestPrepareAntigravityGeminiReasoningReplayInsertsBeforeModelFunctionRespon
 	}
 	if !gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse").Exists() {
 		t.Fatalf("functionResponse should be at [2]: %s", string(out))
+	}
+}
+
+func TestMergeAntigravityFunctionCallPartReplayMergesSignatureIntoExistingFunctionCall(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":0,"name":"Read","call_id":"id1","args":{"file_path":"/a"},"thoughtSignature":"sig-first"}`)
+	internalcache.CacheAntigravityReasoningReplayItems("gemini-3-flash-agent", "session:sess-merge", [][]byte{item})
+
+	payload := []byte(`{"sessionId":"sess-merge","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionCall":{"id":"id1","name":"Read","args":{"file_path":"/a"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"id1","name":"Read","response":{"result":"ok"}}}]}]}}`)
+	out, _, err := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), "gemini-3-flash-agent", cliproxyexecutor.Request{}, cliproxyexecutor.Options{}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "sig-first" {
+		t.Fatalf("thoughtSignature = %q, want sig-first; body=%s", got, out)
+	}
+}
+
+func TestAntigravityReasoningReplayScopeUsesStableSessionWithoutSessionId(t *testing.T) {
+	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"stable-user-text"}]}]}}`)
+	scope := antigravityReasoningReplayScopeFromPayload("gemini-3-flash-agent", payload)
+	if !scope.valid() {
+		t.Fatal("scope should be valid from stable session hash")
+	}
+	if !strings.HasPrefix(scope.sessionKey, "session:") {
+		t.Fatalf("sessionKey = %q", scope.sessionKey)
+	}
+}
+
+func TestAntigravityReplayToolCallKeysUsesNativeFunctionCallID(t *testing.T) {
+	fc := gjson.Parse(`{"name":"Read","args":{"file_path":"/a"},"id":"id-native"}`)
+	keys := antigravityReplayToolCallKeysFromPart(fc)
+	if len(keys) != 1 {
+		t.Fatalf("keys = %v", keys)
+	}
+	fc2 := gjson.Parse(`{"name":"Read","args":{"file_path":"/a"},"id":"id-native-2"}`)
+	keys2 := antigravityReplayToolCallKeysFromPart(fc2)
+	if keys[0] == keys2[0] {
+		t.Fatalf("parallel tool calls should not share replay key: %v vs %v", keys, keys2)
 	}
 }
