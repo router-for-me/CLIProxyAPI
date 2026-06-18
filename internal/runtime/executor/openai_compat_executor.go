@@ -130,6 +130,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
+	translated = helps.NormalizeDeveloperRole(translated)
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -328,6 +329,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	translated = helps.NormalizeDeveloperRole(translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
