@@ -35,7 +35,7 @@ func TestApplyPayloadConfigWithRoot_DisableImageGeneration_RemovesToolsEntryWith
 	}
 	payload := []byte(`{"request":{"tools":[{"type":"image_generation"},{"type":"web_search"}]}}`)
 
-	out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "gemini-cli", "request", payload, nil, "", "")
+	out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "antigravity", "request", payload, nil, "", "")
 
 	tools := gjson.GetBytes(out, "request.tools")
 	if !tools.Exists() || !tools.IsArray() {
@@ -69,7 +69,7 @@ func TestApplyPayloadConfigWithRoot_DisableImageGeneration_RemovesToolChoiceByNa
 	}
 	payload := []byte(`{"request":{"tools":[{"type":"image_generation"},{"type":"web_search"}],"tool_choice":{"type":"tool","name":"image_generation"}}}`)
 
-	out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "gemini-cli", "request", payload, nil, "", "")
+	out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "antigravity", "request", payload, nil, "", "")
 
 	if gjson.GetBytes(out, "request.tool_choice").Exists() {
 		t.Fatalf("expected request.tool_choice to be removed")

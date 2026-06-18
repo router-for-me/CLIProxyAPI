@@ -19,7 +19,7 @@ import (
 const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 
 // ConvertClaudeRequestToGemini parses a Claude API request and returns a complete
-// Gemini CLI request body (as JSON bytes) ready to be sent via SendRawMessageStream.
+// Gemini request body (as JSON bytes) ready to be sent via SendRawMessageStream.
 // All JSON transformations are performed using gjson/sjson.
 //
 // Parameters:
@@ -28,10 +28,10 @@ const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 //   - stream: A boolean indicating if the request is for a streaming response.
 //
 // Returns:
-//   - []byte: The transformed request in Gemini CLI format.
+//   - []byte: The transformed request in Gemini format.
 func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
-	// Build output Gemini CLI request JSON
+	// Build output Gemini request JSON
 	out := []byte(`{"contents":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 

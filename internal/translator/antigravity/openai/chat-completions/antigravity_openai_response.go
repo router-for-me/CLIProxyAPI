@@ -1,5 +1,5 @@
-// Package openai provides response translation functionality for Gemini CLI to OpenAI API compatibility.
-// This package handles the conversion of Gemini CLI API responses into OpenAI Chat Completions-compatible
+// Package openai provides response translation functionality for Antigravity to OpenAI API compatibility.
+// This package handles the conversion of Antigravity API responses into OpenAI Chat Completions-compatible
 // JSON format, transforming streaming events and non-streaming responses into the format
 // expected by OpenAI API clients. It supports both streaming and non-streaming modes,
 // handling text content, tool calls, reasoning content, and usage metadata appropriately.
@@ -34,15 +34,15 @@ type convertCliResponseToOpenAIChatParams struct {
 var functionCallIDCounter uint64
 
 // ConvertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
-// Gemini CLI API format to the OpenAI Chat Completions streaming format.
-// It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
+// Antigravity API format to the OpenAI Chat Completions streaming format.
+// It processes various Antigravity event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
 // responses that match the OpenAI API format. It supports incremental updates for streaming responses.
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response (unused in current implementation)
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the Antigravity API
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
@@ -225,15 +225,15 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	return [][]byte{template}
 }
 
-// ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
-// This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
+// ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Antigravity response to a non-streaming OpenAI response.
+// This function processes the complete Antigravity response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the Antigravity API
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:

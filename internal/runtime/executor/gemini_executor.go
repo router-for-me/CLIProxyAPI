@@ -37,8 +37,7 @@ const (
 )
 
 // GeminiExecutor is a stateless executor for the official Gemini API using API keys.
-// It handles both API key and OAuth bearer token authentication, supporting both
-// regular and streaming requests to the Google Generative Language API.
+// It supports regular and streaming requests to the Google Generative Language API.
 type GeminiExecutor struct {
 	// cfg holds the application configuration.
 	cfg *config.Config
@@ -63,13 +62,10 @@ func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	if req == nil {
 		return nil
 	}
-	apiKey, bearer := geminiCreds(auth)
+	apiKey := geminiAPIKey(auth)
 	if apiKey != "" {
 		req.Header.Set("x-goog-api-key", apiKey)
 		req.Header.Del("Authorization")
-	} else if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
-		req.Header.Del("x-goog-api-key")
 	}
 	applyGeminiHeaders(req, auth)
 	return nil
@@ -110,12 +106,12 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, bearer := geminiCreds(auth)
+	apiKey := geminiAPIKey(auth)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	// Official Gemini API via API key or OAuth bearer
+	// Official Gemini API via API key.
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
@@ -161,8 +157,6 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
-	} else if bearer != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var authID, authLabel, authType, authValue string
@@ -223,7 +217,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, bearer := geminiCreds(auth)
+	apiKey := geminiAPIKey(auth)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -269,8 +263,6 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
-	} else {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var authID, authLabel, authType, authValue string
@@ -364,7 +356,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, bearer := geminiCreds(auth)
+	apiKey := geminiAPIKey(auth)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -395,8 +387,6 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
-	} else {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var authID, authLabel, authType, authValue string
@@ -454,27 +444,16 @@ func (e *GeminiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	return auth, nil
 }
 
-func geminiCreds(a *cliproxyauth.Auth) (apiKey, bearer string) {
+func geminiAPIKey(a *cliproxyauth.Auth) string {
 	if a == nil {
-		return "", ""
+		return ""
 	}
 	if a.Attributes != nil {
 		if v := a.Attributes["api_key"]; v != "" {
-			apiKey = v
+			return v
 		}
 	}
-	if a.Metadata != nil {
-		// GeminiTokenStorage.Token is a map that may contain access_token
-		if v, ok := a.Metadata["access_token"].(string); ok && v != "" {
-			bearer = v
-		}
-		if token, ok := a.Metadata["token"].(map[string]any); ok && token != nil {
-			if v, ok2 := token["access_token"].(string); ok2 && v != "" {
-				bearer = v
-			}
-		}
-	}
-	return
+	return ""
 }
 
 func resolveGeminiBaseURL(auth *cliproxyauth.Auth) string {

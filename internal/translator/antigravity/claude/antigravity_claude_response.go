@@ -95,7 +95,7 @@ var toolUseIDCounter uint64
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response (unused in current implementation)
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the Antigravity API
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
@@ -158,7 +158,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.usage.output_tokens", candidatesTokenCount.Int())
 		}
 
-		// Override default values with actual response metadata if available from the Gemini CLI response
+		// Override default values with actual response metadata if available from the Antigravity response
 		if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.model", modelVersionResult.String())
 		}
@@ -454,12 +454,12 @@ func resolveStopReason(params *Params) string {
 	return "end_turn"
 }
 
-// ConvertAntigravityResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.
+// ConvertAntigravityResponseToClaudeNonStream converts a non-streaming Antigravity response to a non-streaming Claude response.
 //
 // Parameters:
 //   - ctx: The context for the request.
 //   - modelName: The name of the model.
-//   - rawJSON: The raw JSON response from the Gemini CLI API.
+//   - rawJSON: The raw JSON response from the Antigravity API.
 //   - param: A pointer to a parameter object for the conversion.
 //
 // Returns:

@@ -1,8 +1,8 @@
-// Package gemini provides request translation functionality for Gemini CLI to Gemini API compatibility.
-// It handles parsing and transforming Gemini CLI API requests into Gemini API format,
+// Package gemini provides request translation functionality for Antigravity to Gemini API compatibility.
+// It handles parsing and transforming Antigravity API requests into Gemini API format,
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
-// between Gemini CLI API format and Gemini API's expected format.
+// between Antigravity API format and Gemini API's expected format.
 package gemini
 
 import (
@@ -18,7 +18,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertGeminiRequestToAntigravity parses and transforms a Gemini CLI API request into Gemini API format.
+// ConvertGeminiRequestToAntigravity parses and transforms a Antigravity API request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini API.
 // The function performs the following transformations:
@@ -29,7 +29,7 @@ import (
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request (unused in current implementation)
-//   - rawJSON: The raw JSON request data from the Gemini CLI API
+//   - rawJSON: The raw JSON request data from the Antigravity API
 //   - stream: A boolean indicating if the request is for a streaming response (unused in current implementation)
 //
 // Returns:

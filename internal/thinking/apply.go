@@ -21,7 +21,6 @@ var providerAppliersMu sync.RWMutex
 // nativeProviderAppliers maps built-in provider names to their implementations.
 var nativeProviderAppliers = map[string]ProviderApplier{
 	"gemini":      nil,
-	"gemini-cli":  nil,
 	"claude":      nil,
 	"openai":      nil,
 	"codex":       nil,
@@ -140,7 +139,7 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //   - body: Original request body JSON
 //   - model: Model name, optionally with thinking suffix (e.g., "claude-sonnet-4-5(16384)")
 //   - fromFormat: Source request format (e.g., openai, codex, gemini)
-//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, kimi, xai)
+//   - toFormat: Target provider format for the request body (gemini, antigravity, claude, openai, codex, kimi, xai)
 //   - providerKey: Provider identifier used for registry model lookups (may differ from toFormat, e.g., openrouter -> openai)
 //
 // Returns:
@@ -413,7 +412,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 	switch provider {
 	case "claude":
 		return extractClaudeConfig(body)
-	case "gemini", "gemini-cli", "antigravity":
+	case "gemini", "antigravity":
 		return extractGeminiConfig(body, provider)
 	case "openai":
 		return extractOpenAIConfig(body)
@@ -560,13 +559,13 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 //   - generationConfig.thinkingConfig.thinkingLevel: "none", "auto", or level name (Gemini 3)
 //   - generationConfig.thinkingConfig.thinkingBudget: integer (Gemini 2.5)
 //
-// For gemini-cli and antigravity providers, the path is prefixed with "request.".
+// For antigravity providers, the path is prefixed with "request.".
 //
 // Priority: thinkingLevel is checked first (Gemini 3 format), then thinkingBudget (Gemini 2.5 format).
 // This allows newer Gemini 3 level-based configs to take precedence.
 func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	prefix := "generationConfig.thinkingConfig"
-	if provider == "gemini-cli" || provider == "antigravity" {
+	if provider == "antigravity" {
 		prefix = "request.generationConfig.thinkingConfig"
 	}
 

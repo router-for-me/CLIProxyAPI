@@ -19,9 +19,9 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "numeric suffix preserved",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "gemini-2.5-pro(8192)",
 			want:    "gemini-2.5-pro-exp-03-25(8192)",
 		},
@@ -37,9 +37,9 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "no suffix unchanged",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "gemini-2.5-pro",
 			want:    "gemini-2.5-pro-exp-03-25",
 		},
@@ -55,18 +55,18 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "auto suffix preserved",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "gemini-2.5-pro(auto)",
 			want:    "gemini-2.5-pro-exp-03-25(auto)",
 		},
 		{
 			name: "none suffix preserved",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "gemini-2.5-pro(none)",
 			want:    "gemini-2.5-pro-exp-03-25(none)",
 		},
@@ -82,25 +82,25 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "case insensitive alias lookup with suffix",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "Gemini-2.5-Pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "Gemini-2.5-Pro"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "gemini-2.5-pro(high)",
 			want:    "gemini-2.5-pro-exp-03-25(high)",
 		},
 		{
 			name: "no alias returns empty",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "unknown-model(high)",
 			want:    "",
 		},
 		{
 			name: "wrong channel returns empty",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 			},
 			channel: "claude",
 			input:   "gemini-2.5-pro(high)",
@@ -109,18 +109,18 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 		{
 			name: "empty suffix filtered out",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "gemini-2.5-pro()",
 			want:    "gemini-2.5-pro-exp-03-25",
 		},
 		{
 			name: "incomplete suffix treated as no suffix",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro(high"}},
+				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro(high"}},
 			},
-			channel: "gemini-cli",
+			channel: "antigravity",
 			input:   "gemini-2.5-pro(high",
 			want:    "gemini-2.5-pro-exp-03-25",
 		},
@@ -145,8 +145,8 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 
 func createAuthForChannel(channel string) *Auth {
 	switch channel {
-	case "gemini-cli":
-		return &Auth{Provider: "gemini-cli"}
+	case "antigravity":
+		return &Auth{Provider: "antigravity", Attributes: map[string]string{"auth_kind": "oauth"}}
 	case "claude":
 		return &Auth{Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}}
 	case "vertex":
@@ -155,12 +155,18 @@ func createAuthForChannel(channel string) *Auth {
 		return &Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
 	case "aistudio":
 		return &Auth{Provider: "aistudio"}
-	case "antigravity":
-		return &Auth{Provider: "antigravity"}
 	case "kimi":
 		return &Auth{Provider: "kimi"}
 	default:
 		return &Auth{Provider: channel}
+	}
+}
+
+func TestOAuthModelAliasChannel_APIKeyOnlyProviderUnsupported(t *testing.T) {
+	t.Parallel()
+
+	if got := OAuthModelAliasChannel("gemini", "oauth"); got != "" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want empty channel for API-key-only provider", got)
 	}
 }
 
@@ -187,14 +193,14 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	t.Parallel()
 
 	aliases := map[string][]internalconfig.OAuthModelAlias{
-		"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
+		"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},
 	}
 
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{})
 	mgr.SetOAuthModelAlias(aliases)
 
-	auth := &Auth{ID: "test-auth-id", Provider: "gemini-cli"}
+	auth := &Auth{ID: "test-auth-id", Provider: "antigravity"}
 
 	resolvedModel := mgr.applyOAuthModelAlias(auth, "gemini-2.5-pro(8192)")
 	if resolvedModel != "gemini-2.5-pro-exp-03-25(8192)" {

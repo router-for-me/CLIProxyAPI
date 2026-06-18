@@ -556,9 +556,6 @@ func authProjectID(auth *coreauth.Auth) string {
 		if projectID := strings.TrimSpace(auth.Attributes["project_id"]); projectID != "" {
 			return projectID
 		}
-		if projectID := strings.TrimSpace(auth.Attributes["gemini_virtual_project"]); projectID != "" {
-			return projectID
-		}
 	}
 	return ""
 }
