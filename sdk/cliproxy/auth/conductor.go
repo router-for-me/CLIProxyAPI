@@ -204,6 +204,11 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 
 	requestPrepareLocks sync.Map
+
+	// providerRefreshSems limits concurrent token refreshes per provider.
+	// Map key is lowercase provider name; value is a chan struct{} semaphore.
+	providerRefreshSems   map[string]chan struct{}
+	providerRefreshSemsMu sync.RWMutex
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -447,6 +452,49 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		m.clearHomeRuntimeAuths()
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.rebuildProviderRefreshSems(cfg)
+}
+
+const defaultMaxConcurrentRefreshPerProvider = 3
+
+// rebuildProviderRefreshSems recreates per-provider semaphores based on config.
+// Called on SetConfig; existing semaphores (and goroutines waiting on them) are
+// replaced; in-flight refreshes that already acquired the old semaphore finish
+// normally because the defer still releases the channel they hold.
+func (m *Manager) rebuildProviderRefreshSems(cfg *internalconfig.Config) {
+	limit := defaultMaxConcurrentRefreshPerProvider
+	if cfg != nil && cfg.AuthMaxConcurrentRefreshPerProvider > 0 {
+		limit = cfg.AuthMaxConcurrentRefreshPerProvider
+	}
+	// Build semaphores keyed by provider from the executors map (keys are already provider names).
+	m.mu.RLock()
+	providers := make([]string, 0, len(m.executors))
+	for provider := range m.executors {
+		providers = append(providers, strings.ToLower(provider))
+	}
+	m.mu.RUnlock()
+
+	sems := make(map[string]chan struct{}, len(providers))
+	for _, p := range providers {
+		if _, exists := sems[p]; !exists {
+			sems[p] = make(chan struct{}, limit)
+		}
+	}
+	m.providerRefreshSemsMu.Lock()
+	m.providerRefreshSems = sems
+	m.providerRefreshSemsMu.Unlock()
+}
+
+// providerRefreshSem returns the semaphore channel for the given provider,
+// or nil if no limit is configured.
+func (m *Manager) providerRefreshSem(provider string) chan struct{} {
+	if m == nil {
+		return nil
+	}
+	m.providerRefreshSemsMu.RLock()
+	sem := m.providerRefreshSems[strings.ToLower(provider)]
+	m.providerRefreshSemsMu.RUnlock()
+	return sem
 }
 
 // HomeEnabled reports whether the home control plane integration is enabled in the runtime config.
@@ -4818,6 +4866,17 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if auth == nil || exec == nil {
 		return
 	}
+
+	// Acquire per-provider semaphore to limit concurrent refresh storms.
+	if sem := m.providerRefreshSem(auth.Provider); sem != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
+		defer func() { <-sem }()
+	}
+
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
