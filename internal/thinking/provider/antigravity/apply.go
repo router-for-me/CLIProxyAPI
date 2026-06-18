@@ -102,6 +102,10 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
+		if config.Budget == 0 && config.Level == "" {
+			result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig")
+			return result, nil
+		}
 		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
 		if config.Level != "" {
 			result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))

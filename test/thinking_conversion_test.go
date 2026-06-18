@@ -1515,6 +1515,66 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "false",
 			expectErr:       false,
 		},
+		// Case 31A: reasoning_effort=none with zero allowed → delete thinkingConfig
+		{
+			name:        "31A",
+			from:        "openai",
+			to:          "gemini",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31B: reasoning_effort=none with zero allowed to Gemini CLI → delete thinkingConfig
+		{
+			name:        "31B",
+			from:        "openai",
+			to:          "gemini-cli",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31C: reasoning_effort=none with zero allowed to Antigravity → delete thinkingConfig
+		{
+			name:        "31C",
+			from:        "openai",
+			to:          "antigravity",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31D: reasoning.effort=none with zero allowed → delete thinkingConfig
+		{
+			name:        "31D",
+			from:        "openai-response",
+			to:          "gemini",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31E: reasoning.effort=none with zero allowed to Gemini CLI → delete thinkingConfig
+		{
+			name:        "31E",
+			from:        "openai-response",
+			to:          "gemini-cli",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "",
+			expectErr:   false,
+		},
+		// Case 31F: reasoning.effort=none with zero allowed to Antigravity → delete thinkingConfig
+		{
+			name:        "31F",
+			from:        "openai-response",
+			to:          "antigravity",
+			model:       "gemini-zero-mixed-model",
+			inputJSON:   `{"model":"gemini-zero-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "",
+			expectErr:   false,
+		},
 		// Case 32: reasoning_effort=auto → -1 (DynamicAllowed=true)
 		{
 			name:            "32",
@@ -2956,6 +3016,15 @@ func getTestModels() []*registry.ModelInfo {
 			Type:        "gemini",
 			DisplayName: "Gemini Mixed Model",
 			Thinking:    &registry.ThinkingSupport{Min: 128, Max: 32768, Levels: []string{"low", "high"}, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		{
+			ID:          "gemini-zero-mixed-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "gemini",
+			DisplayName: "Gemini Zero Mixed Model",
+			Thinking:    &registry.ThinkingSupport{Min: 1, Max: 65535, Levels: []string{"minimal", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:          "claude-budget-model",

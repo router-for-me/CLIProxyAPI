@@ -22,7 +22,7 @@ import (
 //
 // Gemini-specific behavior:
 //   - Gemini 2.5: thinkingBudget format, flash series supports ZeroAllowed
-//   - Gemini 3.x: thinkingLevel format, cannot be disabled
+//   - Gemini 3.x: thinkingLevel format, disable by removing thinkingConfig when zero is allowed
 //   - Use ThinkingSupport.Levels to decide output format
 type Applier struct{}
 
@@ -114,7 +114,7 @@ func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig) (
 
 func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
 	// ModeNone semantics:
-	//   - ModeNone + Budget=0: completely disable thinking (not possible for Level-only models)
+	//   - ModeNone + Budget=0: remove thinkingConfig to disable thinking
 	//   - ModeNone + Budget>0: forced to think but hide output (includeThoughts=false)
 	// ValidateConfig sets config.Level to the lowest level when ModeNone + Budget > 0.
 
@@ -126,6 +126,10 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
+		if config.Budget == 0 && config.Level == "" {
+			result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig")
+			return result, nil
+		}
 		result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.includeThoughts", false)
 		if config.Level != "" {
 			result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
