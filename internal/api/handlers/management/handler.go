@@ -411,7 +411,13 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
+	snapshot := h.reloadSnapshotConfigLocked()
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	var reqCtx context.Context
+	if c != nil && c.Request != nil {
+		reqCtx = c.Request.Context()
+	}
+	h.reloadConfigAfterManagementSaveAsync(reqCtx, snapshot)
 	return true
 }
 
