@@ -84,13 +84,21 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	transientErrorCooldown    = time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
+var transientErrorCooldownSeconds atomic.Int64
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
+}
+
+// SetTransientErrorCooldownSeconds configures cooldowns for 408/500/502/503/504.
+// 0 keeps the legacy default; negative values disable transient error cooldowns.
+func SetTransientErrorCooldownSeconds(seconds int) {
+	transientErrorCooldownSeconds.Store(int64(seconds))
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
@@ -100,6 +108,17 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 		}
 	}
 	return quotaCooldownDisabled.Load()
+}
+
+func nextTransientErrorRetryAfter(now time.Time) time.Time {
+	seconds := transientErrorCooldownSeconds.Load()
+	if seconds < 0 {
+		return time.Time{}
+	}
+	if seconds == 0 {
+		return now.Add(transientErrorCooldown)
+	}
+	return now.Add(time.Duration(seconds) * time.Second)
 }
 
 // Result captures execution outcome used to adjust auth state.
@@ -2909,8 +2928,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
+								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
 						default:
 							state.NextRetryAfter = time.Time{}
@@ -3414,7 +3432,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
-			auth.NextRetryAfter = now.Add(1 * time.Minute)
+			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
 		}
 	default:
 		if auth.StatusMessage == "" {

@@ -522,6 +522,163 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 }
 
+func TestManager_MarkResult_TransientErrorCooldownDefault(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-transient-default",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-transient-default"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected transient error cooldown to keep the legacy default")
+	}
+	diff := time.Until(state.NextRetryAfter)
+	if diff < 55*time.Second || diff > 65*time.Second {
+		t.Fatalf("expected transient error cooldown to be ~60 seconds, got %v", diff)
+	}
+}
+
+func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+
+	modelAuth := &Auth{
+		ID:       "auth-transient-model-disabled",
+		Provider: "claude",
+	}
+	if _, errRegisterModel := m.Register(context.Background(), modelAuth); errRegisterModel != nil {
+		t.Fatalf("register model auth: %v", errRegisterModel)
+	}
+
+	model := "test-model-transient-disabled"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   modelAuth.ID,
+		Provider: modelAuth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+	})
+
+	updatedModelAuth, okModelAuth := m.GetByID(modelAuth.ID)
+	if !okModelAuth || updatedModelAuth == nil {
+		t.Fatalf("expected model auth to be present")
+	}
+	state := updatedModelAuth.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected transient model cooldown to be disabled, got %v", state.NextRetryAfter)
+	}
+
+	authLevelAuth := &Auth{
+		ID:       "auth-transient-auth-disabled",
+		Provider: "claude",
+	}
+	if _, errRegisterAuth := m.Register(context.Background(), authLevelAuth); errRegisterAuth != nil {
+		t.Fatalf("register auth-level auth: %v", errRegisterAuth)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authLevelAuth.ID,
+		Provider: authLevelAuth.Provider,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "unavailable"},
+	})
+
+	updatedAuthLevel, okAuthLevel := m.GetByID(authLevelAuth.ID)
+	if !okAuthLevel || updatedAuthLevel == nil {
+		t.Fatalf("expected auth-level auth to be present")
+	}
+	if !updatedAuthLevel.NextRetryAfter.IsZero() {
+		t.Fatalf("expected transient auth cooldown to be disabled, got %v", updatedAuthLevel.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_TransientErrorCooldownDoesNotDisableAuthErrors(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-transient-auth-error",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-auth-error"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "forbidden"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected auth error cooldown to remain enabled")
+	}
+	diff := time.Until(state.NextRetryAfter)
+	if diff < 29*time.Minute || diff > 31*time.Minute {
+		t.Fatalf("expected auth error cooldown to be ~30 minutes, got %v", diff)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
