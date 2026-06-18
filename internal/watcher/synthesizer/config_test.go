@@ -336,6 +336,19 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 			wantLen: 2,
 		},
 		{
+			name: "api key email label",
+			compat: []config.OpenAICompatibility{
+				{
+					Name:    "deepseek",
+					BaseURL: "https://api.deepseek.com",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "key-1", Email: "account@example.com"},
+					},
+				},
+			},
+			wantLen: 1,
+		},
+		{
 			name: "empty APIKeyEntries included (legacy)",
 			compat: []config.OpenAICompatibility{
 				{
@@ -394,6 +407,14 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 					if v, ok := auths[i].Metadata["disable_cooling"].(bool); !ok || !v {
 						t.Fatalf("expected auth[%d].disable_cooling=true, got %v", i, auths[i].Metadata["disable_cooling"])
 					}
+				}
+			}
+			if tt.name == "api key email label" {
+				if got := auths[0].Label; got != "account@example.com" {
+					t.Fatalf("Label = %q, want account@example.com", got)
+				}
+				if got, _ := auths[0].Metadata["email"].(string); got != "account@example.com" {
+					t.Fatalf("Metadata[email] = %q, want account@example.com", got)
 				}
 			}
 		})

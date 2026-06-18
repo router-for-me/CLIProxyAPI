@@ -2265,7 +2265,11 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		thinking := model.Thinking
 		if thinking == nil && !model.Image {
-			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			if isDeepSeekV4CompatibilityModel(modelID, model.Name) {
+				thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}}
+			} else {
+				thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			}
 		}
 		models = append(models, &ModelInfo{
 			ID:          modelID,
@@ -2279,6 +2283,16 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		})
 	}
 	return models
+}
+
+func isDeepSeekV4CompatibilityModel(names ...string) bool {
+	for _, name := range names {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "deepseek-v4-pro", "deepseek-v4-flash":
+			return true
+		}
+	}
+	return false
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
