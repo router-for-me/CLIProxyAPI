@@ -173,3 +173,28 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceT
 		t.Fatalf("tools.0.function.parameters.required.0 = %q, want a; output=%s", got, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructuredToolChoice(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Run command."}
+		],
+		"tool_choice": {
+			"type": "function",
+			"function": {
+				"name": "run_command"
+			}
+		}
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "run_command" {
+		t.Fatalf("tool_choice.function.name = %q, want run_command; output=%s", got, out)
+	}
+}
