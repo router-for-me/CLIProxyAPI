@@ -46,7 +46,8 @@
         "levels": [
           "low",
           "medium",
-          "high"
+          "high",
+          "max"
         ]
       }
     },
