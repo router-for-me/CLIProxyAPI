@@ -232,10 +232,11 @@ func antigravityAnyKeyExists(existing map[string]bool, keys []string) bool {
 }
 
 func antigravityRequestHasMatchingFunctionResponse(payload []byte, itemResult gjson.Result) bool {
-	_, ok := antigravityFunctionResponseContentIndex(payload, strings.TrimSpace(itemResult.Get("call_id").String()))
-	if itemResult.Get("call_id").String() == "" {
+	callID := strings.TrimSpace(itemResult.Get("call_id").String())
+	if callID == "" {
 		return true
 	}
+	_, ok := antigravityFunctionResponseContentIndex(payload, callID)
 	return ok
 }
 
@@ -301,14 +302,7 @@ func insertAntigravityModelFunctionCallBeforeContent(payload []byte, beforeIndex
 		fc["id"] = callID
 	}
 	if args.Exists() {
-		if args.Type == gjson.String {
-			fc["args"] = args.String()
-		} else {
-			var parsed any
-			if json.Unmarshal([]byte(args.Raw), &parsed) == nil {
-				fc["args"] = parsed
-			}
-		}
+		fc["args"] = args.Value()
 	}
 	part := map[string]any{"functionCall": fc}
 	if thoughtSig != "" {
@@ -385,8 +379,10 @@ func mergeAntigravityFunctionCallPartReplay(payload []byte, itemResult gjson.Res
 	if callID != "" && antigravityPayloadHasFunctionCallID(payload, callID) {
 		return payload, false
 	}
-	if frIndex, ok := antigravityFunctionResponseContentIndex(payload, callID); callID != "" && ok {
-		return insertAntigravityModelFunctionCallBeforeContent(payload, frIndex, name, callID, sig, args)
+	if callID != "" {
+		if frIndex, ok := antigravityFunctionResponseContentIndex(payload, callID); ok {
+			return insertAntigravityModelFunctionCallBeforeContent(payload, frIndex, name, callID, sig, args)
+		}
 	}
 
 	ci := antigravityReasoningReplayResolveContentIndex(payload, int(itemResult.Get("contentIndex").Int()))
