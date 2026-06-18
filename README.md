@@ -147,6 +147,10 @@ Windows desktop app built with Tauri + React for monitoring AI coding assistant 
 
 A lightweight web admin panel for CLIProxyAPI with health checks, resource monitoring, real-time logs, auto-update, request statistics and pricing display. Supports one-click installation and systemd service.
 
+### [CPA Usage Lens](https://github.com/yyykf/cpa-usage-lens)
+
+Cloud-backed usage analytics dashboard for self-hosted CLIProxyAPI. It consumes the Redis-compatible usage queue, strips sensitive fields, stores slimmed-down events and daily rollups in Supabase/Postgres, and shows account/API-key usage, token trends, collector health, and LiteLLM-based cost estimates with a near-zero local footprint.
+
 ### [CLIProxyAPI Tray](https://github.com/kitephp/CLIProxyAPI_Tray)
 
 A Windows tray application implemented using PowerShell scripts, without relying on any third-party libraries. The main features include: automatic creation of shortcuts, silent running, password management, channel switching (Main / Plus), and automatic downloading and updating.
