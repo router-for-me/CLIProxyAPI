@@ -202,6 +202,40 @@ func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[
+			{
+				"type":"custom",
+				"name":"apply_patch",
+				"description":"Use the apply_patch tool to edit files.",
+				"format":{"type":"grammar","syntax":"lark","definition":"start: patch"}
+			},
+			{
+				"type":"function",
+				"name":"exec_command",
+				"description":"Runs a command.",
+				"parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("tools.#").Int(); got != 1 {
+		t.Fatalf("tools count = %d, want 1. Output: %s", got, string(out))
+	}
+	if got := root.Get("tools.0.name").String(); got != "exec_command" {
+		t.Fatalf("tools.0.name = %q, want exec_command. Output: %s", got, string(out))
+	}
+	if got := root.Get("tools.#(name==\"apply_patch\")").Raw; got != "" {
+		t.Fatalf("apply_patch custom tool should be dropped. Output: %s", string(out))
+	}
+}
+
 func testClaudeResponsesThinkingSignature(t *testing.T) (string, string) {
 	t.Helper()
 	channelBlock := []byte{}
