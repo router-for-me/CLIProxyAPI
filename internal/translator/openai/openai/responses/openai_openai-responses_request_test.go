@@ -122,3 +122,54 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntil
 		t.Fatalf("messages.3.content = %q, want %q", got, "next")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceTools(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Use add_numbers."}
+		],
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "mcp__test_mcp__",
+				"description": "Tools in the mcp__test_mcp__ namespace.",
+				"tools": [
+					{
+						"type": "function",
+						"name": "add_numbers",
+						"description": "Add two numbers",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"a": { "type": "number" },
+								"b": { "type": "number" }
+							},
+							"required": ["a", "b"]
+						}
+					}
+				]
+			}
+		],
+		"tool_choice": "auto"
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+		t.Fatalf("tools count = %d, want 1; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
+		t.Fatalf("tools.0.type = %q, want function; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "mcp__test_mcp__add_numbers" {
+		t.Fatalf("tools.0.function.name = %q, want mcp__test_mcp__add_numbers; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.description").String(); got != "Add two numbers" {
+		t.Fatalf("tools.0.function.description = %q, want Add two numbers; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.required.0").String(); got != "a" {
+		t.Fatalf("tools.0.function.parameters.required.0 = %q, want a; output=%s", got, out)
+	}
+}
