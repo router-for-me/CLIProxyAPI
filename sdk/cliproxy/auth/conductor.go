@@ -1222,7 +1222,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		m.bindSessionAffinitySuccess(ctx, provider, routeModel, opts, auth.ID)
 		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
@@ -1845,7 +1844,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			m.bindSessionAffinitySuccess(execCtx, sessionAffinitySelectorProviderKey(providers, provider), routeModel, opts, auth.ID)
+			m.bindSessionAffinitySuccess(execCtx, "mixed", routeModel, opts, auth.ID)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1947,7 +1946,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
-			m.bindSessionAffinitySuccess(execCtx, sessionAffinitySelectorProviderKey(providers, provider), routeModel, opts, auth.ID)
+			m.bindSessionAffinitySuccess(execCtx, "mixed", routeModel, opts, auth.ID)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -2034,6 +2033,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			continue
 		}
+		m.bindSessionAffinitySuccess(ctx, "mixed", routeModel, opts, auth.ID)
 		return streamResult, nil
 	}
 }
@@ -2738,13 +2738,6 @@ func (m *Manager) bindSessionAffinitySuccess(ctx context.Context, provider, mode
 	if binder, ok := selector.(sessionAffinityBinder); ok && binder != nil {
 		binder.Bind(ctx, provider, selectionArgForSelector(selector, model), opts, authID)
 	}
-}
-
-func sessionAffinitySelectorProviderKey(providers []string, selectedProvider string) string {
-	if len(providers) == 1 {
-		return selectedProvider
-	}
-	return "mixed"
 }
 
 // MarkResult records an execution result and notifies hooks.

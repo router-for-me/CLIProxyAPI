@@ -215,3 +215,97 @@ func TestManagerExecute_SessionAffinityRebindUsesMixedSelectorProviderKey(t *tes
 		}
 	}
 }
+
+func TestManagerExecuteStream_SessionAffinityRebindUsesMixedKeyOnly(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	manager := NewManager(nil, selector, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		streamFirstErrors: map[string]error{
+			"auth-a": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	for _, auth := range []*Auth{
+		{ID: "auth-a", Provider: "claude"},
+		{ID: "auth-b", Provider: "claude"},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	const model = "claude-3"
+	for _, authID := range []string{"auth-a", "auth-b"} {
+		registry.GetGlobalRegistry().RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+	}
+	t.Cleanup(func() {
+		for _, authID := range []string{"auth-a", "auth-b"} {
+			registry.GetGlobalRegistry().UnregisterClient(authID)
+		}
+	})
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_stream-mixed-key-uuid"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+	providers := []string{"claude", "missing-provider"}
+
+	streamResult, errExecute := manager.ExecuteStream(context.Background(), providers, cliproxyexecutor.Request{Model: model}, opts)
+	if errExecute != nil {
+		t.Fatalf("first ExecuteStream error: %v", errExecute)
+	}
+	firstChunk, ok := <-streamResult.Chunks
+	if !ok {
+		t.Fatal("first ExecuteStream closed without chunk")
+	}
+	if firstChunk.Err != nil {
+		t.Fatalf("first ExecuteStream chunk error: %v", firstChunk.Err)
+	}
+	if got := string(firstChunk.Payload); got != "auth-b" {
+		t.Fatalf("first ExecuteStream chunk payload = %q, want auth-b", got)
+	}
+
+	primaryID, _ := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		t.Fatal("expected non-empty session id")
+	}
+	mixedKey := "mixed::" + primaryID + "::" + model
+	if got, ok := selector.cache.Get(mixedKey); !ok || got != "auth-b" {
+		t.Fatalf("mixed cache binding = (%q, %v), want (auth-b, true)", got, ok)
+	}
+	providerKey := "claude::" + primaryID + "::" + model
+	if got, ok := selector.cache.Get(providerKey); ok {
+		t.Fatalf("provider-scoped cache binding = (%q, %v), want no binding", got, ok)
+	}
+
+	streamResult, errExecute = manager.ExecuteStream(context.Background(), providers, cliproxyexecutor.Request{Model: model}, opts)
+	if errExecute != nil {
+		t.Fatalf("second ExecuteStream error: %v", errExecute)
+	}
+	secondChunk, ok := <-streamResult.Chunks
+	if !ok {
+		t.Fatal("second ExecuteStream closed without chunk")
+	}
+	if secondChunk.Err != nil {
+		t.Fatalf("second ExecuteStream chunk error: %v", secondChunk.Err)
+	}
+	if got := string(secondChunk.Payload); got != "auth-b" {
+		t.Fatalf("second ExecuteStream chunk payload = %q, want auth-b", got)
+	}
+
+	calls := executor.StreamCalls()
+	want := []string{"auth-a", "auth-b", "auth-b"}
+	if len(calls) != len(want) {
+		t.Fatalf("stream calls = %#v, want %#v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("stream calls[%d] = %q, want %q (all calls: %#v)", i, calls[i], want[i], calls)
+		}
+	}
+}
