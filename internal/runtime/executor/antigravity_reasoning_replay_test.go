@@ -137,3 +137,10 @@ func TestAntigravityReplayToolCallKeysUsesNativeFunctionCallID(t *testing.T) {
 		t.Fatalf("parallel tool calls should not share replay key: %v vs %v", keys, keys2)
 	}
 }
+
+func TestAntigravityRequestHasMatchingFunctionResponseWhitespaceCallID(t *testing.T) {
+	item := gjson.Parse(`{"call_id":" "}`)
+	if !antigravityRequestHasMatchingFunctionResponse(nil, item) {
+		t.Fatal("whitespace-only call_id should be treated as empty => true")
+	}
+}
