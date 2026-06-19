@@ -181,10 +181,6 @@ codex:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 
-# When true, enable Gemini CLI internal endpoints (/v1internal:*).
-# Default is false for safety.
-enable-gemini-cli-endpoint: false
-
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
@@ -352,17 +348,13 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
+# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
-#   gemini-cli:
-#     - name: "gemini-2.5-pro"          # original model name under this channel
-#       alias: "g2.5p"                  # client-visible alias
-#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
@@ -390,11 +382,6 @@ nonstream-keepalive-interval: 0
 
 # OAuth provider excluded models
 # oauth-excluded-models:
-#   gemini-cli:
-#     - "gemini-2.5-pro"     # exclude specific models (exact match)
-#     - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#     - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#     - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   vertex:
 #     - "gemini-3-pro-preview"
 #   aistudio:

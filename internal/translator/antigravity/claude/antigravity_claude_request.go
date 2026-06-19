@@ -1,8 +1,8 @@
 // Package claude provides request translation functionality for Claude Code API compatibility.
-// This package handles the conversion of Claude Code API requests into Gemini CLI-compatible
+// This package handles the conversion of Claude Code API requests into Antigravity-compatible
 // JSON format, transforming message contents, system instructions, and tool declarations
-// into the format expected by Gemini CLI API clients. It performs JSON data transformation
-// to ensure compatibility between Claude Code API format and Gemini CLI API's expected format.
+// into the format expected by Antigravity API clients. It performs JSON data transformation
+// to ensure compatibility between Claude Code API format and Antigravity API's expected format.
 package claude
 
 import (
@@ -288,12 +288,12 @@ func logDroppedAntigravityToolUseSignature(modelName string, messageIndex, conte
 	}).Debug("antigravity claude translator: dropped tool_use signature field")
 }
 
-// ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
+// ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Antigravity API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
-// from the raw JSON request and returns them in the format expected by the Gemini CLI API.
+// from the raw JSON request and returns them in the format expected by the Antigravity API.
 // The function performs the following transformations:
 // 1. Extracts the model information from the request
-// 2. Restructures the JSON to match Gemini CLI API format
+// 2. Restructures the JSON to match Antigravity API format
 // 3. Converts system instructions to the expected format
 // 4. Maps message contents with proper role transformations
 // 5. Handles tool declarations and tool choices
@@ -305,7 +305,7 @@ func logDroppedAntigravityToolUseSignature(modelName string, messageIndex, conte
 //   - stream: A boolean indicating if the request is for a streaming response (unused in current implementation)
 //
 // Returns:
-//   - []byte: The transformed request data in Gemini CLI API format
+//   - []byte: The transformed request data in Antigravity API format
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
@@ -681,7 +681,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
-	// Build output Gemini CLI request JSON
+	// Build output Antigravity request JSON
 	out := []byte(`{"model":"","request":{"contents":[]}}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 

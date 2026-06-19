@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -131,10 +130,9 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
+func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Gemini type should be mapped to gemini-cli
 	authData := map[string]any{
 		"type":  "gemini",
 		"email": "gemini@example.com",
@@ -157,12 +155,8 @@ func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 1 {
-		t.Fatalf("expected 1 auth, got %d", len(auths))
-	}
-
-	if auths[0].Provider != "gemini-cli" {
-		t.Errorf("gemini should be mapped to gemini-cli, got %s", auths[0].Provider)
+	if len(auths) != 0 {
+		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
 	}
 }
 
@@ -418,242 +412,9 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 }
 
-func TestSynthesizeGeminiVirtualAuths_NilInputs(t *testing.T) {
-	now := time.Now()
-
-	if SynthesizeGeminiVirtualAuths(nil, nil, now) != nil {
-		t.Error("expected nil for nil primary")
-	}
-	if SynthesizeGeminiVirtualAuths(&coreauth.Auth{}, nil, now) != nil {
-		t.Error("expected nil for nil metadata")
-	}
-	if SynthesizeGeminiVirtualAuths(nil, map[string]any{}, now) != nil {
-		t.Error("expected nil for nil primary with metadata")
-	}
-}
-
-func TestSynthesizeGeminiVirtualAuths_SingleProject(t *testing.T) {
-	now := time.Now()
-	primary := &coreauth.Auth{
-		ID:       "test-id",
-		Provider: "gemini-cli",
-		Label:    "test@example.com",
-	}
-	metadata := map[string]any{
-		"project_id": "single-project",
-		"email":      "test@example.com",
-		"type":       "gemini",
-	}
-
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
-	if virtuals != nil {
-		t.Error("single project should not create virtuals")
-	}
-}
-
-func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
-	now := time.Now()
-	primary := &coreauth.Auth{
-		ID:       "primary-id",
-		Provider: "gemini-cli",
-		Label:    "test@example.com",
-		Prefix:   "test-prefix",
-		ProxyURL: "http://proxy.local",
-		Attributes: map[string]string{
-			"source":       "test-source",
-			"path":         "/path/to/auth",
-			"header:X-Tra": "value",
-		},
-	}
-	metadata := map[string]any{
-		"project_id":      "project-a, project-b, project-c",
-		"email":           "test@example.com",
-		"type":            "gemini",
-		"request_retry":   2,
-		"disable_cooling": true,
-	}
-
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
-
-	if len(virtuals) != 3 {
-		t.Fatalf("expected 3 virtuals, got %d", len(virtuals))
-	}
-
-	// Check primary is disabled
-	if !primary.Disabled {
-		t.Error("expected primary to be disabled")
-	}
-	if primary.Status != coreauth.StatusDisabled {
-		t.Errorf("expected primary status disabled, got %s", primary.Status)
-	}
-	if primary.Attributes["gemini_virtual_primary"] != "true" {
-		t.Error("expected gemini_virtual_primary=true")
-	}
-	if !strings.Contains(primary.Attributes["virtual_children"], "project-a") {
-		t.Error("expected virtual_children to contain project-a")
-	}
-
-	// Check virtuals
-	projectIDs := []string{"project-a", "project-b", "project-c"}
-	for i, v := range virtuals {
-		if v.Provider != "gemini-cli" {
-			t.Errorf("expected provider gemini-cli, got %s", v.Provider)
-		}
-		if v.Status != coreauth.StatusActive {
-			t.Errorf("expected status active, got %s", v.Status)
-		}
-		if v.Prefix != "test-prefix" {
-			t.Errorf("expected prefix test-prefix, got %s", v.Prefix)
-		}
-		if v.ProxyURL != "http://proxy.local" {
-			t.Errorf("expected proxy_url http://proxy.local, got %s", v.ProxyURL)
-		}
-		if vv, ok := v.Metadata["disable_cooling"].(bool); !ok || !vv {
-			t.Errorf("expected disable_cooling true, got %v", v.Metadata["disable_cooling"])
-		}
-		if vv, ok := v.Metadata["request_retry"].(int); !ok || vv != 2 {
-			t.Errorf("expected request_retry 2, got %v", v.Metadata["request_retry"])
-		}
-		if v.Attributes["runtime_only"] != "true" {
-			t.Error("expected runtime_only=true")
-		}
-		if got := v.Attributes["header:X-Tra"]; got != "value" {
-			t.Errorf("expected virtual %d header:X-Tra %q, got %q", i, "value", got)
-		}
-		if v.Attributes["gemini_virtual_parent"] != "primary-id" {
-			t.Errorf("expected gemini_virtual_parent=primary-id, got %s", v.Attributes["gemini_virtual_parent"])
-		}
-		if v.Attributes["gemini_virtual_project"] != projectIDs[i] {
-			t.Errorf("expected gemini_virtual_project=%s, got %s", projectIDs[i], v.Attributes["gemini_virtual_project"])
-		}
-		if !strings.Contains(v.Label, "["+projectIDs[i]+"]") {
-			t.Errorf("expected label to contain [%s], got %s", projectIDs[i], v.Label)
-		}
-	}
-}
-
-func TestSynthesizeGeminiVirtualAuths_EmptyProviderAndLabel(t *testing.T) {
-	now := time.Now()
-	// Test with empty Provider and Label to cover fallback branches
-	primary := &coreauth.Auth{
-		ID:         "primary-id",
-		Provider:   "", // empty provider - should default to gemini-cli
-		Label:      "", // empty label - should default to provider
-		Attributes: map[string]string{},
-	}
-	metadata := map[string]any{
-		"project_id": "proj-a, proj-b",
-		"email":      "user@example.com",
-		"type":       "gemini",
-	}
-
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
-
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
-	}
-
-	// Check that empty provider defaults to gemini-cli
-	if virtuals[0].Provider != "gemini-cli" {
-		t.Errorf("expected provider gemini-cli (default), got %s", virtuals[0].Provider)
-	}
-	// Check that empty label defaults to provider
-	if !strings.Contains(virtuals[0].Label, "gemini-cli") {
-		t.Errorf("expected label to contain gemini-cli, got %s", virtuals[0].Label)
-	}
-}
-
-func TestSynthesizeGeminiVirtualAuths_NilPrimaryAttributes(t *testing.T) {
-	now := time.Now()
-	primary := &coreauth.Auth{
-		ID:         "primary-id",
-		Provider:   "gemini-cli",
-		Label:      "test@example.com",
-		Attributes: nil, // nil attributes
-	}
-	metadata := map[string]any{
-		"project_id": "proj-a, proj-b",
-		"email":      "test@example.com",
-		"type":       "gemini",
-	}
-
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
-
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
-	}
-	// Nil attributes should be initialized
-	if primary.Attributes == nil {
-		t.Error("expected primary.Attributes to be initialized")
-	}
-	if primary.Attributes["gemini_virtual_primary"] != "true" {
-		t.Error("expected gemini_virtual_primary=true")
-	}
-}
-
-func TestSplitGeminiProjectIDs(t *testing.T) {
-	tests := []struct {
-		name     string
-		metadata map[string]any
-		want     []string
-	}{
-		{
-			name:     "single project",
-			metadata: map[string]any{"project_id": "proj-a"},
-			want:     []string{"proj-a"},
-		},
-		{
-			name:     "multiple projects",
-			metadata: map[string]any{"project_id": "proj-a, proj-b, proj-c"},
-			want:     []string{"proj-a", "proj-b", "proj-c"},
-		},
-		{
-			name:     "with duplicates",
-			metadata: map[string]any{"project_id": "proj-a, proj-b, proj-a"},
-			want:     []string{"proj-a", "proj-b"},
-		},
-		{
-			name:     "with empty parts",
-			metadata: map[string]any{"project_id": "proj-a, , proj-b, "},
-			want:     []string{"proj-a", "proj-b"},
-		},
-		{
-			name:     "empty project_id",
-			metadata: map[string]any{"project_id": ""},
-			want:     nil,
-		},
-		{
-			name:     "no project_id",
-			metadata: map[string]any{},
-			want:     nil,
-		},
-		{
-			name:     "whitespace only",
-			metadata: map[string]any{"project_id": "   "},
-			want:     nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := splitGeminiProjectIDs(tt.metadata)
-			if len(got) != len(tt.want) {
-				t.Fatalf("expected %v, got %v", tt.want, got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("expected %v, got %v", tt.want, got)
-					break
-				}
-			}
-		})
-	}
-}
-
-func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
+func TestFileSynthesizer_Synthesize_IgnoresGeminiOAuthFile(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create a gemini auth file with multiple projects
 	authData := map[string]any{
 		"type":       "gemini",
 		"email":      "multi@example.com",
@@ -678,149 +439,8 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should have 4 auths: 1 primary (disabled) + 3 virtuals
-	if len(auths) != 4 {
-		t.Fatalf("expected 4 auths (1 primary + 3 virtuals), got %d", len(auths))
-	}
-
-	// First auth should be the primary (disabled)
-	primary := auths[0]
-	if !primary.Disabled {
-		t.Error("expected primary to be disabled")
-	}
-	if primary.Status != coreauth.StatusDisabled {
-		t.Errorf("expected primary status disabled, got %s", primary.Status)
-	}
-	if gotPriority := primary.Attributes["priority"]; gotPriority != "10" {
-		t.Errorf("expected primary priority 10, got %q", gotPriority)
-	}
-
-	// Remaining auths should be virtuals
-	for i := 1; i < 4; i++ {
-		v := auths[i]
-		if v.Status != coreauth.StatusActive {
-			t.Errorf("expected virtual %d to be active, got %s", i, v.Status)
-		}
-		if v.Attributes["gemini_virtual_parent"] != primary.ID {
-			t.Errorf("expected virtual %d parent to be %s, got %s", i, primary.ID, v.Attributes["gemini_virtual_parent"])
-		}
-		if gotPriority := v.Attributes["priority"]; gotPriority != "10" {
-			t.Errorf("expected virtual %d priority 10, got %q", i, gotPriority)
-		}
-	}
-}
-
-func TestBuildGeminiVirtualID(t *testing.T) {
-	tests := []struct {
-		name      string
-		baseID    string
-		projectID string
-		want      string
-	}{
-		{
-			name:      "basic",
-			baseID:    "auth.json",
-			projectID: "my-project",
-			want:      "auth.json::my-project",
-		},
-		{
-			name:      "with slashes",
-			baseID:    "path/to/auth.json",
-			projectID: "project/with/slashes",
-			want:      "path/to/auth.json::project_with_slashes",
-		},
-		{
-			name:      "with spaces",
-			baseID:    "auth.json",
-			projectID: "my project",
-			want:      "auth.json::my_project",
-		},
-		{
-			name:      "empty project",
-			baseID:    "auth.json",
-			projectID: "",
-			want:      "auth.json::project",
-		},
-		{
-			name:      "whitespace project",
-			baseID:    "auth.json",
-			projectID: "   ",
-			want:      "auth.json::project",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := buildGeminiVirtualID(tt.baseID, tt.projectID)
-			if got != tt.want {
-				t.Errorf("expected %q, got %q", tt.want, got)
-			}
-		})
-	}
-}
-
-func TestSynthesizeGeminiVirtualAuths_NotePropagated(t *testing.T) {
-	now := time.Now()
-	primary := &coreauth.Auth{
-		ID:       "primary-id",
-		Provider: "gemini-cli",
-		Label:    "test@example.com",
-		Attributes: map[string]string{
-			"source":   "test-source",
-			"path":     "/path/to/auth",
-			"priority": "5",
-			"note":     "my test note",
-		},
-	}
-	metadata := map[string]any{
-		"project_id": "proj-a, proj-b",
-		"email":      "test@example.com",
-		"type":       "gemini",
-	}
-
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
-
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
-	}
-
-	for i, v := range virtuals {
-		if got := v.Attributes["note"]; got != "my test note" {
-			t.Errorf("virtual %d: expected note %q, got %q", i, "my test note", got)
-		}
-		if got := v.Attributes["priority"]; got != "5" {
-			t.Errorf("virtual %d: expected priority %q, got %q", i, "5", got)
-		}
-	}
-}
-
-func TestSynthesizeGeminiVirtualAuths_NoteAbsentWhenEmpty(t *testing.T) {
-	now := time.Now()
-	primary := &coreauth.Auth{
-		ID:       "primary-id",
-		Provider: "gemini-cli",
-		Label:    "test@example.com",
-		Attributes: map[string]string{
-			"source": "test-source",
-			"path":   "/path/to/auth",
-		},
-	}
-	metadata := map[string]any{
-		"project_id": "proj-a, proj-b",
-		"email":      "test@example.com",
-		"type":       "gemini",
-	}
-
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
-
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
-	}
-
-	for i, v := range virtuals {
-		if _, hasNote := v.Attributes["note"]; hasNote {
-			t.Errorf("virtual %d: expected no note attribute when primary has no note", i)
-		}
+	if len(auths) != 0 {
+		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
 	}
 }
 
@@ -903,55 +523,5 @@ func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 				t.Fatalf("expected note attribute to be absent, got %q", value)
 			}
 		})
-	}
-}
-
-func TestFileSynthesizer_Synthesize_MultiProjectGeminiWithNote(t *testing.T) {
-	tempDir := t.TempDir()
-
-	authData := map[string]any{
-		"type":       "gemini",
-		"email":      "multi@example.com",
-		"project_id": "project-a, project-b",
-		"priority":   5,
-		"note":       "production keys",
-	}
-	data, _ := json.Marshal(authData)
-	err := os.WriteFile(filepath.Join(tempDir, "gemini-multi.json"), data, 0644)
-	if err != nil {
-		t.Fatalf("failed to write auth file: %v", err)
-	}
-
-	synth := NewFileSynthesizer()
-	ctx := &SynthesisContext{
-		Config:      &config.Config{},
-		AuthDir:     tempDir,
-		Now:         time.Now(),
-		IDGenerator: NewStableIDGenerator(),
-	}
-
-	auths, err := synth.Synthesize(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Should have 3 auths: 1 primary (disabled) + 2 virtuals
-	if len(auths) != 3 {
-		t.Fatalf("expected 3 auths (1 primary + 2 virtuals), got %d", len(auths))
-	}
-
-	primary := auths[0]
-	if gotNote := primary.Attributes["note"]; gotNote != "production keys" {
-		t.Errorf("expected primary note %q, got %q", "production keys", gotNote)
-	}
-
-	// Verify virtuals inherit note
-	for i := 1; i < len(auths); i++ {
-		v := auths[i]
-		if gotNote := v.Attributes["note"]; gotNote != "production keys" {
-			t.Errorf("expected virtual %d note %q, got %q", i, "production keys", gotNote)
-		}
-		if gotPriority := v.Attributes["priority"]; gotPriority != "5" {
-			t.Errorf("expected virtual %d priority %q, got %q", i, "5", gotPriority)
-		}
 	}
 }

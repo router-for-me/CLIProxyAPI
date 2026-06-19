@@ -263,6 +263,6 @@ func TestIsAuthBlockedForModel_KeepsGeminiBlockedWithoutCreditsBypass(t *testing
 
 	blocked, reason, _ := isAuthBlockedForModel(auth, "gemini-3-flash", time.Now())
 	if !blocked || reason != blockReasonCooldown {
-		t.Fatalf("expected gemini auth to remain blocked, got blocked=%v reason=%v", blocked, reason)
+		t.Fatalf("expected gemini model to remain blocked, got blocked=%v reason=%v", blocked, reason)
 	}
 }

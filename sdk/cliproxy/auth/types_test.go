@@ -113,16 +113,16 @@ func TestEnsureIndexUsesOAuthTypeAndAbsolutePath(t *testing.T) {
 
 	relPath := "test-oauth.json"
 	absPath := filepath.Join(wd, relPath)
-	expectedSeed := "gemini:" + filepath.Clean(absPath)
+	expectedSeed := "antigravity:" + filepath.Clean(absPath)
 	expectedIndex := stableAuthIndex(expectedSeed)
 
 	a := &Auth{
-		Provider: "gemini-cli",
+		Provider: "antigravity",
 		Attributes: map[string]string{
 			"path": relPath,
 		},
 		Metadata: map[string]any{
-			"type": "gemini",
+			"type": "antigravity",
 		},
 	}
 

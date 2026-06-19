@@ -2126,8 +2126,6 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatClaude
 	case "gemini", "vertex", "aistudio":
 		return sdktranslator.FormatGemini
-	case "gemini-cli":
-		return sdktranslator.FormatGeminiCLI
 	case "kimi":
 		return sdktranslator.FormatOpenAI
 	case "antigravity":
