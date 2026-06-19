@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -91,7 +90,7 @@ func (l *Listener) Serve(handler http.Handler) error {
 	}
 
 	// Actually create the socket
-	syscall.Umask(0) // Use exact permissions
+	clearUmask() // Use exact permissions on Unix
 	ln, err := net.Listen("unix", l.config.Path)
 	if err != nil {
 		return fmt.Errorf("failed to listen on unix socket: %w", err)
