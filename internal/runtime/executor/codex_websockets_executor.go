@@ -506,6 +506,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_close_sent", errSendRetry)
 						continue
 					}
+					if shouldFallbackCodexWebsocketSendErrorToHTTP(errSendRetry, upstreamBody) {
+						e.clearUpstreamConn(sess, connRetry, "send_close_sent_http_fallback", errSendRetry, false)
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_close_sent_http_fallback", errSendRetry)
+						fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
+						return e.CodexExecutor.Execute(ctx, auth, fallbackReq, fallbackOpts)
+					}
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 					return resp, errSendRetry
@@ -518,6 +524,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	readRetryAttempt := 0
+	receivedPayload := false
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -597,6 +604,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 				reporter.StartResponseTTFT()
 				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+					if shouldFallbackCodexWebsocketSendErrorToHTTP(errSendRetry, upstreamBody) {
+						e.clearUpstreamConn(sess, connRetry, "send_pre_payload_close_http_fallback", errSendRetry, false)
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_pre_payload_close_http_fallback", errSendRetry)
+						fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
+						return e.CodexExecutor.Execute(ctx, auth, fallbackReq, fallbackOpts)
+					}
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_pre_payload_close", errSendRetry)
 					return resp, errSendRetry
@@ -604,6 +617,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				conn = connRetry
 				wsReqBody = wsReqBodyRetry
 				continue
+			}
+			if sess != nil && !receivedPayload && shouldFallbackCodexWebsocketPrePayloadReadErrorToHTTP(errRead, upstreamBody) {
+				e.clearUpstreamConn(sess, conn, "read_pre_payload_close_http_fallback", errRead, false)
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "read_pre_payload_close_http_fallback", errRead)
+				fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
+				return e.CodexExecutor.Execute(ctx, auth, fallbackReq, fallbackOpts)
 			}
 			if isCodexWebsocketMessageTooBigError(errRead) && canFallbackCodexWebsocketRequestToHTTP(upstreamBody) {
 				if sess != nil {
@@ -635,6 +654,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if len(payload) == 0 {
 			continue
 		}
+		receivedPayload = true
 		reporter.MarkFirstResponseByte()
 		payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
@@ -856,6 +876,19 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_close_sent", errSendRetry)
 						continue
 					}
+					if shouldFallbackCodexWebsocketSendErrorToHTTP(errSendRetry, upstreamBody) {
+						e.clearUpstreamConn(sess, connRetry, "send_close_sent_http_fallback", errSendRetry, false)
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_close_sent_http_fallback", errSendRetry)
+						sess.clearActive(readCh)
+						fallbackResult, errFallback := e.startCodexHTTPFallbackStream(ctx, auth, req, opts, reporter, func() {
+							sess.reqMu.Unlock()
+						})
+						if errFallback != nil {
+							sess.reqMu.Unlock()
+							return nil, errFallback
+						}
+						return fallbackResult, nil
+					}
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 					sess.clearActive(readCh)
@@ -969,6 +1002,36 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
 						terminateReason = "send_retry_stale_terminal_close"
 						terminateErr = errSendRetry
+						if shouldFallbackCodexWebsocketSendErrorToHTTP(errSendRetry, upstreamBody) {
+							terminateReason = "send_stale_terminal_close_http_fallback"
+							helps.RecordAPIWebsocketError(ctx, e.cfg, "send_stale_terminal_close_http_fallback", errSendRetry)
+							e.clearUpstreamConn(sess, connRetry, terminateReason, errSendRetry, false)
+							fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
+							fallbackResult, errFallback := e.CodexExecutor.ExecuteStream(ctx, auth, fallbackReq, fallbackOpts)
+							if errFallback != nil {
+								terminateErr = errFallback
+								reporter.PublishFailure(ctx, errFallback)
+								_ = send(cliproxyexecutor.StreamChunk{Err: errFallback})
+								return
+							}
+							if fallbackResult == nil {
+								errFallback = fmt.Errorf("codex websockets executor: HTTP fallback returned nil stream")
+								terminateErr = errFallback
+								reporter.PublishFailure(ctx, errFallback)
+								_ = send(cliproxyexecutor.StreamChunk{Err: errFallback})
+								return
+							}
+							okFallback, errFallbackStream := forwardCodexHTTPFallbackStream(ctx, fallbackResult.Chunks, send, &sentPayload)
+							if errFallbackStream != nil {
+								terminateErr = errFallbackStream
+								reporter.PublishFailure(ctx, errFallbackStream)
+							}
+							if !okFallback {
+								terminateReason = "context_done"
+								terminateErr = ctx.Err()
+							}
+							return
+						}
 						e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_stale_terminal_close", errSendRetry)
 						reporter.PublishFailure(ctx, errSendRetry)
@@ -1019,6 +1082,36 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
 						terminateReason = "send_retry_pre_payload_close"
 						terminateErr = errSendRetry
+						if shouldFallbackCodexWebsocketSendErrorToHTTP(errSendRetry, upstreamBody) {
+							terminateReason = "send_pre_payload_close_http_fallback"
+							helps.RecordAPIWebsocketError(ctx, e.cfg, "send_pre_payload_close_http_fallback", errSendRetry)
+							e.clearUpstreamConn(sess, connRetry, terminateReason, errSendRetry, false)
+							fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
+							fallbackResult, errFallback := e.CodexExecutor.ExecuteStream(ctx, auth, fallbackReq, fallbackOpts)
+							if errFallback != nil {
+								terminateErr = errFallback
+								reporter.PublishFailure(ctx, errFallback)
+								_ = send(cliproxyexecutor.StreamChunk{Err: errFallback})
+								return
+							}
+							if fallbackResult == nil {
+								errFallback = fmt.Errorf("codex websockets executor: HTTP fallback returned nil stream")
+								terminateErr = errFallback
+								reporter.PublishFailure(ctx, errFallback)
+								_ = send(cliproxyexecutor.StreamChunk{Err: errFallback})
+								return
+							}
+							okFallback, errFallbackStream := forwardCodexHTTPFallbackStream(ctx, fallbackResult.Chunks, send, &sentPayload)
+							if errFallbackStream != nil {
+								terminateErr = errFallbackStream
+								reporter.PublishFailure(ctx, errFallbackStream)
+							}
+							if !okFallback {
+								terminateReason = "context_done"
+								terminateErr = ctx.Err()
+							}
+							return
+						}
 						e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_pre_payload_close", errSendRetry)
 						reporter.PublishFailure(ctx, errSendRetry)
@@ -1030,6 +1123,37 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					terminateReason = "completed"
 					terminateErr = nil
 					continue
+				}
+				if sess != nil && !sentPayload && shouldFallbackCodexWebsocketPrePayloadReadErrorToHTTP(errRead, upstreamBody) {
+					terminateReason = "read_pre_payload_close_http_fallback"
+					terminateErr = errRead
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "read_pre_payload_close_http_fallback", errRead)
+					e.clearUpstreamConn(sess, conn, terminateReason, errRead, false)
+					fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
+					fallbackResult, errFallback := e.CodexExecutor.ExecuteStream(ctx, auth, fallbackReq, fallbackOpts)
+					if errFallback != nil {
+						terminateErr = errFallback
+						reporter.PublishFailure(ctx, errFallback)
+						_ = send(cliproxyexecutor.StreamChunk{Err: errFallback})
+						return
+					}
+					if fallbackResult == nil {
+						errFallback = fmt.Errorf("codex websockets executor: HTTP fallback returned nil stream")
+						terminateErr = errFallback
+						reporter.PublishFailure(ctx, errFallback)
+						_ = send(cliproxyexecutor.StreamChunk{Err: errFallback})
+						return
+					}
+					okFallback, errFallbackStream := forwardCodexHTTPFallbackStream(ctx, fallbackResult.Chunks, send, &sentPayload)
+					if errFallbackStream != nil {
+						terminateErr = errFallbackStream
+						reporter.PublishFailure(ctx, errFallbackStream)
+					}
+					if !okFallback {
+						terminateReason = "context_done"
+						terminateErr = ctx.Err()
+					}
+					return
 				}
 				if !sentPayload && isCodexWebsocketMessageTooBigError(errRead) && canFallbackCodexWebsocketRequestToHTTP(upstreamBody) {
 					terminateReason = "message_too_big_http_fallback"
@@ -1267,6 +1391,14 @@ func shouldRetryCodexWebsocketSendError(err error, retryAttempt int) bool {
 	return retryAttempt < codexResponsesWebsocketSendRetryLimit && isCodexWebsocketCloseSentError(err)
 }
 
+func shouldFallbackCodexWebsocketSendErrorToHTTP(err error, body []byte) bool {
+	return isCodexWebsocketCloseSentError(err) && canFallbackCodexWebsocketRequestToHTTP(body)
+}
+
+func shouldFallbackCodexWebsocketPrePayloadReadErrorToHTTP(err error, body []byte) bool {
+	return shouldRetryCodexWebsocketPrePayloadReadError(err, 0) && canFallbackCodexWebsocketRequestToHTTP(body)
+}
+
 func shouldRetryCodexWebsocketPrePayloadReadError(err error, retryAttempt int) bool {
 	if retryAttempt >= codexResponsesWebsocketSendRetryLimit || err == nil {
 		return false
@@ -1356,6 +1488,51 @@ func codexHTTPFallbackRequest(req cliproxyexecutor.Request, opts cliproxyexecuto
 		opts.OriginalRequest = sanitizeCodexHTTPFallbackPayload(opts.OriginalRequest)
 	}
 	return req, opts
+}
+
+func (e *CodexWebsocketsExecutor) startCodexHTTPFallbackStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, reporter *helps.UsageReporter, afterForward func()) (*cliproxyexecutor.StreamResult, error) {
+	fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
+	fallbackResult, errFallback := e.CodexExecutor.ExecuteStream(ctx, auth, fallbackReq, fallbackOpts)
+	if errFallback != nil {
+		if reporter != nil {
+			reporter.PublishFailure(ctx, errFallback)
+		}
+		return nil, errFallback
+	}
+	if fallbackResult == nil {
+		errFallback = fmt.Errorf("codex websockets executor: HTTP fallback returned nil stream")
+		if reporter != nil {
+			reporter.PublishFailure(ctx, errFallback)
+		}
+		return nil, errFallback
+	}
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	send := func(chunk cliproxyexecutor.StreamChunk) bool {
+		if ctx == nil {
+			out <- chunk
+			return true
+		}
+		select {
+		case out <- chunk:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	go func() {
+		defer close(out)
+		if afterForward != nil {
+			defer afterForward()
+		}
+		sentPayload := false
+		_, errFallbackStream := forwardCodexHTTPFallbackStream(ctx, fallbackResult.Chunks, send, &sentPayload)
+		if errFallbackStream != nil && reporter != nil {
+			reporter.PublishFailure(ctx, errFallbackStream)
+		}
+	}()
+
+	return &cliproxyexecutor.StreamResult{Headers: fallbackResult.Headers, Chunks: out}, nil
 }
 
 func sanitizeCodexHTTPFallbackPayload(payload []byte) []byte {
