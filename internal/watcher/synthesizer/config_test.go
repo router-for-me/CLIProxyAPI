@@ -400,6 +400,43 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "kimi",
+					BaseURL: "https://kimi-compatible.example.com/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "test-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "openai-compatible-kimi" {
+		t.Fatalf("provider = %q, want openai-compatible-kimi", auth.Provider)
+	}
+	if auth.Attributes["provider_key"] != "openai-compatible-kimi" {
+		t.Fatalf("provider_key = %q, want openai-compatible-kimi", auth.Attributes["provider_key"])
+	}
+	if auth.Attributes["compat_name"] != "kimi" {
+		t.Fatalf("compat_name = %q, want kimi", auth.Attributes["compat_name"])
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -639,7 +676,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

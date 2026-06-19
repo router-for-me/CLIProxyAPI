@@ -913,13 +913,13 @@ func openAICompatProviderKey(auth *Auth) string {
 	}
 	if auth.Attributes != nil {
 		if providerKey := strings.TrimSpace(auth.Attributes["provider_key"]); providerKey != "" {
-			return strings.ToLower(providerKey)
+			return util.OpenAICompatibleProviderKey(providerKey)
 		}
 		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
-			return strings.ToLower(compatName)
+			return util.OpenAICompatibleProviderKey(compatName)
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	return util.OpenAICompatibleProviderKey(auth.Provider)
 }
 
 func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
@@ -3063,7 +3063,7 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 		if auth == nil {
 			continue
 		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		providerKey := executorKeyFromAuth(auth)
 		if _, ok := providerSet[providerKey]; !ok {
 			continue
 		}
@@ -3123,7 +3123,7 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 		if auth == nil {
 			continue
 		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		providerKey := executorKeyFromAuth(auth)
 		if _, ok := providerSet[providerKey]; !ok {
 			continue
 		}
@@ -4017,7 +4017,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate.Provider != provider || candidate.Disabled {
+		if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -4083,7 +4083,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if strings.TrimSpace(model) != "" {
 		m.mu.RLock()
 		for _, candidate := range m.auths {
-			if candidate == nil || candidate.Provider != provider || candidate.Disabled {
+			if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
 				continue
 			}
 			if _, used := tried[candidate.ID]; used {
@@ -4176,7 +4176,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if disallowFreeAuth && isFreeCodexAuth(candidate) {
 			continue
 		}
-		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
+		providerKey := executorKeyFromAuth(candidate)
 		if providerKey == "" {
 			continue
 		}
@@ -4219,7 +4219,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if selected == nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
+	providerKey := executorKeyFromAuth(selected)
 	executor, okExecutor := m.Executor(providerKey)
 	if !okExecutor {
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -4274,7 +4274,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			if candidate == nil || candidate.Disabled {
 				continue
 			}
-			if _, ok := providerSet[strings.TrimSpace(strings.ToLower(candidate.Provider))]; !ok {
+			if _, ok := providerSet[executorKeyFromAuth(candidate)]; !ok {
 				continue
 			}
 			if _, used := tried[candidate.ID]; used {
@@ -4554,7 +4554,7 @@ func (m *Manager) homeRuntimeAuthByID(sessionID string, authID string) (*Auth, P
 	if auth == nil || !authWebsocketsEnabled(auth) {
 		return nil, nil, "", false
 	}
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
 		return nil, nil, "", false
 	}
@@ -4652,7 +4652,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if homeAuthAlreadyTried(tried, auth.ID) {
 		return nil, nil, "", repeatedHomeAuthError()
 	}
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(&auth)
 	if providerKey == "" {
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without provider", HTTPStatus: http.StatusBadGateway}
 	}
@@ -4725,7 +4725,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		if !strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
 			continue
 		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		providerKey := executorKeyFromAuth(auth)
 		executor, ok := m.executors[providerKey]
 		if !ok {
 			continue
@@ -5338,8 +5338,15 @@ func executorKeyFromAuth(auth *Auth) string {
 			if providerKey == "" {
 				providerKey = compatName
 			}
-			return strings.ToLower(providerKey)
+			return util.OpenAICompatibleProviderKey(providerKey)
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+		providerKey := strings.TrimSpace(auth.Label)
+		if providerKey == "" {
+			providerKey = "openai-compatibility"
+		}
+		return util.OpenAICompatibleProviderKey(providerKey)
 	}
 	return strings.ToLower(strings.TrimSpace(auth.Provider))
 }
