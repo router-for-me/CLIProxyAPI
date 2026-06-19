@@ -19,17 +19,6 @@ func TestRequestExecutionMetadataIncludesExecutionSessionWithoutIdempotencyKey(t
 	}
 }
 
-func TestRequestExecutionMetadataIncludesDownstreamWebsocketCloseCallback(t *testing.T) {
-	callback := func() {}
-	ctx := WithDownstreamWebsocketCloseAfterResponseCallback(context.Background(), callback)
-
-	meta := requestExecutionMetadata(ctx)
-	got, ok := meta[coreexecutor.DownstreamWebsocketCloseAfterResponseCallbackMetadataKey].(func())
-	if !ok || got == nil {
-		t.Fatalf("DownstreamWebsocketCloseAfterResponseCallbackMetadataKey = %#v, want callback", meta[coreexecutor.DownstreamWebsocketCloseAfterResponseCallbackMetadataKey])
-	}
-}
-
 func TestSetReasoningEffortMetadataUsesSuffixOverBody(t *testing.T) {
 	meta := make(map[string]any)
 

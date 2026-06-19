@@ -841,9 +841,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						terminateReason = "context_done"
 						terminateErr = ctx.Err()
 					}
-					if okFallback && errFallbackStream == nil {
-						notifyDownstreamWebsocketCloseAfterResponse(opts)
-					}
 					return
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
@@ -1065,17 +1062,6 @@ func canFallbackCodexWebsocketRequestToHTTP(body []byte) bool {
 
 func canRetryCodexWebsocketRequestAfterStaleTerminalClose(body []byte) bool {
 	return strings.TrimSpace(gjson.GetBytes(body, "type").String()) != "response.append"
-}
-
-func notifyDownstreamWebsocketCloseAfterResponse(opts cliproxyexecutor.Options) {
-	if opts.Metadata == nil {
-		return
-	}
-	callback, ok := opts.Metadata[cliproxyexecutor.DownstreamWebsocketCloseAfterResponseCallbackMetadataKey].(func())
-	if !ok || callback == nil {
-		return
-	}
-	callback()
 }
 
 func codexHTTPFallbackRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {

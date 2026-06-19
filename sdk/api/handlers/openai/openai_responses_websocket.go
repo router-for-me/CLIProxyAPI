@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -420,10 +419,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
-		var closeAfterResponse atomic.Bool
-		cliCtx = handlers.WithDownstreamWebsocketCloseAfterResponseCallback(cliCtx, func() {
-			closeAfterResponse.Store(true)
-		})
 		if pinnedAuthID != "" {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		} else {
@@ -447,9 +442,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
-			return
-		}
-		if closeAfterResponse.Load() {
 			return
 		}
 		if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {

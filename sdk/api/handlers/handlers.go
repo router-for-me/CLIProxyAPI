@@ -64,7 +64,6 @@ type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
-type downstreamWebsocketCloseAfterResponseCallbackContextKey struct{}
 
 // PluginInterceptorHost applies plugin interceptors around handler execution.
 type PluginInterceptorHost interface {
@@ -159,18 +158,6 @@ func WithDisallowFreeAuth(ctx context.Context) context.Context {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, disallowFreeAuthContextKey{}, true)
-}
-
-// WithDownstreamWebsocketCloseAfterResponseCallback returns a child context that
-// receives a signal when the downstream websocket should close after this turn.
-func WithDownstreamWebsocketCloseAfterResponseCallback(ctx context.Context, callback func()) context.Context {
-	if callback == nil {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, downstreamWebsocketCloseAfterResponseCallbackContextKey{}, callback)
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -301,9 +288,6 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
-	if callback := downstreamWebsocketCloseAfterResponseCallbackFromContext(ctx); callback != nil {
-		meta[coreexecutor.DownstreamWebsocketCloseAfterResponseCallbackMetadataKey] = callback
-	}
 	return meta
 }
 
@@ -407,17 +391,6 @@ func disallowFreeAuthFromContext(ctx context.Context) bool {
 	}
 	raw, ok := ctx.Value(disallowFreeAuthContextKey{}).(bool)
 	return ok && raw
-}
-
-func downstreamWebsocketCloseAfterResponseCallbackFromContext(ctx context.Context) func() {
-	if ctx == nil {
-		return nil
-	}
-	raw := ctx.Value(downstreamWebsocketCloseAfterResponseCallbackContextKey{})
-	if callback, ok := raw.(func()); ok && callback != nil {
-		return callback
-	}
-	return nil
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
