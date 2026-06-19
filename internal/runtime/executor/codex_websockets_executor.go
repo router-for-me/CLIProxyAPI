@@ -38,6 +38,7 @@ const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
+	codexResponsesWebsocketSendRetryLimit  = 2
 )
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
@@ -463,11 +464,20 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			readCh = make(chan codexWebsocketRead, 4096)
 			sess.setActive(readCh)
 
-			// Retry once with a fresh websocket connection. This is mainly to handle
-			// upstream closing the socket between sequential requests within the same
-			// execution session.
-			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
-			if errDialRetry == nil && connRetry != nil {
+			// Retry with fresh websocket connections. This mainly handles upstream
+			// closing sockets between sequential requests within the same execution
+			// session, including close frames that race with the first resend.
+			for sendRetryAttempt := 0; ; sendRetryAttempt++ {
+				connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+				if errDialRetry != nil || connRetry == nil {
+					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+					if errDialRetry == nil {
+						errDialRetry = fmt.Errorf("codex websockets executor: websocket retry returned nil conn")
+					}
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
+					sess.notifyUpstreamDisconnect(errDialRetry)
+					return resp, errDialRetry
+				}
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -485,16 +495,21 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry == nil {
 					conn = connRetry
 					wsReqBody = wsReqBodyRetry
+					break
 				} else {
+					if shouldRetryCodexWebsocketSendError(errSendRetry, sendRetryAttempt) && !codexWebsocketRequestCannotRetryFresh(sess, connRetry, upstreamBody) {
+						sess.suppressReadErrorForConn(connRetry)
+						sess.stopActiveDelivery(readCh)
+						e.clearUpstreamConn(sess, connRetry, "send_retry_close_sent", errSendRetry, false)
+						readCh = make(chan codexWebsocketRead, 4096)
+						sess.setActive(readCh)
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_close_sent", errSendRetry)
+						continue
+					}
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 					return resp, errSendRetry
 				}
-			} else {
-				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-				sess.notifyUpstreamDisconnect(errDialRetry)
-				return resp, errDialRetry
 			}
 		} else {
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
@@ -502,6 +517,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 
+	readRetryAttempt := 0
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -544,6 +560,45 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_stale_terminal_close", errSendRetry)
+					return resp, errSendRetry
+				}
+				conn = connRetry
+				wsReqBody = wsReqBodyRetry
+				continue
+			}
+			if sess != nil && shouldRetryCodexWebsocketPrePayloadReadError(errRead, readRetryAttempt) && !codexWebsocketRequestCannotRetryFresh(sess, conn, upstreamBody) {
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "read_pre_payload_close_retry", errRead)
+				readRetryAttempt++
+				e.clearUpstreamConn(sess, conn, "pre_payload_close_retry", errRead, false)
+				readCh = make(chan codexWebsocketRead, 4096)
+				sess.setActive(readCh)
+				connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+				if errDialRetry != nil || connRetry == nil {
+					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+					if errDialRetry == nil {
+						errDialRetry = fmt.Errorf("codex websockets executor: websocket retry returned nil conn")
+					}
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry_pre_payload_close", errDialRetry)
+					sess.notifyUpstreamDisconnect(errDialRetry)
+					return resp, errDialRetry
+				}
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
+				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+					URL:       wsURL,
+					Method:    "WEBSOCKET",
+					Headers:   wsHeaders.Clone(),
+					Body:      wsReqBodyRetry,
+					Provider:  e.Identifier(),
+					AuthID:    authID,
+					AuthLabel: authLabel,
+					AuthType:  authType,
+					AuthValue: authValue,
+				})
+				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+				reporter.StartResponseTTFT()
+				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_pre_payload_close", errSendRetry)
 					return resp, errSendRetry
 				}
 				conn = connRetry
@@ -763,39 +818,54 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			readCh = make(chan codexWebsocketRead, 4096)
 			sess.setActive(readCh)
 
-			// Retry once with a new websocket connection for the same execution session.
-			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
-			if errDialRetry != nil || connRetry == nil {
-				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-				sess.notifyUpstreamDisconnect(errDialRetry)
-				sess.clearActive(readCh)
-				sess.reqMu.Unlock()
-				return nil, errDialRetry
+			// Retry with fresh websocket connections for the same execution session.
+			for sendRetryAttempt := 0; ; sendRetryAttempt++ {
+				connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+				if errDialRetry != nil || connRetry == nil {
+					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+					if errDialRetry == nil {
+						errDialRetry = fmt.Errorf("codex websockets executor: websocket retry returned nil conn")
+					}
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
+					sess.notifyUpstreamDisconnect(errDialRetry)
+					sess.clearActive(readCh)
+					sess.reqMu.Unlock()
+					return nil, errDialRetry
+				}
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
+				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+					URL:       wsURL,
+					Method:    "WEBSOCKET",
+					Headers:   wsHeaders.Clone(),
+					Body:      wsReqBodyRetry,
+					Provider:  e.Identifier(),
+					AuthID:    authID,
+					AuthLabel: authLabel,
+					AuthType:  authType,
+					AuthValue: authValue,
+				})
+				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+				reporter.StartResponseTTFT()
+				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+					if shouldRetryCodexWebsocketSendError(errSendRetry, sendRetryAttempt) && !codexWebsocketRequestCannotRetryFresh(sess, connRetry, upstreamBody) {
+						sess.suppressReadErrorForConn(connRetry)
+						sess.stopActiveDelivery(readCh)
+						e.clearUpstreamConn(sess, connRetry, "send_retry_close_sent", errSendRetry, false)
+						readCh = make(chan codexWebsocketRead, 4096)
+						sess.setActive(readCh)
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_close_sent", errSendRetry)
+						continue
+					}
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
+					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
+					sess.clearActive(readCh)
+					sess.reqMu.Unlock()
+					return nil, errSendRetry
+				}
+				conn = connRetry
+				wsReqBody = wsReqBodyRetry
+				break
 			}
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
-			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-				URL:       wsURL,
-				Method:    "WEBSOCKET",
-				Headers:   wsHeaders.Clone(),
-				Body:      wsReqBodyRetry,
-				Provider:  e.Identifier(),
-				AuthID:    authID,
-				AuthLabel: authLabel,
-				AuthType:  authType,
-				AuthValue: authValue,
-			})
-			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
-			reporter.StartResponseTTFT()
-			if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
-				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
-				sess.clearActive(readCh)
-				sess.reqMu.Unlock()
-				return nil, errSendRetry
-			}
-			conn = connRetry
-			wsReqBody = wsReqBodyRetry
 		} else {
 			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "send_error", errSend)
 			if errClose := conn.Close(); errClose != nil {
@@ -837,6 +907,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 
 		var param any
+		readRetryAttempt := 0
 		sentPayload := false
 		for {
 			if ctx != nil && ctx.Err() != nil {
@@ -900,6 +971,56 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						terminateErr = errSendRetry
 						e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_stale_terminal_close", errSendRetry)
+						reporter.PublishFailure(ctx, errSendRetry)
+						_ = send(cliproxyexecutor.StreamChunk{Err: errSendRetry})
+						return
+					}
+					conn = connRetry
+					wsReqBody = wsReqBodyRetry
+					terminateReason = "completed"
+					terminateErr = nil
+					continue
+				}
+				if sess != nil && !sentPayload && shouldRetryCodexWebsocketPrePayloadReadError(errRead, readRetryAttempt) && !codexWebsocketRequestCannotRetryFresh(sess, conn, upstreamBody) {
+					terminateReason = "pre_payload_close_retry"
+					terminateErr = errRead
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "read_pre_payload_close_retry", errRead)
+					readRetryAttempt++
+					e.clearUpstreamConn(sess, conn, terminateReason, errRead, false)
+					readCh = make(chan codexWebsocketRead, 4096)
+					sess.setActive(readCh)
+					connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+					if errDialRetry != nil || connRetry == nil {
+						closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+						if errDialRetry == nil {
+							errDialRetry = fmt.Errorf("codex websockets executor: websocket retry returned nil conn")
+						}
+						terminateErr = errDialRetry
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry_pre_payload_close", errDialRetry)
+						sess.notifyUpstreamDisconnect(errDialRetry)
+						reporter.PublishFailure(ctx, errDialRetry)
+						_ = send(cliproxyexecutor.StreamChunk{Err: errDialRetry})
+						return
+					}
+					wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
+					helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+						URL:       wsURL,
+						Method:    "WEBSOCKET",
+						Headers:   wsHeaders.Clone(),
+						Body:      wsReqBodyRetry,
+						Provider:  e.Identifier(),
+						AuthID:    authID,
+						AuthLabel: authLabel,
+						AuthType:  authType,
+						AuthValue: authValue,
+					})
+					recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+					reporter.StartResponseTTFT()
+					if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+						terminateReason = "send_retry_pre_payload_close"
+						terminateErr = errSendRetry
+						e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
+						helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry_pre_payload_close", errSendRetry)
 						reporter.PublishFailure(ctx, errSendRetry)
 						_ = send(cliproxyexecutor.StreamChunk{Err: errSendRetry})
 						return
@@ -1130,6 +1251,39 @@ func isCodexWebsocketMessageTooBigError(err error) bool {
 	}
 	var closeErr *websocket.CloseError
 	return errors.As(err, &closeErr) && closeErr.Code == websocket.CloseMessageTooBig
+}
+
+func isCodexWebsocketCloseSentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, websocket.ErrCloseSent) {
+		return true
+	}
+	return strings.Contains(err.Error(), websocket.ErrCloseSent.Error())
+}
+
+func shouldRetryCodexWebsocketSendError(err error, retryAttempt int) bool {
+	return retryAttempt < codexResponsesWebsocketSendRetryLimit && isCodexWebsocketCloseSentError(err)
+}
+
+func shouldRetryCodexWebsocketPrePayloadReadError(err error, retryAttempt int) bool {
+	if retryAttempt >= codexResponsesWebsocketSendRetryLimit || err == nil {
+		return false
+	}
+	if isCodexWebsocketCloseSentError(err) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		return false
+	}
+	switch closeErr.Code {
+	case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNoStatusReceived:
+		return true
+	default:
+		return false
+	}
 }
 
 func isCodexWebsocketTerminalPayload(payload []byte) bool {
