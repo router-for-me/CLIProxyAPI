@@ -172,6 +172,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if bodyErr := helps.DetectUpstreamErrorBody(httpResp.StatusCode, data); bodyErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, bodyErr)
+		return resp, bodyErr
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve

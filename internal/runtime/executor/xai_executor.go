@@ -162,6 +162,10 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if bodyErr := helps.DetectUpstreamErrorBody(httpResp.StatusCode, data); bodyErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, bodyErr)
+		return resp, bodyErr
+	}
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
@@ -241,15 +245,16 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, nil, nil, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
-		return nil, nil, nil, err
+		return nil, nil, nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+	if bodyErr := helps.DetectUpstreamErrorBody(httpResp.StatusCode, data); bodyErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, bodyErr)
+		return nil, nil, nil, bodyErr
 	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))

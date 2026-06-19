@@ -257,6 +257,15 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			if compat.ResponsesPassthrough {
+				attrs["responses_passthrough"] = "true"
+			}
+			if compat.ResponsesWebsocket {
+				attrs["responses_websocket"] = "true"
+			}
+			if compat.ResponsesCompaction {
+				attrs["responses_compaction"] = "true"
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
@@ -296,6 +305,15 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			if compat.ResponsesPassthrough {
+				attrs["responses_passthrough"] = "true"
+			}
+			if compat.ResponsesWebsocket {
+				attrs["responses_websocket"] = "true"
+			}
+			if compat.ResponsesCompaction {
+				attrs["responses_compaction"] = "true"
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,

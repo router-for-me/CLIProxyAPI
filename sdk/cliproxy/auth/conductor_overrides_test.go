@@ -108,6 +108,76 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 }
 
+func TestManager_ShouldRetryAfterError_Retries402PaymentRequired(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	_, _, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusPaymentRequired, Message: "insufficient_quota"}, 0, []string{"claude"}, "model", maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for 402, got false (wait=%v)", wait)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_Retries403Forbidden(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	_, _, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusForbidden, Message: "Insufficient quota."}, 0, []string{"claude"}, "model", maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for 403, got false (wait=%v)", wait)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_402RespectsRetryBudget(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(1, 30*time.Second, 0)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	_, _, maxWait := m.retrySettings()
+	// attempt 1 should exceed the retry budget of 1
+	_, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusPaymentRequired, Message: "insufficient_quota"}, 1, []string{"claude"}, "model", maxWait)
+	if shouldRetry {
+		t.Fatal("expected shouldRetry=false when retry budget exhausted")
+	}
+}
+
+func TestManager_ShouldRetryAfterError_429StillRetriesWithoutRetryAfter(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	_, _, maxWait := m.retrySettings()
+	// 429 with no Retry-After should now retry immediately (previously required Retry-After)
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}, 0, []string{"claude"}, "model", maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for 429 without Retry-After, got false (wait=%v)", wait)
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
@@ -1060,5 +1130,76 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 	}
 	if state := updatedBad.ModelStates[model]; state != nil {
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
+	}
+}
+
+func TestManager_StaticFileNotFoundStopsRetryWithoutSuspendingAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "openai",
+		executeErrors: map[string]error{
+			"aa-bad-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    `{"code":"not-found","error":"Failed to read static file."}`,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "gpt-4.1"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "openai"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "openai"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "openai", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "openai", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"openai"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected static-file not-found error")
+	}
+	errResult, ok := errExecute.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", errExecute)
+	}
+	if errResult.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", errResult.HTTPStatus, http.StatusBadRequest)
+	}
+
+	// Should NOT retry with good auth; stop immediately.
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if updatedBad.Unavailable {
+		t.Fatalf("expected static-file not-found to keep bad auth available")
+	}
+	if !updatedBad.NextRetryAfter.IsZero() {
+		t.Fatalf("expected static-file not-found to keep bad auth cooldown unset, got %v", updatedBad.NextRetryAfter)
+	}
+	if state := updatedBad.ModelStates[model]; state != nil {
+		t.Fatalf("expected static-file not-found to avoid bad auth model cooldown state, got %#v", state)
 	}
 }

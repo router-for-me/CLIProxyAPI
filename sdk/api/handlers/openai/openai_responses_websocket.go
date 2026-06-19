@@ -891,6 +891,12 @@ func dedupeInputItemsByID(rawArray string) (string, error) {
 
 func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, metadata map[string]any) bool {
 	if len(attributes) > 0 {
+		if raw := strings.TrimSpace(attributes["responses_websocket"]); raw != "" {
+			parsed, errParse := strconv.ParseBool(raw)
+			if errParse == nil {
+				return parsed
+			}
+		}
 		if raw := strings.TrimSpace(attributes["websockets"]); raw != "" {
 			parsed, errParse := strconv.ParseBool(raw)
 			if errParse == nil {
@@ -1093,7 +1099,17 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
 	if auth == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return true
+	}
+	if len(auth.Attributes) > 0 {
+		if raw := strings.TrimSpace(auth.Attributes["responses_compaction"]); raw != "" {
+			if parsed, err := strconv.ParseBool(raw); err == nil {
+				return parsed
+			}
+		}
+	}
+	return false
 }
 
 func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {

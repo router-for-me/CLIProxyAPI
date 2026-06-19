@@ -836,6 +836,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	// Inject service_tier=priority at the very last moment before sending.
+	// This is the only place we do the JSON work when fast-service-tier is enabled,
+	// guaranteeing it survives all prior processing (payload rules, thinking,
+	// prompt cache injection, etc.) while avoiding double work on every request.
+	body = applyCodexFastServiceTier(e.cfg, body)
 	var identityState codexIdentityConfuseState
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
 	if err != nil {
@@ -961,6 +966,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		var param any
 		clientCompletedData := applyCodexIdentityExposeResponsePayload(completedData, identityState)
 		out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, body, clientCompletedData, &param)
+		if displayModel := codexFallbackDisplayModel(opts); displayModel != "" {
+			out = rewriteCodexResponseModel(out, displayModel)
+		}
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 		return resp, nil
 	}
@@ -1007,6 +1015,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	// Inject service_tier=priority at the very last moment before sending.
+	// Only one sjson operation per request when fast-service-tier is enabled.
+	body = applyCodexFastServiceTier(e.cfg, body)
 	var identityState codexIdentityConfuseState
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
 	if err != nil {
@@ -1120,6 +1131,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	// Inject service_tier=priority at the very last moment before sending.
+	// Only one sjson operation per request when fast-service-tier is enabled.
+	body = applyCodexFastServiceTier(e.cfg, body)
 	var identityState codexIdentityConfuseState
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
 	if err != nil {
@@ -1881,41 +1895,21 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return
 }
 
-func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {
-	if auth == nil || e.cfg == nil {
-		return nil
+// applyCodexFastServiceTier injects service_tier=priority into the payload when the
+// global fast-service-tier config is enabled. It always overwrites the existing value.
+//
+// It is intentionally called only once per request, at the very last moment
+// before the payload is sent over HTTP or WebSocket. This design ensures:
+//   - When disabled: near-zero overhead (simple early return).
+//   - When enabled: sjson.SetBytes is executed exactly once per request,
+//     after all processing (thinking, payload rules, prompt cache, etc.).
+//
+// This single late injection is sufficient for both fresh requests and
+// follow-up turns using previous_response_id on long-lived websocket sessions.
+func applyCodexFastServiceTier(cfg *config.Config, body []byte) []byte {
+	if cfg == nil || !cfg.FastServiceTier || len(body) == 0 {
+		return body
 	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range e.cfg.CodexKey {
-		entry := &e.cfg.CodexKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range e.cfg.CodexKey {
-			entry := &e.cfg.CodexKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
+	body, _ = sjson.SetBytes(body, "service_tier", "priority")
+	return body
 }

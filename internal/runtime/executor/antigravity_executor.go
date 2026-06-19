@@ -806,6 +806,11 @@ attemptLoop:
 			if useCredits {
 				clearAntigravityCreditsFailureState(auth)
 			}
+			if bodyErr := helps.DetectUpstreamErrorBody(httpResp.StatusCode, bodyBytes); bodyErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, bodyErr)
+				err = bodyErr
+				return resp, err
+			}
 			bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
 			reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 			var param any

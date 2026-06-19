@@ -233,6 +233,11 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			if bodyErr := helps.DetectUpstreamErrorBody(httpResp.StatusCode, data); bodyErr != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, bodyErr)
+				err = bodyErr
+				return resp, err
+			}
 			reporter.Publish(ctx, helps.ParseGeminiCLIUsage(data))
 			var param any
 			out := sdktranslator.TranslateNonStream(respCtx, to, responseFormat, attemptModel, opts.OriginalRequest, payload, data, &param)

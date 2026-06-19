@@ -69,6 +69,15 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
+	if oldEntry.ResponsesPassthrough != newEntry.ResponsesPassthrough {
+		details = append(details, fmt.Sprintf("responses-passthrough %t -> %t", oldEntry.ResponsesPassthrough, newEntry.ResponsesPassthrough))
+	}
+	if oldEntry.ResponsesWebsocket != newEntry.ResponsesWebsocket {
+		details = append(details, fmt.Sprintf("responses-websocket %t -> %t", oldEntry.ResponsesWebsocket, newEntry.ResponsesWebsocket))
+	}
+	if oldEntry.ResponsesCompaction != newEntry.ResponsesCompaction {
+		details = append(details, fmt.Sprintf("responses-compaction %t -> %t", oldEntry.ResponsesCompaction, newEntry.ResponsesCompaction))
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
@@ -176,6 +185,15 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	// Intentionally exclude API key material; only count non-empty entries.
 	if count := countAPIKeys(entry); count > 0 {
 		parts = append(parts, fmt.Sprintf("api_keys=%d", count))
+	}
+	if entry.ResponsesPassthrough {
+		parts = append(parts, fmt.Sprintf("rsp=%t", entry.ResponsesPassthrough))
+	}
+	if entry.ResponsesWebsocket {
+		parts = append(parts, fmt.Sprintf("rsw=%t", entry.ResponsesWebsocket))
+	}
+	if entry.ResponsesCompaction {
+		parts = append(parts, fmt.Sprintf("rsc=%t", entry.ResponsesCompaction))
 	}
 
 	if len(parts) == 0 {

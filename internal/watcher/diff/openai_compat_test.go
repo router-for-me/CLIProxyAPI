@@ -185,3 +185,24 @@ func TestOpenAICompatKeyUsesModelNameWhenAliasEmpty(t *testing.T) {
 		t.Fatalf("expected model-name fallback, got %s/%s", key, label)
 	}
 }
+
+func TestDiffOpenAICompatibility_CapabilityFlags(t *testing.T) {
+	oldList := []config.OpenAICompatibility{
+		{
+			Name:                 "provider-a",
+			ResponsesPassthrough: false,
+			ResponsesWebsocket:   false,
+			ResponsesCompaction:  false,
+		},
+	}
+	newList := []config.OpenAICompatibility{
+		{
+			Name:                 "provider-a",
+			ResponsesPassthrough: true,
+			ResponsesWebsocket:   true,
+			ResponsesCompaction:  true,
+		},
+	}
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (responses-passthrough false -> true, responses-websocket false -> true, responses-compaction false -> true)")
+}

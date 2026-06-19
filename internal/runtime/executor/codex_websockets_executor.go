@@ -247,6 +247,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		defer sess.reqMu.Unlock()
 	}
 
+	// Inject service_tier=priority at the absolute latest point, right before
+	// wrapping as websocket "response.create". This is the only sjson work
+	// when fast-service-tier is enabled — covers all processing steps above
+	// (including prompt cache) for multi-turn agent sessions.
+	body = applyCodexFastServiceTier(e.cfg, body)
+	upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
@@ -308,6 +314,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
+				// Re-apply fast service tier for the retry send as well.
+				body = applyCodexFastServiceTier(e.cfg, body)
+				upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -387,6 +396,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			var param any
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, clientBody, clientPayload, &param)
+			if displayModel := codexFallbackDisplayModel(opts); displayModel != "" {
+				out = rewriteCodexResponseModel(out, displayModel)
+			}
 			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
@@ -465,6 +477,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
+	// Inject service_tier=priority at the absolute latest point before
+	// wrapping into websocket "response.create". This is the *only* place
+	// we pay the sjson cost when fast-service-tier is enabled. It covers
+	// prompt cache injection and all prior processing for agent follow-ups.
+	body = applyCodexFastServiceTier(e.cfg, body)
+	upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
 	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
@@ -528,6 +546,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
+			// Re-apply for retry send on the new connection.
+			body = applyCodexFastServiceTier(e.cfg, body)
+			upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
 			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,

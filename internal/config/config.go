@@ -128,6 +128,15 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// FastServiceTier enables automatic injection of service_tier=priority for all Codex requests.
+	// When true, "priority" is always set on the service_tier field (overwriting any existing value)
+	// to accelerate API response times. Applies to both OAuth and API key Codex requests.
+	// The injection is applied defensively at the last possible moment before sending,
+	// including for follow-up turns that carry previous_response_id.
+	// Note: For long conversation chains, upstream behavior may still vary after the first turn.
+	// When false (default), the service_tier field is left unchanged.
+	FastServiceTier bool `yaml:"fast-service-tier,omitempty" json:"fast-service-tier,omitempty"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -611,6 +620,16 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// ResponsesPassthrough when true forwards POST /v1/responses directly to upstream /responses
+	// without converting to Chat Completions format.
+	ResponsesPassthrough bool `yaml:"responses-passthrough,omitempty" json:"responses-passthrough,omitempty"`
+
+	// ResponsesWebsocket when true indicates the upstream supports websocket-style Responses session semantics.
+	ResponsesWebsocket bool `yaml:"responses-websocket,omitempty" json:"responses-websocket,omitempty"`
+
+	// ResponsesCompaction when true enables POST /v1/responses/compact passthrough and websocket compaction replay bypass.
+	ResponsesCompaction bool `yaml:"responses-compaction,omitempty" json:"responses-compaction,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

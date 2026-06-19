@@ -1973,21 +1973,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
-
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
-		if errExec == nil {
-			return resp, nil
-		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
-		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
+	resp, lastErr := m.runMixedRetry(ctx, normalized, req, opts)
+	if lastErr == nil {
+		return resp, nil
+	}
+	if hasCodexProvider(normalized) {
+		if fbResp, ok := m.tryCodexModelFallbackExecute(ctx, normalized, req, opts); ok {
+			return fbResp, nil
 		}
 	}
 	if lastErr != nil {
@@ -1998,9 +1990,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 				return resp, nil
 			}
 		}
-		return cliproxyexecutor.Response{}, lastErr
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, lastErr
 }
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
@@ -2041,8 +2032,58 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	result, lastErr := m.runStreamMixedRetry(ctx, normalized, req, opts)
+	if lastErr == nil {
+		return result, nil
+	}
+	if hasCodexProvider(normalized) {
+		if fbResult, ok := m.tryCodexModelFallbackExecuteStream(ctx, normalized, req, opts); ok {
+			return fbResult, nil
+		}
+	}
+	if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
+		if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
+			return nil, errCredits
+		} else if ok {
+			return result, nil
+		}
+	}
+	var bootstrapErr *streamBootstrapError
+	if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+		return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+	}
+	return nil, lastErr
+}
 
+// runMixedRetry runs the full retry cycle for a non-streaming execution.
+// It returns the first successful response, or the last error if all attempts fail.
+func (m *Manager) runMixedRetry(ctx context.Context, normalized []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	_, maxRetryCredentials, maxWait := m.retrySettings()
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		if errExec == nil {
+			return resp, nil
+		}
+		lastErr = errExec
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		if !shouldRetry {
+			break
+		}
+		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+			return cliproxyexecutor.Response{}, errWait
+		}
+	}
+	if lastErr != nil {
+		return cliproxyexecutor.Response{}, lastErr
+	}
+	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+// runStreamMixedRetry runs the full retry cycle for a streaming execution.
+// It returns the first successful StreamResult, or the last error if all attempts fail.
+func (m *Manager) runStreamMixedRetry(ctx context.Context, normalized []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	_, maxRetryCredentials, maxWait := m.retrySettings()
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
@@ -3164,17 +3205,42 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		}
 		return wait, true
 	}
-	if status != http.StatusTooManyRequests {
+	// Quota, billing and rate-limit failures (429/402/403) are retryable across
+	// alternative credentials. 429 may carry a Retry-After hint; 402/403 typically
+	// do not, so fall back to an immediate retry to let auth selection rotate to
+	// another key. Transient upstream errors (5xx/408) are handled via the cooldown
+	// path above, since applyAuthFailureState already schedules a short cooldown.
+	if !isRetryableStatusCode(status) {
 		return 0, false
 	}
 	if !m.retryAllowed(attempt, providers) {
 		return 0, false
 	}
 	retryAfter := retryAfterFromError(err)
-	if retryAfter == nil || *retryAfter <= 0 || *retryAfter > maxWait {
-		return 0, false
+	if retryAfter != nil && *retryAfter > 0 {
+		if *retryAfter > maxWait {
+			return 0, false
+		}
+		return *retryAfter, true
 	}
-	return *retryAfter, true
+	// No Retry-After hint: retry immediately so the next attempt can select a
+	// different credential that may still have quota available.
+	return 0, true
+}
+
+// isRetryableStatusCode reports whether an upstream HTTP status code should
+// trigger an immediate retry across alternative credentials (subject to the
+// configured retry budget). Rate-limit (429), quota/billing (402) and
+// permission/quota (403) failures are included so an exhausted key can be
+// bypassed in favor of another credential.
+func isRetryableStatusCode(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests,
+		http.StatusPaymentRequired,
+		http.StatusForbidden:
+		return true
+	}
+	return false
 }
 
 func waitForCooldown(ctx context.Context, wait time.Duration) error {
@@ -3238,7 +3304,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) && !isStaticFileNotFoundResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -3677,6 +3743,25 @@ func isModelSupportResultError(err *Error) bool {
 	return isModelSupportErrorMessage(err.Message)
 }
 
+func isContextWindowExceededError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	tokens := [...]string{
+		"context_too_large",
+		"context_length_exceeded",
+		"context window",
+		"context length",
+		"too many tokens",
+	}
+	for _, t := range tokens {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
+}
 func isCloudflareChallengeErrorMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	return strings.Contains(lower, "challenge-platform") ||
@@ -3684,21 +3769,18 @@ func isCloudflareChallengeErrorMessage(message string) bool {
 		strings.Contains(lower, "cloudflare challenge") ||
 		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html"))
 }
-
 func isCloudflareChallengeError(err error) bool {
 	if err == nil {
 		return false
 	}
 	return isCloudflareChallengeErrorMessage(err.Error())
 }
-
 func isCloudflareChallengeResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
 	return isCloudflareChallengeErrorMessage(err.Message)
 }
-
 func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {
 	var next time.Time
 	if !disableCooling {
@@ -3723,6 +3805,21 @@ func isRequestScopedNotFoundMessage(message string) bool {
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
 }
 
+func isStaticFileNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, `"code":"not-found"`) && strings.Contains(msg, "failed to read static file")
+}
+
+func isStaticFileNotFoundResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return isStaticFileNotFoundError(err)
+}
+
 func isRequestScopedNotFoundResultError(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != http.StatusNotFound {
 		return false
@@ -3733,9 +3830,17 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// all 422 responses, and context-window errors (any HTTP status) as request-shape
+// failures where switching auths or pooled upstream models will not help.
+// Model-support errors are excluded so routing can fall through to another auth
+// or upstream.
+// isRequestInvalidError returns true if the error represents a client request
+// error that should not be retried. Specifically, it treats 400 responses with
+// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
+// all 422 responses, and context-window errors (any HTTP status) as request-shape
+// failures where switching auths or pooled upstream models will not help.
+// Model-support errors are excluded so routing can fall through to another auth
+// or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -3745,6 +3850,12 @@ func isRequestInvalidError(err error) bool {
 	}
 	if isModelSupportError(err) {
 		return false
+	}
+	if isContextWindowExceededError(err) {
+		return true
+	}
+	if isStaticFileNotFoundError(err) {
+		return true
 	}
 	status := statusCodeFromError(err)
 	switch status {
@@ -3770,8 +3881,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) {
-		return
+	if isRequestScopedNotFoundResultError(resultErr) || isStaticFileNotFoundResultError(resultErr) {
 	}
 	auth.Unavailable = true
 	auth.Status = StatusError
