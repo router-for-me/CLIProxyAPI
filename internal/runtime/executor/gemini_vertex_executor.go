@@ -420,6 +420,10 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, errRead
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if bodyErr := helps.DetectUpstreamErrorBody(httpResp.StatusCode, data); bodyErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, bodyErr)
+		return resp, bodyErr
+	}
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 
 	// For Imagen models, convert response to Gemini format before translation

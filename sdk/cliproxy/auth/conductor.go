@@ -2791,17 +2791,42 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 		}
 		return wait, true
 	}
-	if status != http.StatusTooManyRequests {
+	// Quota, billing and rate-limit failures (429/402/403) are retryable across
+	// alternative credentials. 429 may carry a Retry-After hint; 402/403 typically
+	// do not, so fall back to an immediate retry to let auth selection rotate to
+	// another key. Transient upstream errors (5xx/408) are handled via the cooldown
+	// path above, since applyAuthFailureState already schedules a short cooldown.
+	if !isRetryableStatusCode(status) {
 		return 0, false
 	}
 	if !m.retryAllowed(attempt, providers) {
 		return 0, false
 	}
 	retryAfter := retryAfterFromError(err)
-	if retryAfter == nil || *retryAfter <= 0 || *retryAfter > maxWait {
-		return 0, false
+	if retryAfter != nil && *retryAfter > 0 {
+		if *retryAfter > maxWait {
+			return 0, false
+		}
+		return *retryAfter, true
 	}
-	return *retryAfter, true
+	// No Retry-After hint: retry immediately so the next attempt can select a
+	// different credential that may still have quota available.
+	return 0, true
+}
+
+// isRetryableStatusCode reports whether an upstream HTTP status code should
+// trigger an immediate retry across alternative credentials (subject to the
+// configured retry budget). Rate-limit (429), quota/billing (402) and
+// permission/quota (403) failures are included so an exhausted key can be
+// bypassed in favor of another credential.
+func isRetryableStatusCode(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests,
+		http.StatusPaymentRequired,
+		http.StatusForbidden:
+		return true
+	}
+	return false
 }
 
 func waitForCooldown(ctx context.Context, wait time.Duration) error {

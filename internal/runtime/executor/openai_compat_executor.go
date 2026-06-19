@@ -185,6 +185,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if bodyErr := helps.DetectUpstreamErrorBody(httpResp.StatusCode, body); bodyErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, bodyErr)
+		return resp, bodyErr
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -426,6 +430,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				}
 				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
 					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+					if bodyErr := helps.DetectUpstreamErrorBody(http.StatusOK, trimmedLine); bodyErr != nil {
+						streamErr = statusErr{code: bodyErr.StatusCode(), msg: bodyErr.Error()}
+					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
