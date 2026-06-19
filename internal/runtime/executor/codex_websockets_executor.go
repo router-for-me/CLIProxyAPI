@@ -1822,6 +1822,10 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				return
 			}
 			if !sess.deliverActiveRead(codexWebsocketRead{conn: conn, err: errRead}) {
+				if isCodexWebsocketMessageTooBigError(errRead) {
+					e.clearUpstreamConn(sess, conn, "message_too_big_without_active_request", errRead, false)
+					return
+				}
 				e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			}
 			return
