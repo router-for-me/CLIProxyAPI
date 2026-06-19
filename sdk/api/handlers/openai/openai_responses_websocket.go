@@ -277,6 +277,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastResponsePendingToolCallIDs []string
 	pinnedAuthID := ""
 	passthroughModelName := ""
+	restoredTranscriptState := false
+	if state, ok := restoreResponsesWebsocketTranscriptState(downstreamSessionKey); ok {
+		lastRequest = state.lastRequest
+		lastResponseOutput = state.lastResponseOutput
+		lastResponseID = state.lastResponseID
+		lastResponsePendingToolCallIDs = state.lastResponsePendingToolCallIDs
+		passthroughModelName = state.passthroughModelName
+		restoredTranscriptState = true
+	}
 	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
 		if h == nil || h.AuthManager == nil {
 			return nil, false
@@ -319,7 +328,22 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if requestModelName == "" {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
-		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
+		upstreamWebsocketPassthroughProvider := h.responsesWebsocketPassthroughProviderForModel(requestModelName)
+		useUpstreamWebsocketPassthrough := upstreamWebsocketPassthroughProvider != ""
+		forceCodexPassthroughTranscriptReplay := false
+		if useUpstreamWebsocketPassthrough &&
+			upstreamWebsocketPassthroughProvider == "codex" &&
+			len(lastRequest) != 0 &&
+			responsesWebsocketRequestRequiresUpstreamContext(payload) {
+			if restoredTranscriptState {
+				forceCodexPassthroughTranscriptReplay = true
+			} else if active, ok := h.responsesWebsocketUpstreamSessionActive("codex", passthroughSessionID); ok && !active {
+				forceCodexPassthroughTranscriptReplay = true
+			}
+		}
+		if forceCodexPassthroughTranscriptReplay {
+			useUpstreamWebsocketPassthrough = false
+		}
 		allowIncrementalInputWithPreviousResponseID := false
 		allowCompactionReplayBypass := false
 		if !useUpstreamWebsocketPassthrough {
@@ -335,13 +359,34 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if forceTranscriptReplayNextRequest {
 				allowIncrementalInputWithPreviousResponseID = false
 			}
+			if forceCodexPassthroughTranscriptReplay {
+				allowIncrementalInputWithPreviousResponseID = false
+			}
 		}
 
 		var requestJSON []byte
 		var updatedLastRequest []byte
+		var passthroughUpdatedLastRequest []byte
+		passthroughCanUpdateTranscript := false
 		var errMsg *interfaces.ErrorMessage
 		if useUpstreamWebsocketPassthrough {
 			requestJSON, errMsg = normalizeResponsesWebsocketPassthroughRequest(payload, requestModelName)
+			if errMsg == nil {
+				_, passthroughUpdatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState(
+					requestJSON,
+					lastRequest,
+					lastResponseOutput,
+					lastResponseID,
+					lastResponsePendingToolCallIDs,
+					false,
+					true,
+				)
+				if errMsg == nil {
+					passthroughCanUpdateTranscript = len(passthroughUpdatedLastRequest) != 0
+				} else {
+					errMsg = nil
+				}
+			}
 		} else {
 			requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState(
 				payload,
@@ -386,6 +431,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseOutput = []byte("[]")
 			lastResponseID = ""
 			lastResponsePendingToolCallIDs = nil
+			recordResponsesWebsocketTranscriptState(downstreamSessionKey, responsesWebsocketTranscriptState{
+				lastRequest:                    lastRequest,
+				lastResponseOutput:             lastResponseOutput,
+				lastResponseID:                 lastResponseID,
+				lastResponsePendingToolCallIDs: lastResponsePendingToolCallIDs,
+				passthroughModelName:           passthroughModelName,
+			})
+			restoredTranscriptState = false
 			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, conn, requestJSON, wsTimelineLog, passthroughSessionID); errWrite != nil {
 				wsTerminateErr = errWrite
 				return
@@ -461,7 +514,20 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseOutput = completedOutput
 			lastResponseID = strings.TrimSpace(completedResponseID)
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
+		} else if passthroughCanUpdateTranscript {
+			lastRequest = passthroughUpdatedLastRequest
+			lastResponseOutput = completedOutput
+			lastResponseID = strings.TrimSpace(completedResponseID)
+			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
 		}
+		recordResponsesWebsocketTranscriptState(downstreamSessionKey, responsesWebsocketTranscriptState{
+			lastRequest:                    lastRequest,
+			lastResponseOutput:             lastResponseOutput,
+			lastResponseID:                 lastResponseID,
+			lastResponsePendingToolCallIDs: lastResponsePendingToolCallIDs,
+			passthroughModelName:           passthroughModelName,
+		})
+		restoredTranscriptState = false
 	}
 }
 
@@ -965,40 +1031,44 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 }
 
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesCodexWebsocketPassthrough(modelName string) bool {
-	return h.responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName)
+	return h.responsesWebsocketPassthroughProviderForModel(modelName) == "codex"
 }
 
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName string) bool {
+	return h.responsesWebsocketPassthroughProviderForModel(modelName) != ""
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketPassthroughProviderForModel(modelName string) string {
 	modelName = strings.TrimSpace(modelName)
 	if h == nil || h.AuthManager == nil || modelName == "" {
-		return false
+		return ""
 	}
 	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
 	if len(auths) == 0 {
-		return false
+		return ""
 	}
 	provider := ""
 	for _, auth := range auths {
 		if auth == nil {
-			return false
+			return ""
 		}
 		authProvider := strings.ToLower(strings.TrimSpace(auth.Provider))
 		if authProvider != "codex" && authProvider != "xai" {
-			return false
+			return ""
 		}
 		if provider == "" {
 			provider = authProvider
 			if _, ok := h.AuthManager.Executor(provider); !ok {
-				return false
+				return ""
 			}
 		} else if authProvider != provider {
-			return false
+			return ""
 		}
 		if !websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
-			return false
+			return ""
 		}
 	}
-	return provider != ""
+	return provider
 }
 
 func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {

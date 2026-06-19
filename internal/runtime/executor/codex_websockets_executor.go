@@ -1872,6 +1872,25 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 	return sess.upstreamDisconnectCh
 }
 
+func (e *CodexWebsocketsExecutor) UpstreamSessionActive(sessionID string) bool {
+	sess := e.getSession(sessionID)
+	return sess != nil && sess.hasUpstreamConn()
+}
+
+func (e *CodexWebsocketsExecutor) getSession(sessionID string) *codexWebsocketSession {
+	sessionID = strings.TrimSpace(sessionID)
+	if e == nil || sessionID == "" {
+		return nil
+	}
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.sessions[sessionID]
+}
+
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	if sess == nil {
 		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
