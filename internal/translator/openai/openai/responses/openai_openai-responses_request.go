@@ -72,6 +72,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
+		pendingReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
 
@@ -81,6 +82,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if pendingReasoningContent != "" {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoningContent)
+				pendingReasoningContent = ""
+			}
 			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
@@ -125,6 +130,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 
 			switch itemType {
+			case "reasoning":
+				// Extract reasoning content to attach to the next assistant message with tool_calls.
+				// Per DeepSeek docs: reasoning_content must be passed back when tool calls occur.
+				if summaryText := item.Get("summary.0.text"); summaryText.Exists() {
+					pendingReasoningContent = summaryText.String()
+				}
+
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
