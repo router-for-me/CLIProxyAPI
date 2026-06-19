@@ -2,7 +2,11 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestManager_Update_PreservesModelStates(t *testing.T) {
@@ -200,5 +204,73 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 	}
 	if state.Quota.BackoffLevel != backoffLevel {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
+	}
+}
+
+func TestManager_ClearQuotaStateClearsQuotaModelAndPreservesOtherFailures(t *testing.T) {
+	ctx := context.Background()
+	const (
+		authID        = "auth-clear-quota-state"
+		quotaModel    = "codex-quota-reset-model"
+		blockedModel  = "codex-unauthorized-model"
+		quotaProvider = "codex"
+	)
+	registry.GetGlobalRegistry().RegisterClient(authID, quotaProvider, []*registry.ModelInfo{
+		{ID: quotaModel},
+		{ID: blockedModel},
+	})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	m := NewManager(nil, &RoundRobinSelector{}, nil)
+	if _, errRegister := m.Register(ctx, &Auth{ID: authID, Provider: quotaProvider, Status: StatusActive}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: quotaProvider,
+		Model:    quotaModel,
+		Success:  false,
+		Error:    &Error{Code: "rate_limit", Message: "quota exceeded", HTTPStatus: http.StatusTooManyRequests},
+	})
+	m.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: quotaProvider,
+		Model:    blockedModel,
+		Success:  false,
+		Error:    &Error{Code: "unauthorized", Message: "unauthorized", HTTPStatus: http.StatusUnauthorized},
+	})
+
+	if _, errPick := m.scheduler.pickSingle(ctx, quotaProvider, quotaModel, cliproxyexecutor.Options{}, nil); errPick == nil {
+		t.Fatal("expected quota model to be unavailable before clearing quota state")
+	}
+
+	if !m.ClearQuotaState(ctx, authID) {
+		t.Fatal("expected ClearQuotaState to report a change")
+	}
+
+	picked, errPick := m.scheduler.pickSingle(ctx, quotaProvider, quotaModel, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("expected quota model to be routable after clearing quota state: %v", errPick)
+	}
+	if picked == nil || picked.ID != authID {
+		t.Fatalf("picked auth = %+v, want %q", picked, authID)
+	}
+
+	updated, ok := m.GetByID(authID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth after clearing quota state")
+	}
+	if state := updated.ModelStates[quotaModel]; state == nil || !modelStateIsClean(state) {
+		t.Fatalf("expected quota model state to be clean, got %+v", state)
+	}
+	blockedState := updated.ModelStates[blockedModel]
+	if blockedState == nil || blockedState.LastError == nil || blockedState.LastError.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized model state to remain, got %+v", blockedState)
+	}
+	if clearedAgain := registry.GetGlobalRegistry().ClearClientQuotaState(authID); clearedAgain != 0 {
+		t.Fatalf("expected registry quota markers to be cleared, clearedAgain=%d", clearedAgain)
 	}
 }

@@ -195,11 +195,37 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	if isCodexQuotaResetConsumeAPICall(method, parsedURL, resp.StatusCode, auth) && h != nil && h.authManager != nil {
+		if h.authManager.ClearQuotaState(c.Request.Context(), auth.ID) {
+			log.WithField("auth_id", auth.ID).Debug("cleared Codex quota routing state after reset credit consume")
+		}
+	}
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func isCodexQuotaResetConsumeAPICall(method string, parsedURL *url.URL, statusCode int, auth *coreauth.Auth) bool {
+	if auth == nil || parsedURL == nil {
+		return false
+	}
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return false
+	}
+	if strings.ToUpper(strings.TrimSpace(method)) != http.MethodPost {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsedURL.Hostname()))
+	if host != "chatgpt.com" {
+		return false
+	}
+	return strings.TrimSpace(parsedURL.EscapedPath()) == "/backend-api/wham/rate-limit-reset-credits/consume"
 }
 
 func firstNonEmptyString(values ...*string) string {

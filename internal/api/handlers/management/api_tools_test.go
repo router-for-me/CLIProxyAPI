@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -208,5 +209,78 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestIsCodexQuotaResetConsumeAPICall(t *testing.T) {
+	t.Parallel()
+
+	resetURL, errParse := url.Parse("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")
+	if errParse != nil {
+		t.Fatalf("parse reset URL: %v", errParse)
+	}
+	auth := &coreauth.Auth{Provider: "codex"}
+
+	if !isCodexQuotaResetConsumeAPICall(http.MethodPost, resetURL, http.StatusOK, auth) {
+		t.Fatal("expected Codex quota reset consume call to match")
+	}
+
+	cases := []struct {
+		name       string
+		method     string
+		target     string
+		statusCode int
+		auth       *coreauth.Auth
+	}{
+		{
+			name:       "non post",
+			method:     http.MethodGet,
+			target:     resetURL.String(),
+			statusCode: http.StatusOK,
+			auth:       auth,
+		},
+		{
+			name:       "failed upstream",
+			method:     http.MethodPost,
+			target:     resetURL.String(),
+			statusCode: http.StatusTooManyRequests,
+			auth:       auth,
+		},
+		{
+			name:       "non codex auth",
+			method:     http.MethodPost,
+			target:     resetURL.String(),
+			statusCode: http.StatusOK,
+			auth:       &coreauth.Auth{Provider: "gemini"},
+		},
+		{
+			name:       "wrong host",
+			method:     http.MethodPost,
+			target:     "https://example.com/backend-api/wham/rate-limit-reset-credits/consume",
+			statusCode: http.StatusOK,
+			auth:       auth,
+		},
+		{
+			name:       "wrong path",
+			method:     http.MethodPost,
+			target:     "https://chatgpt.com/backend-api/wham/usage",
+			statusCode: http.StatusOK,
+			auth:       auth,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			parsed, errParse := url.Parse(tc.target)
+			if errParse != nil {
+				t.Fatalf("parse target: %v", errParse)
+			}
+			if isCodexQuotaResetConsumeAPICall(tc.method, parsed, tc.statusCode, tc.auth) {
+				t.Fatal("expected call not to match")
+			}
+		})
 	}
 }

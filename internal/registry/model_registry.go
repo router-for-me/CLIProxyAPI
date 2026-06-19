@@ -672,6 +672,48 @@ func (r *ModelRegistry) ClearModelQuotaExceeded(clientID, modelID string) {
 	}
 }
 
+// ClearClientQuotaState removes quota tracking and quota-caused suspension for a client.
+func (r *ModelRegistry) ClearClientQuotaState(clientID string) int {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return 0
+	}
+
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	cleared := 0
+	now := time.Now()
+	for _, registration := range r.models {
+		if registration == nil {
+			continue
+		}
+		changedRegistration := false
+		if registration.QuotaExceededClients != nil {
+			if _, ok := registration.QuotaExceededClients[clientID]; ok {
+				delete(registration.QuotaExceededClients, clientID)
+				cleared++
+				changedRegistration = true
+			}
+		}
+		if registration.SuspendedClients != nil {
+			if reason, ok := registration.SuspendedClients[clientID]; ok && strings.EqualFold(strings.TrimSpace(reason), "quota") {
+				delete(registration.SuspendedClients, clientID)
+				cleared++
+				changedRegistration = true
+			}
+		}
+		if changedRegistration {
+			registration.LastUpdated = now
+		}
+	}
+	if cleared > 0 {
+		r.invalidateAvailableModelsCacheLocked()
+	}
+	return cleared
+}
+
 // SuspendClientModel marks a client's model as temporarily unavailable until explicitly resumed.
 // Parameters:
 //   - clientID: The client to suspend

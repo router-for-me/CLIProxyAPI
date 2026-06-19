@@ -457,6 +457,61 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 }
 
+// ClearQuotaState clears quota-related auth and registry state for one auth.
+func (m *Manager) ClearQuotaState(ctx context.Context, authID string) bool {
+	if m == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	registryCleared := registry.GetGlobalRegistry().ClearClientQuotaState(authID)
+
+	var snapshot *Auth
+	cooldownStateChanged := false
+	managerChanged := false
+	now := time.Now()
+
+	m.mu.Lock()
+	if auth, ok := m.auths[authID]; ok && auth != nil {
+		var cooldownRecordsBefore []CooldownStateRecord
+		trackCooldownState := m.cooldownStore != nil
+		if trackCooldownState {
+			cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(auth, now)
+		}
+		managerChanged = clearQuotaStateForAuth(auth, now)
+		if managerChanged {
+			if errPersist := m.persist(ctx, auth); errPersist != nil {
+				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth quota reset state: %v", errPersist)
+			}
+			snapshot = auth.Clone()
+		}
+		if trackCooldownState {
+			cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
+			cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
+		}
+	}
+	m.mu.Unlock()
+
+	if m.scheduler != nil {
+		switch {
+		case snapshot != nil:
+			m.scheduler.upsertAuth(snapshot)
+		case registryCleared > 0:
+			m.RefreshSchedulerEntry(authID)
+		}
+	}
+	if cooldownStateChanged {
+		m.persistCooldownStates(ctx)
+	}
+	return managerChanged || registryCleared > 0
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -684,6 +739,127 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		updateAggregatedAvailability(auth, now)
 	}
 	return changed
+}
+
+func clearQuotaStateForAuth(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	changed := false
+	authQuotaState := quotaStateIsResettable(auth.Quota) || errorIsResettableQuota(auth.LastError) || quotaMessageIsResettable(auth.StatusMessage)
+	if authQuotaState {
+		if auth.Unavailable || !auth.NextRetryAfter.IsZero() || !quotaStateIsEmpty(auth.Quota) {
+			auth.Unavailable = false
+			auth.NextRetryAfter = time.Time{}
+			auth.Quota = QuotaState{}
+			changed = true
+		}
+		if errorIsResettableQuota(auth.LastError) {
+			auth.LastError = nil
+			changed = true
+		}
+		if quotaMessageIsResettable(auth.StatusMessage) {
+			auth.StatusMessage = ""
+			changed = true
+		}
+	}
+	for _, state := range auth.ModelStates {
+		if !modelStateHasResettableQuota(state) {
+			continue
+		}
+		if !modelStateIsClean(state) {
+			resetModelState(state, now)
+			changed = true
+		}
+	}
+	if !changed {
+		return false
+	}
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+	} else {
+		clearAggregatedAvailability(auth)
+	}
+	if !hasModelError(auth, now) {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		if !auth.Disabled && auth.Status != StatusDisabled {
+			auth.Status = StatusActive
+		}
+	} else {
+		if errorIsResettableQuota(auth.LastError) {
+			auth.LastError = nil
+		}
+		if quotaMessageIsResettable(auth.StatusMessage) {
+			auth.StatusMessage = ""
+		}
+	}
+	auth.UpdatedAt = now
+	return true
+}
+
+func quotaStateIsResettable(quota QuotaState) bool {
+	reason := strings.ToLower(strings.TrimSpace(quota.Reason))
+	if quotaReasonIsNonResettable(reason) {
+		return false
+	}
+	if quota.Exceeded {
+		return reason == "" || quotaMessageIsResettable(reason)
+	}
+	return quotaMessageIsResettable(reason)
+}
+
+func quotaStateIsEmpty(quota QuotaState) bool {
+	return !quota.Exceeded && quota.Reason == "" && quota.NextRecoverAt.IsZero() && quota.BackoffLevel == 0
+}
+
+func modelStateHasResettableQuota(state *ModelState) bool {
+	if state == nil {
+		return false
+	}
+	if quotaStateIsResettable(state.Quota) {
+		return true
+	}
+	if errorIsResettableQuota(state.LastError) {
+		return true
+	}
+	return quotaMessageIsResettable(state.StatusMessage)
+}
+
+func errorIsResettableQuota(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if quotaMessageIsResettable(err.Code) || quotaMessageIsResettable(err.Message) {
+		return true
+	}
+	if err.StatusCode() != http.StatusTooManyRequests {
+		return false
+	}
+	combined := strings.TrimSpace(err.Code + " " + err.Message)
+	return quotaMessageIsResettable(combined)
+}
+
+func quotaMessageIsResettable(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" || quotaReasonIsNonResettable(lower) {
+		return false
+	}
+	return strings.Contains(lower, "quota") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "rate limited") ||
+		strings.Contains(lower, "rate_limit") ||
+		strings.Contains(lower, "rate-limit") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "too_many_requests")
+}
+
+func quotaReasonIsNonResettable(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if reason == "" {
+		return false
+	}
+	return strings.Contains(reason, "cloudflare") || strings.Contains(reason, "challenge")
 }
 
 func (m *Manager) persistCooldownStates(ctx context.Context) {

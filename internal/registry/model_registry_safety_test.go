@@ -110,6 +110,44 @@ func TestCleanupExpiredQuotasInvalidatesAvailableModelsCache(t *testing.T) {
 	}
 }
 
+func TestClearClientQuotaStateClearsOnlyQuotaMarkers(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "codex", []*ModelInfo{
+		{ID: "quota-model"},
+		{ID: "blocked-model"},
+	})
+	r.SetModelQuotaExceeded("client-1", "quota-model")
+	r.SuspendClientModel("client-1", "quota-model", "quota")
+	r.SuspendClientModel("client-1", "blocked-model", "unauthorized")
+
+	cleared := r.ClearClientQuotaState("client-1")
+	if cleared != 2 {
+		t.Fatalf("ClearClientQuotaState cleared %d markers, want 2", cleared)
+	}
+
+	quotaRegistration := r.models["quota-model"]
+	if quotaRegistration == nil {
+		t.Fatal("expected quota-model registration")
+	}
+	if _, ok := quotaRegistration.QuotaExceededClients["client-1"]; ok {
+		t.Fatal("expected quota exceeded marker to be cleared")
+	}
+	if _, ok := quotaRegistration.SuspendedClients["client-1"]; ok {
+		t.Fatal("expected quota suspension to be cleared")
+	}
+
+	blockedRegistration := r.models["blocked-model"]
+	if blockedRegistration == nil {
+		t.Fatal("expected blocked-model registration")
+	}
+	if got := blockedRegistration.SuspendedClients["client-1"]; got != "unauthorized" {
+		t.Fatalf("expected unauthorized suspension to remain, got %q", got)
+	}
+	if clearedAgain := r.ClearClientQuotaState("client-1"); clearedAgain != 0 {
+		t.Fatalf("second ClearClientQuotaState cleared %d markers, want 0", clearedAgain)
+	}
+}
+
 func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "openai", []*ModelInfo{{
