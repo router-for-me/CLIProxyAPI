@@ -60,6 +60,7 @@ var globalCodexWebsocketSessionStore = &codexWebsocketSessionStore{
 }
 
 var errCodexWebsocketStaleTerminalClose = errors.New("codex websockets executor: upstream closed after previous terminal event")
+var errCodexWebsocketAppendWithoutUpstreamContext = errors.New("codex websockets executor: append request requires existing websocket session")
 
 type codexWebsocketSession struct {
 	sessionID string
@@ -135,6 +136,16 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 		s.activeDone = nil
 	}
 	s.activeMu.Unlock()
+}
+
+func (s *codexWebsocketSession) hasUpstreamConn() bool {
+	if s == nil {
+		return false
+	}
+	s.connMu.Lock()
+	conn := s.conn
+	s.connMu.Unlock()
+	return conn != nil
 }
 
 func (s *codexWebsocketSession) stopActiveDelivery(ch chan codexWebsocketRead) {
@@ -320,6 +331,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		sess.reqMu.Lock()
 		defer sess.reqMu.Unlock()
 	}
+	if sess != nil && codexWebsocketRequestRequiresExistingUpstream(upstreamBody) && !sess.hasUpstreamConn() {
+		errAppend := e.failCodexWebsocketAppendWithoutUpstreamContext(ctx, sess, nil, "append_without_upstream_context", nil)
+		return resp, errAppend
+	}
 
 	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
@@ -350,6 +365,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		return resp, errDial
 	}
+	if sess != nil && respHS != nil && codexWebsocketRequestRequiresExistingUpstream(upstreamBody) {
+		errAppend := e.failCodexWebsocketAppendWithoutUpstreamContext(ctx, sess, conn, "append_without_upstream_context", nil)
+		return resp, errAppend
+	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
 	reporter.StartResponseTTFT()
 	if sess == nil {
@@ -377,6 +396,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		if sess != nil {
+			if codexWebsocketRequestRequiresExistingUpstream(upstreamBody) {
+				errAppend := e.failCodexWebsocketAppendWithoutUpstreamContext(ctx, sess, conn, "send_append_without_retry", errSend)
+				return resp, errAppend
+			}
 			sess.suppressReadErrorForConn(conn)
 			sess.stopActiveDelivery(readCh)
 			e.clearUpstreamConn(sess, conn, "send_error", errSend, false)
@@ -605,6 +628,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			sess.reqMu.Lock()
 		}
 	}
+	if sess != nil && codexWebsocketRequestRequiresExistingUpstream(upstreamBody) && !sess.hasUpstreamConn() {
+		errAppend := e.failCodexWebsocketAppendWithoutUpstreamContext(ctx, sess, nil, "append_without_upstream_context", nil)
+		sess.reqMu.Unlock()
+		return nil, errAppend
+	}
 
 	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := helps.UpstreamRequestLog{
@@ -642,6 +670,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 		return nil, errDial
 	}
+	if sess != nil && respHS != nil && codexWebsocketRequestRequiresExistingUpstream(upstreamBody) {
+		errAppend := e.failCodexWebsocketAppendWithoutUpstreamContext(ctx, sess, conn, "append_without_upstream_context", nil)
+		sess.reqMu.Unlock()
+		return nil, errAppend
+	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
 	reporter.StartResponseTTFT()
 
@@ -658,6 +691,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil {
+			if codexWebsocketRequestRequiresExistingUpstream(upstreamBody) {
+				errAppend := e.failCodexWebsocketAppendWithoutUpstreamContext(ctx, sess, conn, "send_append_without_retry", errSend)
+				sess.clearActive(readCh)
+				sess.reqMu.Unlock()
+				return nil, errAppend
+			}
 			sess.suppressReadErrorForConn(conn)
 			sess.stopActiveDelivery(readCh)
 			e.clearUpstreamConn(sess, conn, "send_error", errSend, false)
@@ -1053,15 +1092,23 @@ func isCodexWebsocketStaleTerminalCloseError(err error) bool {
 	return errors.Is(err, errCodexWebsocketStaleTerminalClose)
 }
 
+func isCodexWebsocketAppendWithoutUpstreamContextError(err error) bool {
+	return errors.Is(err, errCodexWebsocketAppendWithoutUpstreamContext)
+}
+
+func codexWebsocketRequestRequiresExistingUpstream(body []byte) bool {
+	return strings.TrimSpace(gjson.GetBytes(body, "type").String()) == "response.append"
+}
+
 func canFallbackCodexWebsocketRequestToHTTP(body []byte) bool {
-	if strings.TrimSpace(gjson.GetBytes(body, "type").String()) == "response.append" {
+	if codexWebsocketRequestRequiresExistingUpstream(body) {
 		return false
 	}
 	return strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) == ""
 }
 
 func canRetryCodexWebsocketRequestAfterStaleTerminalClose(body []byte) bool {
-	return strings.TrimSpace(gjson.GetBytes(body, "type").String()) != "response.append"
+	return !codexWebsocketRequestRequiresExistingUpstream(body)
 }
 
 func codexHTTPFallbackRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
@@ -1854,6 +1901,22 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {
 	e.clearUpstreamConn(sess, conn, reason, err, true)
+}
+
+func (e *CodexWebsocketsExecutor) failCodexWebsocketAppendWithoutUpstreamContext(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, reason string, cause error) error {
+	err := errCodexWebsocketAppendWithoutUpstreamContext
+	if cause != nil {
+		err = fmt.Errorf("%w: %w", errCodexWebsocketAppendWithoutUpstreamContext, cause)
+	}
+	helps.RecordAPIWebsocketError(ctx, e.cfg, reason, err)
+	if conn != nil {
+		e.invalidateUpstreamConn(sess, conn, reason, err)
+		return err
+	}
+	if sess != nil {
+		sess.notifyUpstreamDisconnect(err)
+	}
+	return err
 }
 
 func (e *CodexWebsocketsExecutor) clearUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notify bool) {
