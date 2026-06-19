@@ -1097,7 +1097,10 @@ func isCodexWebsocketAppendWithoutUpstreamContextError(err error) bool {
 }
 
 func codexWebsocketRequestRequiresExistingUpstream(body []byte) bool {
-	return strings.TrimSpace(gjson.GetBytes(body, "type").String()) == "response.append"
+	if strings.TrimSpace(gjson.GetBytes(body, "type").String()) != "response.append" {
+		return false
+	}
+	return strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) == ""
 }
 
 func canFallbackCodexWebsocketRequestToHTTP(body []byte) bool {
