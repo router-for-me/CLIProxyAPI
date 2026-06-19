@@ -805,6 +805,7 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 
 func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel = xaiCompactionModel(baseModel, opts)
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	originalPayloadSource := req.Payload
@@ -832,6 +833,8 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
 	body = normalizeXAIToolChoiceForTools(body)
+	body = normalizeXAIInputCustomToolCalls(body)
+	body = dropXAIInputWebSearchCalls(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
@@ -923,6 +926,43 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		return strings.TrimSpace(promptCacheKey.String())
 	}
 	return ""
+}
+
+func xaiCompactionModel(model string, opts cliproxyexecutor.Options) string {
+	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	if name != "grok-build-0.1" || !xaiIsCompactionRequest(opts) {
+		return model
+	}
+	return "grok-4.3"
+}
+
+func xaiIsCompactionRequest(opts cliproxyexecutor.Options) bool {
+	if opts.Alt == "responses/compact" {
+		return true
+	}
+	if opts.Headers != nil {
+		if xaiTurnMetadataIsCompaction(opts.Headers.Get("X-Codex-Turn-Metadata")) {
+			return true
+		}
+	}
+	if raw, ok := opts.Metadata["X-Codex-Turn-Metadata"]; ok {
+		return xaiTurnMetadataIsCompaction(fmt.Sprint(raw))
+	}
+	if raw, ok := opts.Metadata["x-codex-turn-metadata"]; ok {
+		return xaiTurnMetadataIsCompaction(fmt.Sprint(raw))
+	}
+	return false
+}
+
+func xaiTurnMetadataIsCompaction(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !gjson.Valid(raw) {
+		return false
+	}
+	return strings.TrimSpace(gjson.Get(raw, "request_kind").String()) == "compaction"
 }
 
 func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
@@ -1102,6 +1142,105 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 	return raw, changed, true
 }
 
+func normalizeXAIInputCustomToolCalls(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		raw := []byte(item.Raw)
+		switch item.Get("type").String() {
+		case "custom_tool_call":
+			updated, errSet := sjson.SetBytes(raw, "type", "function_call")
+			if errSet != nil {
+				return body
+			}
+			if inputArg := item.Get("input"); inputArg.Exists() {
+				updatedWithArgs, errArgs := sjson.SetBytes(updated, "arguments", xaiCustomToolCallArguments(inputArg))
+				if errArgs != nil {
+					return body
+				}
+				updated = updatedWithArgs
+				updatedWithoutInput, errDel := sjson.DeleteBytes(updated, "input")
+				if errDel != nil {
+					return body
+				}
+				updated = updatedWithoutInput
+			} else if !item.Get("arguments").Exists() {
+				updatedWithArgs, errArgs := sjson.SetBytes(updated, "arguments", "{}")
+				if errArgs != nil {
+					return body
+				}
+				updated = updatedWithArgs
+			}
+			raw = updated
+			changed = true
+		case "custom_tool_call_output":
+			updated, errSet := sjson.SetBytes(raw, "type", "function_call_output")
+			if errSet != nil {
+				return body
+			}
+			raw = updated
+			changed = true
+		}
+		items = append(items, json.RawMessage(raw))
+	}
+	if !changed {
+		return body
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiCustomToolCallArguments(input gjson.Result) string {
+	payload, errSet := sjson.SetRawBytes([]byte(`{}`), "input", []byte(input.Raw))
+	if errSet != nil {
+		return "{}"
+	}
+	return string(payload)
+}
+
+func dropXAIInputWebSearchCalls(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		if item.Get("type").String() == "web_search_call" {
+			changed = true
+			continue
+		}
+		items = append(items, json.RawMessage(item.Raw))
+	}
+	if !changed {
+		return body
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
 func normalizeXAIInputReasoningItems(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
@@ -1122,7 +1261,7 @@ func normalizeXAIInputReasoningItems(body []byte) []byte {
 			updated = updatedBody
 		}
 		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", i)
-		if encryptedContent := gjson.GetBytes(updated, encryptedContentPath); encryptedContent.Exists() && encryptedContent.Type == gjson.Null {
+		if encryptedContent := gjson.GetBytes(updated, encryptedContentPath); encryptedContent.Exists() {
 			updatedBody, errDel := sjson.DeleteBytes(updated, encryptedContentPath)
 			if errDel != nil {
 				return body
