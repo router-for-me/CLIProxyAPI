@@ -128,10 +128,21 @@ func responsesWebsocketRequestRequiresUpstreamContext(payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend {
+	if strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" {
 		return true
 	}
-	return strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != ""
+	requestType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	if requestType == wsRequestTypeAppend {
+		return true
+	}
+	if requestType != wsRequestTypeCreate {
+		return false
+	}
+	input := gjson.GetBytes(payload, "input")
+	if shouldReplaceWebsocketTranscript(payload, input) || inputContainsFullTranscript(input) {
+		return false
+	}
+	return true
 }
 
 type responsesWebsocketUpstreamSessionActiveChecker interface {
