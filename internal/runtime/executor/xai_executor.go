@@ -1237,6 +1237,8 @@ func xaiSupportsReasoningEffort(model string) bool {
 	switch {
 	case strings.HasPrefix(name, "grok-3-mini"):
 		return true
+	case name == "grok-4":
+		return true
 	case strings.HasPrefix(name, "grok-4.20-multi-agent"):
 		return true
 	case strings.HasPrefix(name, "grok-4.3"):
