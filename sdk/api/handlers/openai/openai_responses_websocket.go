@@ -321,6 +321,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		wsTimelineLog.BeginRequest()
 		wsTimelineLog.Append("request", payload, time.Now())
 
+		stateLossReplayAttempted := false
+	retryCurrentPayloadAfterStateLoss:
 		requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 		if requestModelName == "" {
 			requestModelName = passthroughModelName
@@ -330,6 +332,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		upstreamWebsocketPassthroughProvider := h.responsesWebsocketPassthroughProviderForModel(requestModelName)
 		useUpstreamWebsocketPassthrough := upstreamWebsocketPassthroughProvider != ""
+		if stateLossReplayAttempted {
+			useUpstreamWebsocketPassthrough = false
+		}
 		forceCodexPassthroughTranscriptReplay := false
 		if useUpstreamWebsocketPassthrough &&
 			upstreamWebsocketPassthroughProvider == "codex" &&
@@ -360,6 +365,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				allowIncrementalInputWithPreviousResponseID = false
 			}
 			if forceCodexPassthroughTranscriptReplay {
+				allowIncrementalInputWithPreviousResponseID = false
+			}
+			if stateLossReplayAttempted {
 				allowIncrementalInputWithPreviousResponseID = false
 			}
 		}
@@ -491,11 +499,23 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, completedResponseID, completedPendingToolCallIDs, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID)
+		interceptErr := func(errMsg *interfaces.ErrorMessage) bool {
+			return shouldRetryResponsesWebsocketAfterPreviousResponseNotFound(errMsg, payload, previousLastRequest, stateLossReplayAttempted)
+		}
+		completedOutput, completedResponseID, completedPendingToolCallIDs, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID, interceptErr)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
+		}
+		if shouldRetryResponsesWebsocketAfterPreviousResponseNotFound(forwardErrMsg, payload, previousLastRequest, stateLossReplayAttempted) {
+			log.Infof("responses websocket: retrying id=%s with transcript replay after previous_response_not_found", passthroughSessionID)
+			stateLossReplayAttempted = true
+			lastRequest = previousLastRequest
+			lastResponseOutput = previousLastResponseOutput
+			lastResponseID = previousLastResponseID
+			lastResponsePendingToolCallIDs = previousLastResponsePendingToolCallIDs
+			goto retryCurrentPayloadAfterStateLoss
 		}
 		if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
 			pinnedAuthID = ""
@@ -1365,6 +1385,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog websocketTimelineAppender,
 	sessionID string,
+	interceptError func(*interfaces.ErrorMessage) bool,
 ) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
 	completed := false
 	completedOutput := []byte("[]")
@@ -1386,6 +1407,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
+				if interceptError != nil && interceptError(errMsg) {
+					cancel(errMsg.Error)
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+				}
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
@@ -1455,6 +1480,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				var payloadErrMsg *interfaces.ErrorMessage
 				if eventType == wsEventTypeError {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
+					if interceptError != nil && interceptError(payloadErrMsg) {
+						cancel(payloadErrMsg.Error)
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
+					}
 					if h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
 					}
@@ -1506,6 +1535,45 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	default:
 		return false
 	}
+}
+
+func shouldRetryResponsesWebsocketAfterPreviousResponseNotFound(errMsg *interfaces.ErrorMessage, rawPayload []byte, lastRequest []byte, attempted bool) bool {
+	if attempted || len(lastRequest) == 0 || !responsesWebsocketPreviousResponseNotFoundError(errMsg) {
+		return false
+	}
+	return responsesWebsocketRequestRequiresUpstreamContext(rawPayload)
+}
+
+func responsesWebsocketPreviousResponseNotFoundError(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil {
+		return false
+	}
+	status := errMsg.StatusCode
+	if status <= 0 && errMsg.Error != nil {
+		if se, ok := errMsg.Error.(interface{ StatusCode() int }); ok && se != nil {
+			status = se.StatusCode()
+		}
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	errText := ""
+	if errMsg.Error != nil {
+		errText = strings.TrimSpace(errMsg.Error.Error())
+	}
+	if errText == "" {
+		return false
+	}
+	code := strings.TrimSpace(gjson.GetBytes([]byte(errText), "error.code").String())
+	if code == "" {
+		code = strings.TrimSpace(gjson.GetBytes([]byte(errText), "body.error.code").String())
+	}
+	if strings.EqualFold(code, "previous_response_not_found") {
+		return true
+	}
+	lower := strings.ToLower(errText)
+	return strings.Contains(lower, "previous_response_not_found") ||
+		strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not found")
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
