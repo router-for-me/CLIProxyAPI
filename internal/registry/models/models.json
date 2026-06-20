@@ -1,0 +1,2168 @@
+{
+  "claude": [
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "object": "model",
+      "created": 1759276800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.5 Haiku",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4-5-20250929",
+      "object": "model",
+      "created": 1759104000,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.5 Sonnet",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "created": 1771372800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.6 Sonnet",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "claude-opus-4-6",
+      "object": "model",
+      "created": 1770318000,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.6 Opus",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "claude-opus-4-7",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 4.7",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "claude-opus-4-8",
+      "object": "model",
+      "created": 1779984000,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 4.8",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "claude-fable-5",
+      "object": "model",
+      "created": 1781049600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Fable 5",
+      "description": "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "claude-opus-4-5-20251101",
+      "object": "model",
+      "created": 1761955200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.5 Opus",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true
+      }
+    },
+    {
+      "id": "claude-opus-4-1-20250805",
+      "object": "model",
+      "created": 1722945600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.1 Opus",
+      "context_length": 200000,
+      "max_completion_tokens": 32000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "claude-opus-4-20250514",
+      "object": "model",
+      "created": 1715644800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4 Opus",
+      "context_length": 200000,
+      "max_completion_tokens": 32000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "claude-sonnet-4-20250514",
+      "object": "model",
+      "created": 1715644800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4 Sonnet",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "claude-3-7-sonnet-20250219",
+      "object": "model",
+      "created": 1708300800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 3.7 Sonnet",
+      "context_length": 128000,
+      "max_completion_tokens": 8192,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "claude-3-5-haiku-20241022",
+      "object": "model",
+      "created": 1729555200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 3.5 Haiku",
+      "context_length": 128000,
+      "max_completion_tokens": 8192
+    }
+  ],
+  "gemini": [
+    {
+      "id": "gemini-2.5-pro",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Pro",
+      "name": "models/gemini-2.5-pro",
+      "version": "2.5",
+      "description": "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash",
+      "name": "models/gemini-2.5-flash",
+      "version": "001",
+      "description": "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash Lite",
+      "name": "models/gemini-2.5-flash-lite",
+      "version": "2.5",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3-pro-preview",
+      "object": "model",
+      "created": 1737158400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Pro Preview",
+      "name": "models/gemini-3-pro-preview",
+      "version": "3.0",
+      "description": "Gemini 3 Pro Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "object": "model",
+      "created": 1771459200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Pro Preview",
+      "name": "models/gemini-3.1-pro-preview",
+      "version": "3.1",
+      "description": "Gemini 3.1 Pro Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-image-preview",
+      "object": "model",
+      "created": 1771459200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Image Preview",
+      "name": "models/gemini-3.1-flash-image-preview",
+      "version": "3.1",
+      "description": "Gemini 3.1 Flash Image Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "object": "model",
+      "created": 1765929600,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Flash Preview",
+      "name": "models/gemini-3-flash-preview",
+      "version": "3.0",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-lite-preview",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "name": "models/gemini-3.1-flash-lite-preview",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-pro-image-preview",
+      "object": "model",
+      "created": 1737158400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Pro Image Preview",
+      "name": "models/gemini-3-pro-image-preview",
+      "version": "3.0",
+      "description": "Gemini 3 Pro Image Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "object": "model",
+      "created": 1779235200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.5 Flash",
+      "name": "models/gemini-3.5-flash",
+      "version": "3.5",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ],
+  "vertex": [
+    {
+      "id": "gemini-2.5-pro",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Pro",
+      "name": "models/gemini-2.5-pro",
+      "version": "2.5",
+      "description": "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash",
+      "name": "models/gemini-2.5-flash",
+      "version": "001",
+      "description": "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-image",
+      "object": "model",
+      "created": 1763596800,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash Image",
+      "name": "models/gemini-2.5-flash-image",
+      "version": "001",
+      "description": "Our state-of-the-art image generation and editing model.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash Lite",
+      "name": "models/gemini-2.5-flash-lite",
+      "version": "2.5",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3-pro-preview",
+      "object": "model",
+      "created": 1737158400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Pro Preview",
+      "name": "models/gemini-3-pro-preview",
+      "version": "3.0",
+      "description": "Gemini 3 Pro Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "object": "model",
+      "created": 1765929600,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Flash Preview",
+      "name": "models/gemini-3-flash-preview",
+      "version": "3.0",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "object": "model",
+      "created": 1771459200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Pro Preview",
+      "name": "models/gemini-3.1-pro-preview",
+      "version": "3.1",
+      "description": "Gemini 3.1 Pro Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-image-preview",
+      "object": "model",
+      "created": 1771459200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Image Preview",
+      "name": "models/gemini-3.1-flash-image-preview",
+      "version": "3.1",
+      "description": "Gemini 3.1 Flash Image Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-lite-preview",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "name": "models/gemini-3.1-flash-lite-preview",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-pro-image-preview",
+      "object": "model",
+      "created": 1737158400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Pro Image Preview",
+      "name": "models/gemini-3-pro-image-preview",
+      "version": "3.0",
+      "description": "Gemini 3 Pro Image Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "imagen-4.0-generate-001",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Imagen 4.0 Generate",
+      "name": "models/imagen-4.0-generate-001",
+      "version": "4.0",
+      "description": "Imagen 4.0 image generation model",
+      "supportedGenerationMethods": [
+        "predict"
+      ]
+    },
+    {
+      "id": "imagen-4.0-ultra-generate-001",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Imagen 4.0 Ultra Generate",
+      "name": "models/imagen-4.0-ultra-generate-001",
+      "version": "4.0",
+      "description": "Imagen 4.0 Ultra high-quality image generation model",
+      "supportedGenerationMethods": [
+        "predict"
+      ]
+    },
+    {
+      "id": "imagen-3.0-generate-002",
+      "object": "model",
+      "created": 1740000000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Imagen 3.0 Generate",
+      "name": "models/imagen-3.0-generate-002",
+      "version": "3.0",
+      "description": "Imagen 3.0 image generation model",
+      "supportedGenerationMethods": [
+        "predict"
+      ]
+    },
+    {
+      "id": "imagen-3.0-fast-generate-001",
+      "object": "model",
+      "created": 1740000000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Imagen 3.0 Fast Generate",
+      "name": "models/imagen-3.0-fast-generate-001",
+      "version": "3.0",
+      "description": "Imagen 3.0 fast image generation model",
+      "supportedGenerationMethods": [
+        "predict"
+      ]
+    },
+    {
+      "id": "imagen-4.0-fast-generate-001",
+      "object": "model",
+      "created": 1750000000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Imagen 4.0 Fast Generate",
+      "name": "models/imagen-4.0-fast-generate-001",
+      "version": "4.0",
+      "description": "Imagen 4.0 fast image generation model",
+      "supportedGenerationMethods": [
+        "predict"
+      ]
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "object": "model",
+      "created": 1779235200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.5 Flash",
+      "name": "models/gemini-3.5-flash",
+      "version": "3.5",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ],
+  "aistudio": [
+    {
+      "id": "gemini-2.5-pro",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Pro",
+      "name": "models/gemini-2.5-pro",
+      "version": "2.5",
+      "description": "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash",
+      "name": "models/gemini-2.5-flash",
+      "version": "001",
+      "description": "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash Lite",
+      "name": "models/gemini-2.5-flash-lite",
+      "version": "2.5",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3-pro-preview",
+      "object": "model",
+      "created": 1737158400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Pro Preview",
+      "name": "models/gemini-3-pro-preview",
+      "version": "3.0",
+      "description": "Gemini 3 Pro Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "object": "model",
+      "created": 1771459200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Pro Preview",
+      "name": "models/gemini-3.1-pro-preview",
+      "version": "3.1",
+      "description": "Gemini 3.1 Pro Preview",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "object": "model",
+      "created": 1765929600,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3 Flash Preview",
+      "name": "models/gemini-3-flash-preview",
+      "version": "3.0",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-lite-preview",
+      "object": "model",
+      "created": 1776288000,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "name": "models/gemini-3.1-flash-lite-preview",
+      "version": "3.1",
+      "description": "Our smallest and most cost effective model, built for at scale usage.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-pro-latest",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini Pro Latest",
+      "name": "models/gemini-pro-latest",
+      "version": "2.5",
+      "description": "Latest release of Gemini Pro",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-flash-latest",
+      "object": "model",
+      "created": 1750118400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini Flash Latest",
+      "name": "models/gemini-flash-latest",
+      "version": "2.5",
+      "description": "Latest release of Gemini Flash",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-flash-lite-latest",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini Flash-Lite Latest",
+      "name": "models/gemini-flash-lite-latest",
+      "version": "2.5",
+      "description": "Latest release of Gemini Flash-Lite",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 512,
+        "max": 24576,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-image",
+      "object": "model",
+      "created": 1759363200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 2.5 Flash Image",
+      "name": "models/gemini-2.5-flash-image",
+      "version": "2.5",
+      "description": "State-of-the-art image generation and editing model.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 8192,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ]
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "object": "model",
+      "created": 1779235200,
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 3.5 Flash",
+      "name": "models/gemini-3.5-flash",
+      "version": "3.5",
+      "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+        "batchGenerateContent"
+      ],
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ],
+  "codex-free": [
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    }
+  ],
+  "codex-team": [
+    {
+      "id": "gpt-5.4",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4",
+      "version": "gpt-5.4",
+      "description": "Stable version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    }
+  ],
+  "codex-plus": [
+    {
+      "id": "gpt-5.3-codex-spark",
+      "object": "model",
+      "created": 1770912000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.3 Codex Spark",
+      "version": "gpt-5.3",
+      "description": "Ultra-fast coding model.",
+      "context_length": 128000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4",
+      "version": "gpt-5.4",
+      "description": "Stable version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    }
+  ],
+  "codex-pro": [
+    {
+      "id": "gpt-5.3-codex-spark",
+      "object": "model",
+      "created": 1770912000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.3 Codex Spark",
+      "version": "gpt-5.3",
+      "description": "Ultra-fast coding model.",
+      "context_length": 128000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4",
+      "version": "gpt-5.4",
+      "description": "Stable version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    }
+  ],
+  "kimi": [
+    {
+      "id": "kimi-k2",
+      "object": "model",
+      "created": 1752192000,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2",
+      "description": "Kimi K2 - Moonshot AI's flagship coding model",
+      "context_length": 131072,
+      "max_completion_tokens": 32768
+    },
+    {
+      "id": "kimi-k2-thinking",
+      "object": "model",
+      "created": 1762387200,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2 Thinking",
+      "description": "Kimi K2 Thinking - Extended reasoning model",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "kimi-k2.5",
+      "object": "model",
+      "created": 1769472000,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.5",
+      "description": "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "kimi-k2.6",
+      "object": "model",
+      "created": 1776729600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.6",
+      "description": "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.7 Code",
+      "description": "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": false,
+        "dynamic_allowed": true
+      }
+    }
+  ],
+  "zai": [
+    {
+      "id": "glm-5.2",
+      "object": "model",
+      "created": 1781740800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5.2",
+      "description": "Z.AI GLM-5.2 - flagship coding model on the GLM Coding Plan",
+      "context_length": 1000000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.5",
+      "description": "Z.AI GLM-4.5 - flagship hybrid reasoning coding model",
+      "context_length": 131072,
+      "max_completion_tokens": 98304,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5-air",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.5-Air",
+      "description": "Z.AI GLM-4.5-Air - lightweight, lower-latency GLM-4.5 variant",
+      "context_length": 131072,
+      "max_completion_tokens": 98304,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.6",
+      "object": "model",
+      "created": 1759276800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.6",
+      "description": "Z.AI GLM-4.6 - 200K context hybrid reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.7",
+      "object": "model",
+      "created": 1771200000,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.7",
+      "description": "Z.AI GLM-4.7 - hybrid reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5",
+      "object": "model",
+      "created": 1778198400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5",
+      "description": "Z.AI GLM-5 - latest flagship reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5.1",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5.1",
+      "description": "Z.AI GLM-5.1 - latest GLM-5 series reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5-turbo",
+      "object": "model",
+      "created": 1778198400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5-Turbo",
+      "description": "Z.AI GLM-5-Turbo - faster, lower-cost GLM-5 variant",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    }
+  ],
+  "antigravity": [
+    {
+      "id": "claude-opus-4-6-thinking",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Claude Opus 4.6 (Thinking)",
+      "name": "claude-opus-4-6-thinking",
+      "description": "Claude Opus 4.6 (Thinking)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Claude Sonnet 4.6 (Thinking)",
+      "name": "claude-sonnet-4-6",
+      "description": "Claude Sonnet 4.6 (Thinking)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3-flash",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3 Flash",
+      "name": "gemini-3-flash",
+      "description": "Gemini 3 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-flash-agent",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.5 Flash",
+      "name": "gemini-3-flash-agent",
+      "description": "Gemini 3.5 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-pro-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3 Pro (High)",
+      "name": "gemini-3-pro-high",
+      "description": "Gemini 3 Pro (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3-pro-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3 Pro (Low)",
+      "name": "gemini-3-pro-low",
+      "description": "Gemini 3 Pro (Low)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-image",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Flash Image",
+      "name": "gemini-3.1-flash-image",
+      "description": "Gemini 3.1 Flash Image",
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-pro-agent",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Pro (High)",
+      "name": "gemini-pro-agent",
+      "description": "Gemini 3.1 Pro (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.1-pro-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Pro (Low)",
+      "name": "gemini-3.1-pro-low",
+      "description": "Gemini 3.1 Pro (Low)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gpt-oss-120b-medium",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "GPT-OSS 120B (Medium)",
+      "name": "gpt-oss-120b-medium",
+      "description": "GPT-OSS 120B (Medium)",
+      "context_length": 114000,
+      "max_completion_tokens": 32768
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "name": "gemini-3.1-flash-lite",
+      "description": "Gemini 3.1 Flash Lite",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.5 Flash (Low)",
+      "name": "gemini-3.5-flash-low",
+      "description": "Gemini 3.5 Flash (Low)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ],
+  "xai": [
+    {
+      "id": "grok-build-0.1",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Build 0.1",
+      "name": "grok-build-0.1",
+      "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
+      "context_length": 256000,
+      "max_completion_tokens": 256000,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.3",
+      "object": "model",
+      "created": 1775606400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.3",
+      "name": "grok-4.3",
+      "description": "xAI Grok 4.3 model for the Responses API.",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-4.20-0309-reasoning",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 0309 Reasoning",
+      "name": "grok-4.20-0309-reasoning",
+      "description": "xAI Grok 4.20 0309 reasoning model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-0309-non-reasoning",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 0309 Non Reasoning",
+      "name": "grok-4.20-0309-non-reasoning",
+      "description": "xAI Grok 4.20 0309 non-reasoning model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-multi-agent-0309",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Multi Agent 0309",
+      "name": "grok-4.20-multi-agent-0309",
+      "description": "xAI Grok 4.20 multi-agent model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-3-mini",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 3 Mini",
+      "name": "grok-3-mini",
+      "description": "xAI Grok 3 Mini model for the Responses API.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-3-mini-fast",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 3 Mini Fast",
+      "name": "grok-3-mini-fast",
+      "description": "xAI Grok 3 Mini Fast model for the Responses API.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "grok-composer-2.5-fast",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Composer 2.5 Fast",
+      "name": "grok-composer-2.5-fast",
+      "description": "xAI Composer 2.5 Fast model for the Responses API.",
+      "context_length": 200000,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ]
+}

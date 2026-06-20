@@ -1,0 +1,28 @@
+name: translator-path-guard
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  ensure-no-translator-changes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect internal/translator changes
+        id: changed-files
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            internal/translator/**
+      - name: Fail when restricted paths change
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          echo "Changes under internal/translator are not allowed in pull requests."
+          echo "You need to create an issue for our maintenance team to make the necessary changes."
+          exit 1
