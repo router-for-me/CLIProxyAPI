@@ -40,6 +40,30 @@ func mergeRecentRequestBuckets(dst, src []coreauth.RecentRequestBucket) []coreau
 	return dst
 }
 
+
+// usageProviderKey resolves the provider key used to group usage statistics.
+//
+// For OpenAI-compatible providers, auth.Provider carries the namespaced key
+// introduced by provider-key unification (e.g. "openai-compatible-vast"); that
+// namespace is required for executor routing (see #3600). The usage/statistics
+// surface and the Management Center panel, however, address these providers by
+// their bare config name (e.g. "vast"), which is preserved on the auth as
+// compat_name. Returning the bare name here keeps the usage grouping aligned
+// with what the panel looks up, restoring recent-requests/totals display for
+// OpenAI-compatible providers. Other provider kinds keep strings.ToLower(auth.Provider).
+func usageProviderKey(auth *coreauth.Auth) string {
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "" {
+		return "unknown"
+	}
+	if auth.Attributes != nil {
+		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
+			return strings.ToLower(compatName)
+		}
+	}
+	return provider
+}
+
 // GetAPIKeyUsage returns recent request buckets for all in-memory api_key auths,
 // grouped by provider and keyed by "base_url|api_key".
 func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
@@ -78,10 +102,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 			}
 		}
 		compositeKey := baseURL + "|" + apiKey
-		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-		if provider == "" {
-			provider = "unknown"
-		}
+		provider := usageProviderKey(auth)
 
 		recent := auth.RecentRequestsSnapshot(now)
 		providerBucket, ok := out[provider]

@@ -47,9 +47,22 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		t.Fatalf("register claude auth: %v", err)
 	}
 
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "vast-auth",
+		Provider: "openai-compatible-vast",
+		Attributes: map[string]string{
+			"api_key":     "vast-key",
+			"base_url":    "https://www.vastnum.com/v1",
+			"compat_name": "VAST",
+		},
+	}); err != nil {
+		t.Fatalf("register vast openai-compat auth: %v", err)
+	}
 	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "codex-auth", Provider: "codex", Model: "gpt-5", Success: true})
 	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "codex-auth", Provider: "codex", Model: "gpt-5", Success: false})
 	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "claude-auth", Provider: "claude", Model: "claude-4", Success: true})
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "vast-auth", Provider: "openai-compatible-vast", Model: "deepseek-v3", Success: true})
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "vast-auth", Provider: "openai-compatible-vast", Model: "deepseek-v3", Success: false})
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 
@@ -91,4 +104,34 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 	if claudeSuccess != 1 || claudeFailed != 0 {
 		t.Fatalf("claude totals = %d/%d, want 1/0", claudeSuccess, claudeFailed)
 	}
+
+	// OpenAI-compatible providers carry a namespaced auth.Provider (e.g.
+	// "openai-compatible-vast") but must be grouped under their bare config name
+	// ("vast") so the Management Center panel, which looks up by provider name,
+	// can match recent-requests and totals. Regression for #3940.
+	if _, ok := payload["openai-compatible-vast"]; ok {
+		t.Fatalf("openai-compat auth should NOT be grouped under namespaced key %q", "openai-compatible-vast")
+	}
+	vastEntry, ok := payload["vast"]["https://www.vastnum.com/v1|vast-key"]
+	if !ok {
+		t.Fatalf("vast entry missing under bare provider key; payload keys = %v", payloadKeys(payload))
+	}
+	if vastEntry.Success != 1 || vastEntry.Failed != 1 {
+		t.Fatalf("vast totals = %d/%d, want 1/1", vastEntry.Success, vastEntry.Failed)
+	}
+	if len(vastEntry.RecentRequests) != 20 {
+		t.Fatalf("vast buckets len = %d, want 20", len(vastEntry.RecentRequests))
+	}
+	vastSuccess, vastFailed := sumRecentRequestBuckets(vastEntry.RecentRequests)
+	if vastSuccess != 1 || vastFailed != 1 {
+		t.Fatalf("vast totals = %d/%d, want 1/1", vastSuccess, vastFailed)
+	}
+}
+
+func payloadKeys(m map[string]map[string]apiKeyUsageEntry) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
