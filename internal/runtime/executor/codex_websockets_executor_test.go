@@ -1766,6 +1766,24 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	}
 }
 
+func TestCodexAutoExecutorDelegatesUpstreamSessionActive(t *testing.T) {
+	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	sessionID := "sess-codex-auto-active"
+	if exec.UpstreamSessionActive(sessionID) {
+		t.Fatal("new auto executor session should not be active")
+	}
+
+	sess := exec.wsExec.getOrCreateSession(sessionID)
+	conn := &websocket.Conn{}
+	sess.connMu.Lock()
+	sess.conn = conn
+	sess.connMu.Unlock()
+
+	if !exec.UpstreamSessionActive(sessionID) {
+		t.Fatal("auto executor did not delegate active session lookup")
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 

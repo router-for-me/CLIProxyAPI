@@ -672,3 +672,21 @@ func TestXAIWebsocketsExecuteStreamStopsOnBareErrorPayload(t *testing.T) {
 		t.Fatal("timed out waiting for bare upstream error")
 	}
 }
+
+func TestXAIAutoExecutorDelegatesUpstreamSessionActive(t *testing.T) {
+	exec := NewXAIAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	sessionID := "sess-xai-auto-active"
+	if exec.UpstreamSessionActive(sessionID) {
+		t.Fatal("new auto executor session should not be active")
+	}
+
+	sess := exec.wsExec.getOrCreateSession(sessionID)
+	conn := &websocket.Conn{}
+	sess.connMu.Lock()
+	sess.conn = conn
+	sess.connMu.Unlock()
+
+	if !exec.UpstreamSessionActive(sessionID) {
+		t.Fatal("auto executor did not delegate active session lookup")
+	}
+}

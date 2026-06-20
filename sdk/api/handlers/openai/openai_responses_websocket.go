@@ -335,18 +335,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if stateLossReplayAttempted {
 			useUpstreamWebsocketPassthrough = false
 		}
-		forceCodexPassthroughTranscriptReplay := false
+		forcePassthroughTranscriptReplay := false
 		if useUpstreamWebsocketPassthrough &&
-			upstreamWebsocketPassthroughProvider == "codex" &&
 			len(lastRequest) != 0 &&
 			responsesWebsocketRequestRequiresUpstreamContext(payload) {
 			if restoredTranscriptState {
-				forceCodexPassthroughTranscriptReplay = true
-			} else if active, ok := h.responsesWebsocketUpstreamSessionActive("codex", passthroughSessionID); ok && !active {
-				forceCodexPassthroughTranscriptReplay = true
+				forcePassthroughTranscriptReplay = true
+			} else if active, ok := h.responsesWebsocketUpstreamSessionActive(upstreamWebsocketPassthroughProvider, passthroughSessionID); ok && !active {
+				forcePassthroughTranscriptReplay = true
 			}
 		}
-		if forceCodexPassthroughTranscriptReplay {
+		if forcePassthroughTranscriptReplay {
 			useUpstreamWebsocketPassthrough = false
 		}
 		allowIncrementalInputWithPreviousResponseID := false
@@ -364,7 +363,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if forceTranscriptReplayNextRequest {
 				allowIncrementalInputWithPreviousResponseID = false
 			}
-			if forceCodexPassthroughTranscriptReplay {
+			if forcePassthroughTranscriptReplay {
 				allowIncrementalInputWithPreviousResponseID = false
 			}
 			if stateLossReplayAttempted {

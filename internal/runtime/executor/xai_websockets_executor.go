@@ -911,6 +911,21 @@ func (e *XAIWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-chan 
 	return sess.upstreamDisconnectCh
 }
 
+func (e *XAIWebsocketsExecutor) UpstreamSessionActive(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if e == nil || sessionID == "" {
+		return false
+	}
+	store := e.store
+	if store == nil {
+		store = globalXAIWebsocketSessionStore
+	}
+	store.mu.Lock()
+	sess := store.sessions[sessionID]
+	store.mu.Unlock()
+	return sess != nil && sess.hasUpstreamConn()
+}
+
 func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	if sess == nil {
 		return e.dialXAIWebsocket(ctx, auth, wsURL, headers)
@@ -1404,6 +1419,13 @@ func (e *XAIAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan error 
 		return nil
 	}
 	return e.wsExec.UpstreamDisconnectChan(sessionID)
+}
+
+func (e *XAIAutoExecutor) UpstreamSessionActive(sessionID string) bool {
+	if e == nil || e.wsExec == nil {
+		return false
+	}
+	return e.wsExec.UpstreamSessionActive(sessionID)
 }
 
 func xaiWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
