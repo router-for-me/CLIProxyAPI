@@ -691,23 +691,28 @@ func TestConfigSynthesizer_IDStability(t *testing.T) {
 }
 
 func TestConfigSynthesizer_AllProviders(t *testing.T) {
+	geminiWeight := 2
+	claudeWeight := 3
+	codexWeight := 4
+	compatWeight := 5
+	vertexWeight := 6
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
 		Config: &config.Config{
 			GeminiKey: []config.GeminiKey{
-				{APIKey: "gemini-key"},
+				{APIKey: "gemini-key", SelectionWeight: &geminiWeight},
 			},
 			ClaudeKey: []config.ClaudeKey{
-				{APIKey: "claude-key"},
+				{APIKey: "claude-key", SelectionWeight: &claudeWeight},
 			},
 			CodexKey: []config.CodexKey{
-				{APIKey: "codex-key"},
+				{APIKey: "codex-key", SelectionWeight: &codexWeight},
 			},
 			OpenAICompatibility: []config.OpenAICompatibility{
-				{Name: "compat", BaseURL: "https://compat.api"},
+				{Name: "compat", BaseURL: "https://compat.api", SelectionWeight: &compatWeight},
 			},
 			VertexCompatAPIKey: []config.VertexCompatKey{
-				{APIKey: "vertex-key", BaseURL: "https://vertex.api"},
+				{APIKey: "vertex-key", BaseURL: "https://vertex.api", SelectionWeight: &vertexWeight},
 			},
 		},
 		Now:         time.Now(),
@@ -723,8 +728,10 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 	}
 
 	providers := make(map[string]bool)
+	weights := make(map[string]string)
 	for _, a := range auths {
 		providers[a.Provider] = true
+		weights[a.Provider] = a.Attributes["selection_weight"]
 	}
 
 	expected := []string{"gemini", "claude", "codex", "openai-compatible-compat", "vertex"}
@@ -732,5 +739,59 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)
 		}
+	}
+	expectedWeights := map[string]string{
+		"gemini":                   "2",
+		"claude":                   "3",
+		"codex":                    "4",
+		"openai-compatible-compat": "5",
+		"vertex":                   "6",
+	}
+	for provider, wantWeight := range expectedWeights {
+		if got := weights[provider]; got != wantWeight {
+			t.Errorf("provider %s selection_weight = %q, want %q", provider, got, wantWeight)
+		}
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompatSelectionWeightPerKeyOverride(t *testing.T) {
+	providerWeight := 2
+	keyWeight := 5
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:            "compat",
+					BaseURL:         "https://compat.api",
+					SelectionWeight: &providerWeight,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "key-a"},
+						{APIKey: "key-b", SelectionWeight: &keyWeight},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	weightsByKey := map[string]string{}
+	for _, auth := range auths {
+		weightsByKey[auth.Attributes["api_key"]] = auth.Attributes["selection_weight"]
+	}
+	if got := weightsByKey["key-a"]; got != "2" {
+		t.Fatalf("key-a selection_weight = %q, want 2", got)
+	}
+	if got := weightsByKey["key-b"]; got != "5" {
+		t.Fatalf("key-b selection_weight = %q, want 5", got)
 	}
 }

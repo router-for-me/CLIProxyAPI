@@ -81,6 +81,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		addSelectionWeightAttr(attrs, entry.SelectionWeight)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -136,6 +137,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addSelectionWeightAttr(attrs, ck.SelectionWeight)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -194,6 +196,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addSelectionWeightAttr(attrs, ck.SelectionWeight)
 		if ck.BaseURL != "" {
 			attrs["base_url"] = ck.BaseURL
 		}
@@ -268,6 +271,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addSelectionWeightAttr(attrs, firstSelectionWeight(entry.SelectionWeight, compat.SelectionWeight))
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -310,6 +314,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addSelectionWeightAttr(attrs, compat.SelectionWeight)
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
@@ -359,6 +364,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		if compat.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(compat.Priority)
 		}
+		addSelectionWeightAttr(attrs, compat.SelectionWeight)
 		if key != "" {
 			attrs["api_key"] = key
 		}
@@ -381,4 +387,21 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		out = append(out, a)
 	}
 	return out
+}
+
+func firstSelectionWeight(primary, fallback *int) *int {
+	if primary != nil {
+		return primary
+	}
+	return fallback
+}
+
+func addSelectionWeightAttr(attrs map[string]string, weight *int) {
+	if attrs == nil || weight == nil {
+		return
+	}
+	if *weight < 0 {
+		return
+	}
+	attrs["selection_weight"] = strconv.Itoa(*weight)
 }

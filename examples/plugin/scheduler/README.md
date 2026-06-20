@@ -28,13 +28,13 @@ plugins:
 Fields:
 
 - `auth_id`: selects this auth ID when it appears in the scheduler candidates.
-- `delegate`: delegates selection to a built-in scheduler. Supported values are `""`, `fill-first`, and `round-robin`.
+- `delegate`: delegates selection to a built-in scheduler. Supported values are `""`, `fill-first`, `round-robin`, and `weighted-round-robin`.
 - `deny`: returns a scheduler error when set to `true`.
 
 Behavior:
 
 - When `deny` is `true`, the plugin returns an error envelope with code `scheduler_denied`.
-- When `delegate` is `fill-first` or `round-robin`, the plugin returns `DelegateBuiltin` and marks the pick as handled.
+- When `delegate` is `fill-first`, `round-robin`, or `weighted-round-robin`, the plugin returns `DelegateBuiltin` and marks the pick as handled.
 - When `delegate` is any other non-empty value, the plugin leaves the pick unhandled.
 - When `delegate` is empty and `auth_id` exists in the candidates, the plugin returns that auth ID and marks the pick as handled.
 - When no rule matches, the plugin leaves the pick unhandled.

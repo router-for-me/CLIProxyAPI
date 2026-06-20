@@ -247,3 +247,139 @@ func TestHostAuthSaveCallbackWritesPhysicalFile(t *testing.T) {
 		t.Fatalf("auths = %#v, want one registered auth", auths)
 	}
 }
+
+func TestHostAuthSaveCallbackSyncsSelectionWeightAttribute(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{name: "underscore", json: `{"type":"codex","email":"saved@example.com","selection_weight":0}`},
+		{name: "hyphen", json: `{"type":"codex","email":"saved@example.com","selection-weight":2}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authDir := t.TempDir()
+			host := New()
+			host.runtimeConfig = &config.Config{AuthDir: authDir}
+			host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+
+			req, errMarshal := json.Marshal(pluginapi.HostAuthSaveRequest{
+				Name: "saved.json",
+				JSON: json.RawMessage(tt.json),
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, req)
+			if errCall != nil {
+				t.Fatalf("callFromPlugin() error = %v", errCall)
+			}
+			if _, errDecode := decodeRPCEnvelope[pluginapi.HostAuthSaveResponse](rawResp); errDecode != nil {
+				t.Fatalf("decode response: %v", errDecode)
+			}
+			auths := host.currentAuthManager().List()
+			if len(auths) != 1 {
+				t.Fatalf("auths = %#v, want one registered auth", auths)
+			}
+			want := "0"
+			if tt.name == "hyphen" {
+				want = "2"
+			}
+			if got := auths[0].Attributes["selection_weight"]; got != want {
+				t.Fatalf("selection_weight attribute = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestBuildAuthFromFileDataSelectionWeightAttribute(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "weighted.json")
+	auth, err := (&Host{}).buildAuthFromFileData(authPath, []byte(`{"type":"codex","selection-weight":0}`))
+	if err != nil {
+		t.Fatalf("buildAuthFromFileData() error = %v", err)
+	}
+	if auth == nil {
+		t.Fatalf("buildAuthFromFileData() = nil")
+	}
+	if got := auth.Attributes["selection_weight"]; got != "0" {
+		t.Fatalf("Attributes selection_weight = %q, want 0", got)
+	}
+}
+
+func TestBuildAuthFromFileDataSelectionWeightRejectsFractional(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "weighted.json")
+	auth, err := (&Host{}).buildAuthFromFileData(authPath, []byte(`{"type":"codex","selection-weight":1.5}`))
+	if err != nil {
+		t.Fatalf("buildAuthFromFileData() error = %v", err)
+	}
+	if auth == nil {
+		t.Fatalf("buildAuthFromFileData() = nil")
+	}
+	if got, ok := auth.Attributes["selection_weight"]; ok {
+		t.Fatalf("Attributes selection_weight = %q, want absent", got)
+	}
+}
+
+func TestParseSelectionWeightValueProgrammaticNumberTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  any
+		want   int
+		wantOK bool
+	}{
+		{name: "int32", value: int32(3), want: 3, wantOK: true},
+		{name: "json number", value: json.Number("4"), want: 4, wantOK: true},
+		{name: "fractional json number", value: json.Number("1.5"), wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseSelectionWeightValue(tt.value)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("weight = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildHostAuthFileEntrySelectionWeight(t *testing.T) {
+	authDir := t.TempDir()
+	authPath := filepath.Join(authDir, "codex.json")
+	if err := os.WriteFile(authPath, []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	auth := &coreauth.Auth{
+		ID:       "codex.json",
+		FileName: "codex.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":             authPath,
+			"selection_weight": "0",
+		},
+	}
+
+	entry := (&Host{}).buildHostAuthFileEntry(auth)
+	if entry == nil {
+		t.Fatalf("buildHostAuthFileEntry() = nil")
+	}
+	if entry.SelectionWeight != 0 {
+		t.Fatalf("SelectionWeight = %d, want 0", entry.SelectionWeight)
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal entry: %v", err)
+	}
+	var encoded map[string]any
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		t.Fatalf("unmarshal entry: %v", err)
+	}
+	if got, ok := encoded["selection_weight"].(float64); !ok || got != 0 {
+		t.Fatalf("encoded selection_weight = %#v, want 0", encoded["selection_weight"])
+	}
+}

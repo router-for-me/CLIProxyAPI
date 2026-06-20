@@ -186,8 +186,8 @@ func pluginRegistration() registration {
 				{
 					Name:        "delegate",
 					Type:        pluginapi.ConfigFieldTypeEnum,
-					EnumValues:  []string{"", pluginapi.SchedulerBuiltinFillFirst, pluginapi.SchedulerBuiltinRoundRobin},
-					Description: "Delegates selection to a built-in scheduler when set to fill-first or round-robin.",
+					EnumValues:  []string{"", pluginapi.SchedulerBuiltinFillFirst, pluginapi.SchedulerBuiltinRoundRobin, pluginapi.SchedulerBuiltinWeightedRoundRobin},
+					Description: "Delegates selection to a built-in scheduler when set to fill-first, round-robin, or weighted-round-robin.",
 				},
 				{
 					Name:        "deny",
@@ -213,7 +213,7 @@ func pickAuth(raw []byte) ([]byte, error) {
 		return errorEnvelope("scheduler_denied", "scheduler pick denied by plugin configuration"), nil
 	}
 	switch cfg.Delegate {
-	case pluginapi.SchedulerBuiltinFillFirst, pluginapi.SchedulerBuiltinRoundRobin:
+	case pluginapi.SchedulerBuiltinFillFirst, pluginapi.SchedulerBuiltinRoundRobin, pluginapi.SchedulerBuiltinWeightedRoundRobin:
 		return okEnvelope(pluginapi.SchedulerPickResponse{
 			DelegateBuiltin: cfg.Delegate,
 			Handled:         true,

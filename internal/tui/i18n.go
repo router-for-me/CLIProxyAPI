@@ -136,7 +136,7 @@ var zhStrings = map[string]string{
 	// ── Auth Files ──
 	"auth_title":      "🔑 认证文件",
 	"auth_help1":      " [↑↓/jk] 导航 • [Enter] 展开 • [e] 启用/停用 • [d] 删除 • [r] 刷新",
-	"auth_help2":      " [1] 编辑 prefix • [2] 编辑 proxy_url • [3] 编辑 priority",
+	"auth_help2":      " [1] 编辑 prefix • [2] 编辑 proxy_url • [3] 编辑 priority • [4] 编辑 selection weight",
 	"no_auth_files":   "  无认证文件",
 	"confirm_delete":  "⚠ 删除 %s? [y/n]",
 	"deleted":         "已删除 %s",
@@ -291,7 +291,7 @@ var enStrings = map[string]string{
 	// ── Auth Files ──
 	"auth_title":      "🔑 Auth Files",
 	"auth_help1":      " [↑↓/jk] Navigate • [Enter] Expand • [e] Enable/Disable • [d] Delete • [r] Refresh",
-	"auth_help2":      " [1] Edit prefix • [2] Edit proxy_url • [3] Edit priority",
+	"auth_help2":      " [1] Edit prefix • [2] Edit proxy_url • [3] Edit priority • [4] Edit selection weight",
 	"no_auth_files":   "  No auth files found",
 	"confirm_delete":  "⚠ Delete %s? [y/n]",
 	"deleted":         "Deleted %s",

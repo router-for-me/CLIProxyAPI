@@ -93,6 +93,34 @@ func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetails_SelectionWeights(t *testing.T) {
+	claudeWeight := 0
+	codexWeight := 2
+	vertexWeight := 3
+	oldCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{APIKey: "g1"}},
+		ClaudeKey: []config.ClaudeKey{{APIKey: "c1"}},
+		CodexKey:  []config.CodexKey{{APIKey: "x1"}},
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{APIKey: "v1", BaseURL: "http://v1"},
+		},
+	}
+	newCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{APIKey: "g1"}},
+		ClaudeKey: []config.ClaudeKey{{APIKey: "c1", SelectionWeight: &claudeWeight}},
+		CodexKey:  []config.CodexKey{{APIKey: "x1", SelectionWeight: &codexWeight}},
+		VertexCompatAPIKey: []config.VertexCompatKey{
+			{APIKey: "v1", BaseURL: "http://v1", SelectionWeight: &vertexWeight},
+		},
+	}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "claude[0].selection-weight: 1 -> 0")
+	expectContains(t, changes, "codex[0].selection-weight: 1 -> 2")
+	expectContains(t, changes, "vertex[0].selection-weight: 1 -> 3")
+	expectNotContains(t, changes, "gemini[0].selection-weight")
+}
+
 func TestBuildConfigChangeDetails_GeminiVertexHeaders(t *testing.T) {
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{
