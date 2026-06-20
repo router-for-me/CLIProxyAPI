@@ -175,10 +175,11 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 		Config: &config.Config{
 			ClaudeKey: []config.ClaudeKey{
 				{
-					APIKey:         "sk-ant-api-xxx",
-					Prefix:         "main",
-					BaseURL:        "https://api.anthropic.com",
-					DisableCooling: true,
+					APIKey:                  "sk-ant-api-xxx",
+					Prefix:                  "main",
+					BaseURL:                 "https://api.anthropic.com",
+					DisableCooling:          true,
+					RebuildMidSystemMessage: true,
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -212,6 +213,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")
+	}
+	if got := auths[0].Attributes["rebuild_mid_system_message"]; got != "true" {
+		t.Errorf("expected rebuild_mid_system_message=true, got %s", got)
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
