@@ -1264,6 +1264,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 			data,
 			errCh,
 			timelineLog,
+			"tool-session",
 			"session-1",
 			nil,
 		)
@@ -1357,6 +1358,7 @@ func TestForwardResponsesWebsocketTreatsResponseDoneAsTerminalWithoutRewriting(t
 			data,
 			errCh,
 			timelineLog,
+			"tool-session",
 			"session-1",
 			nil,
 		)
@@ -1409,6 +1411,96 @@ func TestForwardResponsesWebsocketTreatsResponseDoneAsTerminalWithoutRewriting(t
 	}
 }
 
+func TestForwardResponsesWebsocketRecordsToolCallsUnderScopedSessionKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	oldToolCallCache := defaultWebsocketToolCallCache
+	defaultWebsocketToolCallCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
+	t.Cleanup(func() {
+		defaultWebsocketToolCallCache = oldToolCallCache
+	})
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			errClose := conn.Close()
+			if errClose != nil {
+				serverErrCh <- errClose
+			}
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup"}]}}`)
+		close(data)
+		close(errCh)
+
+		_, _, _, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"scoped-tool-session",
+			"session-1",
+			nil,
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if errMsg != nil {
+			serverErrCh <- fmt.Errorf("unexpected websocket error message: %v", errMsg.Error)
+			return
+		}
+		if _, ok := defaultWebsocketToolCallCache.get("scoped-tool-session", "call-1"); !ok {
+			serverErrCh <- errors.New("tool call was not recorded under scoped session key")
+			return
+		}
+		if _, ok := defaultWebsocketToolCallCache.get(websocketDownstreamSessionKey(r), "call-1"); ok {
+			serverErrCh <- errors.New("tool call was recorded under unscoped request session key")
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	headers := http.Header{}
+	headers.Set("X-Codex-Turn-Metadata", `{"session_id":"unscoped-tool-session"}`)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("payload type = %s, want %s; payload=%s", got, wsEventTypeCompleted, payload)
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
 func TestForwardResponsesWebsocketTreatsErrorPayloadAsTerminal(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1442,6 +1534,7 @@ func TestForwardResponsesWebsocketTreatsErrorPayloadAsTerminal(t *testing.T) {
 			data,
 			errCh,
 			newInMemoryWebsocketTimelineLog(),
+			"tool-session",
 			"session-1",
 			nil,
 		)
@@ -1525,6 +1618,7 @@ func TestForwardResponsesWebsocketDoesNotInterceptErrorAfterPayload(t *testing.T
 			data,
 			errCh,
 			newInMemoryWebsocketTimelineLog(),
+			"tool-session",
 			"session-1",
 			func(*interfaces.ErrorMessage) bool {
 				interceptCalled = true
@@ -1631,6 +1725,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			data,
 			errCh,
 			timelineLog,
+			"tool-session",
 			"session-1",
 			nil,
 		)

@@ -503,7 +503,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		interceptErr := func(errMsg *interfaces.ErrorMessage) bool {
 			return shouldRetryResponsesWebsocketAfterPreviousResponseNotFound(errMsg, payload, previousLastRequest, stateLossReplayAttempted)
 		}
-		completedOutput, completedResponseID, completedPendingToolCallIDs, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID, interceptErr)
+		completedOutput, completedResponseID, completedPendingToolCallIDs, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, downstreamSessionKey, passthroughSessionID, interceptErr)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
@@ -1432,6 +1432,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	data <-chan []byte,
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog websocketTimelineAppender,
+	downstreamSessionKey string,
 	sessionID string,
 	interceptError func(*interfaces.ErrorMessage) bool,
 ) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
@@ -1440,10 +1441,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	completedResponseID := ""
 	pendingToolCallIDs := make(map[string]struct{})
 	sentPayload := false
-	downstreamSessionKey := ""
-	if c != nil && c.Request != nil {
-		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
-	}
+	downstreamSessionKey = strings.TrimSpace(downstreamSessionKey)
 
 	for {
 		select {
