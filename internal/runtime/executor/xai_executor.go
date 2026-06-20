@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -49,6 +50,7 @@ const (
 	xaiVideosExtensionsPath     = "/videos/extensions"
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
+	xaiComposerModelPrefix      = "grok-composer-"
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -837,6 +839,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
 	sessionID := xaiExecutionSessionID(req, opts)
+	if sessionID == "" && xaiRequiresIsolatedConversation(baseModel) {
+		sessionID = uuid.NewString()
+	}
 	if sessionID != "" {
 		body, _ = sjson.SetBytes(body, "prompt_cache_key", sessionID)
 	}
@@ -923,6 +928,10 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		return strings.TrimSpace(promptCacheKey.String())
 	}
 	return ""
+}
+
+func xaiRequiresIsolatedConversation(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), xaiComposerModelPrefix)
 }
 
 func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {

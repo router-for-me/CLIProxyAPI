@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -156,6 +157,100 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		if include.String() == "reasoning.encrypted_content" {
 			t.Fatalf("xai request must not ask for encrypted reasoning content: %s", string(gotBody))
 		}
+	}
+}
+
+func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+
+	tests := []struct {
+		name          string
+		model         string
+		payload       []byte
+		wantGenerated bool
+		wantSession   string
+	}{
+		{
+			name:          "composer_generates_fresh_session",
+			model:         "grok-composer-2.5-fast",
+			payload:       []byte(`{"model":"grok-composer-2.5-fast","input":"hello"}`),
+			wantGenerated: true,
+		},
+		{
+			name:    "grok_build_stays_stateless_without_session",
+			model:   "grok-build-0.1",
+			payload: []byte(`{"model":"grok-build-0.1","input":"hello"}`),
+		},
+		{
+			name:        "explicit_prompt_cache_key_is_preserved",
+			model:       "grok-composer-2.5-fast",
+			payload:     []byte(`{"model":"grok-composer-2.5-fast","prompt_cache_key":"client-session","input":"hello"}`),
+			wantSession: "client-session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+				Model:   tt.model,
+				Payload: tt.payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Stream:       true,
+			}, true)
+			if err != nil {
+				t.Fatalf("prepareResponsesRequest() error = %v", err)
+			}
+
+			gotSession := prepared.sessionID
+			gotPromptCacheKey := gjson.GetBytes(prepared.body, "prompt_cache_key").String()
+			httpReq, errRequest := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(prepared.body))
+			if errRequest != nil {
+				t.Fatalf("NewRequest() error = %v", errRequest)
+			}
+			applyXAIHeaders(httpReq, auth, "xai-token", true, gotSession)
+			gotGrokConvID := httpReq.Header.Get("x-grok-conv-id")
+
+			if tt.wantGenerated {
+				if _, errParse := uuid.Parse(gotSession); errParse != nil {
+					t.Fatalf("generated sessionID = %q, want UUID; body=%s", gotSession, string(prepared.body))
+				}
+				if gotPromptCacheKey != gotSession {
+					t.Fatalf("prompt_cache_key = %q, want sessionID %q; body=%s", gotPromptCacheKey, gotSession, string(prepared.body))
+				}
+				if gotGrokConvID != gotSession {
+					t.Fatalf("x-grok-conv-id = %q, want sessionID %q", gotGrokConvID, gotSession)
+				}
+				return
+			}
+
+			if tt.wantSession != "" {
+				if gotSession != tt.wantSession {
+					t.Fatalf("sessionID = %q, want %q", gotSession, tt.wantSession)
+				}
+				if gotPromptCacheKey != tt.wantSession {
+					t.Fatalf("prompt_cache_key = %q, want %q; body=%s", gotPromptCacheKey, tt.wantSession, string(prepared.body))
+				}
+				if gotGrokConvID != tt.wantSession {
+					t.Fatalf("x-grok-conv-id = %q, want %q", gotGrokConvID, tt.wantSession)
+				}
+				return
+			}
+
+			if gotSession != "" {
+				t.Fatalf("sessionID = %q, want empty", gotSession)
+			}
+			if gotPromptCacheKey != "" {
+				t.Fatalf("prompt_cache_key = %q, want empty; body=%s", gotPromptCacheKey, string(prepared.body))
+			}
+			if gotGrokConvID != "" {
+				t.Fatalf("x-grok-conv-id = %q, want empty", gotGrokConvID)
+			}
+		})
 	}
 }
 
