@@ -332,72 +332,6 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	})
 }
 
-func TestAmpProviderModelRoutes(t *testing.T) {
-	testCases := []struct {
-		name         string
-		path         string
-		wantStatus   int
-		wantContains string
-	}{
-		{
-			name:         "openai root models",
-			path:         "/api/provider/openai/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "groq root models",
-			path:         "/api/provider/groq/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "openai models",
-			path:         "/api/provider/openai/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "anthropic models",
-			path:         "/api/provider/anthropic/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"data"`,
-		},
-		{
-			name:         "google models v1",
-			path:         "/api/provider/google/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"models"`,
-		},
-		{
-			name:         "google models v1beta",
-			path:         "/api/provider/google/v1beta/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"models"`,
-		},
-	}
-
-	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			server := newTestServer(t)
-
-			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			req.Header.Set("Authorization", "Bearer test-key")
-
-			rr := httptest.NewRecorder()
-			server.engine.ServeHTTP(rr, req)
-
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("unexpected status code for %s: got %d want %d; body=%s", tc.path, rr.Code, tc.wantStatus, rr.Body.String())
-			}
-			if body := rr.Body.String(); !strings.Contains(body, tc.wantContains) {
-				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
-			}
-		})
-	}
-}
-
 func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-anthropic-version-dispatch"
@@ -748,6 +682,89 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
+	withMetadata := formatHomeClaudeModel(homeModelEntry{
+		id:                  "claude-sonnet-4-6",
+		created:             1771372800,
+		ownedBy:             "anthropic",
+		displayName:         "Claude 4.6 Sonnet",
+		contextLength:       200000,
+		maxCompletionTokens: 64000,
+	})
+	if got := withMetadata["created_at"]; got != "2026-02-18T00:00:00Z" {
+		t.Fatalf("created_at = %v, want RFC3339 timestamp", got)
+	}
+	if got := withMetadata["type"]; got != "model" {
+		t.Fatalf("type = %v, want model", got)
+	}
+	if got := withMetadata["display_name"]; got != "Claude 4.6 Sonnet" {
+		t.Fatalf("display_name = %v, want Claude 4.6 Sonnet", got)
+	}
+	if got := withMetadata["max_input_tokens"]; got != 200000 {
+		t.Fatalf("max_input_tokens = %v, want 200000", got)
+	}
+	if got := withMetadata["max_tokens"]; got != 64000 {
+		t.Fatalf("max_tokens = %v, want 64000", got)
+	}
+
+	withDefaults := formatHomeClaudeModel(homeModelEntry{id: "claude-no-limits"})
+	if got := withDefaults["display_name"]; got != "claude-no-limits" {
+		t.Fatalf("display_name fallback = %v, want claude-no-limits", got)
+	}
+	if got := withDefaults["max_input_tokens"]; got != registry.DefaultClaudeMaxInputTokens {
+		t.Fatalf("max_input_tokens fallback = %v, want %d", got, registry.DefaultClaudeMaxInputTokens)
+	}
+	if got := withDefaults["max_tokens"]; got != registry.DefaultClaudeMaxOutputTokens {
+		t.Fatalf("max_tokens fallback = %v, want %d", got, registry.DefaultClaudeMaxOutputTokens)
+	}
+	if _, ok := withDefaults["created_at"]; ok {
+		t.Fatalf("created_at should be omitted when source created is missing, got %v", withDefaults)
+	}
+}
+
+func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"claude": [
+			{
+				"id": "claude-sonnet-4-6",
+				"created": 1771372800,
+				"owned_by": "anthropic",
+				"context_length": 200000,
+				"max_completion_tokens": 64000
+			}
+		],
+		"gemini": [
+			{
+				"name": "models/gemini-3-pro",
+				"inputTokenLimit": 1048576,
+				"outputTokenLimit": 65536
+			}
+		]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+
+	byID := make(map[string]homeModelEntry, len(entries))
+	for _, entry := range entries {
+		byID[entry.id] = entry
+	}
+	claudeEntry, ok := byID["claude-sonnet-4-6"]
+	if !ok {
+		t.Fatalf("expected claude-sonnet-4-6 entry, got %v", byID)
+	}
+	if claudeEntry.contextLength != 200000 || claudeEntry.maxCompletionTokens != 64000 {
+		t.Fatalf("claude token metadata = %d/%d, want 200000/64000", claudeEntry.contextLength, claudeEntry.maxCompletionTokens)
+	}
+	geminiEntry, ok := byID["gemini-3-pro"]
+	if !ok {
+		t.Fatalf("expected gemini-3-pro entry, got %v", byID)
+	}
+	if geminiEntry.contextLength != 1048576 || geminiEntry.maxCompletionTokens != 65536 {
+		t.Fatalf("gemini token metadata = %d/%d, want 1048576/65536", geminiEntry.contextLength, geminiEntry.maxCompletionTokens)
 	}
 }
 

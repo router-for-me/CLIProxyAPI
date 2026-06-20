@@ -19,8 +19,8 @@ import (
 const OpenAIImageModelType = "openai-image"
 
 const (
-	defaultClaudeMaxInputTokens  = 200000
-	defaultClaudeMaxOutputTokens = 64000
+	DefaultClaudeMaxInputTokens  = 200000
+	DefaultClaudeMaxOutputTokens = 64000
 )
 
 // ModelInfo represents information about an available model
@@ -1163,9 +1163,7 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Created > 0 {
 			result["created_at"] = time.Unix(model.Created, 0).UTC().Format(time.RFC3339)
 		}
-		if model.Type != "" {
-			result["type"] = "model"
-		}
+		result["type"] = "model"
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
 		} else {
@@ -1173,11 +1171,11 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		maxInput := model.ContextLength
 		if maxInput <= 0 {
-			maxInput = defaultClaudeMaxInputTokens
+			maxInput = DefaultClaudeMaxInputTokens
 		}
 		maxOutput := model.MaxCompletionTokens
 		if maxOutput <= 0 {
-			maxOutput = defaultClaudeMaxOutputTokens
+			maxOutput = DefaultClaudeMaxOutputTokens
 		}
 		result["max_input_tokens"] = maxInput
 		result["max_tokens"] = maxOutput

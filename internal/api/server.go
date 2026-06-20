@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -1037,10 +1039,12 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Ha
 }
 
 type homeModelEntry struct {
-	id          string
-	created     int64
-	ownedBy     string
-	displayName string
+	id                  string
+	created             int64
+	ownedBy             string
+	displayName         string
+	contextLength       int
+	maxCompletionTokens int
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -1052,21 +1056,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		out := make([]map[string]any, 0, len(entries))
-		for _, entry := range entries {
-			model := map[string]any{
-				"id":       entry.id,
-				"object":   "model",
-				"owned_by": entry.ownedBy,
-			}
-			if entry.created > 0 {
-				model["created_at"] = entry.created
-			}
-			if entry.displayName != "" {
-				model["display_name"] = entry.displayName
-			}
-			out = append(out, model)
-		}
+		out := formatHomeClaudeModels(entries)
 		firstID := ""
 		lastID := ""
 		if len(out) > 0 {
@@ -1104,6 +1094,42 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		"object": "list",
 		"data":   filtered,
 	})
+}
+
+func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {
+	out := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, formatHomeClaudeModel(entry))
+	}
+	return out
+}
+
+func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
+	displayName := entry.displayName
+	if displayName == "" {
+		displayName = entry.id
+	}
+	maxInput := entry.contextLength
+	if maxInput <= 0 {
+		maxInput = registry.DefaultClaudeMaxInputTokens
+	}
+	maxOutput := entry.maxCompletionTokens
+	if maxOutput <= 0 {
+		maxOutput = registry.DefaultClaudeMaxOutputTokens
+	}
+	model := map[string]any{
+		"id":               entry.id,
+		"object":           "model",
+		"owned_by":         entry.ownedBy,
+		"type":             "model",
+		"display_name":     displayName,
+		"max_input_tokens": maxInput,
+		"max_tokens":       maxOutput,
+	}
+	if entry.created > 0 {
+		model["created_at"] = time.Unix(entry.created, 0).UTC().Format(time.RFC3339)
+	}
+	return model
 }
 
 func (s *Server) handleHomeGeminiModels(c *gin.Context) {
@@ -1321,20 +1347,6 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			}
 			seen[id] = struct{}{}
 
-			created := int64(0)
-			switch v := model["created"].(type) {
-			case float64:
-				created = int64(v)
-			case int64:
-				created = v
-			case int:
-				created = int64(v)
-			case json.Number:
-				if n, err := v.Int64(); err == nil {
-					created = n
-				}
-			}
-
 			ownedBy, _ := model["owned_by"].(string)
 			ownedBy = strings.TrimSpace(ownedBy)
 			displayName, _ := model["display_name"].(string)
@@ -1345,10 +1357,12 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			}
 
 			out = append(out, homeModelEntry{
-				id:          id,
-				created:     created,
-				ownedBy:     ownedBy,
-				displayName: displayName,
+				id:                  id,
+				created:             homeModelInt64Value(model, "created"),
+				ownedBy:             ownedBy,
+				displayName:         displayName,
+				contextLength:       int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens")),
+				maxCompletionTokens: int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens")),
 			})
 		}
 	}
@@ -1358,6 +1372,28 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		return nil, fmt.Errorf("home models payload contains no models")
 	}
 	return out, nil
+}
+
+func homeModelInt64Value(model map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		switch value := model[key].(type) {
+		case float64:
+			return int64(value)
+		case int64:
+			return value
+		case int:
+			return int64(value)
+		case json.Number:
+			if n, errInt := value.Int64(); errInt == nil {
+				return n
+			}
+		case string:
+			if n, errParse := strconv.ParseInt(strings.TrimSpace(value), 10, 64); errParse == nil {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
