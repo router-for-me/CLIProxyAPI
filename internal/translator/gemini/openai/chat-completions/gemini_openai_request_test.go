@@ -58,3 +58,46 @@ func TestConvertOpenAIRequestToGeminiPreservesInputAudio(t *testing.T) {
 		t.Fatalf("audio data = %q, want %q", got, "SUQzBA==")
 	}
 }
+
+func TestConvertOpenAIRequestToGeminiCleansToolSchemaRequiredFields(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.0-flash",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "search_company",
+				"description": "Search",
+				"parameters": {
+					"type": "object",
+					"title": "SearchCompany",
+					"properties": {
+						"country": {"type": "string"},
+						"industry": {"type": "string"}
+					},
+					"required": ["country", "industry", "stale_field", "another_stale"]
+				}
+			}
+		}]
+	}`
+
+	output := ConvertOpenAIRequestToGemini("gemini-2.0-flash", []byte(inputJSON), false)
+	schema := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema")
+
+	if !schema.Exists() {
+		t.Fatalf("parametersJsonSchema missing. Output: %s", output)
+	}
+	if schema.Get("title").Exists() {
+		t.Fatalf("schema title should be removed. Output: %s", output)
+	}
+	required := schema.Get("required").Array()
+	if len(required) != 2 {
+		t.Fatalf("required length = %d, want 2. Schema: %s", len(required), schema.Raw)
+	}
+	if got := required[0].String(); got != "country" {
+		t.Fatalf("required[0] = %q, want country. Schema: %s", got, schema.Raw)
+	}
+	if got := required[1].String(); got != "industry" {
+		t.Fatalf("required[1] = %q, want industry. Schema: %s", got, schema.Raw)
+	}
+}
