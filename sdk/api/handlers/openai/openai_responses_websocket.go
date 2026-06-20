@@ -373,13 +373,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		var requestJSON []byte
 		var updatedLastRequest []byte
-		var passthroughUpdatedLastRequest []byte
+		var passthroughTranscriptSnapshot []byte
 		passthroughCanUpdateTranscript := false
 		var errMsg *interfaces.ErrorMessage
 		if useUpstreamWebsocketPassthrough {
 			requestJSON, errMsg = normalizeResponsesWebsocketPassthroughRequest(payload, requestModelName)
 			if errMsg == nil {
-				_, passthroughUpdatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState(
+				// Keep upstream passthrough incremental, but cache a cumulative snapshot for reconnect replay.
+				_, passthroughTranscriptSnapshot, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState(
 					requestJSON,
 					lastRequest,
 					lastResponseOutput,
@@ -389,7 +390,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					true,
 				)
 				if errMsg == nil {
-					passthroughCanUpdateTranscript = len(passthroughUpdatedLastRequest) != 0
+					passthroughCanUpdateTranscript = len(passthroughTranscriptSnapshot) != 0
 				} else {
 					errMsg = nil
 				}
@@ -534,7 +535,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseID = strings.TrimSpace(completedResponseID)
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
 		} else if passthroughCanUpdateTranscript && forwardErrMsg == nil && strings.TrimSpace(completedResponseID) != "" {
-			lastRequest = passthroughUpdatedLastRequest
+			lastRequest = passthroughTranscriptSnapshot
 			lastResponseOutput = completedOutput
 			lastResponseID = strings.TrimSpace(completedResponseID)
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
