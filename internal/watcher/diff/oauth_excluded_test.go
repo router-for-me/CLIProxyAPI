@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -86,4 +87,13 @@ func expectContains(t *testing.T, list []string, target string) {
 		}
 	}
 	t.Fatalf("expected list to contain %q, got %#v", target, list)
+}
+
+func expectNotContains(t *testing.T, list []string, target string) {
+	t.Helper()
+	for _, entry := range list {
+		if strings.Contains(entry, target) {
+			t.Fatalf("expected list not to contain %q, got %#v", target, list)
+		}
+	}
 }

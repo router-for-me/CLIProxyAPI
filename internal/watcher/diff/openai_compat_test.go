@@ -67,6 +67,31 @@ func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	expectContains(t, changes, "provider removed: provider-a (api-keys=1, models=1)")
 }
 
+func TestDiffOpenAICompatibility_SelectionWeights(t *testing.T) {
+	providerWeight := 4
+	keyWeight := 0
+	oldList := []config.OpenAICompatibility{
+		{
+			Name: "provider-a",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "key-a"},
+			},
+		},
+	}
+	newList := []config.OpenAICompatibility{
+		{
+			Name:            "provider-a",
+			SelectionWeight: &providerWeight,
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "key-a", SelectionWeight: &keyWeight},
+			},
+		},
+	}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (selection-weight 1 -> 4, api-key selection-weights updated)")
+}
+
 func TestOpenAICompatKeyFallbacks(t *testing.T) {
 	entry := config.OpenAICompatibility{
 		BaseURL: "http://base",

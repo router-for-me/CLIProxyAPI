@@ -134,6 +134,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
+			if effectiveSelectionWeight(o.SelectionWeight) != effectiveSelectionWeight(n.SelectionWeight) {
+				changes = append(changes, fmt.Sprintf("gemini[%d].selection-weight: %d -> %d", i, effectiveSelectionWeight(o.SelectionWeight), effectiveSelectionWeight(n.SelectionWeight)))
+			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].api-key: updated", i))
 			}
@@ -168,6 +171,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("claude[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if effectiveSelectionWeight(o.SelectionWeight) != effectiveSelectionWeight(n.SelectionWeight) {
+				changes = append(changes, fmt.Sprintf("claude[%d].selection-weight: %d -> %d", i, effectiveSelectionWeight(o.SelectionWeight), effectiveSelectionWeight(n.SelectionWeight)))
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("claude[%d].api-key: updated", i))
@@ -217,6 +223,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("codex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if effectiveSelectionWeight(o.SelectionWeight) != effectiveSelectionWeight(n.SelectionWeight) {
+				changes = append(changes, fmt.Sprintf("codex[%d].selection-weight: %d -> %d", i, effectiveSelectionWeight(o.SelectionWeight), effectiveSelectionWeight(n.SelectionWeight)))
 			}
 			if o.Websockets != n.Websockets {
 				changes = append(changes, fmt.Sprintf("codex[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
@@ -297,6 +306,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
+			if effectiveSelectionWeight(o.SelectionWeight) != effectiveSelectionWeight(n.SelectionWeight) {
+				changes = append(changes, fmt.Sprintf("vertex[%d].selection-weight: %d -> %d", i, effectiveSelectionWeight(o.SelectionWeight), effectiveSelectionWeight(n.SelectionWeight)))
+			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].api-key: updated", i))
 			}
@@ -325,6 +337,13 @@ func trimStrings(in []string) []string {
 		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
+}
+
+func effectiveSelectionWeight(weight *int) int {
+	if weight == nil || *weight < 0 {
+		return 1
+	}
+	return *weight
 }
 
 func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.PayloadConfig) []string {
