@@ -850,6 +850,25 @@ func TestResponseCompletedOutputFromPayload(t *testing.T) {
 	}
 }
 
+func TestResponseCompletedOutputFromPayloadDropsWebSearchAction(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool","arguments":"{}"}]}}`)
+
+	output := responseCompletedOutputFromPayload(payload)
+	items := gjson.ParseBytes(output).Array()
+	if len(items) != 2 {
+		t.Fatalf("output len = %d, want 2", len(items))
+	}
+	if items[0].Get("action").Exists() {
+		t.Fatalf("web search action leaked into replay output: %s", output)
+	}
+	if got := items[0].Get("type").String(); got != "web_search_call" {
+		t.Fatalf("output[0].type = %s, want web_search_call", got)
+	}
+	if got := items[1].Get("arguments").String(); got != "{}" {
+		t.Fatalf("function call arguments were not preserved: %s", output)
+	}
+}
+
 func TestAppendWebsocketEvent(t *testing.T) {
 	var builder strings.Builder
 
@@ -3924,6 +3943,30 @@ func TestNormalizeSubsequentRequestCompactMergesWhenCompactionReplayUnsupported(
 		if item.Get("type").String() == "compaction" || item.Get("type").String() == "compaction_summary" {
 			t.Fatalf("compaction items must be stripped for unsupported downstream fallback: %s", item.Raw)
 		}
+	}
+}
+
+func TestNormalizeSubsequentRequestDropsWebSearchActionFromReplayOutput(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"original prompt"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}},
+		{"type":"message","role":"assistant","id":"msg-2","content":"search done"}
+	]`)
+	raw := []byte(`{"type":"response.create","input":[{"type":"message","role":"user","id":"msg-3","content":"next question"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 4 {
+		t.Fatalf("input len = %d, want 4: %s", len(input), normalized)
+	}
+	if got := input[1].Get("type").String(); got != "web_search_call" {
+		t.Fatalf("input[1].type = %q, want web_search_call: %s", got, normalized)
+	}
+	if input[1].Get("action").Exists() {
+		t.Fatalf("web search action leaked into merged input: %s", normalized)
 	}
 }
 

@@ -1574,6 +1574,25 @@ func sanitizeCodexHTTPFallbackPayload(payload []byte) []byte {
 		out, _ = sjson.DeleteBytes(out, "type")
 	}
 	out, _ = sjson.DeleteBytes(out, "generate")
+	out = sanitizeCodexHTTPFallbackInput(out)
+	return out
+}
+
+func sanitizeCodexHTTPFallbackInput(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return payload
+	}
+	out := payload
+	for i, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "web_search_call" || !item.Get("action").Exists() {
+			continue
+		}
+		updated, err := sjson.DeleteBytes(out, fmt.Sprintf("input.%d.action", i))
+		if err == nil {
+			out = updated
+		}
+	}
 	return out
 }
 

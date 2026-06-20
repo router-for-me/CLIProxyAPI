@@ -748,7 +748,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 
 		existingInput := gjson.GetBytes(lastRequest, "input")
 		var errMerge error
-		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(sanitizeResponsesOutputForInput(lastResponseOutput)))
 		if errMerge != nil {
 			return nil, lastRequest, &interfaces.ErrorMessage{
 				StatusCode: http.StatusBadRequest,
@@ -1627,9 +1627,30 @@ func responsesWebsocketPreviousResponseNotFoundError(errMsg *interfaces.ErrorMes
 func responseCompletedOutputFromPayload(payload []byte) []byte {
 	output := gjson.GetBytes(payload, "response.output")
 	if output.Exists() && output.IsArray() {
-		return bytes.Clone([]byte(output.Raw))
+		return sanitizeResponsesOutputForInput([]byte(output.Raw))
 	}
 	return []byte("[]")
+}
+
+func sanitizeResponsesOutputForInput(output []byte) []byte {
+	if len(output) == 0 {
+		return output
+	}
+	items := gjson.ParseBytes(output)
+	if !items.IsArray() {
+		return output
+	}
+	out := bytes.Clone(output)
+	for i, item := range items.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "web_search_call" || !item.Get("action").Exists() {
+			continue
+		}
+		updated, err := sjson.DeleteBytes(out, fmt.Sprintf("%d.action", i))
+		if err == nil {
+			out = updated
+		}
+	}
+	return out
 }
 
 func responseCompletedIDFromPayload(payload []byte) string {
