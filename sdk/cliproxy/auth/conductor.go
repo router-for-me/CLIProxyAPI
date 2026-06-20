@@ -486,9 +486,6 @@ func (m *Manager) ClearQuotaState(ctx context.Context, authID string) bool {
 		}
 		managerChanged = clearQuotaStateForAuth(auth, now)
 		if managerChanged {
-			if errPersist := m.persist(ctx, auth); errPersist != nil {
-				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth quota reset state: %v", errPersist)
-			}
 			snapshot = auth.Clone()
 		}
 		if trackCooldownState {
@@ -498,6 +495,11 @@ func (m *Manager) ClearQuotaState(ctx context.Context, authID string) bool {
 	}
 	m.mu.Unlock()
 
+	if managerChanged && snapshot != nil {
+		if errPersist := m.persist(ctx, snapshot); errPersist != nil {
+			logEntryWithRequestID(ctx).WithField("auth_id", snapshot.ID).Warnf("failed to persist auth quota reset state: %v", errPersist)
+		}
+	}
 	if m.scheduler != nil {
 		switch {
 		case snapshot != nil:
