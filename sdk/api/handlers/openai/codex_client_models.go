@@ -26,6 +26,7 @@ var codexClientAllowedReasoningLevels = map[string]struct{}{
 	"medium": {},
 	"high":   {},
 	"xhigh":  {},
+	"max":    {},
 }
 
 func (h *OpenAIAPIHandler) codexClientModelsResponse() map[string]any {
@@ -132,6 +133,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["description"] = description
 	entry["priority"] = 100
 	entry["prefer_websockets"] = false
+	entry["service_tiers"] = []any{}
 	delete(entry, "apply_patch_tool_type")
 	delete(entry, "upgrade")
 	delete(entry, "availability_nux")
@@ -249,6 +251,8 @@ func codexClientReasoningDescription(level string) string {
 		return "Greater reasoning depth for complex problems"
 	case "xhigh":
 		return "Extra high reasoning depth for complex problems"
+	case "max":
+		return "Maximum available reasoning depth for complex problems"
 	default:
 		return level
 	}

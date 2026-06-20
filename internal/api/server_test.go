@@ -531,6 +531,10 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["prefer_websockets"].(bool); got {
 		t.Fatalf("custom prefer_websockets = %v, want false", custom["prefer_websockets"])
 	}
+	customServiceTiers, ok := custom["service_tiers"].([]any)
+	if !ok || len(customServiceTiers) != 0 {
+		t.Fatalf("expected custom model service_tiers = [], got %#v", custom["service_tiers"])
+	}
 	if _, ok := custom["apply_patch_tool_type"]; ok {
 		t.Fatal("expected custom model to omit apply_patch_tool_type")
 	}
