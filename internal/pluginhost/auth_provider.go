@@ -161,6 +161,14 @@ func (h *Host) callAuthProviderIdentifier(pluginID string, provider pluginapi.Au
 }
 
 func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
+	auths, handled, errParseAuths := h.ParseAuths(ctx, req)
+	if errParseAuths != nil || !handled || len(auths) == 0 {
+		return nil, handled, errParseAuths
+	}
+	return auths[0], true, nil
+}
+
+func (h *Host) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
 	if h == nil {
 		return nil, false, nil
 	}
@@ -169,21 +177,29 @@ func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*
 		if record == nil {
 			return nil, false, nil
 		}
-		return h.callParseAuth(ctx, *record, req)
+		return h.callParseAuths(ctx, *record, req)
 	}
 	for _, record := range h.Snapshot().records {
 		if record.plugin.Capabilities.AuthProvider == nil || h.isPluginFused(record.id) {
 			continue
 		}
-		auth, handled, errParse := h.callParseAuth(ctx, record, req)
+		auths, handled, errParse := h.callParseAuths(ctx, record, req)
 		if errParse != nil || handled {
-			return auth, handled, errParse
+			return auths, handled, errParse
 		}
 	}
 	return nil, false, nil
 }
 
 func (h *Host) callParseAuth(ctx context.Context, record capabilityRecord, req pluginapi.AuthParseRequest) (auth *coreauth.Auth, handled bool, err error) {
+	auths, handled, errParseAuths := h.callParseAuths(ctx, record, req)
+	if errParseAuths != nil || !handled || len(auths) == 0 {
+		return nil, handled, errParseAuths
+	}
+	return auths[0], true, nil
+}
+
+func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req pluginapi.AuthParseRequest) (auths []*coreauth.Auth, handled bool, err error) {
 	provider := record.plugin.Capabilities.AuthProvider
 	if h == nil || provider == nil || h.isPluginFused(record.id) {
 		return nil, false, nil
@@ -191,7 +207,7 @@ func (h *Host) callParseAuth(ctx context.Context, record capabilityRecord, req p
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, "AuthProvider.ParseAuth", recovered)
-			auth = nil
+			auths = nil
 			handled = false
 			err = fmt.Errorf("auth provider panic: %v", recovered)
 		}
@@ -211,21 +227,32 @@ func (h *Host) callParseAuth(ctx context.Context, record capabilityRecord, req p
 	if !resp.Handled {
 		return nil, false, nil
 	}
-	data := resp.Auth
-	if strings.TrimSpace(data.Provider) == "" {
-		data.Provider = req.Provider
+	datas := pluginAuthParseResponseAuths(resp)
+	auths = make([]*coreauth.Auth, 0, len(datas))
+	for _, data := range datas {
+		if strings.TrimSpace(data.Provider) == "" {
+			data.Provider = req.Provider
+		}
+		if strings.TrimSpace(data.Provider) == "" {
+			data.Provider = normalizeProviderID(provider.Identifier())
+		}
+		if normalizeProviderID(data.Provider) == "" {
+			return nil, true, fmt.Errorf("auth provider %s returned auth without provider", record.id)
+		}
+		parsed := h.AuthDataToCoreAuth(data, req.Path, req.FileName)
+		if parsed == nil {
+			return nil, true, fmt.Errorf("auth provider %s returned invalid auth data", record.id)
+		}
+		auths = append(auths, parsed)
 	}
-	if strings.TrimSpace(data.Provider) == "" {
-		data.Provider = normalizeProviderID(provider.Identifier())
+	return auths, true, nil
+}
+
+func pluginAuthParseResponseAuths(resp pluginapi.AuthParseResponse) []pluginapi.AuthData {
+	if len(resp.Auths) > 0 {
+		return append([]pluginapi.AuthData(nil), resp.Auths...)
 	}
-	if normalizeProviderID(data.Provider) == "" {
-		return nil, true, fmt.Errorf("auth provider %s returned auth without provider", record.id)
-	}
-	parsed := h.AuthDataToCoreAuth(data, req.Path, req.FileName)
-	if parsed == nil {
-		return nil, true, fmt.Errorf("auth provider %s returned invalid auth data", record.id)
-	}
-	return parsed, true, nil
+	return []pluginapi.AuthData{resp.Auth}
 }
 
 func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string) (pluginapi.AuthLoginStartResponse, bool, error) {

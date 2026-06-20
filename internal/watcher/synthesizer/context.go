@@ -14,6 +14,12 @@ type PluginAuthParser interface {
 	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
 }
 
+// PluginMultiAuthParser expands one auth JSON payload into multiple plugin auth records.
+// Returning handled=true with an empty slice means the plugin intentionally suppresses built-in parsing.
+type PluginMultiAuthParser interface {
+	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error)
+}
+
 // SynthesisContext provides the context needed for auth synthesis.
 type SynthesisContext struct {
 	// Config is the current configuration

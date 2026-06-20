@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestNewFileSynthesizer(t *testing.T) {
@@ -158,6 +160,105 @@ func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	if len(auths) != 0 {
 		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
 	}
+}
+
+func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "geminicli.json")
+	raw := []byte(`{"type":"gemini-cli","excluded_models":["model-a"],"headers":{"X-Test":"value"}}`)
+
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			if req.Provider != "gemini-cli" || req.Path != fullPath || req.FileName != "geminicli.json" {
+				t.Fatalf("ParseAuths request = %#v, want file context", req)
+			}
+			return []*coreauth.Auth{
+				{
+					ID:       "geminicli.json",
+					Provider: "gemini-cli",
+					Metadata: map[string]any{
+						"type": "gemini-cli",
+						"headers": map[string]any{
+							"X-Test": "value",
+						},
+					},
+				},
+				nil,
+				{
+					ID:       "geminicli-project-a.json",
+					Provider: "gemini-cli",
+					Metadata: map[string]any{
+						"type":       "gemini-cli",
+						"project_id": "project-a",
+						"headers": map[string]any{
+							"X-Test": "value",
+						},
+					},
+				},
+			}, true, nil
+		}),
+	}
+
+	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	if len(auths) != 2 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want two plugin auths", len(auths))
+	}
+	if firstIndex, secondIndex := auths[0].EnsureIndex(), auths[1].EnsureIndex(); firstIndex == "" || firstIndex == secondIndex {
+		t.Fatalf("auth indexes = %q/%q, want distinct non-empty indexes", firstIndex, secondIndex)
+	}
+	for _, auth := range auths {
+		if !coreauth.IsPluginVirtualAuth(auth) {
+			t.Fatalf("auth attributes = %#v, want plugin virtual marker", auth.Attributes)
+		}
+		if auth.Attributes[coreauth.AttributeVirtualSource] != fullPath {
+			t.Fatalf("virtual_source = %q, want %q", auth.Attributes[coreauth.AttributeVirtualSource], fullPath)
+		}
+		if auth.Attributes["path"] != fullPath || auth.Attributes["source"] != fullPath {
+			t.Fatalf("auth attributes = %#v, want source path", auth.Attributes)
+		}
+		if gotHeader := auth.Attributes["header:X-Test"]; gotHeader != "value" {
+			t.Fatalf("header:X-Test = %q, want value", gotHeader)
+		}
+		if gotKind := auth.Attributes["auth_kind"]; gotKind != "oauth" {
+			t.Fatalf("auth_kind = %q, want oauth", gotKind)
+		}
+	}
+	if gotProject := auths[1].Metadata["project_id"]; gotProject != "project-a" {
+		t.Fatalf("project_id = %#v, want project-a", gotProject)
+	}
+}
+
+func TestSynthesizeAuthFilePluginHandledEmptySuppressesBuiltin(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "codex.json")
+	raw := []byte(`{"type":"codex","access_token":"token"}`)
+
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			return nil, true, nil
+		}),
+	}
+
+	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	if len(auths) != 0 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want plugin-handled empty result", len(auths))
+	}
+}
+
+type multiAuthParserFunc func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error)
+
+func (f multiAuthParserFunc) ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
+	return nil, false, nil
+}
+
+func (f multiAuthParserFunc) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+	return f(ctx, req)
 }
 
 func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {

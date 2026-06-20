@@ -23,6 +23,12 @@ type PluginAuthParser interface {
 	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*cliproxyauth.Auth, bool, error)
 }
 
+// PluginMultiAuthParser expands one auth JSON payload into multiple plugin auth records.
+// Returning handled=true with an empty slice means the plugin intentionally suppresses built-in parsing.
+type PluginMultiAuthParser interface {
+	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error)
+}
+
 type pluginAuthParserHolder struct {
 	parser PluginAuthParser
 }
@@ -171,12 +177,12 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 			return nil
 		}
-		auth, err := s.readAuthFile(path, dir)
-		if err != nil {
+		auths, errReadAuths := s.readAuthFiles(path, dir)
+		if errReadAuths != nil {
 			return nil
 		}
-		if auth != nil {
-			entries = append(entries, auth)
+		if len(auths) > 0 {
+			entries = append(entries, auths...)
 		}
 		return nil
 	})
@@ -213,7 +219,7 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(dir, id), nil
 }
 
-func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
+func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Auth, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -235,22 +241,34 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		return nil, fmt.Errorf("stat file: %w", errStat)
 	}
 	if parser := currentPluginAuthParser(); parser != nil {
-		auth, handled, errParse := parser.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+		auths, handled, errParse := parsePluginAuthFile(parser, pluginapi.AuthParseRequest{
 			Provider: provider,
 			Path:     path,
 			FileName: s.idFor(path, baseDir),
 			RawJSON:  data,
 		})
-		if errParse == nil && handled && auth != nil {
-			auth.CreatedAt = info.ModTime()
-			auth.UpdatedAt = info.ModTime()
-			if auth.Attributes == nil {
-				auth.Attributes = make(map[string]string)
+		if errParse == nil && handled {
+			auths = compactPluginAuths(auths)
+			if len(auths) == 0 {
+				return nil, nil
 			}
-			auth.Attributes["path"] = path
-			auth.Attributes["source"] = path
-			cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
-			return auth, nil
+			for index, auth := range auths {
+				if auth == nil {
+					continue
+				}
+				if len(auths) > 1 {
+					cliproxyauth.MarkPluginVirtualAuth(auth, path, index)
+				}
+				auth.CreatedAt = info.ModTime()
+				auth.UpdatedAt = info.ModTime()
+				if auth.Attributes == nil {
+					auth.Attributes = make(map[string]string)
+				}
+				auth.Attributes["path"] = path
+				auth.Attributes["source"] = path
+				cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+			}
+			return auths, nil
 		}
 	}
 	if provider == "" {
@@ -305,7 +323,43 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		auth.Attributes["email"] = email
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
-	return auth, nil
+	return []*cliproxyauth.Auth{auth}, nil
+}
+
+func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
+	auths, errReadAuths := s.readAuthFiles(path, baseDir)
+	if errReadAuths != nil || len(auths) == 0 {
+		return nil, errReadAuths
+	}
+	return auths[0], nil
+}
+
+func parsePluginAuthFile(parser PluginAuthParser, req pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
+	if parser == nil {
+		return nil, false, nil
+	}
+	if multiParser, ok := parser.(PluginMultiAuthParser); ok {
+		return multiParser.ParseAuths(context.Background(), req)
+	}
+	auth, handled, errParse := parser.ParseAuth(context.Background(), req)
+	if errParse != nil || !handled || auth == nil {
+		return nil, handled, errParse
+	}
+	return []*cliproxyauth.Auth{auth}, true, nil
+}
+
+func compactPluginAuths(auths []*cliproxyauth.Auth) []*cliproxyauth.Auth {
+	if len(auths) == 0 {
+		return nil
+	}
+	out := auths[:0]
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		out = append(out, auth)
+	}
+	return out
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

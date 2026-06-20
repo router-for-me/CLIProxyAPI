@@ -253,6 +253,8 @@ type AuthParseResponse struct {
 	Handled bool
 	// Auth is the parsed auth record when Handled is true.
 	Auth AuthData
+	// Auths contains multiple parsed auth records when one auth material expands into several runtime auths.
+	Auths []AuthData
 }
 
 // AuthProvider parses, logs in, polls, and refreshes plugin provider auths.
@@ -326,6 +328,8 @@ type AuthLoginPollResponse struct {
 	Message string
 	// Auth is the completed auth record when Status is success.
 	Auth AuthData
+	// Auths contains multiple completed auth records when one login flow expands into several runtime auths.
+	Auths []AuthData
 }
 
 // AuthRefreshRequest asks a plugin to refresh provider auth data.

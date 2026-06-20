@@ -117,6 +117,51 @@ func TestParseAuthDefaultsProviderFromAuthProviderIdentifier(t *testing.T) {
 	}
 }
 
+func TestParseAuthsExpandsMultiplePluginAuths(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "geminicli",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "gemini-cli",
+					parseAuth: func(ctx context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+						return pluginapi.AuthParseResponse{
+							Handled: true,
+							Auths: []pluginapi.AuthData{
+								{
+									Provider:    "gemini-cli",
+									ID:          "user.json",
+									FileName:    "user.json",
+									StorageJSON: []byte(`{"type":"gemini-cli"}`),
+								},
+								{
+									Provider:    "gemini-cli",
+									ID:          "user-project-a.json",
+									FileName:    "user-project-a.json",
+									StorageJSON: []byte(`{"type":"gemini-cli","project_id":"project-a"}`),
+									Metadata:    map[string]any{"project_id": "project-a"},
+								},
+							},
+						}, nil
+					},
+				},
+			},
+		},
+	})
+	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
+
+	auths, handled, errParse := host.ParseAuths(context.Background(), pluginapi.AuthParseRequest{Provider: "gemini-cli"})
+	if errParse != nil {
+		t.Fatalf("ParseAuths() error = %v", errParse)
+	}
+	if !handled || len(auths) != 2 {
+		t.Fatalf("ParseAuths() handled=%t len=%d, want two auths", handled, len(auths))
+	}
+	if auths[1].Provider != "gemini-cli" || auths[1].Metadata["project_id"] != "project-a" {
+		t.Fatalf("second auth = %#v, want project-a virtual auth", auths[1])
+	}
+}
+
 func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 	authDir := t.TempDir()
 	expiresAt := time.Now().Add(time.Minute).UTC()
