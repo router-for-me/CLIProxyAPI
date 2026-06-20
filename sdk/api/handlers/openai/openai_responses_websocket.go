@@ -1833,8 +1833,14 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	if status <= 0 {
 		status = int(gjson.GetBytes(payload, "status_code").Int())
 	}
+	errCode := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
+	errType := strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
 	if status <= 0 {
-		status = http.StatusInternalServerError
+		if strings.EqualFold(errCode, "previous_response_not_found") || strings.EqualFold(errType, "invalid_request_error") {
+			status = http.StatusBadRequest
+		} else {
+			status = http.StatusInternalServerError
+		}
 	}
 
 	errText := strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
@@ -1847,7 +1853,6 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	if errText == "" {
 		errText = http.StatusText(status)
 	}
-	errCode := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
 	if errCode != "" && !strings.Contains(errText, errCode) {
 		errText = fmt.Sprintf("%s (code: %s)", errText, errCode)
 	}

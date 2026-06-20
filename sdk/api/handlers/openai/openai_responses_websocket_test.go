@@ -1682,16 +1682,23 @@ func TestForwardResponsesWebsocketDoesNotInterceptErrorAfterPayload(t *testing.T
 }
 
 func TestResponsesWebsocketErrorPayloadPreservesCodeForPreviousResponseRetry(t *testing.T) {
-	payload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`)
-	errMsg := responsesWebsocketErrorMessageFromPayload(payload)
-	if errMsg == nil {
-		t.Fatal("expected error message")
-	}
-	if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "previous_response_not_found") {
-		t.Fatalf("error text = %v, want preserved previous_response_not_found code", errMsg.Error)
-	}
-	if !responsesWebsocketPreviousResponseNotFoundError(errMsg) {
-		t.Fatalf("previous_response_not_found websocket payload was not retryable: %v", errMsg.Error)
+	for _, payload := range [][]byte{
+		[]byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`),
+		[]byte(`{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`),
+	} {
+		errMsg := responsesWebsocketErrorMessageFromPayload(payload)
+		if errMsg == nil {
+			t.Fatal("expected error message")
+		}
+		if errMsg.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d for payload %s", errMsg.StatusCode, http.StatusBadRequest, payload)
+		}
+		if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "previous_response_not_found") {
+			t.Fatalf("error text = %v, want preserved previous_response_not_found code", errMsg.Error)
+		}
+		if !responsesWebsocketPreviousResponseNotFoundError(errMsg) {
+			t.Fatalf("previous_response_not_found websocket payload was not retryable: %v", errMsg.Error)
+		}
 	}
 }
 
