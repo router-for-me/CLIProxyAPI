@@ -460,8 +460,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	old := h.cfg.OpenAICompatibility
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.OpenAICompatibility = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
@@ -471,6 +477,8 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Disabled       *bool                               `json:"disabled"`
 		DisableCooling *bool                               `json:"disable-cooling"`
 		BaseURL        *string                             `json:"base-url"`
+		ProxyURL       *string                             `json:"proxy-url"`
+		Auth           *config.CommandAuthConfig           `json:"auth"`
 		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers        *map[string]string                  `json:"headers"`
@@ -521,12 +529,29 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
 		if trimmed == "" {
+			old := h.cfg.OpenAICompatibility
 			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:targetIndex], h.cfg.OpenAICompatibility[targetIndex+1:]...)
 			h.cfg.SanitizeOpenAICompatibility()
+			if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+				h.cfg.OpenAICompatibility = old
+				c.JSON(400, gin.H{"error": errValidate.Error()})
+				return
+			}
 			h.persistLocked(c)
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Auth != nil {
+		if strings.TrimSpace(body.Value.Auth.Command) == "" && len(body.Value.Auth.Args) == 0 && body.Value.Auth.TimeoutMS == 0 && body.Value.Auth.RefreshIntervalMS == 0 {
+			entry.Auth = nil
+		} else {
+			auth := *body.Value.Auth
+			entry.Auth = &auth
+		}
 	}
 	if body.Value.APIKeyEntries != nil {
 		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
@@ -538,8 +563,14 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
+	old := h.cfg.OpenAICompatibility
 	h.cfg.OpenAICompatibility[targetIndex] = entry
 	h.cfg.SanitizeOpenAICompatibility()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.OpenAICompatibility = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 
@@ -957,19 +988,26 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	old := h.cfg.CodexKey
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.CodexKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string              `json:"api-key"`
-		Prefix         *string              `json:"prefix"`
-		BaseURL        *string              `json:"base-url"`
-		ProxyURL       *string              `json:"proxy-url"`
-		Models         *[]config.CodexModel `json:"models"`
-		Headers        *map[string]string   `json:"headers"`
-		ExcludedModels *[]string            `json:"excluded-models"`
+		APIKey         *string                   `json:"api-key"`
+		Auth           *config.CommandAuthConfig `json:"auth"`
+		Prefix         *string                   `json:"prefix"`
+		BaseURL        *string                   `json:"base-url"`
+		ProxyURL       *string                   `json:"proxy-url"`
+		Models         *[]config.CodexModel      `json:"models"`
+		Headers        *map[string]string        `json:"headers"`
+		ExcludedModels *[]string                 `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1011,12 +1049,26 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
 		if trimmed == "" {
+			old := h.cfg.CodexKey
 			h.cfg.CodexKey = append(h.cfg.CodexKey[:targetIndex], h.cfg.CodexKey[targetIndex+1:]...)
 			h.cfg.SanitizeCodexKeys()
+			if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+				h.cfg.CodexKey = old
+				c.JSON(400, gin.H{"error": errValidate.Error()})
+				return
+			}
 			h.persistLocked(c)
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.Auth != nil {
+		if strings.TrimSpace(body.Value.Auth.Command) == "" && len(body.Value.Auth.Args) == 0 && body.Value.Auth.TimeoutMS == 0 && body.Value.Auth.RefreshIntervalMS == 0 {
+			entry.Auth = nil
+		} else {
+			auth := *body.Value.Auth
+			entry.Auth = &auth
+		}
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
@@ -1031,8 +1083,14 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
 	normalizeCodexKey(&entry)
+	old := h.cfg.CodexKey
 	h.cfg.CodexKey[targetIndex] = entry
 	h.cfg.SanitizeCodexKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.CodexKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 
@@ -1095,6 +1153,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {

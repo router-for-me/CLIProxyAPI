@@ -1004,7 +1004,18 @@ func isAPIKeyAuth(auth *Auth) bool {
 	if auth == nil {
 		return false
 	}
-	return auth.AuthKind() == AuthKindAPIKey
+	if auth.AuthKind() == AuthKindAPIKey {
+		return true
+	}
+	kind, _ := auth.AccountInfo()
+	if strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+		return true
+	}
+	if auth.Attributes == nil {
+		return false
+	}
+	authKind := strings.ToLower(strings.TrimSpace(auth.Attributes[AttrAuthKind]))
+	return authKind == AttrAuthKindAPIKey || authKind == AttrAuthKindAPIKeyUnderscore
 }
 
 func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
@@ -1948,7 +1959,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if strings.TrimSpace(auth.ID) == "" {
 			continue
 		}
-		if auth.AuthKind() != AuthKindAPIKey {
+		if !isAPIKeyAuth(auth) {
 			continue
 		}
 
@@ -3046,7 +3057,7 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		return requestedModel
 	}
 
-	if auth.AuthKind() != AuthKindAPIKey {
+	if !isAPIKeyAuth(auth) {
 		return requestedModel
 	}
 
@@ -3151,6 +3162,22 @@ func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.CodexKey {
 	if cfg == nil {
 		return nil
+	}
+	if auth != nil && auth.Attributes != nil {
+		attrCommandKey := strings.TrimSpace(auth.Attributes[AttrAuthCommandKey])
+		attrBase := strings.TrimSpace(auth.Attributes["base_url"])
+		if attrCommandKey != "" {
+			for i := range cfg.CodexKey {
+				entry := &cfg.CodexKey[i]
+				cfgCommandKey := internalconfig.CommandAuthIdentity(entry.Auth)
+				cfgBase := strings.TrimSpace(entry.BaseURL)
+				if cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
+					if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+						return entry
+					}
+				}
+			}
+		}
 	}
 	return resolveAPIKeyConfig(cfg.CodexKey, auth)
 }
@@ -3574,7 +3601,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					} else {
 						switch statusCode {
 						case 401:
-							if disableCooling {
+							if IsCommandAuth(auth) {
+								invalidateCommandAuthToken(auth)
+								state.Unavailable = false
+								state.NextRetryAfter = time.Time{}
+							} else if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
 								next := now.Add(30 * time.Minute)
@@ -4098,6 +4129,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 	switch statusCode {
 	case 401:
+		if IsCommandAuth(auth) {
+			invalidateCommandAuthToken(auth)
+			auth.Unavailable = false
+			auth.Status = StatusActive
+			auth.StatusMessage = ""
+			auth.NextRetryAfter = time.Time{}
+			return
+		}
 		auth.StatusMessage = "unauthorized"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
@@ -4148,6 +4187,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "request failed"
 		}
 	}
+}
+
+func invalidateCommandAuthToken(auth *Auth) {
+	if !IsCommandAuth(auth) {
+		return
+	}
+	if auth.Metadata != nil {
+		delete(auth.Metadata, "access_token")
+	}
+	auth.NextRefreshAfter = time.Time{}
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
@@ -5214,7 +5263,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if shouldSkipPersist(ctx) {
 		return nil
 	}
-	if IsConfigAPIKeyAuth(auth) {
+	if IsConfigCredentialAuth(auth) {
 		return nil
 	}
 	if auth.Attributes != nil {
@@ -5767,6 +5816,13 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if exec == nil {
 		return &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
+	preparedAuth, errPrepareAuth := m.prepareRequestAuth(ctx, exec, auth)
+	if errPrepareAuth != nil {
+		return errPrepareAuth
+	}
+	if preparedAuth != nil {
+		auth = preparedAuth
+	}
 	preparer, ok := exec.(RequestPreparer)
 	if !ok || preparer == nil {
 		return &Error{Code: "not_supported", Message: "executor does not support http request preparation"}
@@ -5818,6 +5874,13 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	exec := m.executorFor(providerKey)
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+	}
+	preparedAuth, errPrepareAuth := m.prepareRequestAuth(ctx, exec, auth)
+	if errPrepareAuth != nil {
+		return nil, errPrepareAuth
+	}
+	if preparedAuth != nil {
+		auth = preparedAuth
 	}
 	return exec.HttpRequest(ctx, auth, req)
 }

@@ -244,6 +244,15 @@ nonstream-keepalive-interval: 0
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+#   - base-url: "https://proxy.example.com/v1" # command auth is mutually exclusive with api-key
+#     auth:
+#       command: "/usr/local/bin/fetch-codex-token"
+#       args: ["--audience", "codex"]
+#       timeout-ms: 5000
+#       refresh-interval-ms: 300000
+#     models:
+#       - name: "gpt-5-codex"
+#         alias: "codex-command"
 
 # Claude API keys
 # claude-api-key:
@@ -337,6 +346,16 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#   - name: "internal-proxy"
+#     base-url: "https://proxy.example.com/v1" # command auth is mutually exclusive with non-empty api-key-entries
+#     auth:
+#       command: "/usr/local/bin/fetch-codex-token"
+#       args: ["--audience", "codex"]
+#       timeout-ms: 5000
+#       refresh-interval-ms: 300000
+#     models:
+#       - name: "gpt-5"
+#         alias: "gpt-5-internal"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:

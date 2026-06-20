@@ -30,4 +30,31 @@ func TestIsConfigAPIKeyAuth(t *testing.T) {
 	}) {
 		t.Fatal("expected config api key auth")
 	}
+	if IsConfigAPIKeyAuth(&Auth{
+		ID:       "codex:apikey:command",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"source":        "config:codex[abc]",
+			AttrAuthKind:    AttrAuthKindAPIKey,
+			AttrAuthSource:  AttrAuthSourceCommand,
+			AttrAuthCommand: "fetch-token",
+		},
+	}) {
+		t.Fatal("expected command auth without static api_key to not be static config api key auth")
+	}
+}
+
+func TestIsConfigCredentialAuth(t *testing.T) {
+	if !IsConfigCredentialAuth(&Auth{
+		ID:       "codex:apikey:command",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"source":        "config:codex[abc]",
+			AttrAuthKind:    AttrAuthKindAPIKey,
+			AttrAuthSource:  AttrAuthSourceCommand,
+			AttrAuthCommand: "fetch-token",
+		},
+	}) {
+		t.Fatal("expected command auth to be config credential auth")
+	}
 }

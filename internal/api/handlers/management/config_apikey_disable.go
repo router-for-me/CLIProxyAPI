@@ -31,7 +31,7 @@ func setConfigAPIKeyExcludedAll(models []string, disable bool) []string {
 }
 
 func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disable bool) (bool, error) {
-	if cfg == nil || auth == nil || !coreauth.IsConfigAPIKeyAuth(auth) {
+	if cfg == nil || auth == nil || !coreauth.IsConfigCredentialAuth(auth) {
 		return false, nil
 	}
 	authID := strings.TrimSpace(auth.ID)
@@ -59,7 +59,13 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.CodexKey {
 		entry := &cfg.CodexKey[i]
-		id, _ := idGen.Next("codex:apikey", entry.APIKey, entry.BaseURL)
+		var id string
+		if strings.TrimSpace(entry.APIKey) != "" {
+			id, _ = idGen.Next("codex:apikey", entry.APIKey, entry.BaseURL)
+		} else if entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+			idParts := append(synthesizer.CommandAuthIDParts(entry.Auth), entry.BaseURL)
+			id, _ = idGen.Next("codex:apikey", idParts...)
+		}
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil

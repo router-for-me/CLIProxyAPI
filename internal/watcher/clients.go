@@ -391,11 +391,19 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 		claudeAPIKeyCount += len(cfg.ClaudeKey)
 	}
 	if len(cfg.CodexKey) > 0 {
-		codexAPIKeyCount += len(cfg.CodexKey)
+		for _, entry := range cfg.CodexKey {
+			if strings.TrimSpace(entry.APIKey) != "" || entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+				codexAPIKeyCount++
+			}
+		}
 	}
 	if len(cfg.OpenAICompatibility) > 0 {
 		for _, compatConfig := range cfg.OpenAICompatibility {
 			if compatConfig.Disabled {
+				continue
+			}
+			if compatConfig.Auth != nil && strings.TrimSpace(compatConfig.Auth.Command) != "" {
+				openAICompatCount++
 				continue
 			}
 			openAICompatCount += len(compatConfig.APIKeyEntries)

@@ -27,6 +27,7 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type CommandAuthConfig = internalconfig.CommandAuthConfig
 
 type TLS = internalconfig.TLSConfig
 
@@ -41,6 +42,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 }
 
 func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.ParseConfigBytes(data) }
+
+func CommandAuthIdentity(auth *CommandAuthConfig) string {
+	return internalconfig.CommandAuthIdentity(auth)
+}
 
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	return internalconfig.SaveConfigPreserveComments(configFile, cfg)

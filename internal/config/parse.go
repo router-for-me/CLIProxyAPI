@@ -87,6 +87,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
 	cfg.SanitizePayloadRules()
+	if err := cfg.ValidateCommandAuthConfig(); err != nil {
+		return nil, fmt.Errorf("invalid command auth config: %w", err)
+	}
 
 	return &cfg, nil
 }

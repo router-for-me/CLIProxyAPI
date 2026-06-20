@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -117,4 +118,30 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 		}
 		attrs["header:"+key] = val
 	}
+}
+
+func CommandAuthIDParts(auth *config.CommandAuthConfig) []string {
+	if auth == nil || strings.TrimSpace(auth.Command) == "" {
+		return nil
+	}
+	return []string{
+		"auth-command",
+		strings.TrimSpace(auth.Command),
+		config.CommandAuthArgsJSON(auth),
+		config.CommandAuthIdentity(auth),
+	}
+}
+
+func addCommandAuthToAttrs(auth *config.CommandAuthConfig, attrs map[string]string) {
+	if auth == nil || attrs == nil || strings.TrimSpace(auth.Command) == "" {
+		return
+	}
+	attrs[coreauth.AttrAuthKind] = coreauth.AttrAuthKindAPIKey
+	attrs[coreauth.AttrAuthSource] = coreauth.AttrAuthSourceCommand
+	attrs[coreauth.AttrAuthCommand] = strings.TrimSpace(auth.Command)
+	attrs[coreauth.AttrAuthArgsJSON] = config.CommandAuthArgsJSON(auth)
+	attrs[coreauth.AttrAuthCommandKey] = config.CommandAuthIdentity(auth)
+	attrs[coreauth.AttrAuthTimeoutMS] = strconv.Itoa(auth.TimeoutMS)
+	attrs[coreauth.AttrAuthRefreshIntervalMS] = strconv.Itoa(auth.RefreshIntervalMS)
+	attrs[coreauth.AttrAuthInvalidatesOnNext401] = "true"
 }

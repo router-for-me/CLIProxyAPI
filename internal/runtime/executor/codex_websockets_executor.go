@@ -1696,6 +1696,20 @@ func (e *CodexAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 	return e.httpExec.PrepareRequest(req, auth)
 }
 
+func (e *CodexAutoExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if e == nil || e.httpExec == nil {
+		return false
+	}
+	return e.httpExec.ShouldPrepareRequestAuth(auth)
+}
+
+func (e *CodexAutoExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if e == nil || e.httpExec == nil {
+		return auth, nil
+	}
+	return e.httpExec.PrepareRequestAuth(ctx, auth)
+}
+
 func (e *CodexAutoExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if e == nil || e.httpExec == nil {
 		return nil, fmt.Errorf("codex auto executor: http executor is nil")

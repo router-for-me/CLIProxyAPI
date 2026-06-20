@@ -69,6 +69,12 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
+	if strings.TrimSpace(oldEntry.ProxyURL) != strings.TrimSpace(newEntry.ProxyURL) {
+		details = append(details, "proxy-url updated")
+	}
+	if config.CommandAuthIdentity(oldEntry.Auth) != config.CommandAuthIdentity(newEntry.Auth) || commandAuthPresence(oldEntry.Auth) != commandAuthPresence(newEntry.Auth) {
+		details = append(details, "auth updated")
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
@@ -85,6 +91,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {
+	if commandAuthPresence(entry.Auth) {
+		return 1
+	}
 	count := 0
 	for _, keyEntry := range entry.APIKeyEntries {
 		if strings.TrimSpace(keyEntry.APIKey) != "" {
@@ -145,6 +154,9 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if v := strings.TrimSpace(entry.BaseURL); v != "" {
 		parts = append(parts, "base="+v)
 	}
+	if v := strings.TrimSpace(entry.ProxyURL); v != "" {
+		parts = append(parts, "proxy="+v)
+	}
 
 	models := make([]string, 0, len(entry.Models))
 	for _, model := range entry.Models {
@@ -177,10 +189,17 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if count := countAPIKeys(entry); count > 0 {
 		parts = append(parts, fmt.Sprintf("api_keys=%d", count))
 	}
+	if identity := config.CommandAuthIdentity(entry.Auth); identity != "" {
+		parts = append(parts, "auth="+identity)
+	}
 
 	if len(parts) == 0 {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:])
+}
+
+func commandAuthPresence(auth *config.CommandAuthConfig) bool {
+	return auth != nil && strings.TrimSpace(auth.Command) != ""
 }
