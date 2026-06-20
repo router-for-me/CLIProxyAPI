@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -171,7 +172,7 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 			return nil
 		}
-		auth, err := s.readAuthFile(path, dir)
+		auth, err := s.readAuthFile(ctx, path, dir)
 		if err != nil {
 			return nil
 		}
@@ -213,7 +214,10 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(dir, id), nil
 }
 
-func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
+func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string) (*cliproxyauth.Auth, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -277,12 +281,25 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			}
 		}
 	}
+	disabled, _ := metadata["disabled"].(bool)
+	// Skip the subscription lookup for disabled credentials: they are excluded
+	// from runtime use, so contacting ChatGPT here would only delay List by up
+	// to the 20s timeout per file for no benefit.
+	if provider == "codex" && !disabled {
+		// Derive the timeout from the caller's context so a cancelled load
+		// (startup/shutdown) aborts promptly instead of blocking ~20s per file.
+		enrichCtx, cancelEnrich := context.WithTimeout(ctx, 20*time.Second)
+		changed, _ := codex.EnrichSubscriptionMetadata(enrichCtx, metadata, http.DefaultClient)
+		cancelEnrich()
+		if changed {
+			s.persistCodexSubscriptionFields(path, metadata)
+		}
+	}
 	info, errStat = os.Stat(path)
 	if errStat != nil {
 		return nil, fmt.Errorf("stat file: %w", errStat)
 	}
 	id := s.idFor(path, baseDir)
-	disabled, _ := metadata["disabled"].(bool)
 	status := cliproxyauth.StatusActive
 	if disabled {
 		status = cliproxyauth.StatusDisabled
@@ -304,8 +321,68 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	// Mirror the Codex subscription fields into attributes the runtime reads
+	// (the model catalog selects on Attributes["plan_type"]).
+	if provider == "codex" {
+		cliproxyauth.ApplyCodexSubscriptionAttributes(auth)
+	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+// codexSubscriptionMetadataKeys are the only keys the List-path enrichment is
+// allowed to write back, so a concurrent token Save is never rolled back.
+var codexSubscriptionMetadataKeys = []string{
+	"plan_type",
+	"subscription_active_until",
+	"subscription_expired",
+	"chatgpt_account_id",
+	"account_id",
+	"chatgpt_subscription_active_until",
+	"chatgpt_subscription_last_checked",
+}
+
+// persistCodexSubscriptionFields writes the enriched subscription fields back
+// to disk under the store mutex (the same lock Save uses). It re-reads the
+// current file and merges only the subscription keys, so a token refresh/login
+// Save racing the enrichment cannot have its fresh access/refresh tokens
+// clobbered by a stale read taken before the network call.
+func (s *FileTokenStore) persistCodexSubscriptionFields(path string, enriched map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, errRead := os.ReadFile(path)
+	if errRead != nil || len(data) == 0 {
+		return
+	}
+	current := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(data, &current); errUnmarshal != nil {
+		return
+	}
+	for _, key := range codexSubscriptionMetadataKeys {
+		if value, ok := enriched[key]; ok {
+			current[key] = value
+		}
+	}
+	_ = writeAuthMetadataFile(path, current)
+}
+
+func writeAuthMetadataFile(path string, metadata map[string]any) error {
+	raw, errMarshal := json.Marshal(metadata)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	// Write to a sibling temp file and atomically rename into place so a crash
+	// or concurrent read never observes a truncated/empty credential file.
+	tmpPath := path + ".tmp"
+	if errWrite := os.WriteFile(tmpPath, raw, 0o600); errWrite != nil {
+		return errWrite
+	}
+	if errRename := os.Rename(tmpPath, path); errRename != nil {
+		_ = os.Remove(tmpPath)
+		return errRename
+	}
+	return nil
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

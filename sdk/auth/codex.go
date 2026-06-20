@@ -194,5 +194,5 @@ waitForCallback:
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return a.buildAuthRecord(ctx, authSvc, authBundle)
 }

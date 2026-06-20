@@ -531,6 +531,15 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if subscription := extractCodexSubscriptionMetadata(auth); subscription != nil {
+		entry["codex_subscription"] = subscription
+		if v, ok := subscription["plan_type"]; ok {
+			entry["plan_type"] = v
+		}
+		if v, ok := subscription["subscription_active_until"]; ok {
+			entry["subscription_active_until"] = v
+		}
+	}
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
@@ -656,6 +665,71 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 		return nil
 	}
 	return result
+}
+
+func extractCodexSubscriptionMetadata(auth *coreauth.Auth) gin.H {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil
+	}
+	result := gin.H{}
+	copyMetadataValue(result, auth.Metadata, "account_id")
+	copyMetadataValue(result, auth.Metadata, "chatgpt_account_id")
+	copyMetadataValue(result, auth.Metadata, "plan_type")
+	copyMetadataValue(result, auth.Metadata, "subscription_active_until")
+	copyMetadataValue(result, auth.Metadata, "chatgpt_subscription_active_until")
+	// Derive the expired flag from the expiry at response time rather than
+	// exposing the cached boolean, which goes stale once the stored expiry
+	// passes without a reload/enrichment. Pass the raw metadata value (which may
+	// be a JSON number for Unix timestamps) so IsSubscriptionExpired can apply
+	// the same scalar normalization the enrichment uses, instead of a stringified
+	// float in scientific notation.
+	rawActiveUntil := metadataActiveUntilValue(auth.Metadata)
+	if rawActiveUntil != nil {
+		result["subscription_expired"] = codex.IsSubscriptionExpired(rawActiveUntil)
+	} else {
+		copyMetadataValue(result, auth.Metadata, "subscription_expired")
+	}
+	copyMetadataValue(result, auth.Metadata, "chatgpt_subscription_last_checked")
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// metadataActiveUntilValue returns the raw subscription expiry value (string or
+// JSON number) from metadata, preferring subscription_active_until, or nil when
+// neither key holds a usable value.
+func metadataActiveUntilValue(metadata map[string]any) any {
+	for _, key := range []string{"subscription_active_until", "chatgpt_subscription_active_until"} {
+		value, ok := metadata[key]
+		if !ok || value == nil {
+			continue
+		}
+		if text, isString := value.(string); isString && strings.TrimSpace(text) == "" {
+			continue
+		}
+		return value
+	}
+	return nil
+}
+
+func copyMetadataValue(dst gin.H, metadata map[string]any, key string) {
+	if dst == nil || metadata == nil {
+		return
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return
+	}
+	if text, isString := value.(string); isString {
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+	}
+	dst[key] = value
 }
 
 func authEmail(auth *coreauth.Auth) string {
@@ -2012,16 +2086,34 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		// Create token storage and persist
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+		metadata := map[string]any{
+			"email":      tokenStorage.Email,
+			"account_id": tokenStorage.AccountID,
+		}
+		// Bound this best-effort lookup so a slow/unresponsive ChatGPT backend
+		// cannot block the token save and OAuth session completion. Mirrors the
+		// SDK device-flow path (sdk/auth/codex_device.go).
+		enrichCtx, cancelEnrich := context.WithTimeout(ctx, 20*time.Second)
+		if _, errEnrich := openaiAuth.EnrichSubscriptionMetadata(
+			enrichCtx,
+			metadata,
+			tokenStorage.IDToken,
+			tokenStorage.AccessToken,
+			tokenStorage.AccountID,
+		); errEnrich != nil {
+			log.Warnf("Codex subscription metadata enrichment failed: %v", errEnrich)
+		}
+		cancelEnrich()
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "codex",
 			FileName: fileName,
 			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-			},
+			Metadata: metadata,
 		}
+		// Mirror the enriched subscription fields into attributes the runtime
+		// reads (Codex model-catalog selection keys off Attributes["plan_type"]).
+		coreauth.ApplyCodexSubscriptionAttributes(record)
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")

@@ -193,6 +193,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				}
 			}
 		}
+		// Enriched metadata (when present) takes precedence over the JWT claim.
+		coreauth.ApplyCodexSubscriptionAttributes(a)
 	}
 	return []*coreauth.Auth{a}
 }
