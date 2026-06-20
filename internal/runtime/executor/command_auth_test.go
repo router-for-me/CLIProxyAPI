@@ -15,12 +15,25 @@ import (
 )
 
 func TestParseCommandAuthBearerToken(t *testing.T) {
-	token, err := helps.ParseCommandAuthBearerToken([]byte("\nBearer test-token\n"))
-	if err != nil {
-		t.Fatalf("ParseCommandAuthBearerToken error: %v", err)
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{name: "bearer", output: "\nBearer test-token\n", want: "test-token"},
+		{name: "leading noise", output: "warning: cached token stale\nBearer fresh-token\n", want: "fresh-token"},
+		{name: "fallback", output: "plain-token\n", want: "plain-token"},
 	}
-	if token != "test-token" {
-		t.Fatalf("token = %q, want test-token", token)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token, err := helps.ParseCommandAuthBearerToken([]byte(tt.output))
+			if err != nil {
+				t.Fatalf("ParseCommandAuthBearerToken error: %v", err)
+			}
+			if token != tt.want {
+				t.Fatalf("token = %q, want %q", token, tt.want)
+			}
+		})
 	}
 }
 

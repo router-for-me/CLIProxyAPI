@@ -101,6 +101,31 @@ openai-compatibility:
 	}
 }
 
+func TestCommandAuthIdentityCachedAfterParse(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte(`
+codex-api-key:
+  - base-url: https://proxy.example.com/v1
+    auth:
+      command: fetch-token
+      args: ["--audience", "codex"]
+`))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes error: %v", err)
+	}
+	auth := cfg.CodexKey[0].Auth
+	if auth == nil {
+		t.Fatal("auth is nil")
+	}
+	identity := CommandAuthIdentity(auth)
+	if identity == "" {
+		t.Fatal("identity is empty")
+	}
+	auth.Args = []string{"mutated"}
+	if got := CommandAuthIdentity(auth); got != identity {
+		t.Fatalf("cached identity changed to %q, want %q", got, identity)
+	}
+}
+
 func TestParseConfigBytes_CommandAuthRejectsStaticKeyConflict(t *testing.T) {
 	_, err := ParseConfigBytes([]byte(`
 codex-api-key:

@@ -152,17 +152,21 @@ func isExecutableFile(path string) bool {
 
 // ParseCommandAuthBearerToken extracts a bearer token from command stdout.
 func ParseCommandAuthBearerToken(output []byte) (string, error) {
+	var fallbackToken string
 	for _, line := range bytes.Split(output, []byte{'\n'}) {
 		token := strings.TrimSpace(string(line))
 		if token == "" {
 			continue
 		}
 		if len(token) >= len("Bearer ") && strings.EqualFold(token[:len("Bearer ")], "Bearer ") {
-			token = strings.TrimSpace(token[len("Bearer "):])
+			return strings.TrimSpace(token[len("Bearer "):]), nil
 		}
-		if token != "" {
-			return token, nil
+		if fallbackToken == "" {
+			fallbackToken = token
 		}
+	}
+	if fallbackToken != "" {
+		return fallbackToken, nil
 	}
 	return "", fmt.Errorf("command auth: command produced empty stdout")
 }

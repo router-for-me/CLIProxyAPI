@@ -21,6 +21,7 @@ type CommandAuthConfig struct {
 	Args              []string `yaml:"args,omitempty" json:"args,omitempty"`
 	TimeoutMS         int      `yaml:"timeout-ms,omitempty" json:"timeout-ms,omitempty"`
 	RefreshIntervalMS int      `yaml:"refresh-interval-ms,omitempty" json:"refresh-interval-ms,omitempty"`
+	identity          string
 }
 
 func (c *CommandAuthConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -200,6 +201,8 @@ func normalizeCommandAuth(auth *CommandAuthConfig) {
 	if auth.RefreshIntervalMS == 0 {
 		auth.RefreshIntervalMS = DefaultCommandAuthRefreshIntervalMS
 	}
+	auth.identity = ""
+	auth.identity = CommandAuthIdentity(auth)
 }
 
 func validateCommandAuth(section string, auth *CommandAuthConfig) error {
@@ -223,6 +226,9 @@ func CommandAuthIdentity(auth *CommandAuthConfig) string {
 	if auth == nil || strings.TrimSpace(auth.Command) == "" {
 		return ""
 	}
+	if auth.identity != "" {
+		return auth.identity
+	}
 	argsJSON, _ := json.Marshal(normalizedCommandAuthArgs(auth.Args))
 	sum := sha256.Sum256([]byte(strings.TrimSpace(auth.Command) + "\x00" + string(argsJSON)))
 	return hex.EncodeToString(sum[:])
@@ -240,11 +246,7 @@ func normalizedCommandAuthArgs(args []string) []string {
 	if len(args) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(args))
-	for _, arg := range args {
-		out = append(out, arg)
-	}
-	return out
+	return args
 }
 
 // ValidateCommandAuthConfig validates dynamic provider auth configuration.

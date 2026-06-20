@@ -460,7 +460,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	old := h.cfg.OpenAICompatibility
+	old := cloneOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
@@ -529,7 +529,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
 		if trimmed == "" {
-			old := h.cfg.OpenAICompatibility
+			old := cloneOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
 			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:targetIndex], h.cfg.OpenAICompatibility[targetIndex+1:]...)
 			h.cfg.SanitizeOpenAICompatibility()
 			if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
@@ -563,7 +563,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
-	old := h.cfg.OpenAICompatibility
+	old := cloneOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
 	h.cfg.OpenAICompatibility[targetIndex] = entry
 	h.cfg.SanitizeOpenAICompatibility()
 	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
@@ -988,7 +988,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	old := h.cfg.CodexKey
+	old := cloneCodexKeys(h.cfg.CodexKey)
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
 	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
@@ -1049,7 +1049,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
 		if trimmed == "" {
-			old := h.cfg.CodexKey
+			old := cloneCodexKeys(h.cfg.CodexKey)
 			h.cfg.CodexKey = append(h.cfg.CodexKey[:targetIndex], h.cfg.CodexKey[targetIndex+1:]...)
 			h.cfg.SanitizeCodexKeys()
 			if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
@@ -1083,7 +1083,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
 	normalizeCodexKey(&entry)
-	old := h.cfg.CodexKey
+	old := cloneCodexKeys(h.cfg.CodexKey)
 	h.cfg.CodexKey[targetIndex] = entry
 	h.cfg.SanitizeCodexKeys()
 	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
@@ -1169,13 +1169,60 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 	if len(entries) == 0 {
 		return nil
 	}
+	out := cloneOpenAICompatibilityEntries(entries)
+	for i := range out {
+		normalizeOpenAICompatibilityEntry(&out[i])
+	}
+	return out
+}
+
+func cloneOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
+	if len(entries) == 0 {
+		return nil
+	}
 	out := make([]config.OpenAICompatibility, len(entries))
 	for i := range entries {
 		copyEntry := entries[i]
+		if copyEntry.Auth != nil {
+			auth := *copyEntry.Auth
+			auth.Args = append([]string(nil), copyEntry.Auth.Args...)
+			copyEntry.Auth = &auth
+		}
 		if len(copyEntry.APIKeyEntries) > 0 {
 			copyEntry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), copyEntry.APIKeyEntries...)
 		}
-		normalizeOpenAICompatibilityEntry(&copyEntry)
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.OpenAICompatibilityModel(nil), copyEntry.Models...)
+		}
+		if len(copyEntry.Headers) > 0 {
+			copyEntry.Headers = config.NormalizeHeaders(copyEntry.Headers)
+		}
+		out[i] = copyEntry
+	}
+	return out
+}
+
+func cloneCodexKeys(entries []config.CodexKey) []config.CodexKey {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.CodexKey, len(entries))
+	for i := range entries {
+		copyEntry := entries[i]
+		if copyEntry.Auth != nil {
+			auth := *copyEntry.Auth
+			auth.Args = append([]string(nil), copyEntry.Auth.Args...)
+			copyEntry.Auth = &auth
+		}
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.CodexModel(nil), copyEntry.Models...)
+		}
+		if len(copyEntry.Headers) > 0 {
+			copyEntry.Headers = config.NormalizeHeaders(copyEntry.Headers)
+		}
+		if len(copyEntry.ExcludedModels) > 0 {
+			copyEntry.ExcludedModels = append([]string(nil), copyEntry.ExcludedModels...)
+		}
 		out[i] = copyEntry
 	}
 	return out
