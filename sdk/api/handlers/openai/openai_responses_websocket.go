@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -216,7 +217,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return
 	}
 	passthroughSessionID := uuid.NewString()
-	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
+	downstreamSessionKey := websocketScopedDownstreamSessionKey(c, websocketDownstreamSessionKey(c.Request))
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
@@ -561,6 +562,48 @@ func websocketClientAddress(c *gin.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(c.ClientIP())
+}
+
+func websocketScopedDownstreamSessionKey(c *gin.Context, sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	callerScope := websocketCallerScope(c)
+	if callerScope == "" {
+		return sessionKey
+	}
+	scopeHash := sha256.Sum256([]byte(callerScope))
+	return sessionKey + ":caller:" + fmt.Sprintf("%x", scopeHash[:])
+}
+
+func websocketCallerScope(c *gin.Context) string {
+	principal := websocketGinContextString(c, "userApiKey")
+	if principal == "" {
+		return ""
+	}
+	provider := websocketGinContextString(c, "accessProvider")
+	return provider + "\x00" + principal
+}
+
+func websocketGinContextString(c *gin.Context, key string) string {
+	if c == nil {
+		return ""
+	}
+	value, ok := c.Get(key)
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
 }
 
 func websocketUpgradeHeaders(req *http.Request) http.Header {
