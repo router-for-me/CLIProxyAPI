@@ -38,6 +38,93 @@ func TestConvertOpenAIResponsesRequestToGemini_StripsTrailingAssistantPrefill(t 
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGemini_TextFormatJSONSchema(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"temperature": 0.2,
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "Return structured JSON."
+					}
+				]
+			}
+		],
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"strict": true,
+				"name": "response",
+				"schema": {
+					"type": "object",
+					"properties": {
+						"cleanedContent": {
+							"type": "string"
+						}
+					},
+					"required": [
+						"cleanedContent"
+					],
+					"additionalProperties": false
+				}
+			}
+		}
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	schema := genConfig.Get("responseJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("responseJsonSchema missing. Output: %s", output)
+	}
+	if genConfig.Get("responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set with responseJsonSchema. Output: %s", output)
+	}
+	if got := schema.Get("type").String(); got != "object" {
+		t.Fatalf("schema type = %q, want object. Output: %s", got, output)
+	}
+	if got := schema.Get("properties.cleanedContent.type").String(); got != "string" {
+		t.Fatalf("cleanedContent type = %q, want string. Output: %s", got, output)
+	}
+	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() || additionalProperties.Bool() {
+		t.Fatalf("additionalProperties = %s, want false. Output: %s", additionalProperties.Raw, output)
+	}
+	if got := genConfig.Get("temperature").Float(); got != 0.2 {
+		t.Fatalf("temperature = %v, want 0.2. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_TextFormatJSONObject(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"input": "Return a JSON object.",
+		"text": {
+			"format": {
+				"type": "json_object"
+			}
+		}
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	if genConfig.Get("responseJsonSchema").Exists() {
+		t.Fatalf("responseJsonSchema should not be set for json_object. Output: %s", output)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToGemini_ReasoningSignatureCompatibility(t *testing.T) {
 	tests := []struct {
 		name          string
