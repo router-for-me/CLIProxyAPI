@@ -46,7 +46,8 @@
         "levels": [
           "low",
           "medium",
-          "high"
+          "high",
+          "max"
         ]
       }
     },
@@ -1728,46 +1729,6 @@
       }
     },
     {
-      "id": "gemini-3-pro-high",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3 Pro (High)",
-      "name": "gemini-3-pro-high",
-      "description": "Gemini 3 Pro (High)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "high"
-        ]
-      }
-    },
-    {
-      "id": "gemini-3-pro-low",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3 Pro (Low)",
-      "name": "gemini-3-pro-low",
-      "description": "Gemini 3 Pro (Low)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "high"
-        ]
-      }
-    },
-    {
       "id": "gemini-3.1-flash-image",
       "object": "model",
       "owned_by": "antigravity",
@@ -1894,16 +1855,7 @@
       "name": "grok-build-0.1",
       "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
       "context_length": 256000,
-      "max_completion_tokens": 256000,
-      "thinking": {
-        "zero_allowed": true,
-        "levels": [
-          "none",
-          "low",
-          "medium",
-          "high"
-        ]
-      }
+      "max_completion_tokens": 256000
     },
     {
       "id": "grok-4.3",
@@ -2017,14 +1969,7 @@
       "name": "grok-composer-2.5-fast",
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
-      "max_completion_tokens": 32768,
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
+      "max_completion_tokens": 32768
     }
   ]
 }
