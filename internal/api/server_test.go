@@ -515,6 +515,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["display_name"].(string); got != "Custom Codex Model" {
 		t.Fatalf("custom display_name = %q, want Custom Codex Model", got)
 	}
+	if got := int(codexClientTestPriority(custom["priority"])); got != 129 {
+		t.Fatalf("custom priority = %v, want 129", custom["priority"])
+	}
 	if got, _ := custom["description"].(string); got != "Custom model from registry" {
 		t.Fatalf("custom description = %q, want Custom model from registry", got)
 	}
@@ -566,6 +569,17 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
 		}
+	}
+}
+
+func codexClientTestPriority(raw any) int {
+	switch value := raw.(type) {
+	case int:
+		return value
+	case float64:
+		return int(value)
+	default:
+		return -1
 	}
 }
 
