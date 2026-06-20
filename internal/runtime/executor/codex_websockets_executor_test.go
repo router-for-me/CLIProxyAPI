@@ -1680,6 +1680,34 @@ func TestCodexWebsocketsExecuteStreamDoesNotFallbackToHTTPForIncrementalRequest(
 	}
 }
 
+func TestCanFallbackCodexWebsocketRequestToHTTPBlocksLiveSessionCreate(t *testing.T) {
+	liveConn := &websocket.Conn{}
+	sess := &codexWebsocketSession{}
+	sess.connMu.Lock()
+	sess.conn = liveConn
+	sess.terminalStateConn = liveConn
+	sess.connMu.Unlock()
+
+	incrementalCreate := []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"next"}]}`)
+	if canFallbackCodexWebsocketRequestToHTTP(sess, liveConn, incrementalCreate) {
+		t.Fatal("incremental response.create on a live terminal-state websocket should not fallback to HTTP")
+	}
+
+	if !canFallbackCodexWebsocketRequestToHTTP(nil, nil, incrementalCreate) {
+		t.Fatal("initial response.create without live websocket state should fallback to HTTP")
+	}
+
+	replayCreate := []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"compaction_summary","summary":"history"},{"type":"message","role":"user","content":"next"}]}`)
+	if !canFallbackCodexWebsocketRequestToHTTP(sess, liveConn, replayCreate) {
+		t.Fatal("transcript replay response.create should fallback to HTTP")
+	}
+
+	withPreviousResponseID := []byte(`{"type":"response.create","model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"next"}]}`)
+	if canFallbackCodexWebsocketRequestToHTTP(sess, liveConn, withPreviousResponseID) {
+		t.Fatal("previous_response_id request should not fallback to HTTP")
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
