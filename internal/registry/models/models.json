@@ -1649,6 +1649,148 @@
       }
     }
   ],
+  "zai": [
+    {
+      "id": "glm-5.2",
+      "object": "model",
+      "created": 1781740800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5.2",
+      "description": "Z.AI GLM-5.2 - flagship coding model on the GLM Coding Plan",
+      "context_length": 1000000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "glm-4.5",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.5",
+      "description": "Z.AI GLM-4.5 - flagship hybrid reasoning coding model",
+      "context_length": 131072,
+      "max_completion_tokens": 98304,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5-air",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.5-Air",
+      "description": "Z.AI GLM-4.5-Air - lightweight, lower-latency GLM-4.5 variant",
+      "context_length": 131072,
+      "max_completion_tokens": 98304,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.6",
+      "object": "model",
+      "created": 1759276800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.6",
+      "description": "Z.AI GLM-4.6 - 200K context hybrid reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.7",
+      "object": "model",
+      "created": 1771200000,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.7",
+      "description": "Z.AI GLM-4.7 - hybrid reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5",
+      "object": "model",
+      "created": 1778198400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5",
+      "description": "Z.AI GLM-5 - latest flagship reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5.1",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5.1",
+      "description": "Z.AI GLM-5.1 - latest GLM-5 series reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5-turbo",
+      "object": "model",
+      "created": 1778198400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5-Turbo",
+      "description": "Z.AI GLM-5-Turbo - faster, lower-cost GLM-5 variant",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",

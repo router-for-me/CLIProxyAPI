@@ -36,6 +36,11 @@ var modelsCatalogStore = &modelStore{}
 
 var updaterOnce sync.Once
 
+// embeddedZAIModels holds the GLM (zai) definitions shipped in the embedded
+// catalog. They are kept as a fallback for remote catalogs that predate the zai
+// provider and would otherwise replace the section with an empty one.
+var embeddedZAIModels []*ModelInfo
+
 // ModelRefreshCallback is invoked when startup or periodic model refresh detects changes.
 // changedProviders contains the provider names whose model definitions changed.
 type ModelRefreshCallback func(changedProviders []string)
@@ -68,6 +73,11 @@ func init() {
 	// Load embedded data as fallback on startup.
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
 		log.Warnf("registry: failed to parse embedded models.json (embedded catalog may be incomplete or invalid; continuing startup and will rely on remote model refresh): %v", err)
+	}
+	// Capture the embedded zai (GLM) definitions before any remote refresh can
+	// overwrite the catalog, so they can be preserved when the remote omits them.
+	if d := getModels(); d != nil {
+		embeddedZAIModels = d.ZAI
 	}
 }
 
@@ -119,6 +129,13 @@ func tryRefreshModels(ctx context.Context, label string) {
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
+	}
+
+	// A remote catalog that predates the zai provider would otherwise replace the
+	// embedded GLM definitions with an empty section, breaking glm-* provider
+	// resolution. Keep the embedded zai models until the remote ships its own.
+	if applyEmbeddedZAIFallback(parsed) {
+		log.Infof("%s: remote catalog omits zai models; keeping embedded GLM definitions", label)
 	}
 
 	// Detect changes before updating store.
@@ -215,6 +232,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
+		{"zai", oldData.ZAI, newData.ZAI},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -315,6 +333,18 @@ func getModels() *staticModelsJSON {
 	return modelsCatalogStore.data
 }
 
+// applyEmbeddedZAIFallback fills the zai section from the embedded catalog when a
+// remote catalog omits it (e.g. one published before the zai provider existed),
+// so refreshing cannot wipe the GLM definitions and break provider resolution. It
+// reports whether the fallback was applied.
+func applyEmbeddedZAIFallback(parsed *staticModelsJSON) bool {
+	if parsed == nil || len(parsed.ZAI) > 0 || len(embeddedZAIModels) == 0 {
+		return false
+	}
+	parsed.ZAI = embeddedZAIModels
+	return true
+}
+
 func validateModelsCatalog(data *staticModelsJSON) error {
 	if data == nil {
 		return fmt.Errorf("catalog is nil")
@@ -335,6 +365,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "kimi", models: data.Kimi},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
+		{name: "zai", models: data.ZAI},
 	}
 
 	for _, section := range requiredSections {

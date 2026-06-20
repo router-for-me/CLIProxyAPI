@@ -24,6 +24,8 @@ var oauthProviders = []oauthProvider{
 	{"Antigravity", "antigravity-auth-url", "🟪"},
 	{"Kimi", "kimi-auth-url", "🟫"},
 	{"xAI", "xai-auth-url", "⬛"},
+	{"Z.AI / ZCode (International)", "zai-auth-url", "🟦"},
+	{"BigModel / ZCode (China)", "bigmodel-auth-url", "🟦"},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -106,10 +108,17 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		m.authState = msg.state
 		m.providerName = msg.providerName
 		m.state = oauthRemote
-		m.callbackInput.SetValue("")
-		m.callbackInput.Focus()
-		m.inputActive = true
 		m.message = ""
+		// Z.AI / BigModel complete through the server-side loopback/poll flow, and
+		// the generic /oauth-callback endpoint does not accept them, so don't offer
+		// the manual callback-URL input; rely on background polling instead.
+		if m.supportsManualCallback() {
+			m.callbackInput.SetValue("")
+			m.callbackInput.Focus()
+			m.inputActive = true
+		} else {
+			m.inputActive = false
+		}
 		m.viewport.SetContent(m.renderContent())
 		// Also start polling in the background
 		return m, tea.Batch(textinput.Blink, m.pollOAuthStatus(msg.state))
@@ -172,7 +181,10 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		if m.state == oauthRemote {
 			switch msg.String() {
 			case "c", "C":
-				// Re-activate input
+				// Re-activate input (unavailable for providers without a manual callback).
+				if !m.supportsManualCallback() {
+					return m, nil
+				}
 				m.inputActive = true
 				m.callbackInput.Focus()
 				m.viewport.SetContent(m.renderContent())
@@ -262,6 +274,19 @@ func (m oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 	}
 }
 
+// supportsManualCallback reports whether the current provider accepts the manual
+// callback-URL submission via /v0/management/oauth-callback. Z.AI international
+// completes through a server-side poll (nothing to paste), so its manual input is
+// hidden; BigModel uses a loopback callback a remote browser can paste back.
+func (m oauthTabModel) supportsManualCallback() bool {
+	for _, p := range oauthProviders {
+		if p.name == m.providerName {
+			return p.apiPath != "zai-auth-url"
+		}
+	}
+	return true
+}
+
 func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 	return func() tea.Msg {
 		// Determine provider from current context
@@ -280,6 +305,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "kimi"
 				case "xai-auth-url":
 					providerKey = "xai"
+				case "zai-auth-url", "bigmodel-auth-url":
+					providerKey = "zai"
 				}
 				break
 			}
@@ -432,19 +459,23 @@ func (m oauthTabModel) renderRemoteMode() string {
 	sb.WriteString(helpStyle.Render(T("oauth_remote_hint")))
 	sb.WriteString("\n\n")
 
-	// Callback URL input
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_callback_url")))
-	sb.WriteString("\n")
-
-	if m.inputActive {
-		sb.WriteString(m.callbackInput.View())
+	// Callback URL input — only for providers that accept a manual callback.
+	// Z.AI / BigModel complete via the server-side loopback/poll flow instead.
+	if m.supportsManualCallback() {
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_callback_url")))
 		sb.WriteString("\n")
-		sb.WriteString(helpStyle.Render("  " + T("enter_submit") + " • " + T("esc_cancel")))
-	} else {
-		sb.WriteString(helpStyle.Render(T("oauth_press_c")))
+
+		if m.inputActive {
+			sb.WriteString(m.callbackInput.View())
+			sb.WriteString("\n")
+			sb.WriteString(helpStyle.Render("  " + T("enter_submit") + " • " + T("esc_cancel")))
+		} else {
+			sb.WriteString(helpStyle.Render(T("oauth_press_c")))
+		}
+
+		sb.WriteString("\n\n")
 	}
 
-	sb.WriteString("\n\n")
 	sb.WriteString(warningStyle.Render(T("oauth_waiting")))
 
 	return sb.String()
