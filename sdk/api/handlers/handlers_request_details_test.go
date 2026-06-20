@@ -26,12 +26,17 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-5", Created: now + 5},
 	})
+	modelRegistry.RegisterClient("test-request-details-sample", "sample-provider", []*registry.ModelInfo{
+		{ID: "GLM-5.1", Created: now + 3},
+		{ID: "Qwen3_VL_235B_A22B_Instruct", Created: now + 2},
+	})
 
 	// Ensure cleanup of all test registrations.
 	clientIDs := []string{
 		"test-request-details-gemini",
 		"test-request-details-openai",
 		"test-request-details-claude",
+		"test-request-details-sample",
 	}
 	for _, clientID := range clientIDs {
 		id := clientID
@@ -96,6 +101,20 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			inputModel:    "claude-sonnet-4-5(auto)",
 			wantProviders: []string{"claude"},
 			wantModel:     "claude-sonnet-4-5(auto)",
+			wantErr:       false,
+		},
+		{
+			name:          "registered model case mismatch with suffix",
+			inputModel:    "glm-5.1(high)",
+			wantProviders: []string{"sample-provider"},
+			wantModel:     "glm-5.1(high)",
+			wantErr:       false,
+		},
+		{
+			name:          "registered model mixed case mismatch",
+			inputModel:    "qwen3_VL_235b_A22b_instruct",
+			wantProviders: []string{"sample-provider"},
+			wantModel:     "qwen3_VL_235b_A22b_instruct",
 			wantErr:       false,
 		},
 	}

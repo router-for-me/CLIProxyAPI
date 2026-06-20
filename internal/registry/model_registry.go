@@ -496,6 +496,47 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 	log.Debugf("Registered new model %s from provider %s", modelID, provider)
 }
 
+func (r *ModelRegistry) resolveRegisteredModelIDLocked(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	if _, ok := r.models[modelID]; ok {
+		return modelID
+	}
+	baseModel := modelIDWithoutSuffix(modelID)
+	if baseModel != "" && baseModel != modelID {
+		if _, ok := r.models[baseModel]; ok {
+			return baseModel
+		}
+	}
+	for registeredID := range r.models {
+		if strings.EqualFold(strings.TrimSpace(registeredID), modelID) {
+			return registeredID
+		}
+		if baseModel != "" && baseModel != modelID && strings.EqualFold(strings.TrimSpace(registeredID), baseModel) {
+			return registeredID
+		}
+	}
+	return ""
+}
+
+func modelIDWithoutSuffix(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" || !strings.HasSuffix(modelID, ")") {
+		return modelID
+	}
+	open := strings.LastIndex(modelID, "(")
+	if open <= 0 {
+		return modelID
+	}
+	baseModel := strings.TrimSpace(modelID[:open])
+	if baseModel == "" {
+		return modelID
+	}
+	return baseModel
+}
+
 func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider string, now time.Time) {
 	registration, exists := r.models[modelID]
 	if !exists {
@@ -1047,8 +1088,12 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	registration, exists := r.models[modelID]
-	if !exists || registration == nil || len(registration.Providers) == 0 {
+	resolvedModelID := r.resolveRegisteredModelIDLocked(modelID)
+	if resolvedModelID == "" {
+		return nil
+	}
+	registration := r.models[resolvedModelID]
+	if registration == nil || len(registration.Providers) == 0 {
 		return nil
 	}
 
@@ -1098,7 +1143,11 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
-	if reg, ok := r.models[modelID]; ok && reg != nil {
+	resolvedModelID := r.resolveRegisteredModelIDLocked(modelID)
+	if resolvedModelID == "" {
+		return nil
+	}
+	if reg, ok := r.models[resolvedModelID]; ok && reg != nil {
 		// Try provider specific definition first
 		if provider != "" && reg.InfoByProvider != nil {
 			if reg.Providers != nil {

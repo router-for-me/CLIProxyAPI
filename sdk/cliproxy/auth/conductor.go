@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -398,7 +399,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		if model == nil {
 			continue
 		}
-		modelKey := canonicalModelKey(model.ID)
+		modelKey := modelMatchKey(model.ID)
 		if modelKey == "" {
 			continue
 		}
@@ -413,7 +414,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	if ok && auth != nil && len(auth.ModelStates) > 0 {
 		changed := false
 		for modelKey, state := range auth.ModelStates {
-			baseModel := canonicalModelKey(modelKey)
+			baseModel := modelMatchKey(modelKey)
 			if baseModel == "" {
 				baseModel = strings.TrimSpace(modelKey)
 			}
@@ -1113,6 +1114,73 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
 
+func canonicalRegisteredModelForAuth(auth *Auth, requestedModel string) string {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if auth == nil || strings.TrimSpace(auth.ID) == "" || requestedModel == "" {
+		return requestedModel
+	}
+	requestResult := thinking.ParseSuffix(requestedModel)
+	requestKey := modelMatchKey(requestedModel)
+	if requestKey == "" {
+		return requestedModel
+	}
+	registryRef := registry.GetGlobalRegistry()
+	authModels := registryRef.GetModelsForClient(auth.ID)
+	if matched := canonicalRegisteredModelFromList(authModels, requestKey, requestResult); matched != "" {
+		return matched
+	}
+	if len(authModels) == 0 {
+		provider := executorKeyFromAuth(auth)
+		if matched := canonicalRegisteredModelFromList(registryRef.GetAvailableModelsByProvider(provider), requestKey, requestResult); matched != "" {
+			return matched
+		}
+	}
+	return requestedModel
+}
+
+func canonicalRegisteredModelFromList(models []*registry.ModelInfo, requestKey string, requestResult thinking.SuffixResult) string {
+	if requestKey == "" {
+		return ""
+	}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		registeredID := strings.TrimSpace(model.ID)
+		if registeredID == "" {
+			continue
+		}
+		if modelMatchKey(registeredID) == requestKey {
+			return preserveResolvedModelSuffix(registeredID, requestResult)
+		}
+	}
+	return ""
+}
+
+func executionRequestForModel(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, upstreamModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	req.Model = upstreamModel
+	req.Payload = payloadWithExecutionModel(req.Payload, upstreamModel)
+	opts.OriginalRequest = payloadWithExecutionModel(opts.OriginalRequest, upstreamModel)
+	return req, opts
+}
+
+func payloadWithExecutionModel(payload []byte, model string) []byte {
+	model = strings.TrimSpace(model)
+	if len(payload) == 0 || model == "" || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	modelField := gjson.GetBytes(payload, "model")
+	if !modelField.Exists() || modelField.String() == model {
+		return payload
+	}
+	updated, errSet := sjson.SetBytes(payload, "model", model)
+	if errSet != nil {
+		log.WithError(errSet).Debug("auth: failed to normalize execution payload model")
+		return payload
+	}
+	return updated
+}
+
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
@@ -1123,16 +1191,20 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
-			return pool
+			return []string{canonicalRegisteredModelForAuth(auth, pool[0])}
 		}
 		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
-		return rotateStrings(pool, offset)
+		pool = rotateStrings(pool, offset)
+		for i, model := range pool {
+			pool[i] = canonicalRegisteredModelForAuth(auth, model)
+		}
+		return pool
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
 	if strings.TrimSpace(resolved) == "" {
 		resolved = requestedModel
 	}
-	return []string{resolved}
+	return []string{canonicalRegisteredModelForAuth(auth, resolved)}
 }
 
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
@@ -1148,7 +1220,7 @@ func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
 }
 
 func (m *Manager) selectionModelKeyForAuth(auth *Auth, routeModel string) string {
-	return canonicalModelKey(m.selectionModelForAuth(auth, routeModel))
+	return modelMatchKey(m.selectionModelForAuth(auth, routeModel))
 }
 
 func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool) string {
@@ -1162,7 +1234,7 @@ func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel s
 	}
 	stateModel := executionResultModel(routeModel, upstreamModel, pooled)
 	selectionModel := m.selectionModelForAuth(auth, routeModel)
-	if canonicalModelKey(selectionModel) == canonicalModelKey(upstreamModel) && strings.TrimSpace(selectionModel) != "" {
+	if modelMatchKey(selectionModel) == modelMatchKey(upstreamModel) && strings.TrimSpace(selectionModel) != "" {
 		return strings.TrimSpace(upstreamModel)
 	}
 	return stateModel
@@ -1486,7 +1558,7 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if registryRef == nil || auth == nil {
 		return true
 	}
-	routeKey := canonicalModelKey(routeModel)
+	routeKey := modelMatchKey(routeModel)
 	if routeKey == "" {
 		return true
 	}
@@ -1649,9 +1721,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var lastErr error
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
-		execReq := req
-		execReq.Model = execModel
-		execOpts := opts
+		execReq, execOpts := executionRequestForModel(req, opts, execModel)
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		if errStream != nil {
@@ -2341,9 +2411,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
-			execReq := req
-			execReq.Model = upstreamModel
-			execOpts := opts
+			execReq, execOpts := executionRequestForModel(req, opts, upstreamModel)
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
@@ -2442,9 +2510,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
-			execReq := req
-			execReq.Model = upstreamModel
-			execOpts := opts
+			execReq, execOpts := executionRequestForModel(req, opts, upstreamModel)
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
@@ -3499,6 +3565,9 @@ func ensureModelState(auth *Auth, model string) *ModelState {
 	if state, ok := auth.ModelStates[model]; ok && state != nil {
 		return state
 	}
+	if state, ok := modelStateForModel(auth.ModelStates, model); ok && state != nil {
+		return state
+	}
 	state := &ModelState{Status: StatusActive}
 	auth.ModelStates[model] = state
 	return state
@@ -4100,7 +4169,7 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 	if auth == nil || strings.TrimSpace(routeModel) == "" {
 		return false
 	}
-	return m.selectionModelKeyForAuth(auth, routeModel) != canonicalModelKey(routeModel)
+	return m.selectionModelKeyForAuth(auth, routeModel) != modelMatchKey(routeModel)
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
@@ -4953,9 +5022,8 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, len(models) > 1)
-			execReq := req
-			execReq.Model = upstreamModel
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			execReq, execOpts := executionRequestForModel(req, creditsOpts, upstreamModel)
+			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				result.Error = &Error{Message: errExec.Error()}

@@ -29,6 +29,24 @@ func TestGetModelInfoReturnsClone(t *testing.T) {
 	}
 }
 
+func TestModelLookupMatchesCaseAndThinkingSuffix(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "sample-provider", []*ModelInfo{{
+		ID:          "GLM-5.1",
+		DisplayName: "Registered Model",
+	}})
+
+	providers := r.GetModelProviders("glm-5.1(high)")
+	if len(providers) != 1 || providers[0] != "sample-provider" {
+		t.Fatalf("GetModelProviders() = %v, want [sample-provider]", providers)
+	}
+
+	info := r.GetModelInfo("glm-5.1(xhigh)", "sample-provider")
+	if info == nil || info.ID != "GLM-5.1" {
+		t.Fatalf("GetModelInfo() = %+v, want GLM-5.1", info)
+	}
+}
+
 func TestGetModelsForClientReturnsClones(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "gemini", []*ModelInfo{{

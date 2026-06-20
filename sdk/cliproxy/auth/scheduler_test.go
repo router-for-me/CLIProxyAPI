@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/tidwall/gjson"
 )
 
 type schedulerTestExecutor struct{}
@@ -35,6 +36,21 @@ func (schedulerTestExecutor) CountTokens(ctx context.Context, auth *Auth, req cl
 
 func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type capturingSchedulerExecutor struct {
+	schedulerTestExecutor
+	provider string
+	req      cliproxyexecutor.Request
+	opts     cliproxyexecutor.Options
+}
+
+func (e *capturingSchedulerExecutor) Identifier() string { return e.provider }
+
+func (e *capturingSchedulerExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.req = req
+	e.opts = opts
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
 }
 
 type fakePluginScheduler struct {
@@ -145,6 +161,88 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 		if got.ID != "a" {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "a")
 		}
+	}
+}
+
+func TestSchedulerPick_ModelSupportIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	const authID = "case-insensitive-model-auth"
+	registerSchedulerModels(t, "sample-provider", "GLM-5.1", authID)
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: authID, Provider: "sample-provider"},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "sample-provider", "glm-5.1", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != authID {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, authID)
+	}
+}
+
+func TestManagerExecute_CanonicalizesAuthRegisteredModelCase(t *testing.T) {
+	const provider = "sample-provider"
+
+	tests := []struct {
+		name            string
+		authID          string
+		registeredModel string
+		routeModel      string
+		wantModel       string
+	}{
+		{
+			name:            "thinking suffix",
+			authID:          "canonical-execute-model-suffix-auth",
+			registeredModel: "GLM-5.1",
+			routeModel:      "glm-5.1(high)",
+			wantModel:       "GLM-5.1(high)",
+		},
+		{
+			name:            "mixed case model",
+			authID:          "canonical-execute-model-mixed-auth",
+			registeredModel: "Qwen3_VL_235B_A22B_Instruct",
+			routeModel:      "qwen3_VL_235b_A22b_instruct",
+			wantModel:       "Qwen3_VL_235B_A22B_Instruct",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registerSchedulerModels(t, provider, tt.registeredModel, tt.authID)
+
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			executor := &capturingSchedulerExecutor{provider: provider}
+			manager.RegisterExecutor(executor)
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: tt.authID, Provider: provider, Status: StatusActive}); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			payload := []byte(`{"model":"` + tt.routeModel + `","messages":[]}`)
+			_, errExecute := manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{
+				Model:   tt.routeModel,
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				OriginalRequest: payload,
+			})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			if executor.req.Model != tt.wantModel {
+				t.Fatalf("executor model = %q, want %q", executor.req.Model, tt.wantModel)
+			}
+			if got := gjson.GetBytes(executor.req.Payload, "model").String(); got != tt.wantModel {
+				t.Fatalf("payload model = %q, want %q", got, tt.wantModel)
+			}
+			if got := gjson.GetBytes(executor.opts.OriginalRequest, "model").String(); got != tt.wantModel {
+				t.Fatalf("original request model = %q, want %q", got, tt.wantModel)
+			}
+		})
 	}
 }
 

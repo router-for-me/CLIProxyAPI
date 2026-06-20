@@ -140,6 +140,10 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+func modelMatchKey(model string) string {
+	return strings.ToLower(canonicalModelKey(model))
+}
+
 func authWebsocketsEnabled(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -262,7 +266,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	key := provider + ":" + canonicalModelKey(model)
+	key := provider + ":" + modelMatchKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
 		s.cursors = make(map[string]int)
@@ -302,6 +306,32 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+func modelStateForModel(states map[string]*ModelState, model string) (*ModelState, bool) {
+	model = strings.TrimSpace(model)
+	if len(states) == 0 || model == "" {
+		return nil, false
+	}
+	if state, ok := states[model]; ok && state != nil {
+		return state, true
+	}
+	baseModel := canonicalModelKey(model)
+	if baseModel != "" && baseModel != model {
+		if state, ok := states[baseModel]; ok && state != nil {
+			return state, true
+		}
+	}
+	matchKey := modelMatchKey(model)
+	if matchKey == "" {
+		return nil, false
+	}
+	for key, state := range states {
+		if state != nil && modelMatchKey(key) == matchKey {
+			return state, true
+		}
+	}
+	return nil, false
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
@@ -311,13 +341,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
-				baseModel := canonicalModelKey(model)
-				if baseModel != "" && baseModel != model {
-					state, ok = auth.ModelStates[baseModel]
-				}
-			}
+			state, ok := modelStateForModel(auth.ModelStates, model)
 			if ok && state != nil {
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}

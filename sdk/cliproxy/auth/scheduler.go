@@ -204,7 +204,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
-	modelKey := canonicalModelKey(model)
+	modelKey := modelMatchKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerPrefersWebsocketTransport(providerKey) && pinnedAuthID == ""
 
@@ -277,7 +277,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return picked, providerKey, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	modelKey := canonicalModelKey(model)
+	modelKey := modelMatchKey(model)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -419,7 +419,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if providerState == nil {
 			continue
 		}
-		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
+		shard := providerState.ensureModelLocked(modelMatchKey(model), now)
 		if shard == nil {
 			continue
 		}
@@ -563,7 +563,7 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 		if model == nil {
 			continue
 		}
-		modelKey := canonicalModelKey(model.ID)
+		modelKey := modelMatchKey(model.ID)
 		if modelKey == "" {
 			continue
 		}
@@ -608,7 +608,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	if p == nil {
 		return nil
 	}
-	modelKey = canonicalModelKey(modelKey)
+	modelKey = modelMatchKey(modelKey)
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
 		shard.promoteExpiredLocked(now)
 		return shard
@@ -630,7 +630,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 
 // supportsModel reports whether the auth metadata currently supports modelKey.
 func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
-	modelKey = canonicalModelKey(modelKey)
+	modelKey = modelMatchKey(modelKey)
 	if modelKey == "" {
 		return true
 	}
