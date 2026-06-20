@@ -40,7 +40,6 @@ func mergeRecentRequestBuckets(dst, src []coreauth.RecentRequestBucket) []coreau
 	return dst
 }
 
-
 // usageProviderKey resolves the provider key used to group usage statistics.
 //
 // For OpenAI-compatible providers, auth.Provider carries the namespaced key
@@ -51,7 +50,12 @@ func mergeRecentRequestBuckets(dst, src []coreauth.RecentRequestBucket) []coreau
 // compat_name. Returning the bare name here keeps the usage grouping aligned
 // with what the panel looks up, restoring recent-requests/totals display for
 // OpenAI-compatible providers. Other provider kinds keep strings.ToLower(auth.Provider).
+// If compat_name is missing for some reason, the openai-compatible- namespace
+// prefix is stripped as a fallback so the bare name still matches the panel.
 func usageProviderKey(auth *coreauth.Auth) string {
+	if auth == nil {
+		return "unknown"
+	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if provider == "" {
 		return "unknown"
@@ -61,7 +65,10 @@ func usageProviderKey(auth *coreauth.Auth) string {
 			return strings.ToLower(compatName)
 		}
 	}
-	return provider
+	// Fallback: an OpenAI-compatible auth that reached here without compat_name
+	// still carries the namespaced provider key; strip the namespace so the panel
+	// (which looks up by the bare name) can match its usage.
+	return strings.TrimPrefix(provider, "openai-compatible-")
 }
 
 // GetAPIKeyUsage returns recent request buckets for all in-memory api_key auths,

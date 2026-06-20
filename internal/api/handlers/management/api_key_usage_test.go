@@ -127,6 +127,52 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		t.Fatalf("vast totals = %d/%d, want 1/1", vastSuccess, vastFailed)
 	}
 }
+func TestUsageProviderKey(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *coreauth.Auth
+		want string
+	}{
+		{
+			name: "nil auth",
+			auth: nil,
+			want: "unknown",
+		},
+		{
+			name: "empty provider",
+			auth: &coreauth.Auth{Provider: ""},
+			want: "unknown",
+		},
+		{
+			name: "non-openai-compat provider passes through",
+			auth: &coreauth.Auth{Provider: "codex"},
+			want: "codex",
+		},
+		{
+			name: "openai-compat uses bare compat_name",
+			auth: &coreauth.Auth{
+				Provider:   "openai-compatible-vast",
+				Attributes: map[string]string{"compat_name": "VAST"},
+			},
+			want: "vast",
+		},
+		{
+			name: "openai-compat without compat_name strips namespace fallback",
+			auth: &coreauth.Auth{
+				Provider:   "openai-compatible-vast",
+				Attributes: map[string]string{},
+			},
+			want: "vast",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := usageProviderKey(tt.auth); got != tt.want {
+				t.Fatalf("usageProviderKey(%+v) = %q, want %q", tt.auth, got, tt.want)
+			}
+		})
+	}
+}
 
 func payloadKeys(m map[string]map[string]apiKeyUsageEntry) []string {
 	keys := make([]string, 0, len(m))
