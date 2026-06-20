@@ -452,6 +452,8 @@ const (
 	SchedulerBuiltinRoundRobin = "round-robin"
 	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
 	SchedulerBuiltinFillFirst = "fill-first"
+	// SchedulerBuiltinWeightedRoundRobin delegates auth selection to the built-in weighted round-robin scheduler.
+	SchedulerBuiltinWeightedRoundRobin = "weighted-round-robin"
 )
 
 // Scheduler chooses an auth candidate before the built-in scheduler runs.
@@ -499,6 +501,8 @@ type SchedulerAuthCandidate struct {
 	Provider string
 	// Priority is the host priority assigned to the auth record.
 	Priority int
+	// SelectionWeight is the host selection weight used by weighted schedulers.
+	SelectionWeight int
 	// Status is the current host-visible auth status.
 	Status string
 	// Attributes contains immutable routing and provider attributes.
@@ -711,6 +715,8 @@ type HostAuthFileEntry struct {
 	Account string `json:"account,omitempty"`
 	// Priority is the credential routing priority when available.
 	Priority int `json:"priority,omitempty"`
+	// SelectionWeight is the credential routing selection weight.
+	SelectionWeight int `json:"selection_weight"`
 	// Note is the credential note when available.
 	Note string `json:"note,omitempty"`
 	// Websockets reports whether websocket mode is enabled when available.

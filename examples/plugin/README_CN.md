@@ -75,7 +75,7 @@ plugins:
 
 ## Scheduler
 
-`scheduler` 声明调度能力。它可以从候选列表中选择配置的 auth ID，委托内置的 `fill-first` 或 `round-robin` 调度器，或在 `deny` 为 `true` 时拒绝调度。
+`scheduler` 声明调度能力。它可以从候选列表中选择配置的 auth ID，委托内置的 `fill-first`、`round-robin` 或 `weighted-round-robin` 调度器，或在 `deny` 为 `true` 时拒绝调度。
 
 ```yaml
 plugins:
@@ -88,7 +88,7 @@ plugins:
       deny: false
 ```
 
-`auth_id` 会在 `delegate` 为空时选择匹配候选。`delegate` 支持 `""`、`fill-first` 和 `round-robin`；其他非空值会让本插件不处理本次调度。`deny` 会返回调度错误。
+`auth_id` 会在 `delegate` 为空时选择匹配候选。`delegate` 支持 `""`、`fill-first`、`round-robin` 和 `weighted-round-robin`；其他非空值会让本插件不处理本次调度。`deny` 会返回调度错误。
 
 ## 构建全部示例
 

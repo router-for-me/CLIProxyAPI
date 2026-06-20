@@ -76,7 +76,7 @@ The default example model is `gpt-5.5`, but the request succeeds only when the c
 
 ## Scheduler
 
-`scheduler` declares the scheduler capability. It can select a configured auth ID from the candidate list, delegate to the built-in `fill-first` or `round-robin` scheduler, or reject picks when `deny` is `true`.
+`scheduler` declares the scheduler capability. It can select a configured auth ID from the candidate list, delegate to the built-in `fill-first`, `round-robin`, or `weighted-round-robin` scheduler, or reject picks when `deny` is `true`.
 
 ```yaml
 plugins:
@@ -89,7 +89,7 @@ plugins:
       deny: false
 ```
 
-`auth_id` selects a matching candidate when `delegate` is empty. `delegate` accepts `""`, `fill-first`, or `round-robin`; other non-empty values leave the pick unhandled. `deny` returns a scheduler error.
+`auth_id` selects a matching candidate when `delegate` is empty. `delegate` accepts `""`, `fill-first`, `round-robin`, or `weighted-round-robin`; other non-empty values leave the pick unhandled. `deny` returns a scheduler error.
 
 ## Build All Examples
 

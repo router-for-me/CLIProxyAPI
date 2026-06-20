@@ -1614,7 +1614,10 @@ func codexIdentityConfuseEnabled(cfg *config.Config) bool {
 		return false
 	}
 	strategy := strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
-	return cfg.Routing.SessionAffinity || strategy == "fill-first" || strategy == "fillfirst" || strategy == "ff"
+	return cfg.Routing.SessionAffinity ||
+		strategy == "fill-first" || strategy == "fillfirst" || strategy == "ff" ||
+		strategy == "weighted-round-robin" || strategy == "weighted_round_robin" ||
+		strategy == "weighted-rr" || strategy == "weightedrr" || strategy == "wrr"
 }
 
 func codexIdentityConfuseUUID(authID string, kind string, value string) string {

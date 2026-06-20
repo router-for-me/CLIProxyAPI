@@ -89,6 +89,77 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	}
 }
 
+func TestWeightedRoundRobinSelectorPick_UsesSelectionWeights(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "b", Attributes: map[string]string{"selection_weight": "3"}},
+		{ID: "a", Attributes: map[string]string{"selection_weight": "1"}},
+	}
+
+	want := []string{"a", "b", "b", "b", "a"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_ZeroWeightFallsBackToLowerPriority(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "high", Attributes: map[string]string{"priority": "10", "selection_weight": "0"}},
+		{ID: "low", Attributes: map[string]string{"priority": "0", "selection_weight": "1"}},
+	}
+
+	got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "low" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "low")
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_PinnedZeroWeightAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "other", Attributes: map[string]string{"priority": "10", "selection_weight": "5"}},
+		{ID: "pinned", Attributes: map[string]string{"priority": "0", "selection_weight": "0"}},
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.PinnedAuthMetadataKey: "pinned",
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "gemini", "", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "pinned" {
+		t.Fatalf("Pick() auth.ID = %q, want pinned", got.ID)
+	}
+}
+
 func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	t.Parallel()
 
@@ -606,6 +677,44 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 		if got.ID != second.ID {
 			t.Fatalf("Pick() #%d after failover inconsistent: got %q, want %q", i, got.ID, second.ID)
 		}
+	}
+}
+
+func TestSessionAffinitySelector_WeightedBindingSurvivesPriorityRecovery(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &WeightedRoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}}`),
+	}
+	initialAuths := []*Auth{
+		{ID: "high", Attributes: map[string]string{"priority": "10", "selection_weight": "0"}},
+		{ID: "low", Attributes: map[string]string{"priority": "0", "selection_weight": "1"}},
+	}
+
+	first, err := selector.Pick(context.Background(), "gemini", "gemini-pro", opts, initialAuths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first == nil || first.ID != "low" {
+		t.Fatalf("first Pick() = %#v, want low", first)
+	}
+
+	recoveredAuths := []*Auth{
+		{ID: "high", Attributes: map[string]string{"priority": "10", "selection_weight": "1"}},
+		{ID: "low", Attributes: map[string]string{"priority": "0", "selection_weight": "1"}},
+	}
+	second, err := selector.Pick(context.Background(), "gemini", "gemini-pro", opts, recoveredAuths)
+	if err != nil {
+		t.Fatalf("Pick() after recovery error = %v", err)
+	}
+	if second == nil || second.ID != "low" {
+		t.Fatalf("Pick() after recovery = %#v, want existing low binding", second)
 	}
 }
 

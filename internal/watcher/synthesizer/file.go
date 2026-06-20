@@ -3,6 +3,7 @@ package synthesizer
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -173,6 +174,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	if weight, ok := metadataSelectionWeight(metadata); ok {
+		a.Attributes["selection_weight"] = strconv.Itoa(weight)
+	}
 	// Read note from auth file.
 	if rawNote, ok := metadata["note"]; ok {
 		if note, isStr := rawNote.(string); isStr {
@@ -225,6 +229,55 @@ func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAut
 	}
 	cfg.SanitizeOAuthModelAlias()
 	return cfg.OAuthModelAlias["auth"]
+}
+
+func metadataSelectionWeight(metadata map[string]any) (int, bool) {
+	if metadata == nil {
+		return 0, false
+	}
+	raw, ok := metadata["selection_weight"]
+	if !ok {
+		raw, ok = metadata["selection-weight"]
+	}
+	if !ok {
+		return 0, false
+	}
+	switch v := raw.(type) {
+	case int:
+		if v < 0 {
+			return 0, false
+		}
+		return v, true
+	case int32:
+		if v < 0 {
+			return 0, false
+		}
+		return int(v), true
+	case int64:
+		if v < 0 {
+			return 0, false
+		}
+		return int(v), true
+	case float64:
+		if v < 0 || math.Trunc(v) != v {
+			return 0, false
+		}
+		return int(v), true
+	case json.Number:
+		parsed, errParse := v.Int64()
+		if errParse != nil || parsed < 0 {
+			return 0, false
+		}
+		return int(parsed), true
+	case string:
+		weight := strings.TrimSpace(v)
+		parsed, errAtoi := strconv.Atoi(weight)
+		if errAtoi != nil || parsed < 0 {
+			return 0, false
+		}
+		return parsed, true
+	}
+	return 0, false
 }
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.

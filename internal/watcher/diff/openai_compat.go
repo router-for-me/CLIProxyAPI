@@ -69,8 +69,14 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
+	if effectiveSelectionWeight(oldEntry.SelectionWeight) != effectiveSelectionWeight(newEntry.SelectionWeight) {
+		details = append(details, fmt.Sprintf("selection-weight %d -> %d", effectiveSelectionWeight(oldEntry.SelectionWeight), effectiveSelectionWeight(newEntry.SelectionWeight)))
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
+	}
+	if openAICompatAPIKeySelectionWeightsChanged(oldEntry.APIKeyEntries, newEntry.APIKeyEntries) {
+		details = append(details, "api-key selection-weights updated")
 	}
 	if oldModelCount != newModelCount {
 		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
@@ -82,6 +88,18 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 		return ""
 	}
 	return "(" + strings.Join(details, ", ") + ")"
+}
+
+func openAICompatAPIKeySelectionWeightsChanged(oldEntries, newEntries []config.OpenAICompatibilityAPIKey) bool {
+	if len(oldEntries) != len(newEntries) {
+		return false
+	}
+	for i := range oldEntries {
+		if effectiveSelectionWeight(oldEntries[i].SelectionWeight) != effectiveSelectionWeight(newEntries[i].SelectionWeight) {
+			return true
+		}
+	}
+	return false
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {
