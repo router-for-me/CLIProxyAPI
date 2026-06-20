@@ -1485,6 +1485,103 @@ func TestForwardResponsesWebsocketTreatsErrorPayloadAsTerminal(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesWebsocketDoesNotInterceptErrorAfterPayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			errClose := conn.Close()
+			if errClose != nil {
+				serverErrCh <- errClose
+			}
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 2)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"response.created","response":{"id":"resp-1"}}`)
+		data <- []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`)
+		close(data)
+		close(errCh)
+
+		interceptCalled := false
+		_, _, _, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-1",
+			func(*interfaces.ErrorMessage) bool {
+				interceptCalled = true
+				return true
+			},
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if interceptCalled {
+			serverErrCh <- errors.New("intercept called after downstream payload was sent")
+			return
+		}
+		if errMsg == nil {
+			serverErrCh <- errors.New("expected websocket error message")
+			return
+		}
+		if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "Previous response") {
+			serverErrCh <- fmt.Errorf("error message = %v, want previous_response_not_found", errMsg.Error)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	_, createdPayload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read created websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(createdPayload, "type").String(); got != "response.created" {
+		t.Fatalf("created payload type = %s, want response.created; payload=%s", got, createdPayload)
+	}
+
+	_, errorPayload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read error websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(errorPayload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("error payload type = %s, want %s; payload=%s", got, wsEventTypeError, errorPayload)
+	}
+	if got := gjson.GetBytes(errorPayload, "error.code").String(); got != "previous_response_not_found" {
+		t.Fatalf("error code = %s, want previous_response_not_found; payload=%s", got, errorPayload)
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
 func TestRecordPendingToolCallIDsFromPayloadDropsSatisfiedCalls(t *testing.T) {
 	pending := map[string]struct{}{}
 	payload := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call-1","id":"fc-1"},{"type":"function_call_output","call_id":"call-1","id":"out-1"},{"type":"custom_tool_call","call_id":"call-2","id":"ctc-1"},{"type":"custom_tool_call_output","call_id":"call-2","id":"custom-out-1"}]}}`)

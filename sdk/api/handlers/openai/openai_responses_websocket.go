@@ -1391,6 +1391,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	completedOutput := []byte("[]")
 	completedResponseID := ""
 	pendingToolCallIDs := make(map[string]struct{})
+	sentPayload := false
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
@@ -1407,7 +1408,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
-				if interceptError != nil && interceptError(errMsg) {
+				if !sentPayload && interceptError != nil && interceptError(errMsg) {
 					cancel(errMsg.Error)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
 				}
@@ -1480,7 +1481,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				var payloadErrMsg *interfaces.ErrorMessage
 				if eventType == wsEventTypeError {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
-					if interceptError != nil && interceptError(payloadErrMsg) {
+					if !sentPayload && interceptError != nil && interceptError(payloadErrMsg) {
 						cancel(payloadErrMsg.Error)
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
 					}
@@ -1510,6 +1511,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					cancel(errWrite)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
 				}
+				sentPayload = true
 				if payloadErrMsg != nil {
 					cancel(payloadErrMsg.Error)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
