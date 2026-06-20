@@ -49,6 +49,14 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 	provider := ""
 	if executor != nil {
 		provider = executor.Identifier()
+		// Executors that reuse another's wire format (e.g. ZAIExecutor over the
+		// Claude path) can override the attributed provider key so usage is not
+		// misclassified as the host executor.
+		if pk, ok := executor.(interface{ ProviderKey() string }); ok {
+			if v := strings.TrimSpace(pk.ProviderKey()); v != "" {
+				provider = v
+			}
+		}
 	}
 	reporter := NewUsageReporter(ctx, provider, model, auth)
 	reporter.executorType = ExecutorTypeName(executor)

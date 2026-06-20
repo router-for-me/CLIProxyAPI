@@ -39,6 +39,11 @@ import (
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg *config.Config
+	// providerKey overrides the provider identity used for usage attribution,
+	// request logging, and thinking model-capability lookups when this executor
+	// is embedded by another (e.g. ZAIExecutor sets "zai"). Empty falls back to
+	// Identifier().
+	providerKey string
 }
 
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
@@ -146,6 +151,18 @@ func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecu
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
+// ProviderKey returns the provider key used for usage attribution, request
+// logging, and thinking model-capability lookups. It defaults to the executor
+// identifier but can be overridden (ZAIExecutor sets "zai") so requests that
+// reuse the Claude wire format are still attributed to the real provider and
+// resolve model capabilities from the correct catalog.
+func (e *ClaudeExecutor) ProviderKey() string {
+	if strings.TrimSpace(e.providerKey) != "" {
+		return e.providerKey
+	}
+	return e.Identifier()
+}
+
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
@@ -156,8 +173,9 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 		return nil
 	}
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	forceXAPIKey := auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key")
 	isAnthropicBase := req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com")
-	if isAnthropicBase && useAPIKey {
+	if forceXAPIKey || (isAnthropicBase && useAPIKey) {
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", apiKey)
 	} else {
@@ -215,7 +233,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.ProviderKey())
 	if err != nil {
 		return resp, err
 	}
@@ -287,7 +305,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
+		Provider:  e.ProviderKey(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
 		AuthType:  authType,
@@ -402,7 +420,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.ProviderKey())
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +488,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
+		Provider:  e.ProviderKey(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
 		AuthType:  authType,
@@ -710,7 +728,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
 		Body:      body,
-		Provider:  e.Identifier(),
+		Provider:  e.ProviderKey(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
 		AuthType:  authType,
@@ -1014,8 +1032,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	forceXAPIKey := auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key")
 	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
-	if isAnthropicBase && useAPIKey {
+	if forceXAPIKey || (isAnthropicBase && useAPIKey) {
 		r.Header.Del("Authorization")
 		r.Header.Set("x-api-key", apiKey)
 	} else {
@@ -2506,9 +2525,12 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 	}
 
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(strings.TrimSpace(modelID)) {
-		if strings.EqualFold(provider, "claude") {
+		// Anthropic-compatible upstreams require max_tokens. Default it for Claude
+		// and for providers that reuse ClaudeExecutor (e.g. zai/GLM coding plans),
+		// otherwise clients that omit max_tokens get rejected upstream.
+		if strings.EqualFold(provider, "claude") || strings.EqualFold(provider, "zai") {
 			maxTokens := defaultModelMaxTokens
-			if info := registry.GetGlobalRegistry().GetModelInfo(strings.TrimSpace(modelID), "claude"); info != nil && info.MaxCompletionTokens > 0 {
+			if info := registry.GetGlobalRegistry().GetModelInfo(strings.TrimSpace(modelID), provider); info != nil && info.MaxCompletionTokens > 0 {
 				maxTokens = info.MaxCompletionTokens
 			}
 			body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
