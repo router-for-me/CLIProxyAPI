@@ -1,0 +1,5 @@
+# cliproxyapi-plusplus deny.toml — v1
+# Generated 2026-06-19 (T33 guardrail fill)
+advisories = { severity = "high" }
+bans = { multiple-versions = "deny" }
+sources = [{ crate-io = {} }]
