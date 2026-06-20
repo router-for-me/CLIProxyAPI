@@ -208,6 +208,53 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	}
 }
 
+func TestApplyOAuthModelAlias_PerAuthOverridesGlobalAlias(t *testing.T) {
+	t.Parallel()
+
+	globalAliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5-global", Alias: "gpt-5.5"}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(globalAliases)
+
+	auth := &Auth{
+		ID:       "codex-auth-id",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind":     "oauth",
+			"model_aliases": `[{"name":"gpt-5.3-codex-spark","alias":"gpt-5.5"}]`,
+		},
+	}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "gpt-5.5(high)")
+	if resolvedModel != "gpt-5.3-codex-spark(high)" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gpt-5.3-codex-spark(high)")
+	}
+}
+
+func TestApplyOAuthModelAlias_PerAuthAliasSkipsAPIKey(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+
+	auth := &Auth{
+		ID:       "codex-api-key-auth",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind":     "api_key",
+			"model_aliases": `[{"name":"gpt-5.3-codex-spark","alias":"gpt-5.5"}]`,
+		},
+	}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "gpt-5.5")
+	if resolvedModel != "gpt-5.5" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gpt-5.5")
+	}
+}
+
 func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
 	t.Parallel()
 
