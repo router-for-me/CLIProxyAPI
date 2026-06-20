@@ -573,7 +573,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				wsReqBody = wsReqBodyRetry
 				continue
 			}
-			if sess != nil && shouldRetryCodexWebsocketPrePayloadReadError(errRead, readRetryAttempt) && !codexWebsocketRequestCannotRetryFresh(sess, conn, upstreamBody) {
+			if sess != nil && !receivedPayload && shouldRetryCodexWebsocketPrePayloadReadError(errRead, readRetryAttempt) && !codexWebsocketRequestCannotRetryFresh(sess, conn, upstreamBody) {
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read_pre_payload_close_retry", errRead)
 				readRetryAttempt++
 				e.clearUpstreamConn(sess, conn, "pre_payload_close_retry", errRead, false)
@@ -624,7 +624,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
 				return e.CodexExecutor.Execute(ctx, auth, fallbackReq, fallbackOpts)
 			}
-			if isCodexWebsocketMessageTooBigError(errRead) && canFallbackCodexWebsocketRequestToHTTP(upstreamBody) {
+			if !receivedPayload && isCodexWebsocketMessageTooBigError(errRead) && canFallbackCodexWebsocketRequestToHTTP(upstreamBody) {
 				if sess != nil {
 					e.clearUpstreamConn(sess, conn, "message_too_big_http_fallback", errRead, false)
 				}
@@ -1446,14 +1446,14 @@ func codexWebsocketRequestRequiresExistingUpstream(sess *codexWebsocketSession, 
 	if codexWebsocketRequestIsAppendOnly(body) {
 		return true
 	}
-	return codexWebsocketRequestUsesPreviousResponseID(body) && sess != nil && sess.lostTerminalState()
+	return sess != nil && sess.lostTerminalState() && codexWebsocketRequestNeedsLiveUpstream(body)
 }
 
 func codexWebsocketRequestCannotRetryFresh(sess *codexWebsocketSession, conn *websocket.Conn, body []byte) bool {
 	if codexWebsocketRequestIsAppendOnly(body) {
 		return true
 	}
-	return codexWebsocketRequestUsesPreviousResponseID(body) && sess != nil && sess.connHasTerminalState(conn)
+	return sess != nil && sess.connHasTerminalState(conn) && codexWebsocketRequestNeedsLiveUpstream(body)
 }
 
 func codexWebsocketRequestIsAppendOnly(body []byte) bool {
@@ -1468,7 +1468,34 @@ func codexWebsocketRequestUsesPreviousResponseID(body []byte) bool {
 }
 
 func codexWebsocketRequestStartsFreshContext(body []byte) bool {
-	return strings.TrimSpace(gjson.GetBytes(body, "type").String()) != "response.append" && !codexWebsocketRequestUsesPreviousResponseID(body)
+	return !codexWebsocketRequestNeedsLiveUpstream(body)
+}
+
+func codexWebsocketRequestNeedsLiveUpstream(body []byte) bool {
+	if codexWebsocketRequestUsesPreviousResponseID(body) || codexWebsocketRequestIsAppendOnly(body) {
+		return true
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "type").String()) != "response.create" {
+		return false
+	}
+	return !codexWebsocketInputLooksFullTranscript(gjson.GetBytes(body, "input"))
+}
+
+func codexWebsocketInputLooksFullTranscript(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "compaction", "compaction_summary", "function_call", "custom_tool_call":
+			return true
+		case "message":
+			if strings.TrimSpace(item.Get("role").String()) == "assistant" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func canFallbackCodexWebsocketRequestToHTTP(body []byte) bool {
