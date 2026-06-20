@@ -59,6 +59,38 @@ func TestConvertOpenAIRequestToGeminiPreservesInputAudio(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToGeminiPreservesVideoURL(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAAIGZ0eXBtcDQy"}},
+					{"type": "text", "text": "Describe the video"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToGemini("gemini-3-flash", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	parts := resultJSON.Get("contents.0.parts").Array()
+
+	if len(parts) != 2 {
+		t.Fatalf("parts length = %d, want 2. parts=%s", len(parts), resultJSON.Get("contents.0.parts").Raw)
+	}
+	if got := parts[0].Get("inlineData.mime_type").String(); got != "video/mp4" {
+		t.Fatalf("video mime_type = %q, want %q", got, "video/mp4")
+	}
+	if got := parts[0].Get("inlineData.data").String(); got != "AAAAIGZ0eXBtcDQy" {
+		t.Fatalf("video data = %q, want %q", got, "AAAAIGZ0eXBtcDQy")
+	}
+	if got := parts[1].Get("text").String(); got != "Describe the video" {
+		t.Fatalf("text part = %q, want prompt text", got)
+	}
+}
+
 func TestConvertOpenAIRequestToGeminiCleansToolSchemaRequiredFields(t *testing.T) {
 	inputJSON := `{
 		"model": "gemini-2.0-flash",
