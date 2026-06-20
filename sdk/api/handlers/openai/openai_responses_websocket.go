@@ -1847,6 +1847,10 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	if errText == "" {
 		errText = http.StatusText(status)
 	}
+	errCode := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
+	if errCode != "" && !strings.Contains(errText, errCode) {
+		errText = fmt.Sprintf("%s (code: %s)", errText, errCode)
+	}
 	return &interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", errText)}
 }
 

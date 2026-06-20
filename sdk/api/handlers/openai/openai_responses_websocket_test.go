@@ -1681,6 +1681,20 @@ func TestForwardResponsesWebsocketDoesNotInterceptErrorAfterPayload(t *testing.T
 	}
 }
 
+func TestResponsesWebsocketErrorPayloadPreservesCodeForPreviousResponseRetry(t *testing.T) {
+	payload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`)
+	errMsg := responsesWebsocketErrorMessageFromPayload(payload)
+	if errMsg == nil {
+		t.Fatal("expected error message")
+	}
+	if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "previous_response_not_found") {
+		t.Fatalf("error text = %v, want preserved previous_response_not_found code", errMsg.Error)
+	}
+	if !responsesWebsocketPreviousResponseNotFoundError(errMsg) {
+		t.Fatalf("previous_response_not_found websocket payload was not retryable: %v", errMsg.Error)
+	}
+}
+
 func TestRecordPendingToolCallIDsFromPayloadDropsSatisfiedCalls(t *testing.T) {
 	pending := map[string]struct{}{}
 	payload := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call-1","id":"fc-1"},{"type":"function_call_output","call_id":"call-1","id":"out-1"},{"type":"custom_tool_call","call_id":"call-2","id":"ctc-1"},{"type":"custom_tool_call_output","call_id":"call-2","id":"custom-out-1"}]}}`)
