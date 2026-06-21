@@ -116,13 +116,13 @@ max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
-# Timeout in seconds for the connect + TLS handshake + first-response-byte phase of
-# upstream HTTP calls (openai-compatibility, gemini, codex-images, xai, kimi). 0
-# (default) applies no such timeout, preserving the legacy behavior. Set to a positive
-# value to bound how long a request can hang on a flaky upstream connection during
-# establishment. This is applied as the transport ResponseHeaderTimeout, so it does
-# NOT cut off a healthy streaming (SSE) response body that is actively delivering
-# chunks; it only bounds the time to receive the response headers. Note: it only
+# Timeout in seconds for the DNS/TCP dial + TLS handshake phase of upstream HTTP
+# calls (openai-compatibility, gemini, codex-images, xai, kimi). 0 (default) applies
+# no such timeout, preserving the legacy behavior. Set to a positive value to bound
+# how long a request can hang on a half-broken upstream connection during
+# establishment (the connect phase, where the process wedge in #3944 occurs). It is
+# applied as the transport DialContext + TLSHandshakeTimeout, so it does NOT cut off
+# a healthy streaming (SSE) response body that is actively delivering chunks. It only
 # takes effect for transports constructed by the proxy helper (proxy or default
 # transport); context-injected custom round trippers (utls) are not modified.
 # request-timeout-seconds: 0

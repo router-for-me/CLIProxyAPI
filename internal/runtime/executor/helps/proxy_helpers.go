@@ -2,8 +2,10 @@ package helps
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -17,27 +19,35 @@ import (
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
 //
+// When a request timeout is resolved (explicit caller timeout or
+// cfg.RequestTimeoutSeconds), it is applied as a dial + TLS handshake timeout
+// on transports constructed by this helper. It bounds the connect phase where
+// the process wedge in issue #3944 actually occurs, without limiting how long
+// an active streaming (SSE) response body can run.
+//
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
 //   - cfg: The application configuration
 //   - auth: The authentication information
-//   - timeout: The client timeout (0 means no timeout)
+//   - timeout: The connect + TLS timeout (0 means no timeout, unless cfg sets one)
 //
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
-	// Resolve a request timeout. We intentionally do NOT set http.Client.Timeout:
-	// that covers the entire request-response lifecycle including reading the
-	// response body, which would abort healthy streaming (SSE) responses mid-stream.
-	// Instead we apply it as the transport ResponseHeaderTimeout, which bounds the
-	// connect + TLS handshake + first-response-byte phase without cutting off an
-	// active stream body.
-	var headerTimeout time.Duration
+	// Resolve a connect/TLS timeout. We intentionally do NOT set
+	// http.Client.Timeout: that covers the entire request-response lifecycle
+	// including reading the response body, which would abort healthy streaming
+	// (SSE) responses mid-stream. ResponseHeaderTimeout is also avoided: it fires
+	// after the request is fully written and can cut off upstreams that compute
+	// before sending headers, and it does not bound DNS/TCP/TLS setup. Instead we
+	// bound DialContext + TLSHandshakeTimeout, which is where a half-broken
+	// connection actually hangs.
+	var dialTimeout time.Duration
 	if timeout > 0 {
-		headerTimeout = timeout
+		dialTimeout = timeout
 	} else if cfg != nil && cfg.RequestTimeoutSeconds > 0 {
-		headerTimeout = time.Duration(cfg.RequestTimeoutSeconds) * time.Second
+		dialTimeout = time.Duration(cfg.RequestTimeoutSeconds) * time.Second
 	}
 
 	// Priority 1: Use auth.ProxyURL if configured
@@ -55,7 +65,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
-			applyHeaderTimeout(transport, headerTimeout)
+			applyConnectTimeout(transport, dialTimeout)
 			httpClient.Transport = transport
 			return httpClient
 		}
@@ -65,18 +75,18 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor).
 	// Context round trippers are custom (e.g. utls) and may be shared, so we do
-	// not attempt to mutate them; the header timeout only applies to transports
+	// not attempt to mutate them; the connect timeout only applies to transports
 	// we construct ourselves below.
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
 		return httpClient
 	}
 
-	// No proxy and no context round tripper: use a default transport clone so we
-	// can apply the header timeout without mutating the shared default.
-	if headerTimeout > 0 {
-		httpClient.Transport = cloneDefaultTransportWithHeaderTimeout(headerTimeout)
-	}
+	// No proxy and no context round tripper: use a shared default-transport
+	// clone with the connect timeout applied. The transport is cached per timeout
+	// value so connection reuse is preserved across requests instead of cloning a
+	// fresh transport (and leaking idle sockets) on every call.
+	httpClient.Transport = sharedDefaultTransportWithConnectTimeout(dialTimeout)
 	return httpClient
 }
 
@@ -97,23 +107,54 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 	return transport
 }
 
-// applyHeaderTimeout sets ResponseHeaderTimeout on a transport we own. It is a
-// no-op when the timeout is zero (legacy behavior).
-func applyHeaderTimeout(transport *http.Transport, headerTimeout time.Duration) {
-	if headerTimeout > 0 {
-		transport.ResponseHeaderTimeout = headerTimeout
+// applyConnectTimeout bounds the DNS/TCP dial and TLS handshake phases on a
+// transport we own. It is a no-op when the timeout is zero (legacy behavior).
+func applyConnectTimeout(transport *http.Transport, dialTimeout time.Duration) {
+	if dialTimeout <= 0 {
+		return
 	}
+	// Preserve any existing DialContext (e.g. SOCKS5 dialer) and only wrap it
+	// with a deadline.
+	baseDial := transport.DialContext
+	if baseDial == nil {
+		baseDial = (&net.Dialer{}).DialContext
+	}
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+		defer cancel()
+		return baseDial(dialCtx, network, addr)
+	}
+	// Always override with the configured timeout so an explicit setting wins
+	// over the http.DefaultTransport default (10s).
+	transport.TLSHandshakeTimeout = dialTimeout
 }
 
-// cloneDefaultTransportWithHeaderTimeout returns a clone of http.DefaultTransport
-// configured with the given ResponseHeaderTimeout, bounding the connect + TLS +
-// first-response-byte phase without limiting how long a streaming body can run.
-func cloneDefaultTransportWithHeaderTimeout(headerTimeout time.Duration) *http.Transport {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || base == nil {
-		return &http.Transport{ResponseHeaderTimeout: headerTimeout}
+var defaultTransportCache sync.Map // map[int64]*http.Transport keyed by dialTimeout seconds
+
+// sharedDefaultTransportWithConnectTimeout returns a cached clone of
+// http.DefaultTransport with a connect + TLS handshake timeout applied. Caching
+// per timeout value preserves connection reuse across requests instead of
+// allocating (and leaking idle sockets for) a new transport on every call.
+func sharedDefaultTransportWithConnectTimeout(dialTimeout time.Duration) *http.Transport {
+	if dialTimeout <= 0 {
+		// No timeout configured: keep using the shared default transport verbatim.
+		if t, ok := http.DefaultTransport.(*http.Transport); ok && t != nil {
+			return t
+		}
+		return &http.Transport{}
 	}
-	clone := base.Clone()
-	clone.ResponseHeaderTimeout = headerTimeout
-	return clone
+	key := int64(dialTimeout)
+	if cached, ok := defaultTransportCache.Load(key); ok {
+		return cached.(*http.Transport)
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	var transport *http.Transport
+	if ok && base != nil {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	applyConnectTimeout(transport, dialTimeout)
+	actual, _ := defaultTransportCache.LoadOrStore(key, transport)
+	return actual.(*http.Transport)
 }

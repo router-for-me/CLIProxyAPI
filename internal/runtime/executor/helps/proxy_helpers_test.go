@@ -30,13 +30,12 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	}
 }
 
-// TestNewProxyAwareHTTPClientFallsBackToConfigHeaderTimeout verifies that when a
-// caller passes timeout 0 (the legacy no-timeout value), the constructed
-// transport picks up cfg.RequestTimeoutSeconds as ResponseHeaderTimeout. This
-// bounds the connect + TLS + first-response-byte phase so a single request
-// cannot hang indefinitely on a flaky upstream connection, while leaving the
-// response body (including streaming) unbounded.
-func TestNewProxyAwareHTTPClientFallsBackToConfigHeaderTimeout(t *testing.T) {
+// TestNewProxyAwareHTTPClientFallsBackToConfigConnectTimeout verifies that when
+// a caller passes timeout 0 (the legacy value), the constructed transport picks
+// up cfg.RequestTimeoutSeconds as a dial + TLS handshake timeout. This bounds
+// the connect phase where the process wedge in issue #3944 actually occurs,
+// without limiting how long an active streaming (SSE) response body can run.
+func TestNewProxyAwareHTTPClientFallsBackToConfigConnectTimeout(t *testing.T) {
 	t.Parallel()
 
 	client := NewProxyAwareHTTPClient(
@@ -47,14 +46,17 @@ func TestNewProxyAwareHTTPClientFallsBackToConfigHeaderTimeout(t *testing.T) {
 	)
 
 	if client.Timeout != 0 {
-		t.Fatalf("client.Timeout = %v, want 0 (must not set whole-request timeout; it cuts off streaming bodies)", client.Timeout)
+		t.Fatalf("client.Timeout = %v, want 0 (must never set whole-request timeout; it cuts off streaming bodies)", client.Timeout)
 	}
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
 	}
-	if transport.ResponseHeaderTimeout != 42*time.Second {
-		t.Fatalf("ResponseHeaderTimeout = %v, want %v", transport.ResponseHeaderTimeout, 42*time.Second)
+	if transport.TLSHandshakeTimeout != 42*time.Second {
+		t.Fatalf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, 42*time.Second)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("DialContext is nil, expected a deadline-wrapped dialer")
 	}
 }
 
@@ -74,8 +76,8 @@ func TestNewProxyAwareHTTPClientExplicitTimeoutWinsOverConfig(t *testing.T) {
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
 	}
-	if transport.ResponseHeaderTimeout != 7*time.Second {
-		t.Fatalf("ResponseHeaderTimeout = %v, want %v (explicit caller timeout must win)", transport.ResponseHeaderTimeout, 7*time.Second)
+	if transport.TLSHandshakeTimeout != 7*time.Second {
+		t.Fatalf("TLSHandshakeTimeout = %v, want %v (explicit caller timeout must win)", transport.TLSHandshakeTimeout, 7*time.Second)
 	}
 }
 
@@ -99,8 +101,15 @@ func TestNewProxyAwareHTTPClientZeroTimeoutNoConfigKeepsLegacy(t *testing.T) {
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
 	}
-	if transport.ResponseHeaderTimeout != 0 {
-		t.Fatalf("ResponseHeaderTimeout = %v, want 0 (legacy no-timeout when unconfigured)", transport.ResponseHeaderTimeout)
+	// In legacy mode applyConnectTimeout is never called, so TLSHandshakeTimeout
+	// keeps the http.DefaultTransport default; verify it was not overridden by
+	// this helper.
+	defaultTLS := time.Duration(0)
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok && dt != nil {
+		defaultTLS = dt.TLSHandshakeTimeout
+	}
+	if transport.TLSHandshakeTimeout != defaultTLS {
+		t.Fatalf("TLSHandshakeTimeout = %v, want %v (default, untouched by helper in legacy mode)", transport.TLSHandshakeTimeout, defaultTLS)
 	}
 }
 
@@ -125,5 +134,23 @@ func TestNewProxyAwareHTTPClientNeverSetsWholeRequestTimeout(t *testing.T) {
 		if client.Timeout != 0 {
 			t.Errorf("%s: client.Timeout = %v, want 0 (whole-request timeout would cut streaming bodies)", c.name, client.Timeout)
 		}
+	}
+}
+
+// TestSharedDefaultTransportCacheReused ensures the default-transport path
+// returns the same cached transport for a given timeout instead of cloning a
+// fresh one every call (which would disable connection reuse and leak idle
+// sockets).
+func TestSharedDefaultTransportCacheReused(t *testing.T) {
+	t.Parallel()
+
+	a := sharedDefaultTransportWithConnectTimeout(30 * time.Second)
+	b := sharedDefaultTransportWithConnectTimeout(30 * time.Second)
+	if a != b {
+		t.Fatal("expected the same cached transport for the same timeout value")
+	}
+	c := sharedDefaultTransportWithConnectTimeout(60 * time.Second)
+	if a == c {
+		t.Fatal("expected a different transport for a different timeout value")
 	}
 }
