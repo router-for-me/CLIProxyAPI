@@ -963,17 +963,23 @@ func TestClaudeExecutor_ExecuteStripsForeignToolUseSignaturesBeforeUpstream(t *t
 }
 
 func TestShouldSanitizeClaudeMessagesForUpstream_OnlyClaudeFamily(t *testing.T) {
-	cases := map[string]bool{
-		"claude-sonnet-4-5":          true,
-		"claude-3-5-sonnet-20241022": true,
-		"kimi-k2.5":                  false,
-		"mimo-v2":                    false,
-		"gemini-3.5-flash":           false,
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{model: "claude-sonnet-4-5", want: true},
+		{model: "claude-3-5-sonnet-20241022", want: true},
+		{model: "kimi-k2.5", want: false},
+		{model: "mimo-v2", want: false},
+		{model: "gemini-3.5-flash", want: false},
 	}
-	for model, want := range cases {
-		if got := shouldSanitizeClaudeMessagesForUpstream(model); got != want {
-			t.Fatalf("shouldSanitizeClaudeMessagesForUpstream(%q) = %v, want %v", model, got, want)
-		}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			got := shouldSanitizeClaudeMessagesForUpstream(tc.model)
+			if got != tc.want {
+				t.Errorf("shouldSanitizeClaudeMessagesForUpstream(%q) = %v, want %v", tc.model, got, tc.want)
+			}
+		})
 	}
 }
 
