@@ -139,6 +139,9 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for i := range arr {
+		normalizeGeminiKey(&arr[i])
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	old := cloneGeminiKeys(h.cfg.GeminiKey)
@@ -221,6 +224,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
+	normalizeGeminiKey(&entry)
 	old := cloneGeminiKeys(h.cfg.GeminiKey)
 	h.cfg.GeminiKey[targetIndex] = entry
 	h.cfg.SanitizeGeminiKeys()
@@ -1195,6 +1199,9 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
+		if entry.Auth != nil && isCommandAuthAPIKey(trimmed) {
+			trimmed = ""
+		}
 		entry.APIKeyEntries[i].APIKey = trimmed
 		if trimmed != "" {
 			existing[trimmed] = struct{}{}
@@ -1343,11 +1350,38 @@ func commandAuthFromPatch(auth *config.CommandAuthConfig) *config.CommandAuthCon
 	return cloneCommandAuth(auth)
 }
 
+func normalizeGeminiKey(entry *config.GeminiKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.Auth = commandAuthFromPatch(entry.Auth)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.GeminiModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
 func normalizeClaudeKey(entry *config.ClaudeKey) {
 	if entry == nil {
 		return
 	}
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
@@ -1373,7 +1407,7 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	if entry == nil {
 		return
 	}
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
@@ -1400,7 +1434,7 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	if entry == nil {
 		return
 	}
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)

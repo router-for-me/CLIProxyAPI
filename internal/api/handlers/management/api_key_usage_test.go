@@ -138,7 +138,7 @@ func TestGetAPIKeyUsage_IncludesCommandAuthCredentials(t *testing.T) {
 	if entry.AuthSource != coreauth.AttrAuthSourceCommand {
 		t.Fatalf("command auth source = %q, want %q", entry.AuthSource, coreauth.AttrAuthSourceCommand)
 	}
-	if entry.AuthKey != "auth-command:command-identity" {
+	if entry.AuthKey != commandAuthManagementKey("command-identity") {
 		t.Fatalf("command auth key = %q", entry.AuthKey)
 	}
 	if entry.AuthIndex == "" {

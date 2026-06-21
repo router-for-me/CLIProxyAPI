@@ -25,6 +25,14 @@ type apiKeyUsageIdentity struct {
 	source   string
 }
 
+func commandAuthManagementKey(commandKey string) string {
+	commandKey = strings.TrimSpace(commandKey)
+	if commandKey == "" {
+		return ""
+	}
+	return "auth-command:" + commandKey
+}
+
 func apiKeyUsageIdentityForAuth(auth *coreauth.Auth) (apiKeyUsageIdentity, bool) {
 	var identity apiKeyUsageIdentity
 	if auth == nil {
@@ -62,11 +70,11 @@ func apiKeyUsageIdentityForAuth(auth *coreauth.Auth) (apiKeyUsageIdentity, bool)
 		if commandKey == "" {
 			return identity, false
 		}
-		identity.authKey = "auth-command:" + commandKey
+		identity.authKey = commandAuthManagementKey(commandKey)
 		identity.source = coreauth.AttrAuthSourceCommand
-		// Older management frontends key config credentials as "base_url|api_key".
-		// Command-auth entries intentionally have no static api_key, so use the
-		// empty-key shape while exposing the stable command identity in auth_key.
+		// Keep the legacy composite key so older management frontends that look up
+		// command auth entries as "base_url|" continue to receive statistics. Newer
+		// frontends should prefer the explicit auth_key/auth_source fields.
 		identity.key = baseURL + "|"
 		return identity, true
 	}
@@ -113,9 +121,9 @@ func apiKeyUsageProviderKey(auth *coreauth.Auth) string {
 }
 
 // GetAPIKeyUsage returns recent request buckets for in-memory API-key-class auths,
-// grouped by provider and keyed by "base_url|api_key". Command-auth credentials
-// have no static api_key, so they use the legacy-compatible "base_url|" key and
-// expose their stable command identity in the entry's auth_key field.
+// grouped by provider. Static API-key credentials are keyed by "base_url|api_key".
+// Command-auth credentials have no static api_key, so they keep the legacy
+// "base_url|" key and expose their stable non-secret identity in auth_key.
 func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
