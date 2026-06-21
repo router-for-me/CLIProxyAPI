@@ -29,6 +29,11 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	httpClient := &http.Client{}
 	if timeout > 0 {
 		httpClient.Timeout = timeout
+	} else if cfg != nil && cfg.RequestTimeoutSeconds > 0 {
+		// Callers pass 0 to keep the legacy no-timeout behavior; fall back to a
+		// globally configured request timeout so a single request cannot hang
+		// indefinitely on a flaky upstream connection.
+		httpClient.Timeout = time.Duration(cfg.RequestTimeoutSeconds) * time.Second
 	}
 
 	// Priority 1: Use auth.ProxyURL if configured
