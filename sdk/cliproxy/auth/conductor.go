@@ -1610,7 +1610,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					errors.Is(chunk.Err, context.DeadlineExceeded) ||
 					ctx.Err() != nil
 				if !isClientCancel {
-					rerr := errorToResultError(chunk.Err)
+					rerr := errorToStreamResultError(chunk.Err)
 					m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
 				}
 			}
@@ -3679,6 +3679,28 @@ func errorToResultError(err error) *Error {
 		e.HTTPStatus = http.StatusBadGateway
 		e.Retryable = true
 	}
+	return e
+}
+
+// errorToStreamResultError converts a streaming chunk error into the *Error
+// shape stored on a Result. Unlike the non-streaming path, by the time a
+// stream is producing chunks the request has already been accepted upstream,
+// so there are no local request-validation errors here: any chunk error is
+// either a client-initiated cancellation (filtered by the caller) or an
+// upstream/transport failure. Map bare errors to 502 so mid-stream resets,
+// TLS errors and truncated reads cool down the credential instead of
+// falling through the cooldown switch default branch.
+func errorToStreamResultError(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	e := &Error{Message: err.Error()}
+	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
+		e.HTTPStatus = se.StatusCode()
+		return e
+	}
+	e.HTTPStatus = http.StatusBadGateway
+	e.Retryable = true
 	return e
 }
 

@@ -181,7 +181,9 @@ func TestWrapStreamResult_ClientCancellationDoesNotCooldown(t *testing.T) {
 	cancel() // simulate a client that disconnected mid-stream
 
 	buffered := []cliproxyexecutor.StreamChunk{{Err: context.Canceled}}
-	sr := manager.wrapStreamResult(ctx, auth, "openai-compatibility", "gpt-5", nil, buffered, nil)
+	remaining := make(chan cliproxyexecutor.StreamChunk)
+	close(remaining)
+	sr := manager.wrapStreamResult(ctx, auth, "openai-compatibility", "gpt-5", nil, buffered, remaining)
 	for range sr.Chunks {
 	}
 
@@ -203,4 +205,49 @@ func snapshotAuthByID(m *Manager, id string) *Auth {
 		}
 	}
 	return nil
+}
+
+// TestWrapStreamResult_MidStreamReadErrorCooldowns verifies that a streaming
+// read failure (e.g. scanner.Err / Body.Read returning a transport error after
+// the upstream accepted the request) is treated as a transient upstream error
+// and cools down the credential. Unlike *url.Error, these errors surface as
+// bare errors carried on a StreamChunk, so errorToStreamResultError maps them
+// to 502.
+func TestWrapStreamResult_MidStreamReadErrorCooldowns(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-stream-read", Provider: "openai-compatibility", Status: StatusActive}
+	if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+
+	ctx := context.Background()
+	// Simulate a mid-stream read error: bare error, no HTTP status, not a
+	// *url.Error, not a client cancellation.
+	buffered := []cliproxyexecutor.StreamChunk{{Err: errors.New("tls: bad record MAC")}}
+	remaining := make(chan cliproxyexecutor.StreamChunk)
+	close(remaining) // no further chunks; the buffered error is terminal
+	sr := manager.wrapStreamResult(ctx, auth, "openai-compatibility", "gpt-5", nil, buffered, remaining)
+	for range sr.Chunks {
+	}
+
+	got := snapshotAuthByID(manager, auth.ID)
+	if got == nil {
+		t.Fatalf("auth %s not found in snapshot", auth.ID)
+	}
+	if blocked, _, next := isAuthBlockedForModel(got, "gpt-5", time.Now()); !blocked || !next.After(time.Now()) {
+		t.Fatalf("mid-stream read error did not cool down credential: blocked=%v next=%v", blocked, next)
+	}
+}
+
+// TestErrorToStreamResultError_MapsBareErrorToBadGateway covers the streaming
+// helper directly: a bare error becomes 502 (coolable), while an explicit
+// StatusError keeps its status.
+func TestErrorToStreamResultError_MapsBareErrorToBadGateway(t *testing.T) {
+	got := errorToStreamResultError(errors.New("unexpected EOF"))
+	if got.HTTPStatus != http.StatusBadGateway {
+		t.Fatalf("HTTPStatus = %d, want %d", got.HTTPStatus, http.StatusBadGateway)
+	}
+	if !got.Retryable {
+		t.Fatalf("Retryable = false, want true")
+	}
 }
