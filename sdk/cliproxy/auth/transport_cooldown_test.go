@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 // TestMarkResult_TransportErrorCooldownsModel verifies that a transport-level
@@ -113,4 +115,32 @@ func snapshotAuthByID(m *Manager, id string) *Auth {
 		}
 	}
 	return nil
+}
+
+// TestWrapStreamResult_ClientCancellationDoesNotCooldown verifies that a
+// stream chunk error caused by the client cancelling the request
+// (context.Canceled) is filtered out before reaching MarkResult, so a
+// healthy credential is not put into cooldown for an aborted SSE stream.
+func TestWrapStreamResult_ClientCancellationDoesNotCooldown(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-cancel-stream", Provider: "openai-compatibility", Status: StatusActive}
+	if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate a client that disconnected mid-stream
+
+	buffered := []cliproxyexecutor.StreamChunk{{Err: context.Canceled}}
+	sr := manager.wrapStreamResult(ctx, auth, "openai-compatibility", "gpt-5", nil, buffered, nil)
+	for range sr.Chunks {
+	}
+
+	got := snapshotAuthByID(manager, auth.ID)
+	if got == nil {
+		t.Fatalf("auth %s not found in snapshot", auth.ID)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(got, "gpt-5", time.Now()); blocked {
+		t.Fatalf("client cancellation of a stream incorrectly cooled down a healthy credential")
+	}
 }

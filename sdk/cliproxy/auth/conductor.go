@@ -1601,11 +1601,20 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
-				rerr := &Error{Message: chunk.Err.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
+				// Client-initiated cancellations (context.Canceled) and
+				// deadline expirations surface as zero-status chunk errors
+				// rather than upstream transport failures; do not cool down
+				// the credential for them.
+				isClientCancel := errors.Is(chunk.Err, context.Canceled) ||
+					errors.Is(chunk.Err, context.DeadlineExceeded) ||
+					ctx.Err() != nil
+				if !isClientCancel {
+					rerr := &Error{Message: chunk.Err.Error()}
+					if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
+						rerr.HTTPStatus = se.StatusCode()
+					}
+					m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
 				}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
 			}
 			if !forward {
 				return false
@@ -3970,8 +3979,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if statusCode == 0 && !disableCooling {
 			auth.StatusMessage = "transport error"
 			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
-		} else if auth.StatusMessage == "" {
-			auth.StatusMessage = "request failed"
+		} else {
+			auth.NextRetryAfter = time.Time{}
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = "request failed"
+			}
 		}
 	}
 }
