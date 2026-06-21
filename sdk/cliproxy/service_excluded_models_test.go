@@ -148,30 +148,36 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		sawFetch = true
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-				"models": {
-					"gemini-3.1-flash-lite": {
-						"displayName": "Gemini 3.1 Flash Lite",
-						"maxTokens": 1,
-						"maxOutputTokens": 2
+					"models": {
+						"gemini-3.1-flash-lite": {
+							"displayName": "Gemini 3.1 Flash Lite",
+							"maxTokens": 1,
+							"maxOutputTokens": 2
+						},
+						" gemini-3.5-flash-extra-low ": {
+							"displayName": "Gemini 3.5 Flash (Low)",
+							"maxTokens": 1048576,
+							"maxOutputTokens": 65535
+						},
+						"gemini-3.5-flash-low": {
+							"displayName": "Gemini 3.5 Flash (Medium)",
+							"maxTokens": 1048576,
+							"maxOutputTokens": 65535
+						},
+						"gemini-3.5-flash-family-only": {
+							"displayName": "Gemini 3.5 Flash (Experimental)"
+						},
+						"fetched-only-search-model": {
+							"displayName": "Fetched Only Search Model"
+						},
+						"chat_20706": {
+							"displayName": "Internal Chat Model"
+						},
+						"tab_flash_lite_preview": {
+							"displayName": "Internal Tab Model"
+						}
 					},
-					"gemini-3.5-flash-extra-low": {
-						"displayName": "Gemini 3.5 Flash (Low)",
-						"maxTokens": 1048576,
-						"maxOutputTokens": 65535
-					},
-					"gemini-3.5-flash-low": {
-						"displayName": "Gemini 3.5 Flash (Medium)",
-						"maxTokens": 1048576,
-						"maxOutputTokens": 65535
-					},
-					"gemini-3.5-flash-family-only": {
-						"displayName": "Gemini 3.5 Flash (Experimental)"
-					},
-					"fetched-only-search-model": {
-						"displayName": "Fetched Only Search Model"
-					}
-				},
-				"webSearchModelIds": ["gemini-3.1-flash-lite", "fetched-only-search-model"]
+					"webSearchModelIds": ["gemini-3.1-flash-lite", "fetched-only-search-model"]
 			}`))
 	}))
 	defer server.Close()
@@ -209,7 +215,7 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		}
 	}
 
-	var webSearchModel, extraLowModel, mediumModel, familyOnlyModel, agentModel, staticOnlyModel, fetchedOnlyModel *internalregistry.ModelInfo
+	var webSearchModel, extraLowModel, mediumModel, familyOnlyModel, agentModel, staticOnlyModel, fetchedOnlyModel, internalModel *internalregistry.ModelInfo
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -229,6 +235,8 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 			staticOnlyModel = model
 		case "fetched-only-search-model":
 			fetchedOnlyModel = model
+		case "chat_20706", "tab_flash_lite_preview":
+			internalModel = model
 		}
 	}
 	if webSearchModel == nil {
@@ -252,6 +260,9 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	}
 	if extraLowModel.Thinking == nil {
 		t.Fatal("expected fetched extra-low model to inherit static thinking metadata")
+	}
+	if extraLowModel.ContextLength != 1048576 || extraLowModel.MaxCompletionTokens != 65535 {
+		t.Fatalf("expected extra-low model to keep fetched token limits, got=%#v", extraLowModel)
 	}
 	if mediumModel == nil {
 		t.Fatal("expected fetched gemini-3.5-flash-low to be registered")
@@ -279,6 +290,9 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	}
 	if !fetchedOnlyModel.SupportsWebSearch {
 		t.Fatal("expected fetched-only model to support web search")
+	}
+	if internalModel != nil {
+		t.Fatalf("internal Antigravity model should not be registered: %#v", internalModel)
 	}
 }
 
@@ -341,5 +355,80 @@ func TestRegisterModelsForAuth_AntigravityFallsBackToStaticModelsWhenFetchHasNoM
 	}
 	if staticOnlyModel == nil {
 		t.Fatal("expected static-only Antigravity model to remain registered on hints-only fetch")
+	}
+}
+
+func TestFetchAntigravityModelsForAuth_KeepsTryingAfterHintsOnlyResponse(t *testing.T) {
+	var sawHintsOnlyFetch, sawModelFetch bool
+	hintsOnlyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHintsOnlyFetch = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+				"webSearchModelIds": ["fetched-search-model"]
+			}`))
+	}))
+	defer hintsOnlyServer.Close()
+
+	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawModelFetch = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+				"models": {
+					"fetched-search-model": {
+						"displayName": "Fetched Search Model"
+					}
+				}
+			}`))
+	}))
+	defer modelServer.Close()
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-antigravity-fetch-fallback",
+		Provider: "antigravity",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token",
+		},
+	}
+
+	fetched := service.fetchAntigravityModelsForAuthFromBaseURLs(context.Background(), auth, []string{hintsOnlyServer.URL, modelServer.URL})
+	if !sawHintsOnlyFetch || !sawModelFetch {
+		t.Fatalf("expected both fallback endpoints to be fetched, saw hints=%v models=%v", sawHintsOnlyFetch, sawModelFetch)
+	}
+	if len(fetched.Models) != 1 {
+		t.Fatalf("models count = %d, want 1", len(fetched.Models))
+	}
+	if fetched.Models[0].ID != "fetched-search-model" {
+		t.Fatalf("fetched model ID = %q, want fetched-search-model", fetched.Models[0].ID)
+	}
+	if _, ok := fetched.Hints.WebSearchModelIDs["fetched-search-model"]; !ok {
+		t.Fatalf("expected hints-only response to be retained, got=%#v", fetched.Hints.WebSearchModelIDs)
+	}
+}
+
+func TestApplyAntigravityFetchedModels_MergesGenerationMethods(t *testing.T) {
+	staticModels := []*internalregistry.ModelInfo{{
+		ID:                         "dynamic-model",
+		DisplayName:                "Dynamic Model",
+		SupportedGenerationMethods: []string{"generateContent"},
+	}}
+	fetched := antigravityFetchedModels{
+		Models: []*ModelInfo{{
+			ID:          "dynamic-model",
+			DisplayName: "Dynamic Model",
+		}},
+	}
+
+	models := applyAntigravityFetchedModels(staticModels, fetched)
+	if len(models) != 1 {
+		t.Fatalf("models count = %d, want 1", len(models))
+	}
+	if got := models[0].SupportedGenerationMethods; len(got) != 1 || got[0] != "generateContent" {
+		t.Fatalf("supported generation methods = %#v, want generateContent", got)
+	}
+	staticModels[0].SupportedGenerationMethods[0] = "mutated"
+	if got := models[0].SupportedGenerationMethods[0]; got != "generateContent" {
+		t.Fatalf("supported generation methods should be cloned, got %q", got)
 	}
 }

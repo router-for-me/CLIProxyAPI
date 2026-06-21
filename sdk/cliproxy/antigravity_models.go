@@ -42,6 +42,10 @@ type antigravityFetchedModels struct {
 }
 
 func (s *Service) fetchAntigravityModelsForAuth(ctx context.Context, auth *coreauth.Auth) antigravityFetchedModels {
+	return s.fetchAntigravityModelsForAuthFromBaseURLs(ctx, auth, antigravityModelBaseURLs(auth))
+}
+
+func (s *Service) fetchAntigravityModelsForAuthFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs []string) antigravityFetchedModels {
 	if auth == nil || auth.Metadata == nil {
 		return antigravityFetchedModels{}
 	}
@@ -56,7 +60,8 @@ func (s *Service) fetchAntigravityModelsForAuth(ctx context.Context, auth *corea
 		client.Transport = transport
 	}
 
-	for _, baseURL := range antigravityModelBaseURLs(auth) {
+	var hints antigravityModelCapabilityHints
+	for _, baseURL := range baseURLs {
 		req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+antigravityModelsPath, strings.NewReader(antigravityModelFetchPayload(auth)))
 		if errReq != nil {
 			continue
@@ -81,11 +86,13 @@ func (s *Service) fetchAntigravityModelsForAuth(ctx context.Context, auth *corea
 			continue
 		}
 		fetched := parseAntigravityFetchedModels(body)
-		if len(fetched.Models) > 0 || len(fetched.Hints.WebSearchModelIDs) > 0 {
+		hints = mergeAntigravityModelCapabilityHints(hints, fetched.Hints)
+		if len(fetched.Models) > 0 {
+			fetched.Hints = hints
 			return fetched
 		}
 	}
-	return antigravityFetchedModels{}
+	return antigravityFetchedModels{Hints: hints}
 }
 
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
@@ -151,15 +158,24 @@ func parseAntigravityFetchedModels(body []byte) antigravityFetchedModels {
 
 	models := make([]*ModelInfo, 0, len(parsed.Models))
 	modelIDs := make([]string, 0, len(parsed.Models))
-	for modelID := range parsed.Models {
-		modelID = strings.TrimSpace(modelID)
+	trimmedModels := make(map[string]antigravityFetchedModel, len(parsed.Models))
+	for rawModelID, modelData := range parsed.Models {
+		modelID := strings.TrimSpace(rawModelID)
 		if modelID != "" {
+			if isInternalAntigravityFetchedModelID(modelID) {
+				continue
+			}
+			if _, exists := trimmedModels[modelID]; exists {
+				trimmedModels[modelID] = modelData
+				continue
+			}
+			trimmedModels[modelID] = modelData
 			modelIDs = append(modelIDs, modelID)
 		}
 	}
 	sort.Strings(modelIDs)
 	for _, modelID := range modelIDs {
-		modelData := parsed.Models[modelID]
+		modelData := trimmedModels[modelID]
 		displayName := strings.TrimSpace(modelData.DisplayName)
 		if displayName == "" {
 			displayName = modelID
@@ -191,6 +207,20 @@ func parseAntigravityModelCapabilityHintsFromResponse(parsed antigravityFetchAva
 		if modelID != "" {
 			webSearchModels[modelID] = struct{}{}
 		}
+	}
+	return antigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels}
+}
+
+func mergeAntigravityModelCapabilityHints(left, right antigravityModelCapabilityHints) antigravityModelCapabilityHints {
+	if len(left.WebSearchModelIDs) == 0 && len(right.WebSearchModelIDs) == 0 {
+		return antigravityModelCapabilityHints{}
+	}
+	webSearchModels := make(map[string]struct{}, len(left.WebSearchModelIDs)+len(right.WebSearchModelIDs))
+	for modelID := range left.WebSearchModelIDs {
+		webSearchModels[modelID] = struct{}{}
+	}
+	for modelID := range right.WebSearchModelIDs {
+		webSearchModels[modelID] = struct{}{}
 	}
 	return antigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels}
 }
@@ -286,6 +316,9 @@ func mergeAntigravityStaticModelMetadata(model, staticModel *ModelInfo) {
 	if len(model.SupportedParameters) == 0 {
 		model.SupportedParameters = append([]string(nil), staticModel.SupportedParameters...)
 	}
+	if len(model.SupportedGenerationMethods) == 0 {
+		model.SupportedGenerationMethods = append([]string(nil), staticModel.SupportedGenerationMethods...)
+	}
 	if len(model.SupportedInputModalities) == 0 {
 		model.SupportedInputModalities = append([]string(nil), staticModel.SupportedInputModalities...)
 	}
@@ -322,4 +355,13 @@ func normalizeAntigravityDisplayFamily(displayName string) string {
 
 func normalizeAntigravityFetchedModelID(modelID string) string {
 	return strings.ToLower(strings.TrimSpace(modelID))
+}
+
+func isInternalAntigravityFetchedModelID(modelID string) bool {
+	switch normalizeAntigravityFetchedModelID(modelID) {
+	case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+		return true
+	default:
+		return false
+	}
 }
