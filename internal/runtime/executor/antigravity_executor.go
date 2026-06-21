@@ -283,16 +283,30 @@ func initAntigravityTransport() {
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	antigravityTransportOnce.Do(initAntigravityTransport)
 
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	// If no transport is set, use the shared HTTP/1.1 transport.
-	if client.Transport == nil {
-		client.Transport = antigravityTransport
+	// Resolve whether a proxy is configured the same way the proxy helper does,
+	// so we can decide between the shared HTTP/1.1 singleton and a cloned
+	// proxy transport. When request-timeout-seconds is configured the helper
+	// installs a non-proxy default transport to apply a connect timeout; for
+	// Antigravity that would trigger a per-request clone and lose connection
+	// pooling, so prefer the singleton whenever no proxy is in use.
+	proxyURL := ""
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	if proxyURL == "" {
+		client := &http.Client{Transport: antigravityTransport}
 		return client
 	}
 
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
 	if transport, ok := client.Transport.(*http.Transport); ok {
 		client.Transport = cloneTransportWithHTTP11(transport)
+	} else {
+		client.Transport = antigravityTransport
 	}
 	return client
 }
