@@ -7,6 +7,12 @@ import (
 
 func TestParseConfigBytes_CommandAuthAliasesAndDefaults(t *testing.T) {
 	cfg, err := ParseConfigBytes([]byte(`
+gemini-api-key:
+  - auth:
+      command: fetch-gemini-token
+claude-api-key:
+  - auth:
+      command: fetch-claude-token
 codex-api-key:
   - base_url: https://proxy.example.com/v1
     auth:
@@ -29,6 +35,12 @@ openai-compatibility:
 `))
 	if err != nil {
 		t.Fatalf("ParseConfigBytes error: %v", err)
+	}
+	if len(cfg.GeminiKey) != 1 || cfg.GeminiKey[0].Auth == nil || cfg.GeminiKey[0].Auth.Command != "fetch-gemini-token" {
+		t.Fatalf("gemini command auth = %#v", cfg.GeminiKey)
+	}
+	if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].Auth == nil || cfg.ClaudeKey[0].Auth.Command != "fetch-claude-token" {
+		t.Fatalf("claude command auth = %#v", cfg.ClaudeKey)
 	}
 	if len(cfg.CodexKey) != 1 {
 		t.Fatalf("codex key count = %d, want 1", len(cfg.CodexKey))
@@ -136,6 +148,36 @@ codex-api-key:
 `))
 	if err == nil || !strings.Contains(err.Error(), "cannot set both api-key and auth") {
 		t.Fatalf("error = %v, want api-key/auth conflict", err)
+	}
+
+	_, err = ParseConfigBytes([]byte(`
+gemini-api-key:
+  - api-key: static-key
+    auth:
+      command: fetch-token
+`))
+	if err == nil || !strings.Contains(err.Error(), "cannot set both api-key and auth") {
+		t.Fatalf("error = %v, want gemini api-key/auth conflict", err)
+	}
+
+	_, err = ParseConfigBytes([]byte(`
+claude-api-key:
+  - api-key: static-key
+    auth:
+      command: fetch-token
+`))
+	if err == nil || !strings.Contains(err.Error(), "cannot set both api-key and auth") {
+		t.Fatalf("error = %v, want claude api-key/auth conflict", err)
+	}
+
+	_, err = ParseConfigBytes([]byte(`
+vertex-api-key:
+  - api-key: static-key
+    auth:
+      command: fetch-token
+`))
+	if err == nil || !strings.Contains(err.Error(), "cannot set both api-key and auth") {
+		t.Fatalf("error = %v, want vertex api-key/auth conflict", err)
 	}
 
 	_, err = ParseConfigBytes([]byte(`

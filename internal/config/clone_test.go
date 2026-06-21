@@ -86,6 +86,32 @@ func TestCloneForRuntimeDoesNotShareReferenceFields(t *testing.T) {
 	assertNoSharedRuntimeReferences(t, reflect.ValueOf(cfg), reflect.ValueOf(clone), "Config")
 }
 
+func TestCloneForRuntimeCommandAuthDoesNotPanic(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte(`
+gemini-api-key:
+  - auth:
+      command: fetch-token
+codex-api-key:
+  - base-url: https://codex.example.com/v1
+    auth:
+      command: fetch-token
+`))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes error: %v", err)
+	}
+
+	clone := cfg.CloneForRuntime()
+	if clone == nil {
+		t.Fatal("CloneForRuntime returned nil")
+	}
+	if clone.GeminiKey[0].Auth == nil || clone.GeminiKey[0].Auth.Command != "fetch-token" {
+		t.Fatalf("gemini command auth clone = %#v", clone.GeminiKey[0].Auth)
+	}
+	if got := CommandAuthIdentity(clone.GeminiKey[0].Auth); got == "" {
+		t.Fatal("cloned gemini command auth identity is empty")
+	}
+}
+
 func sampleCloneRuntimeConfig() *Config {
 	cacheStrict := true
 	bypassStrict := false

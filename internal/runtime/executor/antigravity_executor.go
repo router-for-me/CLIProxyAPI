@@ -1602,6 +1602,9 @@ attemptLoop:
 
 // Refresh refreshes the authentication credentials using the refresh token.
 func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if helps.ShouldPrepareCommandAuth(auth) {
+		return helps.PrepareCommandAuth(ctx, auth)
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}
@@ -1616,7 +1619,7 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
-	return antigravityProjectIDFromAuth(auth) == ""
+	return helps.ShouldPrepareCommandAuth(auth) || antigravityProjectIDFromAuth(auth) == ""
 }
 
 func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -1625,6 +1628,20 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 	}
 
 	updated := auth.Clone()
+	if helps.ShouldPrepareCommandAuth(updated) {
+		prepared, errPrepare := helps.PrepareCommandAuth(ctx, updated)
+		if errPrepare != nil {
+			return nil, errPrepare
+		}
+		if prepared != nil {
+			updated = prepared
+		}
+	}
+
+	if antigravityProjectIDFromAuth(updated) != "" {
+		return updated, nil
+	}
+
 	token, refreshedAuth, errToken := e.ensureAccessToken(ctx, updated)
 	if errToken != nil {
 		return nil, errToken
@@ -1817,6 +1834,13 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
 	accessToken := metaStringValue(auth.Metadata, "access_token")
+	if cliproxyauth.IsCommandAuth(auth) {
+		if strings.TrimSpace(accessToken) == "" {
+			return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing command auth access token"}
+		}
+		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)
+		return accessToken, nil, nil
+	}
 	expiry := tokenExpiry(auth.Metadata)
 	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
 		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)

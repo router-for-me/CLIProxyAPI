@@ -145,3 +145,13 @@ func addCommandAuthToAttrs(auth *config.CommandAuthConfig, attrs map[string]stri
 	attrs[coreauth.AttrAuthRefreshIntervalMS] = strconv.Itoa(auth.RefreshIntervalMS)
 	attrs[coreauth.AttrAuthInvalidatesOnNext401] = "true"
 }
+
+func commandAuthIDPartsOrAPIKey(auth *config.CommandAuthConfig, apiKey string, extra ...string) []string {
+	if auth != nil && strings.TrimSpace(auth.Command) != "" {
+		return append(CommandAuthIDParts(auth), extra...)
+	}
+	out := make([]string, 0, 1+len(extra))
+	out = append(out, strings.TrimSpace(apiKey))
+	out = append(out, extra...)
+	return out
+}

@@ -87,6 +87,10 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				APIKey:   "codex-key",
 				ProxyURL: "http://codex-proxy.example.com:8080",
 			}},
+			VertexCompatAPIKey: []config.VertexCompatKey{{
+				APIKey:   "vertex-key",
+				ProxyURL: "http://vertex-proxy.example.com:8080",
+			}},
 			OpenAICompatibility: []config.OpenAICompatibility{{
 				Name:    "bohe",
 				BaseURL: "https://bohe.example.com",
@@ -128,6 +132,14 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 			wantProxy: "http://codex-proxy.example.com:8080",
 		},
 		{
+			name: "vertex",
+			auth: &coreauth.Auth{
+				Provider:   "vertex",
+				Attributes: map[string]string{"api_key": "vertex-key"},
+			},
+			wantProxy: "http://vertex-proxy.example.com:8080",
+		},
+		{
 			name: "openai-compatibility",
 			auth: &coreauth.Auth{
 				Provider: "bohe",
@@ -165,6 +177,46 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				t.Fatalf("proxy URL = %v, want %s", proxyURL, tc.wantProxy)
 			}
 		})
+	}
+}
+
+func TestAPICallTransportCommandAuthFallsBackToConfigProxyURL(t *testing.T) {
+	t.Parallel()
+
+	commandAuth := &config.CommandAuthConfig{Command: "fetch-token"}
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{
+			Auth:     commandAuth,
+			ProxyURL: "http://gemini-command-proxy.example.com:8080",
+		}},
+	}
+	cfg.SanitizeGeminiKeys()
+	h := &Handler{cfg: cfg}
+	auth := &coreauth.Auth{
+		Provider: "gemini",
+		Attributes: map[string]string{
+			coreauth.AttrAuthKind:       coreauth.AttrAuthKindAPIKey,
+			coreauth.AttrAuthSource:     coreauth.AttrAuthSourceCommand,
+			coreauth.AttrAuthCommand:    "fetch-token",
+			coreauth.AttrAuthCommandKey: config.CommandAuthIdentity(cfg.GeminiKey[0].Auth),
+		},
+	}
+
+	transport := h.apiCallTransport(auth)
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", transport)
+	}
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+	proxyURL, errProxy := httpTransport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("httpTransport.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://gemini-command-proxy.example.com:8080" {
+		t.Fatalf("proxy URL = %v, want http://gemini-command-proxy.example.com:8080", proxyURL)
 	}
 }
 

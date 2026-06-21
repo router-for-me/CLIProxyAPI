@@ -337,6 +337,72 @@ func TestConfigSynthesizer_CodexCommandAuth(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_CommandAuthProviders(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{{
+				BaseURL: "https://gemini.example.com",
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-gemini-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+			ClaudeKey: []config.ClaudeKey{{
+				BaseURL: "https://claude.example.com",
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-claude-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+			VertexCompatAPIKey: []config.VertexCompatKey{{
+				BaseURL: "https://vertex.example.com",
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-vertex-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths, got %d", len(auths))
+	}
+
+	want := map[string]string{
+		"gemini": "fetch-gemini-token",
+		"claude": "fetch-claude-token",
+		"vertex": "fetch-vertex-token",
+	}
+	for _, auth := range auths {
+		command := want[auth.Provider]
+		if command == "" {
+			t.Fatalf("unexpected provider %q", auth.Provider)
+		}
+		if got := auth.Attributes[coreauth.AttrAuthCommand]; got != command {
+			t.Fatalf("%s auth_command = %q, want %q", auth.Provider, got, command)
+		}
+		if got := auth.Attributes[coreauth.AttrAuthSource]; got != coreauth.AttrAuthSourceCommand {
+			t.Fatalf("%s auth_source = %q, want command", auth.Provider, got)
+		}
+		if _, ok := auth.Attributes["api_key"]; ok {
+			t.Fatalf("%s command auth should not set api_key", auth.Provider)
+		}
+		if auth.Label != auth.Provider+"-auth-command" {
+			t.Fatalf("%s label = %q", auth.Provider, auth.Label)
+		}
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -570,8 +636,8 @@ func TestConfigSynthesizer_VertexCompat_SkipsEmptyAndHeaders(t *testing.T) {
 	ctx := &SynthesisContext{
 		Config: &config.Config{
 			VertexCompatAPIKey: []config.VertexCompatKey{
-				{APIKey: "", BaseURL: "https://vertex.api"},   // empty key creates auth without api_key attr
-				{APIKey: "  ", BaseURL: "https://vertex.api"}, // whitespace key creates auth without api_key attr
+				{APIKey: "", BaseURL: "https://vertex.api"},   // empty, should be skipped
+				{APIKey: "  ", BaseURL: "https://vertex.api"}, // whitespace, should be skipped
 				{APIKey: "valid-key", BaseURL: "https://vertex.api", Headers: map[string]string{"X-Vertex": "test"}},
 			},
 		},
@@ -583,20 +649,11 @@ func TestConfigSynthesizer_VertexCompat_SkipsEmptyAndHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Vertex compat doesn't skip empty keys - it creates auths without api_key attribute
-	if len(auths) != 3 {
-		t.Fatalf("expected 3 auths, got %d", len(auths))
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth (empty keys skipped), got %d", len(auths))
 	}
-	// First two should not have api_key attribute
-	if _, ok := auths[0].Attributes["api_key"]; ok {
-		t.Error("expected first auth to not have api_key attribute")
-	}
-	if _, ok := auths[1].Attributes["api_key"]; ok {
-		t.Error("expected second auth to not have api_key attribute")
-	}
-	// Third should have headers
-	if auths[2].Attributes["header:X-Vertex"] != "test" {
-		t.Errorf("expected header:X-Vertex=test, got %s", auths[2].Attributes["header:X-Vertex"])
+	if auths[0].Attributes["header:X-Vertex"] != "test" {
+		t.Errorf("expected header:X-Vertex=test, got %s", auths[0].Attributes["header:X-Vertex"])
 	}
 }
 

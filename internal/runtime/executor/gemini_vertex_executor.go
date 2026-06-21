@@ -217,6 +217,14 @@ func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	return nil
 }
 
+func (e *GeminiVertexExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	return helps.ShouldPrepareCommandAuth(auth)
+}
+
+func (e *GeminiVertexExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return helps.PrepareCommandAuth(ctx, auth)
+}
+
 // HttpRequest injects Vertex credentials into the request and executes it.
 func (e *GeminiVertexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
@@ -1121,6 +1129,9 @@ func (e *GeminiVertexExecutor) resolveVertexConfig(auth *cliproxyauth.Auth) *con
 		entry := &e.cfg.VertexCompatAPIKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if commandAuthMatches(entry.Auth, cfgBase, attrBase, auth) {
+			return entry
+		}
 		if attrKey != "" && attrBase != "" {
 			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
 				return entry

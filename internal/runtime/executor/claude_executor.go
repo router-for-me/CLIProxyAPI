@@ -179,6 +179,14 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	return nil
 }
 
+func (e *ClaudeExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	return helps.ShouldPrepareCommandAuth(auth)
+}
+
+func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return helps.PrepareCommandAuth(ctx, auth)
+}
+
 // HttpRequest injects Claude credentials into the request and executes it.
 func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {

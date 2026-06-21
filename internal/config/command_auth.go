@@ -24,6 +24,13 @@ type CommandAuthConfig struct {
 	identity          string
 }
 
+// CommandAuthCapable is implemented by config entries that may use command auth.
+type CommandAuthCapable interface {
+	GetAPIKey() string
+	GetBaseURL() string
+	GetCommandAuth() *CommandAuthConfig
+}
+
 func (c *CommandAuthConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c == nil {
 		return nil
@@ -72,6 +79,132 @@ func (c *CommandAuthConfig) UnmarshalJSON(data []byte) error {
 		out.RefreshIntervalMS = aliases.RefreshIntervalMS
 	}
 	*c = CommandAuthConfig(out)
+	return nil
+}
+
+func (k *GeminiKey) UnmarshalYAML(value *yaml.Node) error {
+	if k == nil {
+		return nil
+	}
+	type raw GeminiKey
+	var out raw
+	if value != nil {
+		if err := value.Decode(&out); err != nil {
+			return err
+		}
+		decodeYAMLStringAlias(value, "api_key", &out.APIKey)
+		decodeYAMLStringAlias(value, "base_url", &out.BaseURL)
+		decodeYAMLStringAlias(value, "proxy_url", &out.ProxyURL)
+		decodeYAMLStringSliceAlias(value, "excluded_models", &out.ExcludedModels)
+		decodeYAMLBoolAlias(value, "disable_cooling", &out.DisableCooling)
+	}
+	*k = GeminiKey(out)
+	return nil
+}
+
+func (k *GeminiKey) UnmarshalJSON(data []byte) error {
+	if k == nil {
+		return nil
+	}
+	type raw GeminiKey
+	var out raw
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	var aliases struct {
+		APIKey         string   `json:"api_key"`
+		BaseURL        string   `json:"base_url"`
+		ProxyURL       string   `json:"proxy_url"`
+		ExcludedModels []string `json:"excluded_models"`
+		DisableCooling bool     `json:"disable_cooling"`
+	}
+	if err := json.Unmarshal(data, &aliases); err != nil {
+		return err
+	}
+	if strings.TrimSpace(out.APIKey) == "" {
+		out.APIKey = aliases.APIKey
+	}
+	if strings.TrimSpace(out.BaseURL) == "" {
+		out.BaseURL = aliases.BaseURL
+	}
+	if strings.TrimSpace(out.ProxyURL) == "" {
+		out.ProxyURL = aliases.ProxyURL
+	}
+	if len(out.ExcludedModels) == 0 {
+		out.ExcludedModels = aliases.ExcludedModels
+	}
+	if !out.DisableCooling {
+		out.DisableCooling = aliases.DisableCooling
+	}
+	*k = GeminiKey(out)
+	return nil
+}
+
+func (k *ClaudeKey) UnmarshalYAML(value *yaml.Node) error {
+	if k == nil {
+		return nil
+	}
+	type raw ClaudeKey
+	var out raw
+	if value != nil {
+		if err := value.Decode(&out); err != nil {
+			return err
+		}
+		decodeYAMLStringAlias(value, "api_key", &out.APIKey)
+		decodeYAMLStringAlias(value, "base_url", &out.BaseURL)
+		decodeYAMLStringAlias(value, "proxy_url", &out.ProxyURL)
+		decodeYAMLStringSliceAlias(value, "excluded_models", &out.ExcludedModels)
+		decodeYAMLBoolAlias(value, "rebuild_mid_system_message", &out.RebuildMidSystemMessage)
+		decodeYAMLBoolAlias(value, "disable_cooling", &out.DisableCooling)
+		decodeYAMLBoolAlias(value, "experimental_cch_signing", &out.ExperimentalCCHSigning)
+	}
+	*k = ClaudeKey(out)
+	return nil
+}
+
+func (k *ClaudeKey) UnmarshalJSON(data []byte) error {
+	if k == nil {
+		return nil
+	}
+	type raw ClaudeKey
+	var out raw
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	var aliases struct {
+		APIKey                  string   `json:"api_key"`
+		BaseURL                 string   `json:"base_url"`
+		ProxyURL                string   `json:"proxy_url"`
+		ExcludedModels          []string `json:"excluded_models"`
+		RebuildMidSystemMessage bool     `json:"rebuild_mid_system_message"`
+		DisableCooling          bool     `json:"disable_cooling"`
+		ExperimentalCCHSigning  bool     `json:"experimental_cch_signing"`
+	}
+	if err := json.Unmarshal(data, &aliases); err != nil {
+		return err
+	}
+	if strings.TrimSpace(out.APIKey) == "" {
+		out.APIKey = aliases.APIKey
+	}
+	if strings.TrimSpace(out.BaseURL) == "" {
+		out.BaseURL = aliases.BaseURL
+	}
+	if strings.TrimSpace(out.ProxyURL) == "" {
+		out.ProxyURL = aliases.ProxyURL
+	}
+	if len(out.ExcludedModels) == 0 {
+		out.ExcludedModels = aliases.ExcludedModels
+	}
+	if !out.RebuildMidSystemMessage {
+		out.RebuildMidSystemMessage = aliases.RebuildMidSystemMessage
+	}
+	if !out.DisableCooling {
+		out.DisableCooling = aliases.DisableCooling
+	}
+	if !out.ExperimentalCCHSigning {
+		out.ExperimentalCCHSigning = aliases.ExperimentalCCHSigning
+	}
+	*k = ClaudeKey(out)
 	return nil
 }
 
@@ -221,6 +354,17 @@ func validateCommandAuth(section string, auth *CommandAuthConfig) error {
 	return nil
 }
 
+func validateCommandAuthEntry[T CommandAuthCapable](section string, entry T) error {
+	auth := entry.GetCommandAuth()
+	if err := validateCommandAuth(section, auth); err != nil {
+		return err
+	}
+	if auth != nil && strings.TrimSpace(entry.GetAPIKey()) != "" {
+		return fmt.Errorf("%s cannot set both api-key and auth", section)
+	}
+	return nil
+}
+
 // CommandAuthIdentity returns a stable non-secret identity for a command auth config.
 func CommandAuthIdentity(auth *CommandAuthConfig) string {
 	if auth == nil || strings.TrimSpace(auth.Command) == "" {
@@ -254,14 +398,24 @@ func (cfg *Config) ValidateCommandAuthConfig() error {
 	if cfg == nil {
 		return nil
 	}
-	for i := range cfg.CodexKey {
-		entry := &cfg.CodexKey[i]
-		section := fmt.Sprintf("codex-api-key[%d]", i)
-		if err := validateCommandAuth(section, entry.Auth); err != nil {
+	for i := range cfg.GeminiKey {
+		if err := validateCommandAuthEntry(fmt.Sprintf("gemini-api-key[%d]", i), cfg.GeminiKey[i]); err != nil {
 			return err
 		}
-		if entry.Auth != nil && strings.TrimSpace(entry.APIKey) != "" {
-			return fmt.Errorf("%s cannot set both api-key and auth", section)
+	}
+	for i := range cfg.ClaudeKey {
+		if err := validateCommandAuthEntry(fmt.Sprintf("claude-api-key[%d]", i), cfg.ClaudeKey[i]); err != nil {
+			return err
+		}
+	}
+	for i := range cfg.CodexKey {
+		if err := validateCommandAuthEntry(fmt.Sprintf("codex-api-key[%d]", i), cfg.CodexKey[i]); err != nil {
+			return err
+		}
+	}
+	for i := range cfg.VertexCompatAPIKey {
+		if err := validateCommandAuthEntry(fmt.Sprintf("vertex-api-key[%d]", i), cfg.VertexCompatAPIKey[i]); err != nil {
+			return err
 		}
 	}
 	for i := range cfg.OpenAICompatibility {

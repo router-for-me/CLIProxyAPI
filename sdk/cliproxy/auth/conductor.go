@@ -3104,16 +3104,30 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 type APIKeyConfigEntry interface {
 	GetAPIKey() string
 	GetBaseURL() string
+	GetCommandAuth() *internalconfig.CommandAuthConfig
 }
 
 func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
 	if auth == nil || len(entries) == 0 {
 		return nil
 	}
-	attrKey, attrBase := "", ""
+	attrKey, attrBase, attrCommandKey := "", "", ""
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrCommandKey = strings.TrimSpace(auth.Attributes[AttrAuthCommandKey])
+	}
+	if attrCommandKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			cfgCommandKey := internalconfig.CommandAuthIdentity((*entry).GetCommandAuth())
+			cfgBase := strings.TrimSpace((*entry).GetBaseURL())
+			if cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
+				if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+					return entry
+				}
+			}
+		}
 	}
 	for i := range entries {
 		entry := &entries[i]
@@ -3162,22 +3176,6 @@ func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.CodexKey {
 	if cfg == nil {
 		return nil
-	}
-	if auth != nil && auth.Attributes != nil {
-		attrCommandKey := strings.TrimSpace(auth.Attributes[AttrAuthCommandKey])
-		attrBase := strings.TrimSpace(auth.Attributes["base_url"])
-		if attrCommandKey != "" {
-			for i := range cfg.CodexKey {
-				entry := &cfg.CodexKey[i]
-				cfgCommandKey := internalconfig.CommandAuthIdentity(entry.Auth)
-				cfgBase := strings.TrimSpace(entry.BaseURL)
-				if cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
-					if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-						return entry
-					}
-				}
-			}
-		}
 	}
 	return resolveAPIKeyConfig(cfg.CodexKey, auth)
 }

@@ -55,6 +55,131 @@ func TestOpenAICompatPrepareRequestUsesCommandAuthMetadata(t *testing.T) {
 	}
 }
 
+func TestProviderPrepareRequestUsesCommandAuthMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		exec interface {
+			PrepareRequest(*http.Request, *cliproxyauth.Auth) error
+		}
+		url        string
+		wantHeader string
+		wantValue  string
+	}{
+		{
+			name:       "gemini",
+			exec:       NewGeminiExecutor(nil),
+			url:        "https://generativelanguage.googleapis.com/v1beta/models",
+			wantHeader: "x-goog-api-key",
+			wantValue:  "dynamic-token",
+		},
+		{
+			name:       "claude",
+			exec:       NewClaudeExecutor(nil),
+			url:        "https://api.anthropic.com/v1/messages",
+			wantHeader: "Authorization",
+			wantValue:  "Bearer dynamic-token",
+		},
+		{
+			name:       "vertex",
+			exec:       NewGeminiVertexExecutor(nil),
+			url:        "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini:generateContent",
+			wantHeader: "x-goog-api-key",
+			wantValue:  "dynamic-token",
+		},
+		{
+			name:       "kimi",
+			exec:       NewKimiExecutor(nil),
+			url:        "https://api.kimi.com/coding/v1/chat/completions",
+			wantHeader: "Authorization",
+			wantValue:  "Bearer dynamic-token",
+		},
+		{
+			name:       "xai",
+			exec:       NewXAIExecutor(nil),
+			url:        "https://api.x.ai/v1/responses",
+			wantHeader: "Authorization",
+			wantValue:  "Bearer dynamic-token",
+		},
+		{
+			name:       "aistudio",
+			exec:       NewAIStudioExecutor(nil, "aistudio", nil),
+			url:        "https://generativelanguage.googleapis.com/v1beta/models",
+			wantHeader: "Authorization",
+			wantValue:  "Bearer dynamic-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, tt.url, nil)
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			auth := &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":                  "https://example.com/v1",
+					cliproxyauth.AttrAuthKind:   cliproxyauth.AttrAuthKindAPIKey,
+					cliproxyauth.AttrAuthSource: cliproxyauth.AttrAuthSourceCommand,
+				},
+				Metadata: map[string]any{"access_token": "dynamic-token"},
+			}
+			if err := tt.exec.PrepareRequest(req, auth); err != nil {
+				t.Fatalf("PrepareRequest error: %v", err)
+			}
+			if got := req.Header.Get(tt.wantHeader); got != tt.wantValue {
+				t.Fatalf("%s = %q, want %q", tt.wantHeader, got, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestProviderRequestAuthPreparersRunCommandAuth(t *testing.T) {
+	script := writeTokenScript(t, "prepared-provider-token")
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		exec     interface {
+			ShouldPrepareRequestAuth(*cliproxyauth.Auth) bool
+			PrepareRequestAuth(context.Context, *cliproxyauth.Auth) (*cliproxyauth.Auth, error)
+		}
+	}{
+		{name: "gemini", exec: NewGeminiExecutor(nil)},
+		{name: "claude", exec: NewClaudeExecutor(nil)},
+		{name: "codex", exec: NewCodexExecutor(nil)},
+		{name: "openai-compat", exec: NewOpenAICompatExecutor("openai-compatibility", nil)},
+		{name: "vertex", exec: NewGeminiVertexExecutor(nil)},
+		{name: "kimi", exec: NewKimiExecutor(nil)},
+		{name: "xai", exec: NewXAIExecutor(nil)},
+		{name: "xai-auto", exec: NewXAIAutoExecutor(nil)},
+		{name: "aistudio", exec: NewAIStudioExecutor(nil, "aistudio", nil)},
+		{name: "antigravity", metadata: map[string]any{"project_id": "test-project"}, exec: NewAntigravityExecutor(nil)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{
+				ID:         tt.name + "-command-auth",
+				Provider:   tt.name,
+				Attributes: commandAuthAttrs(script, 60000),
+				Metadata:   tt.metadata,
+			}
+			if !tt.exec.ShouldPrepareRequestAuth(auth) {
+				t.Fatal("expected command auth to require preparation")
+			}
+			updated, err := tt.exec.PrepareRequestAuth(context.Background(), auth)
+			if err != nil {
+				t.Fatalf("PrepareRequestAuth error: %v", err)
+			}
+			if got, _ := updated.Metadata["access_token"].(string); got != "prepared-provider-token" {
+				t.Fatalf("access_token = %q, want prepared-provider-token", got)
+			}
+			if tt.exec.ShouldPrepareRequestAuth(updated) {
+				t.Fatal("expected prepared command auth to skip preparation")
+			}
+		})
+	}
+}
+
 func TestCommandAuthPrepareExecutesCommandAndCaches(t *testing.T) {
 	script := writeTokenScript(t, "Bearer dynamic-token")
 	auth := &cliproxyauth.Auth{

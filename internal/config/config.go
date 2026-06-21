@@ -438,6 +438,10 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Auth executes a command to obtain a token before upstream requests.
+	// Mutually exclusive with APIKey.
+	Auth *CommandAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -478,6 +482,9 @@ type ClaudeKey struct {
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+func (k ClaudeKey) GetCommandAuth() *CommandAuthConfig {
+	return k.Auth
+}
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {
@@ -537,6 +544,9 @@ type CodexKey struct {
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
+func (k CodexKey) GetCommandAuth() *CommandAuthConfig {
+	return k.Auth
+}
 
 // CodexModel describes a mapping between an alias and the actual upstream model name.
 type CodexModel struct {
@@ -559,6 +569,10 @@ func (m CodexModel) GetForceMapping() bool { return m.ForceMapping }
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Auth executes a command to obtain a token before upstream requests.
+	// Mutually exclusive with APIKey.
+	Auth *CommandAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -588,6 +602,9 @@ type GeminiKey struct {
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
 func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
+func (k GeminiKey) GetCommandAuth() *CommandAuthConfig {
+	return k.Auth
+}
 
 // GeminiModel describes a mapping between an alias and the actual upstream model name.
 type GeminiModel struct {
@@ -1024,9 +1041,13 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		normalizeCommandAuth(entry.Auth)
 	}
 }
 
@@ -1042,7 +1063,8 @@ func (cfg *Config) SanitizeGeminiKeys() {
 	for i := range cfg.GeminiKey {
 		entry := cfg.GeminiKey[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
+		normalizeCommandAuth(entry.Auth)
+		if entry.APIKey == "" && (entry.Auth == nil || strings.TrimSpace(entry.Auth.Command) == "") {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
@@ -1051,6 +1073,9 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if entry.APIKey == "" {
+			uniqueKey = CommandAuthIdentity(entry.Auth) + "|" + entry.BaseURL
+		}
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

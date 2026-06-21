@@ -2,7 +2,6 @@ package config
 
 import (
 	"reflect"
-	"unsafe"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,10 +46,7 @@ func cloneRuntimeValue(v reflect.Value) reflect.Value {
 			dst := out.Field(i)
 			src := v.Field(i)
 			if !dst.CanSet() {
-				if !dst.CanAddr() || !src.Type().AssignableTo(dst.Type()) {
-					return v
-				}
-				dst = reflect.NewAt(dst.Type(), unsafe.Pointer(dst.UnsafeAddr())).Elem()
+				continue
 			}
 			dst.Set(cloneRuntimeValue(src))
 		}

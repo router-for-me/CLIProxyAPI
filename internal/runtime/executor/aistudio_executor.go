@@ -53,12 +53,23 @@ func (e *AIStudioExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.
 	if req == nil {
 		return nil
 	}
+	if token := commandAuthMetadataToken(auth); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 	return nil
+}
+
+func (e *AIStudioExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	return helps.ShouldPrepareCommandAuth(auth)
+}
+
+func (e *AIStudioExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return helps.PrepareCommandAuth(ctx, auth)
 }
 
 // HttpRequest forwards an arbitrary HTTP request through the websocket relay.
@@ -144,6 +155,9 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
 		Body:    body.payload,
 	}
+	if token := commandAuthMetadataToken(auth); token != "" {
+		wsReq.Headers.Set("Authorization", "Bearer "+token)
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -212,6 +226,9 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		URL:     endpoint,
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
 		Body:    body.payload,
+	}
+	if token := commandAuthMetadataToken(auth); token != "" {
+		wsReq.Headers.Set("Authorization", "Bearer "+token)
 	}
 	var attrs map[string]string
 	if auth != nil {
@@ -392,6 +409,9 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
 		Body:    body.payload,
 	}
+	if token := commandAuthMetadataToken(auth); token != "" {
+		wsReq.Headers.Set("Authorization", "Bearer "+token)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -432,6 +452,9 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 
 // Refresh refreshes the authentication credentials (no-op for AI Studio).
 func (e *AIStudioExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if helps.ShouldPrepareCommandAuth(auth) {
+		return helps.PrepareCommandAuth(ctx, auth)
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}

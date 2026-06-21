@@ -43,7 +43,13 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 
 	for i := range cfg.GeminiKey {
 		entry := &cfg.GeminiKey[i]
-		id, _ := idGen.Next("gemini:apikey", entry.APIKey, entry.BaseURL)
+		var id string
+		if strings.TrimSpace(entry.APIKey) != "" {
+			id, _ = idGen.Next("gemini:apikey", entry.APIKey, entry.BaseURL)
+		} else if entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+			idParts := append(synthesizer.CommandAuthIDParts(entry.Auth), entry.BaseURL)
+			id, _ = idGen.Next("gemini:apikey", idParts...)
+		}
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil
@@ -51,7 +57,13 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
-		id, _ := idGen.Next("claude:apikey", entry.APIKey, entry.BaseURL)
+		var id string
+		if strings.TrimSpace(entry.APIKey) != "" {
+			id, _ = idGen.Next("claude:apikey", entry.APIKey, entry.BaseURL)
+		} else if entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+			idParts := append(synthesizer.CommandAuthIDParts(entry.Auth), entry.BaseURL)
+			id, _ = idGen.Next("claude:apikey", idParts...)
+		}
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil
@@ -73,7 +85,13 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.VertexCompatAPIKey {
 		entry := &cfg.VertexCompatAPIKey[i]
-		id, _ := idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
+		var id string
+		if strings.TrimSpace(entry.APIKey) != "" {
+			id, _ = idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
+		} else if entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+			idParts := append(synthesizer.CommandAuthIDParts(entry.Auth), entry.BaseURL, strings.TrimSpace(entry.ProxyURL))
+			id, _ = idGen.Next("vertex:apikey", idParts...)
+		}
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil

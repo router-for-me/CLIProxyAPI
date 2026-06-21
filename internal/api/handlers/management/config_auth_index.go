@@ -100,6 +100,10 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("gemini:apikey", key, entry.BaseURL)
 			authIndex = liveIndexByID[id]
+		} else if entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+			idParts := append(synthesizer.CommandAuthIDParts(entry.Auth), entry.BaseURL)
+			id, _ := idGen.Next("gemini:apikey", idParts...)
+			authIndex = liveIndexByID[id]
 		}
 		out[i] = geminiKeyWithAuthIndex{
 			GeminiKey: entry,
@@ -128,6 +132,10 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 		authIndex := ""
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("claude:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		} else if entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+			idParts := append(synthesizer.CommandAuthIDParts(entry.Auth), entry.BaseURL)
+			id, _ := idGen.Next("claude:apikey", idParts...)
 			authIndex = liveIndexByID[id]
 		}
 		out[i] = claudeKeyWithAuthIndex{
@@ -187,7 +195,13 @@ func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex
 	out := make([]vertexCompatKeyWithAuthIndex, len(h.cfg.VertexCompatAPIKey))
 	for i := range h.cfg.VertexCompatAPIKey {
 		entry := h.cfg.VertexCompatAPIKey[i]
-		id, _ := idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
+		var id string
+		if strings.TrimSpace(entry.APIKey) != "" {
+			id, _ = idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
+		} else if entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+			idParts := append(synthesizer.CommandAuthIDParts(entry.Auth), entry.BaseURL, strings.TrimSpace(entry.ProxyURL))
+			id, _ = idGen.Next("vertex:apikey", idParts...)
+		}
 		authIndex := liveIndexByID[id]
 		out[i] = vertexCompatKeyWithAuthIndex{
 			VertexCompatKey: entry,
