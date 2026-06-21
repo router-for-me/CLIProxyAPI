@@ -64,3 +64,35 @@ func TestNewAntigravityHTTPClientProxyClones(t *testing.T) {
 		t.Fatal("proxy clone should force HTTP/1.1 (ForceAttemptHTTP2=false)")
 	}
 }
+
+// rtStub is a minimal round tripper for verifying context-injected transports
+// are honored by newAntigravityHTTPClient.
+type rtStub struct{ called bool }
+
+func (r *rtStub) RoundTrip(*http.Request) (*http.Response, error) {
+	r.called = true
+	return &http.Response{StatusCode: http.StatusTeapot}, nil
+}
+
+// TestNewAntigravityHTTPClientContextRoundTripperHonored verifies that when an
+// execution context carries a round tripper, newAntigravityHTTPClient does NOT
+// short-circuit to the singleton and instead honors the injected transport (via
+// the proxy helper). This preserves custom RoundTripperProvider / test mock
+// behavior that the singleton short-circuit would otherwise bypass.
+func TestNewAntigravityHTTPClientContextRoundTripperHonored(t *testing.T) {
+	antigravityTransportOnce.Do(initAntigravityTransport)
+
+	stub := &rtStub{}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", stub)
+	// No proxy URL on auth/cfg, so without the context-RT check the singleton
+	// short-circuit would kick in.
+	client := newAntigravityHTTPClient(ctx, &internalconfig.Config{}, nil, 0)
+
+	if client.Transport == antigravityTransport {
+		t.Fatal("Transport is the singleton; expected the context-injected round tripper to be honored")
+	}
+	// The proxy helper sets Transport to the context RT when one is present.
+	if client.Transport != stub {
+		t.Fatalf("Transport = %p, want the context-injected stub %p", client.Transport, stub)
+	}
+}

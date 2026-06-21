@@ -297,17 +297,25 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 	if proxyURL == "" {
-		client := &http.Client{Transport: antigravityTransport}
-		return client
+		// No proxy configured. Prefer the shared HTTP/1.1 singleton, but still
+		// honor a context-injected round tripper (e.g. RoundTripperProvider or a
+		// test mock) by falling through to the helper when one is present.
+		if _, hasRT := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); !hasRT {
+			return &http.Client{Transport: antigravityTransport}
+		}
 	}
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
 	if transport, ok := client.Transport.(*http.Transport); ok {
 		client.Transport = cloneTransportWithHTTP11(transport)
-	} else {
+	} else if client.Transport == nil {
+		// No transport at all (e.g. no proxy, no context RT, no cfg timeout):
+		// fall back to the shared HTTP/1.1 singleton.
 		client.Transport = antigravityTransport
 	}
+	// Otherwise (e.g. a context-injected custom round tripper) leave the
+	// transport as-is so injected transports are honored.
 	return client
 }
 
