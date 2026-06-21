@@ -30,23 +30,31 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	}
 }
 
-// TestNewProxyAwareHTTPClientFallsBackToConfigTimeout verifies that when a caller
-// passes timeout 0 (the legacy no-timeout value), the client picks up a
-// globally configured RequestTimeoutSeconds. This bounds how long a single
-// upstream request can hang on a flaky connection, which is the necessary
-// condition to prevent the process-wide wedge described in issue #3944.
-func TestNewProxyAwareHTTPClientFallsBackToConfigTimeout(t *testing.T) {
+// TestNewProxyAwareHTTPClientFallsBackToConfigHeaderTimeout verifies that when a
+// caller passes timeout 0 (the legacy no-timeout value), the constructed
+// transport picks up cfg.RequestTimeoutSeconds as ResponseHeaderTimeout. This
+// bounds the connect + TLS + first-response-byte phase so a single request
+// cannot hang indefinitely on a flaky upstream connection, while leaving the
+// response body (including streaming) unbounded.
+func TestNewProxyAwareHTTPClientFallsBackToConfigHeaderTimeout(t *testing.T) {
 	t.Parallel()
 
 	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{RequestTimeoutSeconds: 42},
-		nil,
-		0, // caller keeps legacy no-timeout behavior
+		&cliproxyauth.Auth{ProxyURL: "http://proxy.example.com:8080"},
+		0,
 	)
 
-	if client.Timeout != 42*time.Second {
-		t.Fatalf("client.Timeout = %v, want %v (cfg.RequestTimeoutSeconds fallback)", client.Timeout, 42*time.Second)
+	if client.Timeout != 0 {
+		t.Fatalf("client.Timeout = %v, want 0 (must not set whole-request timeout; it cuts off streaming bodies)", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 42*time.Second {
+		t.Fatalf("ResponseHeaderTimeout = %v, want %v", transport.ResponseHeaderTimeout, 42*time.Second)
 	}
 }
 
@@ -58,12 +66,16 @@ func TestNewProxyAwareHTTPClientExplicitTimeoutWinsOverConfig(t *testing.T) {
 	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{RequestTimeoutSeconds: 42},
-		nil,
+		&cliproxyauth.Auth{ProxyURL: "http://proxy.example.com:8080"},
 		7*time.Second,
 	)
 
-	if client.Timeout != 7*time.Second {
-		t.Fatalf("client.Timeout = %v, want %v (explicit caller timeout must win)", client.Timeout, 7*time.Second)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 7*time.Second {
+		t.Fatalf("ResponseHeaderTimeout = %v, want %v (explicit caller timeout must win)", transport.ResponseHeaderTimeout, 7*time.Second)
 	}
 }
 
@@ -75,12 +87,43 @@ func TestNewProxyAwareHTTPClientZeroTimeoutNoConfigKeepsLegacy(t *testing.T) {
 
 	client := NewProxyAwareHTTPClient(
 		context.Background(),
-		&config.Config{}, // RequestTimeoutSeconds == 0
-		nil,
+		&config.Config{},
+		&cliproxyauth.Auth{ProxyURL: "http://proxy.example.com:8080"},
 		0,
 	)
 
 	if client.Timeout != 0 {
-		t.Fatalf("client.Timeout = %v, want 0 (legacy no-timeout when unconfigured)", client.Timeout)
+		t.Fatalf("client.Timeout = %v, want 0", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 0 {
+		t.Fatalf("ResponseHeaderTimeout = %v, want 0 (legacy no-timeout when unconfigured)", transport.ResponseHeaderTimeout)
+	}
+}
+
+// TestNewProxyAwareHTTPClientNeverSetsWholeRequestTimeout is a regression guard:
+// http.Client.Timeout must never be set by this helper, because it covers the
+// entire request-response lifecycle including reading the response body, which
+// would abort healthy streaming (SSE) responses mid-stream.
+func TestNewProxyAwareHTTPClientNeverSetsWholeRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{RequestTimeoutSeconds: 42}
+	cases := []struct {
+		name    string
+		auth    *cliproxyauth.Auth
+		timeout time.Duration
+	}{
+		{"config fallback proxy", &cliproxyauth.Auth{ProxyURL: "http://proxy.example.com:8080"}, 0},
+		{"explicit timeout proxy", &cliproxyauth.Auth{ProxyURL: "http://proxy.example.com:8080"}, 10 * time.Second},
+	}
+	for _, c := range cases {
+		client := NewProxyAwareHTTPClient(context.Background(), cfg, c.auth, c.timeout)
+		if client.Timeout != 0 {
+			t.Errorf("%s: client.Timeout = %v, want 0 (whole-request timeout would cut streaming bodies)", c.name, client.Timeout)
+		}
 	}
 }

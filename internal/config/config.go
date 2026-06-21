@@ -99,11 +99,13 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
-	// RequestTimeoutSeconds sets a per-request timeout for upstream HTTP calls
-	// (openai-compatibility, gemini, codex-images, xai, kimi). When 0 (default)
-	// no overall client timeout is applied, preserving the legacy behavior. Set to
-	// a positive value to bound how long a single request can hang on a flaky
-	// upstream connection.
+	// RequestTimeoutSeconds bounds the connect + TLS handshake + first-response-byte
+	// phase of upstream HTTP calls (openai-compatibility, gemini, codex-images, xai,
+	// kimi). When 0 (default) no such timeout is applied, preserving the legacy
+	// behavior. Set to a positive value to bound how long a request can hang on a
+	// flaky upstream connection during establishment. It is applied as the transport
+	// ResponseHeaderTimeout, so it does NOT cut off a healthy streaming (SSE) response
+	// body; it only bounds the time to receive the response headers.
 	RequestTimeoutSeconds int `yaml:"request-timeout-seconds" json:"request-timeout-seconds"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.

@@ -27,13 +27,17 @@ import (
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
+	// Resolve a request timeout. We intentionally do NOT set http.Client.Timeout:
+	// that covers the entire request-response lifecycle including reading the
+	// response body, which would abort healthy streaming (SSE) responses mid-stream.
+	// Instead we apply it as the transport ResponseHeaderTimeout, which bounds the
+	// connect + TLS handshake + first-response-byte phase without cutting off an
+	// active stream body.
+	var headerTimeout time.Duration
 	if timeout > 0 {
-		httpClient.Timeout = timeout
+		headerTimeout = timeout
 	} else if cfg != nil && cfg.RequestTimeoutSeconds > 0 {
-		// Callers pass 0 to keep the legacy no-timeout behavior; fall back to a
-		// globally configured request timeout so a single request cannot hang
-		// indefinitely on a flaky upstream connection.
-		httpClient.Timeout = time.Duration(cfg.RequestTimeoutSeconds) * time.Second
+		headerTimeout = time.Duration(cfg.RequestTimeoutSeconds) * time.Second
 	}
 
 	// Priority 1: Use auth.ProxyURL if configured
@@ -51,6 +55,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
+			applyHeaderTimeout(transport, headerTimeout)
 			httpClient.Transport = transport
 			return httpClient
 		}
@@ -58,11 +63,20 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
-	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
+	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor).
+	// Context round trippers are custom (e.g. utls) and may be shared, so we do
+	// not attempt to mutate them; the header timeout only applies to transports
+	// we construct ourselves below.
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+		return httpClient
 	}
 
+	// No proxy and no context round tripper: use a default transport clone so we
+	// can apply the header timeout without mutating the shared default.
+	if headerTimeout > 0 {
+		httpClient.Transport = cloneDefaultTransportWithHeaderTimeout(headerTimeout)
+	}
 	return httpClient
 }
 
@@ -81,4 +95,25 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 		return nil
 	}
 	return transport
+}
+
+// applyHeaderTimeout sets ResponseHeaderTimeout on a transport we own. It is a
+// no-op when the timeout is zero (legacy behavior).
+func applyHeaderTimeout(transport *http.Transport, headerTimeout time.Duration) {
+	if headerTimeout > 0 {
+		transport.ResponseHeaderTimeout = headerTimeout
+	}
+}
+
+// cloneDefaultTransportWithHeaderTimeout returns a clone of http.DefaultTransport
+// configured with the given ResponseHeaderTimeout, bounding the connect + TLS +
+// first-response-byte phase without limiting how long a streaming body can run.
+func cloneDefaultTransportWithHeaderTimeout(headerTimeout time.Duration) *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || base == nil {
+		return &http.Transport{ResponseHeaderTimeout: headerTimeout}
+	}
+	clone := base.Clone()
+	clone.ResponseHeaderTimeout = headerTimeout
+	return clone
 }
