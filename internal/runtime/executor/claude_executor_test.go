@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,10 @@ import (
 
 func resetClaudeDeviceProfileCache() {
 	helps.ResetClaudeDeviceProfileCache()
+}
+
+func malformedClaudeTreeSignatureForClaudeExecutorTest() string {
+	return base64.StdEncoding.EncodeToString([]byte{0x12, 0xFF, 0xFE, 0xFD})
 }
 
 func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Request {
@@ -854,6 +859,420 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "proxy_mcp__nia__manage_resource" {
 		t.Fatalf("nested tool_reference tool_name = %q, want %q", got, "proxy_mcp__nia__manage_resource")
+	}
+}
+
+func TestClaudeExecutor_ExecuteStripsOpenAIEncryptedThinkingBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"codex reasoning","signature":"gAAAAABopenai-encrypted-content"},
+				{"type":"text","text":"Answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if strings.Contains(string(seenBody), "gAAAAABopenai-encrypted-content") || strings.Contains(string(seenBody), "codex reasoning") {
+		t.Fatalf("invalid thinking block was forwarded: %s", string(seenBody))
+	}
+	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	if len(content) != 1 {
+		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
+	}
+	if got := content[0].Get("text").String(); got != "Answer" {
+		t.Fatalf("remaining content text = %q, want Answer", got)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStripsForeignToolUseSignaturesBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{
+					"type":"tool_use",
+					"id":"toolu_1",
+					"name":"lookup",
+					"input":{"q":"x"},
+					"signature":"skip_thought_signature_validator",
+					"thought_signature":"skip_thought_signature_validator",
+					"extra_content":{"google":{"thought_signature":"skip_thought_signature_validator"}}
+				}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	toolUse := gjson.GetBytes(seenBody, "messages.0.content.0")
+	if !toolUse.Get("type").Exists() || toolUse.Get("type").String() != "tool_use" {
+		t.Fatalf("tool_use block was not preserved: %s", string(seenBody))
+	}
+	for _, path := range []string{"signature", "thought_signature", "extra_content"} {
+		if toolUse.Get(path).Exists() {
+			t.Fatalf("foreign tool_use signature field %s was forwarded: %s", path, string(seenBody))
+		}
+	}
+}
+
+func TestShouldSanitizeClaudeMessagesForUpstream_OnlyClaudeFamily(t *testing.T) {
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{model: "claude-sonnet-4-5", want: true},
+		{model: "claude-3-5-sonnet-20241022", want: true},
+		{model: "kimi-k2.5", want: false},
+		{model: "mimo-v2", want: false},
+		{model: "gemini-3.5-flash", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			got := shouldSanitizeClaudeMessagesForUpstream(tc.model)
+			if got != tc.want {
+				t.Errorf("shouldSanitizeClaudeMessagesForUpstream(%q) = %v, want %v", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstream_BypassesUnknownModelSignatureMatrix(t *testing.T) {
+	rawSignature := "skip_thought_signature_validator"
+	body := []byte(`{
+		"model": "kimi-k2.5",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "keep", "signature": "` + rawSignature + `"},
+					{"type": "text", "text": "hello"},
+					{"type": "tool_use", "id": "call_123", "name": "get_weather", "input": {}, "signature": "` + rawSignature + `"}
+				]
+			}
+		]
+	}`)
+
+	output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
+	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	if len(parts) != 3 {
+		t.Fatalf("content length = %d, want 3 when sanitizer is bypassed: %s", len(parts), output)
+	}
+	if got := parts[0].Get("signature").String(); got != rawSignature {
+		t.Fatalf("thinking signature = %q, want preserved %q", got, rawSignature)
+	}
+	if got := parts[2].Get("signature").String(); got != rawSignature {
+		t.Fatalf("tool_use signature = %q, want preserved %q", got, rawSignature)
+	}
+}
+
+func TestClaudeExecutor_ExecuteBypassesSignatureSanitizerForUnknownModel(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"mimo-v2","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"keep reasoning","signature":""},
+				{"type":"text","text":"Answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "mimo-v2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if !strings.Contains(string(seenBody), "keep reasoning") {
+		t.Fatalf("unknown-model thinking block should bypass Claude sanitizer: %s", string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_ExecuteStripsMalformedEPrefixThinkingBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	malformedSignature := malformedClaudeTreeSignatureForClaudeExecutorTest()
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"bad reasoning","signature":"` + malformedSignature + `"},
+				{"type":"text","text":"Answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if strings.Contains(string(seenBody), malformedSignature) || strings.Contains(string(seenBody), "bad reasoning") {
+		t.Fatalf("malformed E-prefix thinking block was forwarded: %s", string(seenBody))
+	}
+	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	if len(content) != 1 {
+		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
+	}
+	if got := content[0].Get("text").String(); got != "Answer" {
+		t.Fatalf("remaining content text = %q, want Answer", got)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStripsInvalidBase64ThinkingBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"bad reasoning","signature":"E!!!invalid!!!"},
+				{"type":"text","text":"Answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if strings.Contains(string(seenBody), "E!!!invalid!!!") || strings.Contains(string(seenBody), "bad reasoning") {
+		t.Fatalf("invalid-base64 thinking block was forwarded: %s", string(seenBody))
+	}
+	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	if len(content) != 1 {
+		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_ExecuteStripsEmptySignatureEmptyTextThinking(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","text":"","signature":""},
+				{"type":"text","text":"Answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	if len(content) != 1 {
+		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
+	}
+	if got := content[0].Get("type").String(); got != "text" {
+		t.Fatalf("remaining content type = %q, want text: %s", got, string(seenBody))
+	}
+	if got := content[0].Get("text").String(); got != "Answer" {
+		t.Fatalf("remaining content text = %q, want Answer: %s", got, string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamStripsOpenAIEncryptedThinkingBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"codex reasoning","signature":"gAAAAABopenai-encrypted-content"},
+				{"type":"text","text":"Answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if strings.Contains(string(seenBody), "gAAAAABopenai-encrypted-content") || strings.Contains(string(seenBody), "codex reasoning") {
+		t.Fatalf("invalid thinking block was forwarded: %s", string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_CountTokensStripsOpenAIEncryptedThinkingBeforeUpstream(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"codex reasoning","signature":"gAAAAABopenai-encrypted-content"},
+				{"type":"text","text":"Answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if strings.Contains(string(seenBody), "gAAAAABopenai-encrypted-content") || strings.Contains(string(seenBody), "codex reasoning") {
+		t.Fatalf("invalid thinking block was forwarded: %s", string(seenBody))
 	}
 }
 
