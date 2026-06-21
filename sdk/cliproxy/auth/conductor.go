@@ -4994,6 +4994,11 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
+				// A client cancellation surfaces as a *url.Error wrapping the
+				// context error; do not cool down the credits credential for it.
+				if errCtx := creditsCtx.Err(); errCtx != nil {
+					return cliproxyexecutor.Response{}, false, nil
+				}
 				result.Error = errorToResultError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
