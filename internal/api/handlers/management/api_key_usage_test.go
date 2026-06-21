@@ -93,6 +93,63 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 	}
 }
 
+func TestGetAPIKeyUsage_IncludesCommandAuthCredentials(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "gemini-command-auth",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			coreauth.AttrAuthKind:       coreauth.AttrAuthKindAPIKey,
+			coreauth.AttrAuthSource:     coreauth.AttrAuthSourceCommand,
+			coreauth.AttrAuthCommand:    "fetch-token",
+			coreauth.AttrAuthCommandKey: "command-identity",
+			"base_url":                  "https://gemini.example.com",
+		},
+	}); err != nil {
+		t.Fatalf("register command auth: %v", err)
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "gemini-command-auth", Provider: "gemini", Model: "gemini-pro", Success: true})
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "gemini-command-auth", Provider: "gemini", Model: "gemini-pro", Success: false})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	ginCtx.Request = req
+	h.GetAPIKeyUsage(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	entry := payload["gemini"]["https://gemini.example.com|"]
+	if entry.Success != 1 || entry.Failed != 1 {
+		t.Fatalf("command auth totals = %d/%d, want 1/1", entry.Success, entry.Failed)
+	}
+	if entry.AuthSource != coreauth.AttrAuthSourceCommand {
+		t.Fatalf("command auth source = %q, want %q", entry.AuthSource, coreauth.AttrAuthSourceCommand)
+	}
+	if entry.AuthKey != "auth-command:command-identity" {
+		t.Fatalf("command auth key = %q", entry.AuthKey)
+	}
+	if entry.AuthIndex == "" {
+		t.Fatal("command auth index is empty")
+	}
+	success, failed := sumRecentRequestBuckets(entry.RecentRequests)
+	if success != 1 || failed != 1 {
+		t.Fatalf("command auth bucket totals = %d/%d, want 1/1", success, failed)
+	}
+}
+
 func TestGetAPIKeyUsage_GroupsOpenAICompatibleByCompatName(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 

@@ -83,6 +83,26 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 			return true, nil
 		}
 	}
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		if compat.Auth == nil || strings.TrimSpace(compat.Auth.Command) == "" {
+			continue
+		}
+		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
+		if providerName == "" {
+			providerName = "openai-compatibility"
+		}
+		idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+		idParts := append(synthesizer.CommandAuthIDParts(compat.Auth), strings.TrimSpace(compat.BaseURL), strings.TrimSpace(compat.ProxyURL))
+		id, _ := idGen.Next(idKind, idParts...)
+		if id == authID {
+			// OpenAI-compatibility providers expose no per-credential excluded-models field.
+			// A command-auth provider maps to a single synthesized credential, so toggling the
+			// provider's Disabled flag is the persistent equivalent of disabling that credential.
+			compat.Disabled = disable
+			return true, nil
+		}
+	}
 	for i := range cfg.VertexCompatAPIKey {
 		entry := &cfg.VertexCompatAPIKey[i]
 		var id string

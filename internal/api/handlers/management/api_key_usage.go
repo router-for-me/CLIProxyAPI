@@ -10,9 +10,68 @@ import (
 )
 
 type apiKeyUsageEntry struct {
+	AuthIndex      string                         `json:"auth_index,omitempty"`
+	AuthKey        string                         `json:"auth_key,omitempty"`
+	AuthSource     string                         `json:"auth_source,omitempty"`
 	Success        int64                          `json:"success"`
 	Failed         int64                          `json:"failed"`
 	RecentRequests []coreauth.RecentRequestBucket `json:"recent_requests"`
+}
+
+type apiKeyUsageIdentity struct {
+	provider string
+	key      string
+	authKey  string
+	source   string
+}
+
+func apiKeyUsageIdentityForAuth(auth *coreauth.Auth) (apiKeyUsageIdentity, bool) {
+	var identity apiKeyUsageIdentity
+	if auth == nil {
+		return identity, false
+	}
+
+	baseURL := ""
+	apiKey := ""
+	commandKey := ""
+	if auth.Attributes != nil {
+		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+		if baseURL == "" {
+			baseURL = strings.TrimSpace(auth.Attributes["base-url"])
+		}
+		commandKey = strings.TrimSpace(auth.Attributes[coreauth.AttrAuthCommandKey])
+	}
+
+	identity.provider = apiKeyUsageProviderKey(auth)
+
+	if apiKey != "" {
+		identity.key = baseURL + "|" + apiKey
+		identity.authKey = apiKey
+		identity.source = "api_key"
+		return identity, true
+	}
+
+	if coreauth.IsCommandAuth(auth) {
+		if commandKey == "" {
+			commandKey = auth.EnsureIndex()
+		}
+		if commandKey == "" {
+			commandKey = strings.TrimSpace(auth.ID)
+		}
+		if commandKey == "" {
+			return identity, false
+		}
+		identity.authKey = "auth-command:" + commandKey
+		identity.source = coreauth.AttrAuthSourceCommand
+		// Older management frontends key config credentials as "base_url|api_key".
+		// Command-auth entries intentionally have no static api_key, so use the
+		// empty-key shape while exposing the stable command identity in auth_key.
+		identity.key = baseURL + "|"
+		return identity, true
+	}
+
+	return identity, false
 }
 
 func mergeRecentRequestBuckets(dst, src []coreauth.RecentRequestBucket) []coreauth.RecentRequestBucket {
@@ -53,8 +112,10 @@ func apiKeyUsageProviderKey(auth *coreauth.Auth) string {
 	return provider
 }
 
-// GetAPIKeyUsage returns recent request buckets for all in-memory api_key auths,
-// grouped by provider and keyed by "base_url|api_key".
+// GetAPIKeyUsage returns recent request buckets for in-memory API-key-class auths,
+// grouped by provider and keyed by "base_url|api_key". Command-auth credentials
+// have no static api_key, so they use the legacy-compatible "base_url|" key and
+// expose their stable command identity in the entry's auth_key field.
 func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
@@ -72,41 +133,28 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 	now := time.Now()
 	out := make(map[string]map[string]apiKeyUsageEntry)
 	for _, auth := range manager.List() {
-		if auth == nil {
+		identity, okIdentity := apiKeyUsageIdentityForAuth(auth)
+		if !okIdentity {
 			continue
 		}
-		kind, apiKey := auth.AccountInfo()
-		if !strings.EqualFold(strings.TrimSpace(kind), "api_key") {
-			continue
-		}
-		apiKey = strings.TrimSpace(apiKey)
-		if apiKey == "" {
-			continue
-		}
-		baseURL := ""
-		if auth.Attributes != nil {
-			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
-			if baseURL == "" {
-				baseURL = strings.TrimSpace(auth.Attributes["base-url"])
-			}
-		}
-		compositeKey := baseURL + "|" + apiKey
-		provider := apiKeyUsageProviderKey(auth)
 
 		recent := auth.RecentRequestsSnapshot(now)
-		providerBucket, ok := out[provider]
+		providerBucket, ok := out[identity.provider]
 		if !ok {
 			providerBucket = make(map[string]apiKeyUsageEntry)
-			out[provider] = providerBucket
+			out[identity.provider] = providerBucket
 		}
-		if existing, exists := providerBucket[compositeKey]; exists {
+		if existing, exists := providerBucket[identity.key]; exists {
 			existing.Success += auth.Success
 			existing.Failed += auth.Failed
 			existing.RecentRequests = mergeRecentRequestBuckets(existing.RecentRequests, recent)
-			providerBucket[compositeKey] = existing
+			providerBucket[identity.key] = existing
 			continue
 		}
-		providerBucket[compositeKey] = apiKeyUsageEntry{
+		providerBucket[identity.key] = apiKeyUsageEntry{
+			AuthIndex:      auth.EnsureIndex(),
+			AuthKey:        identity.authKey,
+			AuthSource:     identity.source,
 			Success:        auth.Success,
 			Failed:         auth.Failed,
 			RecentRequests: recent,

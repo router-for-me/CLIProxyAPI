@@ -2185,15 +2185,23 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
-	var attrKey, attrBase string
+	var attrKey, attrBase, attrCommandKey string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrCommandKey = strings.TrimSpace(auth.Attributes[coreauth.AttrAuthCommandKey])
 	}
 	for i := range s.cfg.ClaudeKey {
 		entry := &s.cfg.ClaudeKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
+		cfgCommandKey := config.CommandAuthIdentity(entry.Auth)
+		if attrCommandKey != "" && cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
 		if attrKey != "" && attrBase != "" {
 			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
 				return entry
@@ -2224,15 +2232,23 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
-	var attrKey, attrBase string
+	var attrKey, attrBase, attrCommandKey string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrCommandKey = strings.TrimSpace(auth.Attributes[coreauth.AttrAuthCommandKey])
 	}
 	for i := range s.cfg.GeminiKey {
 		entry := &s.cfg.GeminiKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
+		cfgCommandKey := config.CommandAuthIdentity(entry.Auth)
+		if attrCommandKey != "" && cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
 			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
 				return entry
@@ -2250,15 +2266,23 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
-	var attrKey, attrBase string
+	var attrKey, attrBase, attrCommandKey string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrCommandKey = strings.TrimSpace(auth.Attributes[coreauth.AttrAuthCommandKey])
 	}
 	for i := range s.cfg.VertexCompatAPIKey {
 		entry := &s.cfg.VertexCompatAPIKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
+		cfgCommandKey := config.CommandAuthIdentity(entry.Auth)
+		if attrCommandKey != "" && cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
 			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
 				return entry
