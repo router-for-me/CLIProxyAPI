@@ -113,6 +113,29 @@ func TestNewProxyAwareHTTPClientZeroTimeoutNoConfigKeepsLegacy(t *testing.T) {
 	}
 }
 
+// TestNewProxyAwareHTTPClientZeroTimeoutNoProxyLeavesTransportNil verifies that
+// when no timeout is configured and there is no proxy and no context round
+// tripper, Transport stays nil. Callers such as antigravity_executor treat a nil
+// transport as a signal to reuse a shared singleton transport, so installing one
+// here would regress connection reuse for them.
+func TestNewProxyAwareHTTPClientZeroTimeoutNoProxyLeavesTransportNil(t *testing.T) {
+	t.Parallel()
+
+	client := NewProxyAwareHTTPClient(
+		context.Background(),
+		&config.Config{}, // no RequestTimeoutSeconds
+		nil,              // no auth proxy
+		0,
+	)
+
+	if client.Timeout != 0 {
+		t.Fatalf("client.Timeout = %v, want 0", client.Timeout)
+	}
+	if client.Transport != nil {
+		t.Fatalf("Transport = %T, want nil (legacy no-proxy path must leave Transport nil)", client.Transport)
+	}
+}
+
 // TestNewProxyAwareHTTPClientNeverSetsWholeRequestTimeout is a regression guard:
 // http.Client.Timeout must never be set by this helper, because it covers the
 // entire request-response lifecycle including reading the response body, which

@@ -82,11 +82,14 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		return httpClient
 	}
 
-	// No proxy and no context round tripper: use a shared default-transport
-	// clone with the connect timeout applied. The transport is cached per timeout
-	// value so connection reuse is preserved across requests instead of cloning a
-	// fresh transport (and leaking idle sockets) on every call.
-	httpClient.Transport = sharedDefaultTransportWithConnectTimeout(dialTimeout)
+	// No proxy and no context round tripper. When no timeout is configured, leave
+	// Transport nil so callers that treat a nil transport as a signal to reuse a
+	// shared singleton (e.g. antigravity_executor) keep their behavior — this
+	// preserves the legacy code path exactly. Only install a cached, timeout-
+	// bounded transport when a connect timeout is actually configured.
+	if dialTimeout > 0 {
+		httpClient.Transport = sharedDefaultTransportWithConnectTimeout(dialTimeout)
+	}
 	return httpClient
 }
 
@@ -113,8 +116,15 @@ func applyConnectTimeout(transport *http.Transport, dialTimeout time.Duration) {
 	if dialTimeout <= 0 {
 		return
 	}
-	// Preserve any existing DialContext (e.g. SOCKS5 dialer) and only wrap it
-	// with a deadline.
+	// Preserve any existing DialContext (e.g. SOCKS5 dialer) and wrap it with a
+	// deadline. Some dialers (notably the SOCKS5 dialer installed by
+	// proxyutil.BuildHTTPTransport) ignore the passed-in context, so we cannot
+	// rely on context.WithTimeout alone: run the dial on a goroutine and race it
+	// against the deadline, closing a late-arriving connection so the caller is
+	// unblocked even when the underlying dialer is not context-aware. The goroutine
+	// may leak until the OS-level dial times out, but that is strictly better than
+	// hanging the request (issue #3944). A fully context-aware SOCKS5 dialer would
+	// remove this workaround and is tracked as a follow-up.
 	baseDial := transport.DialContext
 	if baseDial == nil {
 		baseDial = (&net.Dialer{}).DialContext
@@ -122,7 +132,27 @@ func applyConnectTimeout(transport *http.Transport, dialTimeout time.Duration) {
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 		defer cancel()
-		return baseDial(dialCtx, network, addr)
+
+		type dialResult struct {
+			conn net.Conn
+			err  error
+		}
+		ch := make(chan dialResult, 1)
+		go func() {
+			conn, err := baseDial(dialCtx, network, addr)
+			ch <- dialResult{conn: conn, err: err}
+		}()
+		select {
+		case <-dialCtx.Done():
+			go func() {
+				if r := <-ch; r.conn != nil {
+					_ = r.conn.Close()
+				}
+			}()
+			return nil, dialCtx.Err()
+		case r := <-ch:
+			return r.conn, r.err
+		}
 	}
 	// Always override with the configured timeout so an explicit setting wins
 	// over the http.DefaultTransport default (10s).
@@ -136,13 +166,6 @@ var defaultTransportCache sync.Map // map[int64]*http.Transport keyed by dialTim
 // per timeout value preserves connection reuse across requests instead of
 // allocating (and leaking idle sockets for) a new transport on every call.
 func sharedDefaultTransportWithConnectTimeout(dialTimeout time.Duration) *http.Transport {
-	if dialTimeout <= 0 {
-		// No timeout configured: keep using the shared default transport verbatim.
-		if t, ok := http.DefaultTransport.(*http.Transport); ok && t != nil {
-			return t
-		}
-		return &http.Transport{}
-	}
 	key := int64(dialTimeout)
 	if cached, ok := defaultTransportCache.Load(key); ok {
 		return cached.(*http.Transport)
