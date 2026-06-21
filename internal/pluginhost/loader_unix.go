@@ -191,6 +191,9 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		C.cliproxy_free_plugin_buffer(c.api.free_buffer, response.ptr, response.len)
 	}
 	if rc != 0 {
+		if isPluginErrorEnvelope(out) {
+			return out, nil
+		}
 		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(rc), string(out))
 	}
 	return out, nil

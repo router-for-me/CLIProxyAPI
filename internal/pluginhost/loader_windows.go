@@ -128,6 +128,9 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		_, _, _ = syscall.SyscallN(c.api.freeBuffer, response.ptr, response.len)
 	}
 	if rc != 0 {
+		if isPluginErrorEnvelope(out) {
+			return out, nil
+		}
 		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, rc, string(out))
 	}
 	return out, nil
