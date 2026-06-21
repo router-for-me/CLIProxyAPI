@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1609,10 +1610,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					errors.Is(chunk.Err, context.DeadlineExceeded) ||
 					ctx.Err() != nil
 				if !isClientCancel {
-					rerr := &Error{Message: chunk.Err.Error()}
-					if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
-						rerr.HTTPStatus = se.StatusCode()
-					}
+					rerr := errorToResultError(chunk.Err)
 					m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
 				}
 			}
@@ -1667,10 +1665,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			rerr := &Error{Message: errStream.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
+			rerr := errorToResultError(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
@@ -1688,10 +1683,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := errorToResultError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
@@ -1699,10 +1691,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, bootstrapErr
 			}
 			if idx < len(execModels)-1 {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := errorToResultError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
@@ -1710,10 +1699,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				lastErr = bootstrapErr
 				continue
 			}
-			rerr := &Error{Message: bootstrapErr.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
+			rerr := errorToResultError(bootstrapErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
@@ -2360,10 +2346,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = errorToResultError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -2461,10 +2444,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = errorToResultError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -3453,15 +3433,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
 						default:
-							// Transport-level errors (TLS failures, connection
-							// resets, DNS) carry no HTTP status code; cool down
-							// briefly so the credential isn't immediately
-							// re-selected against a broken upstream connection.
-							if statusCode == 0 && !disableCooling {
-								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
-							} else {
-								state.NextRetryAfter = time.Time{}
-							}
+							state.NextRetryAfter = time.Time{}
 						}
 					}
 
@@ -3683,6 +3655,31 @@ func errorString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// errorToResultError converts an executor error into the *Error shape stored
+// on a Result. It preserves an explicit HTTP status when the error implements
+// StatusError. Transport-level failures returned by http.Client.Do are
+// *url.Error with no status code; map them to 502 so the cooldown switch
+// treats them as transient upstream errors instead of falling through the
+// default branch (which would leave the credential immediately re-selectable,
+// or, for genuine local validation errors that also carry status 0, would
+// incorrectly cool down a credential for a bad client request).
+func errorToResultError(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	e := &Error{Message: err.Error()}
+	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
+		e.HTTPStatus = se.StatusCode()
+		return e
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		e.HTTPStatus = http.StatusBadGateway
+		e.Retryable = true
+	}
+	return e
 }
 
 func statusCodeFromError(err error) int {
@@ -3972,18 +3969,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
 		}
 	default:
-		// Transport-level errors (TLS failures, connection resets, DNS)
-		// carry no HTTP status code; cool down briefly so the credential
-		// isn't immediately re-selected against a broken upstream
-		// connection.
-		if statusCode == 0 && !disableCooling {
-			auth.StatusMessage = "transport error"
-			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
-		} else {
-			auth.NextRetryAfter = time.Time{}
-			if auth.StatusMessage == "" {
-				auth.StatusMessage = "request failed"
-			}
+		if auth.StatusMessage == "" {
+			auth.StatusMessage = "request failed"
 		}
 	}
 }
@@ -4985,10 +4972,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = errorToResultError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
