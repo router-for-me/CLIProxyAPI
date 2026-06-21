@@ -154,6 +154,19 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 						"maxTokens": 1,
 						"maxOutputTokens": 2
 					},
+					"gemini-3.5-flash-extra-low": {
+						"displayName": "Gemini 3.5 Flash (Low)",
+						"maxTokens": 1048576,
+						"maxOutputTokens": 65535
+					},
+					"gemini-3.5-flash-low": {
+						"displayName": "Gemini 3.5 Flash (Medium)",
+						"maxTokens": 1048576,
+						"maxOutputTokens": 65535
+					},
+					"gemini-3.5-flash-family-only": {
+						"displayName": "Gemini 3.5 Flash (Experimental)"
+					},
 					"fetched-only-search-model": {
 						"displayName": "Fetched Only Search Model"
 					}
@@ -196,7 +209,7 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		}
 	}
 
-	var webSearchModel, agentModel, staticOnlyModel, fetchedOnlyModel *internalregistry.ModelInfo
+	var webSearchModel, extraLowModel, mediumModel, familyOnlyModel, agentModel, staticOnlyModel, fetchedOnlyModel *internalregistry.ModelInfo
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -204,6 +217,12 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		switch strings.TrimSpace(model.ID) {
 		case "gemini-3.1-flash-lite":
 			webSearchModel = model
+		case "gemini-3.5-flash-extra-low":
+			extraLowModel = model
+		case "gemini-3.5-flash-low":
+			mediumModel = model
+		case "gemini-3.5-flash-family-only":
+			familyOnlyModel = model
 		case "gemini-3-flash-agent":
 			agentModel = model
 		case "gpt-oss-120b-medium":
@@ -222,19 +241,105 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	if staticWebSearchModel == nil {
 		t.Fatal("expected static gemini-3.1-flash-lite definition")
 	}
-	if webSearchModel.ContextLength != staticWebSearchModel.ContextLength || webSearchModel.MaxCompletionTokens != staticWebSearchModel.MaxCompletionTokens {
-		t.Fatalf("static token limits should be preserved, got=%#v static=%#v", webSearchModel, staticWebSearchModel)
+	if webSearchModel.ContextLength != 1 || webSearchModel.MaxCompletionTokens != 2 {
+		t.Fatalf("fetched token limits should be preserved, got=%#v", webSearchModel)
 	}
-	if agentModel == nil {
-		t.Fatal("expected gemini-3-flash-agent to be registered")
+	if extraLowModel == nil {
+		t.Fatal("expected fetched gemini-3.5-flash-extra-low to be registered")
 	}
-	if agentModel.SupportsWebSearch {
-		t.Fatal("gemini-3-flash-agent should not support web search")
+	if extraLowModel.DisplayName != "Gemini 3.5 Flash (Low)" {
+		t.Fatalf("extra-low display name = %q, want Gemini 3.5 Flash (Low)", extraLowModel.DisplayName)
+	}
+	if extraLowModel.Thinking == nil {
+		t.Fatal("expected fetched extra-low model to inherit static thinking metadata")
+	}
+	if mediumModel == nil {
+		t.Fatal("expected fetched gemini-3.5-flash-low to be registered")
+	}
+	if mediumModel.DisplayName != "Gemini 3.5 Flash (Medium)" {
+		t.Fatalf("low display name = %q, want Gemini 3.5 Flash (Medium)", mediumModel.DisplayName)
+	}
+	if familyOnlyModel == nil {
+		t.Fatal("expected fetched family-only model to be registered")
+	}
+	if familyOnlyModel.Thinking == nil {
+		t.Fatal("expected family-only model to inherit static thinking metadata")
+	}
+	if familyOnlyModel.ContextLength == 0 || familyOnlyModel.MaxCompletionTokens == 0 {
+		t.Fatalf("expected family-only model to inherit static token limits, got=%#v", familyOnlyModel)
+	}
+	if agentModel != nil {
+		t.Fatalf("static-only gemini-3-flash-agent should not be registered when upstream model list is available: %#v", agentModel)
+	}
+	if staticOnlyModel != nil {
+		t.Fatalf("static-only Antigravity model should not be registered when upstream model list is available: %#v", staticOnlyModel)
+	}
+	if fetchedOnlyModel == nil {
+		t.Fatal("expected fetched-only model to be registered")
+	}
+	if !fetchedOnlyModel.SupportsWebSearch {
+		t.Fatal("expected fetched-only model to support web search")
+	}
+}
+
+func TestRegisterModelsForAuth_AntigravityFallsBackToStaticModelsWhenFetchHasNoModels(t *testing.T) {
+	var sawFetch bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != antigravityModelsPath {
+			t.Fatalf("path = %q, want %s", r.URL.Path, antigravityModelsPath)
+		}
+		sawFetch = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+				"webSearchModelIds": ["gemini-3.1-flash-lite"]
+			}`))
+	}))
+	defer server.Close()
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-antigravity-fetch-hints-only",
+		Provider: "antigravity",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+		},
+	}
+
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+	if !sawFetch {
+		t.Fatal("expected fetchAvailableModels request")
+	}
+
+	models := registry.GetModelsForClient(auth.ID)
+	var webSearchModel, staticOnlyModel *internalregistry.ModelInfo
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch strings.TrimSpace(model.ID) {
+		case "gemini-3.1-flash-lite":
+			webSearchModel = model
+		case "gpt-oss-120b-medium":
+			staticOnlyModel = model
+		}
+	}
+	if webSearchModel == nil {
+		t.Fatal("expected static gemini-3.1-flash-lite to be registered")
+	}
+	if !webSearchModel.SupportsWebSearch {
+		t.Fatal("expected static model to receive fetched web search capability")
 	}
 	if staticOnlyModel == nil {
-		t.Fatal("expected static-only Antigravity model to remain registered")
-	}
-	if fetchedOnlyModel != nil {
-		t.Fatalf("fetched-only model should not be registered: %#v", fetchedOnlyModel)
+		t.Fatal("expected static-only Antigravity model to remain registered on hints-only fetch")
 	}
 }
