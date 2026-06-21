@@ -3444,7 +3444,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
 						default:
-							state.NextRetryAfter = time.Time{}
+							// Transport-level errors (TLS failures, connection
+							// resets, DNS) carry no HTTP status code; cool down
+							// briefly so the credential isn't immediately
+							// re-selected against a broken upstream connection.
+							if statusCode == 0 && !disableCooling {
+								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
+							} else {
+								state.NextRetryAfter = time.Time{}
+							}
 						}
 					}
 
@@ -3955,7 +3963,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
 		}
 	default:
-		if auth.StatusMessage == "" {
+		// Transport-level errors (TLS failures, connection resets, DNS)
+		// carry no HTTP status code; cool down briefly so the credential
+		// isn't immediately re-selected against a broken upstream
+		// connection.
+		if statusCode == 0 && !disableCooling {
+			auth.StatusMessage = "transport error"
+			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
+		} else if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
 	}
