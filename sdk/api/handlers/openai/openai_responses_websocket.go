@@ -818,7 +818,7 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 
 	for _, item := range nextInput.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
-		case "function_call", "custom_tool_call":
+		case "function_call", "custom_tool_call", "tool_search_call", "local_shell_call":
 			return true
 		case "message":
 			role := strings.TrimSpace(item.Get("role").String())
@@ -841,7 +841,7 @@ func inputSatisfiesPendingToolCalls(input gjson.Result, pendingCallIDs []string)
 	outputs := make(map[string]struct{}, len(pendingCallIDs))
 	for _, item := range input.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
-		case "function_call_output", "custom_tool_call_output":
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
 			callID := strings.TrimSpace(item.Get("call_id").String())
 			if callID != "" {
 				outputs[callID] = struct{}{}
@@ -972,8 +972,11 @@ func dedupeInputItemsByID(rawArray string) (string, error) {
 	// rejects the request with "No tool call found for function call output".
 	referencedCallIDs := make(map[string]struct{}, len(items))
 	for i := range items {
-		switch meta[i].itemType {
-		case "function_call_output", "custom_tool_call_output":
+		if isResponsesToolCallOutputType(meta[i].itemType) {
+			if meta[i].itemType == "tool_search_output" &&
+				strings.EqualFold(strings.TrimSpace(gjson.GetBytes(items[i], "execution").String()), "server") {
+				continue
+			}
 			if meta[i].callID != "" {
 				referencedCallIDs[meta[i].callID] = struct{}{}
 			}
@@ -1694,12 +1697,12 @@ func updatePendingToolCallIDsFromItem(pending map[string]struct{}, item gjson.Re
 		return
 	}
 	switch strings.TrimSpace(item.Get("type").String()) {
-	case "function_call", "custom_tool_call":
+	case "function_call", "custom_tool_call", "tool_search_call", "local_shell_call":
 		callID := strings.TrimSpace(item.Get("call_id").String())
 		if callID != "" {
 			pending[callID] = struct{}{}
 		}
-	case "function_call_output", "custom_tool_call_output":
+	case "function_call_output", "custom_tool_call_output", "tool_search_output":
 		callID := strings.TrimSpace(item.Get("call_id").String())
 		if callID != "" {
 			delete(pending, callID)

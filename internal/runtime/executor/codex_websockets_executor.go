@@ -1508,7 +1508,7 @@ func codexWebsocketInputLooksFullTranscript(input gjson.Result) bool {
 	}
 	for _, item := range input.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
-		case "compaction", "compaction_summary", "function_call", "custom_tool_call":
+		case "compaction", "compaction_summary", "function_call", "custom_tool_call", "tool_search_call", "local_shell_call":
 			return true
 		case "message":
 			if strings.TrimSpace(item.Get("role").String()) == "assistant" {
@@ -1584,37 +1584,6 @@ func (e *CodexWebsocketsExecutor) startCodexHTTPFallbackStream(ctx context.Conte
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: fallbackResult.Headers, Chunks: out}, nil
-}
-
-func sanitizeCodexHTTPFallbackPayload(payload []byte) []byte {
-	if len(payload) == 0 {
-		return payload
-	}
-	out := bytes.Clone(payload)
-	if strings.TrimSpace(gjson.GetBytes(out, "type").String()) == "response.create" {
-		out, _ = sjson.DeleteBytes(out, "type")
-	}
-	out, _ = sjson.DeleteBytes(out, "generate")
-	out = sanitizeCodexHTTPFallbackInput(out)
-	return out
-}
-
-func sanitizeCodexHTTPFallbackInput(payload []byte) []byte {
-	input := gjson.GetBytes(payload, "input")
-	if !input.IsArray() {
-		return payload
-	}
-	out := payload
-	for i, item := range input.Array() {
-		if !item.Get("action").Exists() {
-			continue
-		}
-		updated, err := sjson.DeleteBytes(out, fmt.Sprintf("input.%d.action", i))
-		if err == nil {
-			out = updated
-		}
-	}
-	return out
 }
 
 func forwardCodexHTTPFallbackStream(ctx context.Context, chunks <-chan cliproxyexecutor.StreamChunk, send func(cliproxyexecutor.StreamChunk) bool, sentPayload *bool) (bool, error) {
