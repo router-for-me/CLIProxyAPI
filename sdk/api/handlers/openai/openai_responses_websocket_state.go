@@ -10,7 +10,9 @@ import (
 )
 
 const (
-	responsesWebsocketTranscriptStateTTL = 30 * time.Minute
+	responsesWebsocketTranscriptStateTTL         = 30 * time.Minute
+	responsesWebsocketTranscriptStateMaxSessions = 512
+	responsesWebsocketTranscriptStateMaxBytes    = 32 << 20
 )
 
 var defaultResponsesWebsocketTranscriptStateCache = newResponsesWebsocketTranscriptStateCache(0)
@@ -42,13 +44,17 @@ func (s responsesWebsocketTranscriptState) valid() bool {
 }
 
 type responsesWebsocketTranscriptStateCache struct {
-	mu       sync.Mutex
-	ttl      time.Duration
-	sessions map[string]responsesWebsocketTranscriptStateEntry
+	mu          sync.Mutex
+	ttl         time.Duration
+	maxSessions int
+	maxBytes    int
+	totalBytes  int
+	sessions    map[string]responsesWebsocketTranscriptStateEntry
 }
 
 type responsesWebsocketTranscriptStateEntry struct {
 	lastSeen time.Time
+	size     int
 	state    responsesWebsocketTranscriptState
 }
 
@@ -57,8 +63,10 @@ func newResponsesWebsocketTranscriptStateCache(ttl time.Duration) *responsesWebs
 		ttl = responsesWebsocketTranscriptStateTTL
 	}
 	return &responsesWebsocketTranscriptStateCache{
-		ttl:      ttl,
-		sessions: make(map[string]responsesWebsocketTranscriptStateEntry),
+		ttl:         ttl,
+		maxSessions: responsesWebsocketTranscriptStateMaxSessions,
+		maxBytes:    responsesWebsocketTranscriptStateMaxBytes,
+		sessions:    make(map[string]responsesWebsocketTranscriptStateEntry),
 	}
 }
 
@@ -69,14 +77,27 @@ func (c *responsesWebsocketTranscriptStateCache) record(sessionKey string, state
 	}
 
 	now := time.Now()
+	cloned := state.clone()
+	size := responsesWebsocketTranscriptStateEntrySize(sessionKey, cloned)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.cleanupLocked(now)
+	if previous, ok := c.sessions[sessionKey]; ok {
+		c.totalBytes -= previous.size
+		delete(c.sessions, sessionKey)
+	}
+	if c.maxBytes > 0 && size > c.maxBytes {
+		return
+	}
 	c.sessions[sessionKey] = responsesWebsocketTranscriptStateEntry{
 		lastSeen: now,
-		state:    state.clone(),
+		size:     size,
+		state:    cloned,
 	}
+	c.totalBytes += size
+	c.enforceLimitsLocked()
 }
 
 func (c *responsesWebsocketTranscriptStateCache) get(sessionKey string) (responsesWebsocketTranscriptState, bool) {
@@ -105,9 +126,47 @@ func (c *responsesWebsocketTranscriptStateCache) cleanupLocked(now time.Time) {
 	}
 	for key, entry := range c.sessions {
 		if now.Sub(entry.lastSeen) > c.ttl {
+			c.totalBytes -= entry.size
 			delete(c.sessions, key)
 		}
 	}
+}
+
+func (c *responsesWebsocketTranscriptStateCache) enforceLimitsLocked() {
+	if c == nil {
+		return
+	}
+	for {
+		if (c.maxSessions <= 0 || len(c.sessions) <= c.maxSessions) && (c.maxBytes <= 0 || c.totalBytes <= c.maxBytes) {
+			return
+		}
+		var oldestKey string
+		var oldestSeen time.Time
+		for key, entry := range c.sessions {
+			if oldestKey == "" || entry.lastSeen.Before(oldestSeen) {
+				oldestKey = key
+				oldestSeen = entry.lastSeen
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		entry := c.sessions[oldestKey]
+		c.totalBytes -= entry.size
+		delete(c.sessions, oldestKey)
+	}
+}
+
+func responsesWebsocketTranscriptStateEntrySize(sessionKey string, state responsesWebsocketTranscriptState) int {
+	size := len(sessionKey)
+	size += len(state.lastRequest)
+	size += len(state.lastResponseOutput)
+	size += len(state.lastResponseID)
+	size += len(state.passthroughModelName)
+	for _, id := range state.lastResponsePendingToolCallIDs {
+		size += len(id)
+	}
+	return size
 }
 
 func recordResponsesWebsocketTranscriptState(sessionKey string, state responsesWebsocketTranscriptState) {

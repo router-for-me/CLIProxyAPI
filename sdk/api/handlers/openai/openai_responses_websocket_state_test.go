@@ -134,3 +134,57 @@ func TestResponsesWebsocketRequestRequiresUpstreamContext(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesWebsocketTranscriptStateCacheEvictsOldestSession(t *testing.T) {
+	cache := newResponsesWebsocketTranscriptStateCache(time.Minute)
+	cache.maxSessions = 2
+	cache.maxBytes = 0
+
+	cache.record("session-a", testResponsesWebsocketTranscriptState("request-a"))
+	cache.record("session-b", testResponsesWebsocketTranscriptState("request-b"))
+
+	cache.mu.Lock()
+	entryA := cache.sessions["session-a"]
+	entryA.lastSeen = time.Now().Add(-time.Minute)
+	cache.sessions["session-a"] = entryA
+	cache.mu.Unlock()
+
+	cache.record("session-c", testResponsesWebsocketTranscriptState("request-c"))
+
+	if _, ok := cache.get("session-a"); ok {
+		t.Fatal("expected oldest session to be evicted")
+	}
+	if _, ok := cache.get("session-b"); !ok {
+		t.Fatal("expected newer session to remain cached")
+	}
+	if _, ok := cache.get("session-c"); !ok {
+		t.Fatal("expected newest session to remain cached")
+	}
+}
+
+func TestResponsesWebsocketTranscriptStateCacheDropsOversizedSession(t *testing.T) {
+	cache := newResponsesWebsocketTranscriptStateCache(time.Minute)
+	cache.maxSessions = 0
+	cache.maxBytes = responsesWebsocketTranscriptStateEntrySize("session-a", testResponsesWebsocketTranscriptState("small")) + 1
+
+	cache.record("session-a", testResponsesWebsocketTranscriptState("small"))
+	if _, ok := cache.get("session-a"); !ok {
+		t.Fatal("expected small session to be cached")
+	}
+
+	oversized := testResponsesWebsocketTranscriptState(strings.Repeat("x", cache.maxBytes+1))
+	cache.record("session-a", oversized)
+	if _, ok := cache.get("session-a"); ok {
+		t.Fatal("expected oversized session to be dropped with stale state removed")
+	}
+}
+
+func testResponsesWebsocketTranscriptState(request string) responsesWebsocketTranscriptState {
+	return responsesWebsocketTranscriptState{
+		lastRequest:                    []byte(request),
+		lastResponseOutput:             []byte(`[{"id":"out-1"}]`),
+		lastResponseID:                 "resp-1",
+		lastResponsePendingToolCallIDs: []string{"call-1"},
+		passthroughModelName:           "codex",
+	}
+}
