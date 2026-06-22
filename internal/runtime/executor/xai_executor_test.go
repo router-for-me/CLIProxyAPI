@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -1137,6 +1139,205 @@ func TestXAIExecutorDropsInvalidCompactionItem(t *testing.T) {
 	if gjson.GetBytes(gotBody, "input.1").Exists() {
 		t.Fatalf("input.1 exists, want only user item after dropping invalid compaction; body=%s", string(gotBody))
 	}
+}
+
+func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeRequest(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	addedEncryptedContent := testValidGrokEncryptedContentForSeed(1)
+	doneEncryptedContent := testValidGrokEncryptedContentForSeed(2)
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		bodies = append(bodies, body)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","item":{"id":"rs_added","type":"reasoning","status":"in_progress","summary":[],"encrypted_content":"` + addedEncryptedContent + `"},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_done","type":"reasoning","summary":[],"encrypted_content":"` + doneEncryptedContent + `"},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"grok-4.3","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-replay-1",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":  server.URL,
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"access_token": "xai-token",
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       false,
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-1\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first Execute error: %v", err)
+	}
+
+	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-1\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("second Execute error: %v", err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(bodies))
+	}
+	secondBody := bodies[1]
+	if got := gjson.GetBytes(secondBody, "input.0.type").String(); got != "reasoning" {
+		t.Fatalf("input.0.type = %q, want reasoning; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.0.encrypted_content").String(); got != doneEncryptedContent {
+		t.Fatalf("injected encrypted_content = %q, want final done %q; body=%s", got, doneEncryptedContent, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.1.role").String(); got != "user" {
+		t.Fatalf("input.1.role = %q, want user; body=%s", got, string(secondBody))
+	}
+}
+
+func TestApplyXAIReasoningReplayCacheFallsBackWhenReadFails(t *testing.T) {
+	previous := getXAIReasoningReplayItemsRequired
+	getXAIReasoningReplayItemsRequired = func(context.Context, string, string) ([][]byte, bool, error) {
+		return nil, false, errors.New("cache unavailable")
+	}
+	t.Cleanup(func() {
+		getXAIReasoningReplayItemsRequired = previous
+	})
+
+	body := []byte(`{"model":"grok-4.3","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	updated, scope, err := applyXAIReasoningReplayCacheRequired(context.Background(), sdktranslator.FormatClaude, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: body,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-read-error",
+		},
+	}, body)
+	if err != nil {
+		t.Fatalf("applyXAIReasoningReplayCacheRequired() error = %v", err)
+	}
+	if !scope.valid() {
+		t.Fatalf("replay scope should remain valid")
+	}
+	if string(updated) != string(body) {
+		t.Fatalf("body changed on cache read error: %s", string(updated))
+	}
+}
+
+func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	reasoningEncryptedContent := testValidGrokEncryptedContentForSeed(3)
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		bodies = append(bodies, body)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"` + reasoningEncryptedContent + `"},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"weather\"}","status":"in_progress"},"output_index":1}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"weather\"}","status":"completed"},"output_index":1}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"grok-4.3","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-replay-tool",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":  server.URL,
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"access_token": "xai-token",
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       false,
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.3",
+		Payload: []byte(`{
+			"model":"grok-4.3",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-tool\"}"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"call lookup"}]}],
+			"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]
+		}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first Execute error: %v", err)
+	}
+
+	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.3",
+		Payload: []byte(`{
+			"model":"grok-4.3",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-tool\"}"},
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"call lookup"}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"sunny"}]}
+			],
+			"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]
+		}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("second Execute error: %v", err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(bodies))
+	}
+	secondBody := bodies[1]
+	if got := gjson.GetBytes(secondBody, "input.0.type").String(); got != "message" {
+		t.Fatalf("input.0.type = %q, want initial user message; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.1.type").String(); got != "reasoning" {
+		t.Fatalf("input.1.type = %q, want cached reasoning; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("input.2.type = %q, want cached function_call; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.2.call_id").String(); got != "call_1" {
+		t.Fatalf("input.2.call_id = %q, want call_1; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.3.type").String(); got != "function_call_output" {
+		t.Fatalf("input.3.type = %q, want function_call_output after cached call; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.3.call_id").String(); got != "call_1" {
+		t.Fatalf("input.3.call_id = %q, want call_1; body=%s", got, string(secondBody))
+	}
+}
+
+func testValidGrokEncryptedContentForSeed(seed byte) string {
+	buf := make([]byte, 0, 256)
+	for i := 0; len(buf) < 256; i++ {
+		sum := sha256.Sum256([]byte{seed, byte(i), byte(i >> 8), byte(i >> 16)})
+		buf = append(buf, sum[:]...)
+	}
+	return base64.RawStdEncoding.EncodeToString(buf[:256])
 }
 
 func testValidGrokEncryptedContent() string {
