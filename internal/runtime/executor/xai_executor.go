@@ -17,6 +17,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -835,6 +836,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeXAITools(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	body = normalizeXAIInputReasoningItems(body)
+	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
@@ -1126,6 +1128,61 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		changed = true
 	}
 	return raw, changed, true
+}
+
+func sanitizeXAIInputEncryptedContent(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	updated := body
+	dropCount := 0
+	firstReason := ""
+	firstItemType := ""
+	for index, item := range input.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "reasoning" && itemType != "compaction" {
+			continue
+		}
+		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", index)
+		encryptedContent := gjson.GetBytes(updated, encryptedContentPath)
+		if !encryptedContent.Exists() {
+			continue
+		}
+		reason := ""
+		switch encryptedContent.Type {
+		case gjson.String:
+			if _, err := signature.InspectGrokEncryptedContent(encryptedContent.String()); err != nil {
+				reason = err.Error()
+			}
+		case gjson.Null:
+			reason = "encrypted_content is null"
+		default:
+			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
+		}
+		if reason == "" {
+			continue
+		}
+		next, err := sjson.DeleteBytes(updated, encryptedContentPath)
+		if err != nil {
+			continue
+		}
+		updated = next
+		dropCount++
+		if firstReason == "" {
+			firstReason = reason
+			firstItemType = itemType
+		}
+	}
+	if dropCount > 0 {
+		log.WithFields(log.Fields{
+			"component":       "xai_encrypted_content_sanitizer",
+			"dropped":         dropCount,
+			"first_item_type": firstItemType,
+			"first_reason":    firstReason,
+		}).Debug("xai executor: removed invalid encrypted_content before upstream")
+	}
+	return updated
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {
