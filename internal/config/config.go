@@ -143,6 +143,9 @@ type Config struct {
 	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
+	// CommandCodeKey defines Command Code CLI provider configurations.
+	CommandCodeKey []CommandCodeKey `yaml:"commandcode" json:"commandcode"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -473,6 +476,48 @@ type ClaudeKey struct {
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+
+// CommandCodeKey represents the configuration for a Command Code CLI provider.
+type CommandCodeKey struct {
+	// BinaryPath is the path to the `cmd` binary. Empty means auto-detect from PATH.
+	BinaryPath string `yaml:"binary-path" json:"binary-path"`
+
+	// DefaultModel is the default model to pass via the -m flag.
+	DefaultModel string `yaml:"default-model" json:"default-model"`
+
+	// WorkingDir is the default working directory for cmd execution.
+	WorkingDir string `yaml:"working-dir" json:"working-dir"`
+
+	// PermissionMode sets the --permission-mode flag (e.g., "trust", "plan", "standard").
+	PermissionMode string `yaml:"permission-mode" json:"permission-mode"`
+
+	// MaxTurns sets the --max-turns flag. 0 means unlimited.
+	MaxTurns int `yaml:"max-turns" json:"max-turns"`
+
+	// AutoAccept enables the --auto-accept flag.
+	AutoAccept bool `yaml:"auto-accept" json:"auto-accept"`
+
+	// Yolo enables the --yolo flag (bypass all permission prompts).
+	Yolo bool `yaml:"yolo" json:"yolo"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []CommandCodeModel `yaml:"models" json:"models"`
+
+	// ExcludedModels lists model IDs that should be excluded.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+// CommandCodeModel describes a model mapping for Command Code.
+type CommandCodeModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m CommandCodeModel) GetName() string  { return m.Name }
+func (m CommandCodeModel) GetAlias() string { return m.Alias }
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {

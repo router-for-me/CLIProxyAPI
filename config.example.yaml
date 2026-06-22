@@ -297,6 +297,24 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# Command Code CLI provider
+# Wraps the `cmd` CLI binary (Command Code) as an API endpoint.
+# Requires Command Code to be installed and authenticated (`cmd login`).
+# commandcode:
+#   - binary-path: ""          # path to `cmd` binary; empty = auto-detect from PATH
+#     default-model: ""        # model to pass via -m flag; empty = CLI default
+#     working-dir: ""          # working directory for cmd execution; empty = current dir
+#     permission-mode: "plan"  # trust | plan | auto-accept | standard
+#     max-turns: 10            # 0 = unlimited
+#     auto-accept: true        # skip permission prompts
+#     yolo: false              # bypass all permissions (dangerous)
+#     models:
+#       - name: "claude-sonnet-4"
+#         alias: "cc-sonnet"
+#       - name: "gpt-4"
+#         alias: "cc-gpt"
+#     excluded-models: []
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.

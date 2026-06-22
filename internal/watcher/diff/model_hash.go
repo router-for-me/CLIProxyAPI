@@ -72,6 +72,21 @@ func ComputeCodexModelsHash(models []config.CodexModel) string {
 	return hashJoined(keys)
 }
 
+// ComputeCommandCodeModelsHash returns a stable hash for Command Code model aliases.
+func ComputeCommandCodeModelsHash(models []config.CommandCodeModel) string {
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+		}
+	})
+	return hashJoined(keys)
+}
+
 // ComputeGeminiModelsHash returns a stable hash for Gemini model aliases.
 func ComputeGeminiModelsHash(models []config.GeminiModel) string {
 	keys := normalizeModelPairs(func(out func(key string)) {

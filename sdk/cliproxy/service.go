@@ -914,6 +914,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"antigravity",
 		"kimi",
 		"xai",
+		"commandcode",
 		"openai-compatibility",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
@@ -994,6 +995,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+	case "commandcode":
+		s.coreManager.RegisterExecutor(executor.NewCommandCodeExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1895,6 +1898,17 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	case "xai":
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
+	case "commandcode":
+		models = getCommandCodeModels()
+		if entry := s.resolveConfigCommandCodeKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildCommandCodeConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -2409,6 +2423,65 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+}
+
+func getCommandCodeModels() []*ModelInfo {
+	now := time.Now().Unix()
+	return []*ModelInfo{
+		// Open Source
+		{ID: "deepseek/deepseek-v4-pro", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "DeepSeek V4 Pro"},
+		{ID: "deepseek/deepseek-v4-flash", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "DeepSeek V4 Flash"},
+		{ID: "moonshotai/Kimi-K2.7-Code", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Kimi K2.7 Code"},
+		{ID: "moonshotai/Kimi-K2.7-Code-Highspeed", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Kimi K2.7 Code Highspeed"},
+		{ID: "moonshotai/Kimi-K2.6", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Kimi K2.6"},
+		{ID: "moonshotai/Kimi-K2.5", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Kimi K2.5"},
+		{ID: "zai-org/GLM-5.2", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "GLM 5.2"},
+		{ID: "zai-org/GLM-5.1", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "GLM 5.1"},
+		{ID: "zai-org/GLM-5", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "GLM 5"},
+		{ID: "MiniMaxAI/MiniMax-M3", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "MiniMax M3"},
+		{ID: "MiniMaxAI/MiniMax-M2.7", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "MiniMax M2.7"},
+		{ID: "MiniMaxAI/MiniMax-M2.5", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "MiniMax M2.5"},
+		{ID: "xiaomi/mimo-v2.5-pro", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "MiMo V2.5 Pro"},
+		{ID: "xiaomi/mimo-v2.5", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "MiMo V2.5"},
+		{ID: "Qwen/Qwen3.6-Max-Preview", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Qwen 3.6 Max Preview"},
+		{ID: "Qwen/Qwen3.6-Plus", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Qwen 3.6 Plus"},
+		{ID: "Qwen/Qwen3.7-Max", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Qwen 3.7 Max"},
+		{ID: "Qwen/Qwen3.7-Plus", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Qwen 3.7 Plus"},
+		{ID: "stepfun/Step-3.7-Flash", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Step 3.7 Flash"},
+		{ID: "stepfun/Step-3.5-Flash", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Step 3.5 Flash"},
+		{ID: "nvidia/nemotron-3-ultra-550b-a55b", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Nemotron 3 Ultra 550B"},
+		// Anthropic
+		{ID: "claude-sonnet-4-6", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Claude Sonnet 4.6"},
+		{ID: "claude-fable-5", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Claude Fable 5"},
+		{ID: "claude-opus-4-8", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Claude Opus 4.8"},
+		{ID: "claude-opus-4-7", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Claude Opus 4.7"},
+		{ID: "claude-haiku-4-5", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Claude Haiku 4.5"},
+		// OpenAI
+		{ID: "gpt-5.5", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "GPT 5.5"},
+		{ID: "gpt-5.4", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "GPT 5.4"},
+		{ID: "gpt-5.3-codex", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "GPT 5.3 Codex"},
+		{ID: "gpt-5.4-mini", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "GPT 5.4 Mini"},
+		// Google
+		{ID: "google/gemini-3.5-flash", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Gemini 3.5 Flash"},
+		{ID: "google/gemini-3.1-flash-lite", Object: "model", Created: now, OwnedBy: "commandcode", Type: "commandcode", DisplayName: "Gemini 3.1 Flash Lite"},
+	}
+}
+
+func (s *Service) resolveConfigCommandCodeKey(auth *coreauth.Auth) *config.CommandCodeKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	for i := range s.cfg.CommandCodeKey {
+		return &s.cfg.CommandCodeKey[i]
+	}
+	return nil
+}
+
+func buildCommandCodeConfigModels(entry *config.CommandCodeKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "commandcode", "commandcode")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

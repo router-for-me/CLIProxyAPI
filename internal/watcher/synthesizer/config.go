@@ -36,6 +36,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// CommandCode
+	out = append(out, s.synthesizeCommandCodeKeys(ctx)...)
 
 	return out, nil
 }
@@ -91,6 +93,60 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeCommandCodeKeys creates Auth entries for Command Code CLI providers.
+func (s *ConfigSynthesizer) synthesizeCommandCodeKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.CommandCodeKey))
+	for i := range cfg.CommandCodeKey {
+		entry := cfg.CommandCodeKey[i]
+		binaryPath := strings.TrimSpace(entry.BinaryPath)
+		id, token := idGen.Next("commandcode", binaryPath)
+		attrs := map[string]string{
+			"source":  fmt.Sprintf("config:commandcode[%s]", token),
+			"api_key": "commandcode-local",
+		}
+		if binaryPath != "" {
+			attrs["binary_path"] = binaryPath
+		}
+		if entry.DefaultModel != "" {
+			attrs["default_model"] = entry.DefaultModel
+		}
+		if entry.WorkingDir != "" {
+			attrs["working_dir"] = entry.WorkingDir
+		}
+		if entry.PermissionMode != "" {
+			attrs["permission_mode"] = entry.PermissionMode
+		}
+		if entry.MaxTurns > 0 {
+			attrs["max_turns"] = strconv.Itoa(entry.MaxTurns)
+		}
+		if entry.AutoAccept {
+			attrs["auto_accept"] = "true"
+		}
+		if entry.Yolo {
+			attrs["yolo"] = "true"
+		}
+		if hash := diff.ComputeCommandCodeModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "commandcode",
+			Label:      "commandcode",
+			Status:     coreauth.StatusActive,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
 	return out
