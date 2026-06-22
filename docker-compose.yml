@@ -18,11 +18,13 @@ services:
       - "8085:8085"
       - "1455:1455"
       - "54545:54545"
-      - "51121:51121"
+      # - "51121:51121"  # Windows reserves 51121 on this host; use --oauth-callback-port 52121 for antigravity login instead.
+      - "52121:52121"
       - "11451:11451"
     volumes:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
       - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/CLIProxyAPI/plugins
+      - ./static:/CLIProxyAPI/static
     restart: unless-stopped
