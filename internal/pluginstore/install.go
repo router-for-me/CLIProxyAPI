@@ -11,10 +11,11 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sys/cpu"
 )
 
 type InstallOptions struct {
@@ -39,6 +40,7 @@ type InstallResult struct {
 	Version     string `json:"version"`
 	Path        string `json:"path"`
 	Overwritten bool   `json:"overwritten"`
+	Skipped     bool   `json:"skipped"`
 }
 
 func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptions) (InstallResult, error) {
@@ -58,6 +60,42 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 		return InstallResult{}, errVersion
 	}
 	plugin.Version = latestVersion
+	return c.installRelease(ctx, plugin, release, latestVersion, options)
+}
+
+// InstallVersion installs a plugin artifact from a fixed release tag/version.
+func (c Client) InstallVersion(ctx context.Context, plugin Plugin, releaseTag string, version string, options InstallOptions) (InstallResult, error) {
+	if errValidate := ValidatePlugin(plugin); errValidate != nil {
+		return InstallResult{}, errValidate
+	}
+	options = normalizeInstallOptions(options)
+	if loadedPluginInstallBlocked(options) && options.BeforeWrite == nil {
+		return InstallResult{}, ErrLoadedPluginLocked
+	}
+	version = normalizeVersion(version)
+	if !validPluginVersion(version) {
+		return InstallResult{}, fmt.Errorf("invalid plugin version %q", version)
+	}
+	releaseTag = strings.TrimSpace(releaseTag)
+	if releaseTag == "" {
+		releaseTag = version
+	}
+	release, errRelease := c.FetchReleaseByTag(ctx, plugin, releaseTag)
+	if errRelease != nil {
+		return InstallResult{}, errRelease
+	}
+	releaseVersion, errVersion := ReleaseVersion(release)
+	if errVersion != nil {
+		return InstallResult{}, errVersion
+	}
+	if releaseVersion != version {
+		return InstallResult{}, fmt.Errorf("release tag %q resolved version %q, want %q", releaseTag, releaseVersion, version)
+	}
+	plugin.Version = version
+	return c.installRelease(ctx, plugin, release, version, options)
+}
+
+func (c Client) installRelease(ctx context.Context, plugin Plugin, release Release, version string, options InstallOptions) (InstallResult, error) {
 	archiveAsset, checksumAsset, errAssets := SelectReleaseAssets(release, plugin.ID, plugin.Version, options.GOOS, options.GOARCH)
 	if errAssets != nil {
 		return InstallResult{}, errAssets
@@ -77,13 +115,14 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 	if errVerify := VerifyChecksum(archiveAsset.Name, archiveData, checksums); errVerify != nil {
 		return InstallResult{}, errVerify
 	}
+	plugin.Version = version
 	return InstallArchive(archiveData, plugin, options)
 }
 
 func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (InstallResult, error) {
 	options = normalizeInstallOptions(options)
 	id := strings.TrimSpace(plugin.ID)
-	if !pluginhost.ValidatePluginID(id) {
+	if !validPluginID(id) {
 		return InstallResult{}, fmt.Errorf("invalid plugin id %q", plugin.ID)
 	}
 	reader, errZip := zip.NewReader(bytes.NewReader(archiveData), int64(len(archiveData)))
@@ -105,6 +144,21 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 		overwritten = true
 	} else if !errors.Is(errStat, os.ErrNotExist) {
 		return InstallResult{}, fmt.Errorf("stat target plugin: %w", errStat)
+	}
+	if overwritten {
+		existingData, errReadExisting := os.ReadFile(targetPath)
+		if errReadExisting != nil {
+			return InstallResult{}, fmt.Errorf("read target plugin: %w", errReadExisting)
+		}
+		if bytes.Equal(existingData, libraryData) {
+			return InstallResult{
+				ID:          id,
+				Version:     strings.TrimSpace(plugin.Version),
+				Path:        targetPath,
+				Overwritten: true,
+				Skipped:     true,
+			}, nil
+		}
 	}
 	// Re-check immediately before writing: the plugin may have been loaded
 	// while the archive was being downloaded and verified.
@@ -128,11 +182,11 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 }
 
 func installTargetPath(options InstallOptions, id string) (string, error) {
-	defaultPath := filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, id+pluginhost.PluginExtension(options.GOOS))
+	defaultPath := filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, id+pluginExtension(options.GOOS))
 	if options.GOOS != runtime.GOOS || options.GOARCH != runtime.GOARCH {
 		return defaultPath, nil
 	}
-	files, errDiscover := pluginhost.DiscoverPluginFiles(options.PluginsDir)
+	files, errDiscover := discoverCurrentPluginFiles(options.PluginsDir)
 	if errDiscover != nil {
 		return "", fmt.Errorf("discover current plugin files: %w", errDiscover)
 	}
@@ -145,7 +199,7 @@ func installTargetPath(options InstallOptions, id string) (string, error) {
 }
 
 func readTargetLibrary(reader *zip.Reader, id string, goos string) ([]byte, os.FileMode, error) {
-	targetName := strings.TrimSpace(id) + pluginhost.PluginExtension(goos)
+	targetName := strings.TrimSpace(id) + pluginExtension(goos)
 	var target *zip.File
 	for _, file := range reader.File {
 		cleanedName, errClean := cleanZipName(file.Name)
@@ -221,6 +275,101 @@ func regularZipFile(file *zip.File) bool {
 func hasDynamicLibraryExtension(name string) bool {
 	lowerName := strings.ToLower(name)
 	return strings.HasSuffix(lowerName, ".dylib") || strings.HasSuffix(lowerName, ".so") || strings.HasSuffix(lowerName, ".dll")
+}
+
+type pluginFileInfo struct {
+	ID   string
+	Path string
+}
+
+func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = "plugins"
+	}
+	candidates := pluginCandidateDirs(root, runtime.GOOS, runtime.GOARCH, cpuVariant())
+	extension := pluginExtension(runtime.GOOS)
+	selected := make([]pluginFileInfo, 0)
+	seen := make(map[string]struct{})
+	for _, dir := range candidates {
+		entries, errReadDir := os.ReadDir(dir)
+		if errReadDir != nil {
+			if os.IsNotExist(errReadDir) {
+				continue
+			}
+			return nil, errReadDir
+		}
+		files := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			if entry == nil || !entry.Type().IsRegular() {
+				continue
+			}
+			if strings.HasSuffix(strings.ToLower(entry.Name()), extension) {
+				files = append(files, filepath.Join(dir, entry.Name()))
+			}
+		}
+		sort.Strings(files)
+		for _, path := range files {
+			id := pluginIDFromPath(path)
+			if !validPluginID(id) {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			selected = append(selected, pluginFileInfo{ID: id, Path: path})
+		}
+	}
+	return selected, nil
+}
+
+func pluginCandidateDirs(root string, goos string, goarch string, variant string) []string {
+	dirs := make([]string, 0, 3)
+	if variant != "" {
+		dirs = append(dirs, filepath.Join(root, goos, goarch+"-"+variant))
+	}
+	dirs = append(dirs, filepath.Join(root, goos, goarch))
+	dirs = append(dirs, root)
+	return dirs
+}
+
+func pluginIDFromPath(path string) string {
+	base := filepath.Base(path)
+	lowerBase := strings.ToLower(base)
+	for _, extension := range []string{".so", ".dylib", ".dll"} {
+		if strings.HasSuffix(lowerBase, extension) {
+			return base[:len(base)-len(extension)]
+		}
+	}
+	return base
+}
+
+func pluginExtension(goos string) string {
+	switch strings.ToLower(strings.TrimSpace(goos)) {
+	case "darwin", "mac", "macos", "osx":
+		return ".dylib"
+	case "windows":
+		return ".dll"
+	default:
+		return ".so"
+	}
+}
+
+func cpuVariant() string {
+	if runtime.GOARCH != "amd64" {
+		return ""
+	}
+	if cpu.X86.HasAVX512F && cpu.X86.HasAVX512BW && cpu.X86.HasAVX512CD && cpu.X86.HasAVX512DQ && cpu.X86.HasAVX512VL {
+		return "v4"
+	}
+	if cpu.X86.HasAVX && cpu.X86.HasAVX2 && cpu.X86.HasBMI1 && cpu.X86.HasBMI2 && cpu.X86.HasFMA {
+		return "v3"
+	}
+	if cpu.X86.HasSSE3 && cpu.X86.HasSSSE3 && cpu.X86.HasSSE41 && cpu.X86.HasSSE42 && cpu.X86.HasPOPCNT {
+		return "v2"
+	}
+	return "v1"
 }
 
 func writeFileAtomic(targetPath string, data []byte, mode os.FileMode) error {

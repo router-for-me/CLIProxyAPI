@@ -9,8 +9,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 )
 
 const (
@@ -21,6 +19,7 @@ const (
 )
 
 var pluginVersionPattern = regexp.MustCompile(`^[0-9][0-9A-Za-z.+-]*$`)
+var pluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type Source struct {
 	ID   string `json:"id"`
@@ -159,7 +158,7 @@ func ValidatePlugin(plugin Plugin) error {
 			return fmt.Errorf("missing required field %s", field)
 		}
 	}
-	if !pluginhost.ValidatePluginID(strings.TrimSpace(plugin.ID)) {
+	if !validPluginID(strings.TrimSpace(plugin.ID)) {
 		return fmt.Errorf("invalid plugin id %q", plugin.ID)
 	}
 	// The version is optional since the latest release is the source of truth;
@@ -175,6 +174,10 @@ func ValidatePlugin(plugin Plugin) error {
 
 func validPluginVersion(version string) bool {
 	return version != "" && !strings.HasPrefix(version, "v") && pluginVersionPattern.MatchString(version)
+}
+
+func validPluginID(id string) bool {
+	return pluginIDPattern.MatchString(id)
 }
 
 func GitHubRepositoryParts(repository string) (string, string, error) {

@@ -328,6 +328,78 @@ func (h *Host) callPollLogin(ctx context.Context, record capabilityRecord, provi
 	return resp, true, nil
 }
 
+func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, handled bool, err error) {
+	if h == nil || auth == nil {
+		return nil, false, nil
+	}
+	record := h.authProviderRecord(authProvider(auth))
+	if record == nil || record.plugin.Capabilities.AuthProvider == nil {
+		return nil, false, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
+			refreshed = nil
+			handled = true
+			err = fmt.Errorf("auth provider refresh panic: %v", recovered)
+		}
+	}()
+
+	pluginResp, errRefresh := record.plugin.Capabilities.AuthProvider.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{
+		AuthID:       authID(auth),
+		AuthProvider: authProvider(auth),
+		StorageJSON:  storageJSONFromAuth(auth),
+		Metadata:     cloneAnyMap(authMetadata(auth)),
+		Attributes:   authAttributes(auth),
+		Host:         h.hostConfigSummary(),
+		HTTPClient:   h.newHTTPClient(auth),
+	})
+	if errRefresh != nil {
+		return nil, true, errRefresh
+	}
+	data := pluginResp.Auth
+	if strings.TrimSpace(data.Provider) == "" {
+		data.Provider = authProvider(auth)
+	}
+	if strings.TrimSpace(data.ID) == "" {
+		data.ID = authID(auth)
+	}
+	if strings.TrimSpace(data.FileName) == "" {
+		data.FileName = auth.FileName
+	}
+	if strings.TrimSpace(data.Label) == "" {
+		data.Label = auth.Label
+	}
+	if strings.TrimSpace(data.Prefix) == "" {
+		data.Prefix = auth.Prefix
+	}
+	if strings.TrimSpace(data.ProxyURL) == "" {
+		data.ProxyURL = auth.ProxyURL
+	}
+	if len(data.Metadata) == 0 {
+		data.Metadata = cloneAnyMap(auth.Metadata)
+	}
+	if len(data.Attributes) == 0 {
+		data.Attributes = cloneStringMap(auth.Attributes)
+	}
+	if len(data.StorageJSON) == 0 {
+		data.StorageJSON = storageJSONFromAuth(auth)
+	}
+	if pluginResp.NextRefreshAfter.IsZero() {
+		data.NextRefreshAfter = auth.NextRefreshAfter
+	} else {
+		data.NextRefreshAfter = pluginResp.NextRefreshAfter
+	}
+	next := h.AuthDataToCoreAuth(data, "", data.FileName)
+	if next == nil {
+		return nil, true, fmt.Errorf("auth provider refresh returned invalid auth data")
+	}
+	next.Index = auth.Index
+	next.CreatedAt = auth.CreatedAt
+	next.UpdatedAt = auth.UpdatedAt
+	return next, true, nil
+}
+
 func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string) *coreauth.Auth {
 	authDir := ""
 	if h != nil {

@@ -1424,15 +1424,24 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 }
 
 func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
+	if errApply := s.applyHomeOverlayContext(context.Background(), remoteCfg); errApply != nil {
+		log.Warnf("failed to apply home config payload: %v", errApply)
+	}
+}
+
+func (s *Service) applyHomeOverlayContext(ctx context.Context, remoteCfg *config.Config) error {
 	if s == nil || remoteCfg == nil {
-		return
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	s.cfgMu.RLock()
 	baseCfg := s.cfg
 	s.cfgMu.RUnlock()
 	if baseCfg == nil {
-		return
+		return nil
 	}
 
 	merged := *remoteCfg
@@ -1443,7 +1452,11 @@ func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
 	forceHomeRuntimeConfig(&merged)
 
 	logHomeConfigChanges(baseCfg, &merged)
+	if errSync := s.syncHomePlugins(ctx, &merged); errSync != nil {
+		return errSync
+	}
 	s.applyConfigUpdate(&merged)
+	return nil
 }
 
 func logHomeConfigChanges(oldCfg, newCfg *config.Config) {
@@ -1567,8 +1580,7 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 			log.Warnf("failed to parse home config payload: %v", err)
 			return err
 		}
-		s.applyHomeOverlay(parsed)
-		return nil
+		return s.applyHomeOverlayContext(homeCtx, parsed)
 	})
 	s.startHomeUsageForwarder(homeCtx, client)
 	s.homeLogForwarder = logging.StartHomeAppLogForwarder(0)
