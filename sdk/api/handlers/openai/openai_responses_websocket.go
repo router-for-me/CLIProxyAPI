@@ -727,6 +727,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 				}
 			}
 			normalized, _ = sjson.SetBytes(normalized, "stream", true)
+			normalized = sanitizeResponsesInputForHTTP(normalized)
 			return normalized, bytes.Clone(normalized), nil
 		}
 	}
@@ -748,7 +749,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 
 		existingInput := gjson.GetBytes(lastRequest, "input")
 		var errMerge error
-		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(sanitizeResponsesOutputForInput(lastResponseOutput)))
+		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(sanitizeResponsesInputArrayForHTTP(lastResponseOutput)))
 		if errMerge != nil {
 			return nil, lastRequest, &interfaces.ErrorMessage{
 				StatusCode: http.StatusBadRequest,
@@ -772,6 +773,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	if errDedupeItemIDs == nil {
 		mergedInput = dedupedInput
 	}
+	mergedInput = string(sanitizeResponsesInputArrayForHTTP([]byte(mergedInput)))
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
@@ -877,6 +879,7 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = sanitizeResponsesInputForHTTP(normalized)
 	return bytes.Clone(normalized)
 }
 
@@ -1627,22 +1630,38 @@ func responsesWebsocketPreviousResponseNotFoundError(errMsg *interfaces.ErrorMes
 func responseCompletedOutputFromPayload(payload []byte) []byte {
 	output := gjson.GetBytes(payload, "response.output")
 	if output.Exists() && output.IsArray() {
-		return sanitizeResponsesOutputForInput([]byte(output.Raw))
+		return sanitizeResponsesInputArrayForHTTP([]byte(output.Raw))
 	}
 	return []byte("[]")
 }
 
-func sanitizeResponsesOutputForInput(output []byte) []byte {
-	if len(output) == 0 {
-		return output
+func sanitizeResponsesInputForHTTP(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return payload
 	}
-	items := gjson.ParseBytes(output)
+	sanitizedInput := sanitizeResponsesInputArrayForHTTP([]byte(input.Raw))
+	if string(sanitizedInput) == input.Raw {
+		return payload
+	}
+	updated, err := sjson.SetRawBytes(payload, "input", sanitizedInput)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func sanitizeResponsesInputArrayForHTTP(input []byte) []byte {
+	if len(input) == 0 {
+		return input
+	}
+	items := gjson.ParseBytes(input)
 	if !items.IsArray() {
-		return output
+		return input
 	}
-	out := bytes.Clone(output)
+	out := bytes.Clone(input)
 	for i, item := range items.Array() {
-		if strings.TrimSpace(item.Get("type").String()) != "web_search_call" || !item.Get("action").Exists() {
+		if !item.Get("action").Exists() {
 			continue
 		}
 		updated, err := sjson.DeleteBytes(out, fmt.Sprintf("%d.action", i))

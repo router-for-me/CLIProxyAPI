@@ -851,7 +851,7 @@ func TestResponseCompletedOutputFromPayload(t *testing.T) {
 }
 
 func TestResponseCompletedOutputFromPayloadDropsWebSearchAction(t *testing.T) {
-	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool","arguments":"{}"}]}}`)
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool","arguments":"{}","action":{"type":"unexpected"}}]}}`)
 
 	output := responseCompletedOutputFromPayload(payload)
 	items := gjson.ParseBytes(output).Array()
@@ -866,6 +866,9 @@ func TestResponseCompletedOutputFromPayloadDropsWebSearchAction(t *testing.T) {
 	}
 	if got := items[1].Get("arguments").String(); got != "{}" {
 		t.Fatalf("function call arguments were not preserved: %s", output)
+	}
+	if items[1].Get("action").Exists() {
+		t.Fatalf("generic action leaked into replay output: %s", output)
 	}
 }
 
@@ -3907,6 +3910,27 @@ func TestNormalizeSubsequentRequestCompactSkipsMerge(t *testing.T) {
 	}
 }
 
+func TestNormalizeSubsequentRequestCompactSkipsMergeAndDropsAction(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"old"}]}`)
+	raw := []byte(`{"type":"response.create","input":[
+		{"type":"message","role":"user","id":"msg-1c","content":"compacted user msg"},
+		{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}},
+		{"type":"compaction","encrypted_content":"conversation summary"}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, nil)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("input len = %d, want 3: %s", len(input), normalized)
+	}
+	if input[1].Get("action").Exists() {
+		t.Fatalf("action leaked through compact replay bypass: %s", normalized)
+	}
+}
+
 func TestNormalizeSubsequentRequestCompactMergesWhenCompactionReplayUnsupported(t *testing.T) {
 	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[
 		{"type":"message","role":"user","id":"msg-1","content":"original long prompt"},
@@ -3943,6 +3967,42 @@ func TestNormalizeSubsequentRequestCompactMergesWhenCompactionReplayUnsupported(
 		if item.Get("type").String() == "compaction" || item.Get("type").String() == "compaction_summary" {
 			t.Fatalf("compaction items must be stripped for unsupported downstream fallback: %s", item.Raw)
 		}
+	}
+}
+
+func TestNormalizeSubsequentRequestDropsActionFromExistingInput(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[
+		{"type":"message","role":"user","id":"msg-1","content":"original prompt"},
+		{"type":"web_search_call","id":"ws-old","status":"completed","action":{"type":"search","query":"old weather"}}
+	]}`)
+	raw := []byte(`{"type":"response.create","input":[{"type":"message","role":"user","id":"msg-2","content":"next question"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, nil, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("input len = %d, want 3: %s", len(input), normalized)
+	}
+	if input[1].Get("action").Exists() {
+		t.Fatalf("action leaked from existing request input: %s", normalized)
+	}
+}
+
+func TestNormalizeSubsequentRequestWithPreviousResponseIDDropsAction(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"original prompt"}]}`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithLastResponseID(raw, lastRequest, nil, "resp-1", true, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(normalized, "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("previous_response_id = %q, want resp-1: %s", got, normalized)
+	}
+	if gjson.GetBytes(normalized, "input.0.action").Exists() {
+		t.Fatalf("action leaked through previous_response_id path: %s", normalized)
 	}
 }
 

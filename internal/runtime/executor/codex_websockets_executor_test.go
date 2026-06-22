@@ -43,7 +43,7 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 }
 
 func TestSanitizeCodexHTTPFallbackPayloadDropsWebSearchAction(t *testing.T) {
-	payload := []byte(`{"type":"response.create","model":"gpt-5-codex","generate":false,"input":[{"type":"message","id":"msg-1"},{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}}]}`)
+	payload := []byte(`{"type":"response.create","model":"gpt-5-codex","generate":false,"input":[{"type":"message","id":"msg-1"},{"type":"web_search_call","id":"ws-1","status":"completed","action":{"type":"search","query":"weather"}},{"type":"message","id":"msg-2","action":{"type":"open_page"}}]}`)
 
 	sanitized := sanitizeCodexHTTPFallbackPayload(payload)
 
@@ -55,6 +55,9 @@ func TestSanitizeCodexHTTPFallbackPayloadDropsWebSearchAction(t *testing.T) {
 	}
 	if gjson.GetBytes(sanitized, "input.1.action").Exists() {
 		t.Fatalf("web search action leaked into HTTP fallback input: %s", sanitized)
+	}
+	if gjson.GetBytes(sanitized, "input.2.action").Exists() {
+		t.Fatalf("generic action leaked into HTTP fallback input: %s", sanitized)
 	}
 	if got := gjson.GetBytes(sanitized, "input.1.type").String(); got != "web_search_call" {
 		t.Fatalf("input.1.type = %s, want web_search_call", got)

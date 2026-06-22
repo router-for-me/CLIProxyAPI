@@ -1585,7 +1585,7 @@ func sanitizeCodexHTTPFallbackInput(payload []byte) []byte {
 	}
 	out := payload
 	for i, item := range input.Array() {
-		if strings.TrimSpace(item.Get("type").String()) != "web_search_call" || !item.Get("action").Exists() {
+		if !item.Get("action").Exists() {
 			continue
 		}
 		updated, err := sjson.DeleteBytes(out, fmt.Sprintf("input.%d.action", i))
