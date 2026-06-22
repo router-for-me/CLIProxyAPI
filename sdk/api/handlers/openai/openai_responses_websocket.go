@@ -1877,7 +1877,16 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 		status = int(gjson.GetBytes(payload, "status_code").Int())
 	}
 	errCode := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
+	if errCode == "" {
+		errCode = strings.TrimSpace(gjson.GetBytes(payload, "code").String())
+	}
 	errType := strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
+	if errType == "" {
+		topLevelType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+		if !strings.EqualFold(topLevelType, wsEventTypeError) {
+			errType = topLevelType
+		}
+	}
 	if status <= 0 {
 		if strings.EqualFold(errCode, "previous_response_not_found") || strings.EqualFold(errType, "invalid_request_error") {
 			status = http.StatusBadRequest

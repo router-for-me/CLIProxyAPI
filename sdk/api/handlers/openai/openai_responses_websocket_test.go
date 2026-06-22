@@ -1707,6 +1707,7 @@ func TestResponsesWebsocketErrorPayloadPreservesCodeForPreviousResponseRetry(t *
 	for _, payload := range [][]byte{
 		[]byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`),
 		[]byte(`{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}}`),
+		[]byte(`{"type":"error","code":"previous_response_not_found","message":"Previous response with id 'resp-1' not found.","param":"previous_response_id"}`),
 	} {
 		errMsg := responsesWebsocketErrorMessageFromPayload(payload)
 		if errMsg == nil {
