@@ -379,8 +379,10 @@ func (a *Auth) EnsureIndex() string {
 	if a == nil {
 		return ""
 	}
-	if a.indexAssigned && a.Index != "" {
-		return a.Index
+	if existingIndex := strings.TrimSpace(a.Index); existingIndex != "" {
+		a.Index = existingIndex
+		a.indexAssigned = true
+		return existingIndex
 	}
 
 	seed := a.indexSeed()

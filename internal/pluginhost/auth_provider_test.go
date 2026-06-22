@@ -267,6 +267,53 @@ func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 	}
 }
 
+func TestRefreshAuthPreservesAuthIndex(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "plugin-provider",
+					refreshAuth: func(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+						if req.AuthID != "auth-1" || req.AuthProvider != "plugin-provider" {
+							t.Fatalf("RefreshAuth request = %#v, want auth id/provider", req)
+						}
+						return pluginapi.AuthRefreshResponse{
+							Auth: pluginapi.AuthData{
+								Metadata: map[string]any{"access_token": "new-token"},
+							},
+						}, nil
+					},
+				},
+			},
+		},
+	})
+
+	auth := host.AuthDataToCoreAuth(pluginapi.AuthData{
+		Provider: "plugin-provider",
+		ID:       "auth-1",
+		Metadata: map[string]any{"access_token": "old-token"},
+	}, "", "")
+	if auth == nil {
+		t.Fatal("AuthDataToCoreAuth() = nil, want auth")
+	}
+	auth.Index = "home-index-1"
+
+	refreshed, handled, errRefresh := host.RefreshAuth(context.Background(), auth)
+	if errRefresh != nil {
+		t.Fatalf("RefreshAuth() error = %v", errRefresh)
+	}
+	if !handled || refreshed == nil {
+		t.Fatalf("RefreshAuth() handled=%t auth=%#v, want refreshed auth", handled, refreshed)
+	}
+	if refreshed.Index != "home-index-1" {
+		t.Fatalf("RefreshAuth() index = %q, want home-index-1", refreshed.Index)
+	}
+	if got := refreshed.Metadata["access_token"]; got != "new-token" {
+		t.Fatalf("RefreshAuth() access_token = %q, want new-token", got)
+	}
+}
+
 func TestHostAuthDataToCoreAuthRejectsMissingProviderAndUsesAuthDir(t *testing.T) {
 	authDir := t.TempDir()
 	host := New()
