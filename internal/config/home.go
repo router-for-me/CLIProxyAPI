@@ -3,6 +3,7 @@ package config
 // HomeConfig stores runtime-only Home control plane settings from -home-jwt.
 type HomeConfig struct {
 	Enabled                 bool          `yaml:"enabled" json:"enabled"`
+	NodeID                  string        `yaml:"-" json:"-"`
 	Host                    string        `yaml:"host" json:"-"`
 	Port                    int           `yaml:"port" json:"-"`
 	DisableClusterDiscovery bool          `yaml:"disable-cluster-discovery" json:"-"`
