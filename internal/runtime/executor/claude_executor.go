@@ -1892,7 +1892,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
-	// Collect user system instructions and prepend to first user message
+	// Collect user system instructions and prepend to first user message.
+	// In OAuth mode, sanitize only the first forwarded system block and preserve
+	// all subsequent blocks unchanged (PR #3335 approach).
 	if !strictMode {
 		var userSystemParts []string
 		if system.IsArray() {
@@ -1912,7 +1914,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		if len(userSystemParts) > 0 {
 			combined := strings.Join(userSystemParts, "\n\n")
 			if oauthMode {
-				combined = sanitizeForwardedSystemPrompt(combined)
+				combined = sanitizeForwardedSystemPrompt(userSystemParts)
 			}
 			if strings.TrimSpace(combined) != "" {
 				payload = prependToFirstUserMessage(payload, combined)
@@ -1923,17 +1925,20 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	return payload
 }
 
-// sanitizeForwardedSystemPrompt reduces forwarded third-party system context to a
-// tiny neutral reminder for Claude OAuth cloaking. The goal is to preserve only
-// the minimum tool/task guidance while removing virtually all client-specific
-// prompt structure that Anthropic may classify as third-party agent traffic.
-func sanitizeForwardedSystemPrompt(text string) string {
-	if strings.TrimSpace(text) == "" {
+// sanitizeForwardedSystemPrompt sanitizes the first forwarded system block and
+// preserves all subsequent blocks unchanged. This is the PR #3335 approach:
+// sanitize userSystemParts[0], keep userSystemParts[1:].
+func sanitizeForwardedSystemPrompt(parts []string) string {
+	if len(parts) == 0 {
 		return ""
 	}
-	return strings.TrimSpace(`Use the available tools when needed to help with software engineering tasks.
+	genericReminder := strings.TrimSpace(`Use the available tools when needed to help with software engineering tasks.
 Keep responses concise and focused on the user's request.
 Prefer acting on the user's task over describing product-specific workflows.`)
+	sanitized := make([]string, 0, len(parts))
+	sanitized = append(sanitized, genericReminder)
+	sanitized = append(sanitized, parts[1:]...)
+	return strings.Join(sanitized, "\n\n")
 }
 
 // buildTextBlock constructs a JSON text block object with proper escaping.

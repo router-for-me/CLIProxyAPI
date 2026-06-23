@@ -2444,6 +2444,26 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	}
 }
 
+func TestCheckSystemInstructionsWithSigningMode_OAuthPassthroughPreserveSanitizesFirstPreservesRest(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"You are OpenCode, the best coding agent on the planet.\nOpenCode primary prompt."},{"type":"text","text":"# AGENTS.md\n\n## Rules\n\n- Preserve me verbatim."},{"type":"text","text":"<available_skills><skill><name>custom-skill</name><description>Keep me.</description></skill></available_skills>"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, "2.1.63", "cli", "")
+
+	content := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(content, "# AGENTS.md") || !strings.Contains(content, "Preserve me verbatim") {
+		t.Fatalf("passthrough-preserve should preserve second system block verbatim, got %q", content)
+	}
+	if !strings.Contains(content, "custom-skill") || !strings.Contains(content, "Keep me") {
+		t.Fatalf("passthrough-preserve should preserve third system block verbatim, got %q", content)
+	}
+	if strings.Contains(content, "You are OpenCode, the best coding agent on the planet") {
+		t.Fatalf("passthrough-preserve should sanitize first block identity, got %q", content)
+	}
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 3 {
+		t.Fatalf("system blocks = %d, want 3 canonical Claude Code blocks", got)
+	}
+}
+
 func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
