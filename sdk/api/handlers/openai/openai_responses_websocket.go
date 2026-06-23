@@ -501,7 +501,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
 		interceptErr := func(errMsg *interfaces.ErrorMessage) bool {
-			return shouldRetryResponsesWebsocketAfterPreviousResponseNotFound(errMsg, payload, previousLastRequest, stateLossReplayAttempted)
+			return shouldRetryResponsesWebsocketAfterUpstreamStateLoss(errMsg, payload, previousLastRequest, stateLossReplayAttempted)
 		}
 		completedOutput, completedResponseID, completedPendingToolCallIDs, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, downstreamSessionKey, passthroughSessionID, interceptErr)
 		if errForward != nil {
@@ -509,8 +509,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
 		}
-		if shouldRetryResponsesWebsocketAfterPreviousResponseNotFound(forwardErrMsg, payload, previousLastRequest, stateLossReplayAttempted) {
-			log.Infof("responses websocket: retrying id=%s with transcript replay after previous_response_not_found", passthroughSessionID)
+		if shouldRetryResponsesWebsocketAfterUpstreamStateLoss(forwardErrMsg, payload, previousLastRequest, stateLossReplayAttempted) {
+			log.Infof("responses websocket: retrying id=%s with transcript replay after upstream websocket state loss", passthroughSessionID)
 			stateLossReplayAttempted = true
 			lastRequest = previousLastRequest
 			lastResponseOutput = previousLastResponseOutput
