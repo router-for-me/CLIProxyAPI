@@ -1,4 +1,4 @@
-package main
+package home
 
 import (
 	"context"
@@ -10,18 +10,18 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 )
 
-type recordingHomePluginStatusClient struct {
+type recordingPluginStatusClient struct {
 	payload []byte
 	err     error
 }
 
-func (c *recordingHomePluginStatusClient) RPushPluginStatus(ctx context.Context, payload []byte) error {
+func (c *recordingPluginStatusClient) RPushPluginStatus(ctx context.Context, payload []byte) error {
 	c.payload = append([]byte(nil), payload...)
 	return c.err
 }
 
-func TestReportHomePluginStatusPushesNodeReport(t *testing.T) {
-	client := &recordingHomePluginStatusClient{}
+func TestReportPluginStatusPushesNodeReport(t *testing.T) {
+	client := &recordingPluginStatusClient{}
 	report := homeplugins.SyncReport{
 		Task:    "plugin-sync",
 		Status:  "success",
@@ -29,8 +29,8 @@ func TestReportHomePluginStatusPushesNodeReport(t *testing.T) {
 		Plugins: []homeplugins.PluginInstallStatus{{ID: "sample", InstallStatus: "installed"}},
 	}
 
-	if errReport := reportHomePluginStatus(context.Background(), client, " node-1 ", report); errReport != nil {
-		t.Fatalf("reportHomePluginStatus() error = %v", errReport)
+	if errReport := ReportPluginStatus(context.Background(), client, " node-1 ", report); errReport != nil {
+		t.Fatalf("ReportPluginStatus() error = %v", errReport)
 	}
 	var payload homeplugins.SyncReport
 	if errUnmarshal := json.Unmarshal(client.payload, &payload); errUnmarshal != nil {
@@ -44,8 +44,8 @@ func TestReportHomePluginStatusPushesNodeReport(t *testing.T) {
 	}
 }
 
-func TestReportHomePluginStatusPushesEmptyReport(t *testing.T) {
-	client := &recordingHomePluginStatusClient{}
+func TestReportPluginStatusPushesEmptyReport(t *testing.T) {
+	client := &recordingPluginStatusClient{}
 	report := homeplugins.SyncReport{
 		Task:    "plugin-sync",
 		Status:  "success",
@@ -53,8 +53,8 @@ func TestReportHomePluginStatusPushesEmptyReport(t *testing.T) {
 		Plugins: []homeplugins.PluginInstallStatus{},
 	}
 
-	if errReport := reportHomePluginStatus(context.Background(), client, "node-1", report); errReport != nil {
-		t.Fatalf("reportHomePluginStatus() error = %v", errReport)
+	if errReport := ReportPluginStatus(context.Background(), client, "node-1", report); errReport != nil {
+		t.Fatalf("ReportPluginStatus() error = %v", errReport)
 	}
 	var payload homeplugins.SyncReport
 	if errUnmarshal := json.Unmarshal(client.payload, &payload); errUnmarshal != nil {
@@ -65,29 +65,29 @@ func TestReportHomePluginStatusPushesEmptyReport(t *testing.T) {
 	}
 }
 
-func TestReportHomePluginStatusRequiresNodeID(t *testing.T) {
-	client := &recordingHomePluginStatusClient{}
+func TestReportPluginStatusRequiresNodeID(t *testing.T) {
+	client := &recordingPluginStatusClient{}
 	report := homeplugins.SyncReport{
 		Plugins: []homeplugins.PluginInstallStatus{{ID: "sample", InstallStatus: "failed"}},
 	}
 
-	errReport := reportHomePluginStatus(context.Background(), client, " ", report)
+	errReport := ReportPluginStatus(context.Background(), client, " ", report)
 	if errReport == nil || !strings.Contains(errReport.Error(), "node id") {
-		t.Fatalf("reportHomePluginStatus() error = %v, want node id error", errReport)
+		t.Fatalf("ReportPluginStatus() error = %v, want node id error", errReport)
 	}
 	if len(client.payload) != 0 {
 		t.Fatalf("client payload = %s, want none", client.payload)
 	}
 }
 
-func TestReportHomePluginStatusPropagatesPushError(t *testing.T) {
-	client := &recordingHomePluginStatusClient{err: errors.New("push failed")}
+func TestReportPluginStatusPropagatesPushError(t *testing.T) {
+	client := &recordingPluginStatusClient{err: errors.New("push failed")}
 	report := homeplugins.SyncReport{
 		Plugins: []homeplugins.PluginInstallStatus{{ID: "sample", InstallStatus: "installed"}},
 	}
 
-	errReport := reportHomePluginStatus(context.Background(), client, "node-1", report)
+	errReport := ReportPluginStatus(context.Background(), client, "node-1", report)
 	if !errors.Is(errReport, client.err) {
-		t.Fatalf("reportHomePluginStatus() error = %v, want push failed", errReport)
+		t.Fatalf("ReportPluginStatus() error = %v, want push failed", errReport)
 	}
 }

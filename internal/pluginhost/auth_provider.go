@@ -549,12 +549,13 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	}
 	path = strings.TrimSpace(path)
 	if path != "" {
-		attributes["path"] = path
-		attributes["source"] = path
+		attributes[coreauth.AttributePath] = path
+		attributes[coreauth.AttributeSource] = path
+		attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
 	}
 	fileName = strings.TrimSpace(firstNonEmpty(data.FileName, fileName))
-	if fileName != "" && attributes["source"] == "" {
-		attributes["source"] = fileName
+	if fileName != "" && attributes[coreauth.AttributeSource] == "" {
+		attributes[coreauth.AttributeSource] = fileName
 	}
 	id := strings.TrimSpace(data.ID)
 	if id == "" {
