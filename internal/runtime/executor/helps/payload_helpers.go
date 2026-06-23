@@ -15,8 +15,8 @@ import (
 )
 
 // ApplyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
-// paths as relative to the provided root path (for example, "request" for Gemini CLI)
-// and restricts matches to the given protocol when supplied. Defaults are checked
+// paths as relative to the provided root path and restricts matches to the given
+// protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
 // requestPath is the inbound HTTP request path (when available) used for endpoint-scoped gates.
@@ -33,11 +33,9 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
-	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
-		if cfg.DisableImageGeneration != config.DisableImageGenerationChat || !isImagesEndpointRequestPath(requestPath) {
-			out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
-			out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
-		}
+	if shouldStripImageGeneration(cfg.DisableImageGeneration, requestPath) {
+		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
+		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}
 
 	rules := cfg.Payload
@@ -197,6 +195,23 @@ func isImagesEndpointRequestPath(path string) bool {
 		return true
 	}
 	return false
+}
+
+// shouldStripImageGeneration reports whether the built-in image_generation tool must be
+// removed from the outbound payload for the given mode and request path.
+//   - All: strip on every endpoint.
+//   - Chat: strip only on non-images endpoints; keep it on /v1/images/* endpoints.
+//   - Off / Passthrough: never strip. Off injects the tool elsewhere; Passthrough forwards
+//     the client payload untouched.
+func shouldStripImageGeneration(mode config.DisableImageGenerationMode, requestPath string) bool {
+	switch mode {
+	case config.DisableImageGenerationAll:
+		return true
+	case config.DisableImageGenerationChat:
+		return !isImagesEndpointRequestPath(requestPath)
+	default:
+		return false
+	}
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fromProtocol string, headers http.Header, payload []byte, root string, models []string) bool {
@@ -383,8 +398,6 @@ func normalizePayloadFromProtocol(protocol string) string {
 	switch protocol {
 	case "openai-response", "openai-responses", "response":
 		return "responses"
-	case "gemini-cli":
-		return "gemini"
 	default:
 		return protocol
 	}

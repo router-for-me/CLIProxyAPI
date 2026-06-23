@@ -40,6 +40,14 @@ func (w *Watcher) scheduleConfigReload() {
 	})
 }
 
+// ReloadConfigIfChanged runs the same config reload path used by filesystem events.
+func (w *Watcher) ReloadConfigIfChanged() {
+	if w == nil {
+		return
+	}
+	w.reloadConfigIfChanged()
+}
+
 func (w *Watcher) reloadConfigIfChanged() {
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {

@@ -1,4 +1,4 @@
-EXAMPLES := simple model auth frontend-auth executor protocol-format request-translator request-normalizer response-translator response-normalizer thinking usage cli management-api host-callback
+EXAMPLES := simple model auth frontend-auth executor protocol-format request-translator request-normalizer response-translator response-normalizer thinking usage cli management-api host-callback host-callback-auth-files host-model-callback claude-web-search-router
 LANGUAGES := go c rust
 BIN_DIR := $(CURDIR)/bin
 BUILD_DIR := $(BIN_DIR)/build

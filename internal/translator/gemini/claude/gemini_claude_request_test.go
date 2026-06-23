@@ -134,13 +134,13 @@ func TestConvertClaudeRequestToGemini_ConvertsMessageSystemRoleToUserContent(t *
 	if got := contents[1].Get("role").String(); got != "user" {
 		t.Fatalf("Expected message-level string system content to be downgraded to user role, got %q", got)
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "String mid-conversation rule" {
+	if got := contents[1].Get("parts.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected string message-level system content text: %q", got)
 	}
 	if got := contents[2].Get("role").String(); got != "user" {
 		t.Fatalf("Expected message-level array system content to be downgraded to user role, got %q", got)
 	}
-	if got := contents[2].Get("parts.0.text").String(); got != "Array mid-conversation rule" {
+	if got := contents[2].Get("parts.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected array message-level system content text: %q", got)
 	}
 
@@ -176,5 +176,82 @@ func TestConvertClaudeRequestToGemini_SkipsEmptyTextParts(t *testing.T) {
 	}
 	if got := parts[0].Get("text").String(); got != "hello" {
 		t.Fatalf("Expected part text 'hello', got '%s'", got)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_StructuredToolResult(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "json-call-1", "name": "json", "input": {"ok": true}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "json-call-1",
+						"content": [
+							{"type": "text", "text": "alpha"},
+							{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	fr := gjson.GetBytes(output, "contents.1.parts.0.functionResponse")
+	if !fr.Exists() {
+		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "contents").Raw)
+	}
+	// The text block must remain structured JSON, not a double-encoded string blob.
+	if got := fr.Get("response.result.text").String(); got != "alpha" {
+		t.Fatalf("expected structured result text 'alpha', got result=%s", fr.Get("response.result").Raw)
+	}
+	// The image block must be emitted as a separate inline_data part, not embedded in result.
+	img := gjson.GetBytes(output, "contents.1.parts.1.inline_data")
+	if got := img.Get("mime_type").String(); got != "image/png" {
+		t.Fatalf("expected image mime type 'image/png', got '%s'", got)
+	}
+	if got := img.Get("data").String(); got != "aGVsbG8=" {
+		t.Fatalf("expected image data 'aGVsbG8=', got '%s'", got)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_StringToolResult(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "json-call-1", "name": "json", "input": {"ok": true}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "json-call-1", "content": "alpha"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	fr := gjson.GetBytes(output, "contents.1.parts.0.functionResponse")
+	if !fr.Exists() {
+		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "contents").Raw)
+	}
+	// String content must not be double-encoded: result should be exactly "alpha".
+	if got := fr.Get("response.result").String(); got != "alpha" {
+		t.Fatalf("expected result 'alpha', got '%s' (raw=%s)", got, fr.Get("response.result").Raw)
 	}
 }

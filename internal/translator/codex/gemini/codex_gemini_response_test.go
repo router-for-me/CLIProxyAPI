@@ -109,3 +109,43 @@ func TestConvertCodexResponseToGemini_NonStreamImageGenerationCallAddsInlineData
 		t.Fatalf("expected inlineData.mimeType %q, got %q; chunk=%s", "image/png", gotMime, string(out))
 	}
 }
+
+func TestConvertCodexResponseToGemini_StreamPreservesFunctionCallID(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[]}`)
+	var param any
+
+	out := ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", originalRequest, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_gateway","name":"lookup","arguments":"{\"query\":\"status\"}"}}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected function call output to be buffered, got %d chunks", len(out))
+	}
+
+	out = ConvertCodexResponseToGemini(ctx, "gemini-2.5-pro", originalRequest, nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`), &param)
+	if len(out) == 0 {
+		t.Fatal("expected buffered function call to be emitted on completion")
+	}
+
+	got := ""
+	for _, chunk := range out {
+		if value := gjson.GetBytes(chunk, "candidates.0.content.parts.0.functionCall.id").String(); value != "" {
+			got = value
+			break
+		}
+	}
+	if got != "call_gateway" {
+		t.Fatalf("expected functionCall.id %q, got %q; chunks=%q", "call_gateway", got, out)
+	}
+}
+
+func TestConvertCodexResponseToGeminiNonStreamPreservesFunctionCallID(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[]}`)
+
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_gateway","name":"lookup","arguments":"{\"query\":\"status\"}"}]}}`)
+	out := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", originalRequest, nil, raw, nil)
+
+	got := gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall.id").String()
+	if got != "call_gateway" {
+		t.Fatalf("expected functionCall.id %q, got %q; chunk=%s", "call_gateway", got, string(out))
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -107,6 +108,86 @@ func TestAntigravityBuildRequest_UsesAuthProjectID(t *testing.T) {
 
 	if got, ok := body["project"].(string); !ok || got != "project-1" {
 		t.Fatalf("project should come from auth metadata, got=%v", body["project"])
+	}
+}
+
+func TestAntigravityBuildRequest_UsesRouteModelWhenPayloadContainsDifferentModel(t *testing.T) {
+	body := buildRequestBodyFromRawPayload(t, "gemini-3-flash-agent", []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [{"text": "Perform a web search"}]
+				}
+			],
+			"tools": [{"googleSearch": {}}]
+		}
+	}`))
+
+	if got, ok := body["model"].(string); !ok || got != "gemini-3-flash-agent" {
+		t.Fatalf("request model should stay on route model, got=%v", body["model"])
+	}
+}
+
+func TestAntigravityBuildRequest_PreservesIndependentWebSearchRequestType(t *testing.T) {
+	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-flash-lite", []byte(`{
+		"requestType": "web_search",
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [{"text": "北京天气 2026-06-12"}]
+				}
+			],
+			"tools": [
+				{
+					"googleSearch": {
+						"enhancedContent": {
+							"imageSearch": {
+								"maxResultCount": 5
+							}
+						}
+					}
+				}
+			],
+			"generationConfig": {
+				"candidateCount": 1
+			}
+		}
+	}`))
+
+	if got, ok := body["requestType"].(string); !ok || got != "web_search" {
+		t.Fatalf("requestType should stay web_search, got=%v", body["requestType"])
+	}
+	if _, ok := body["requestId"]; ok {
+		t.Fatalf("web_search request should not add requestId: %v", body["requestId"])
+	}
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid: %v", body["request"])
+	}
+	if _, ok := request["sessionId"]; ok {
+		t.Fatalf("web_search request should not add request.sessionId: %v", request["sessionId"])
+	}
+	if got, ok := body["project"].(string); !ok || got != "project-1" {
+		t.Fatalf("project should come from auth metadata, got=%v", body["project"])
+	}
+}
+
+func TestShouldResolveAntigravityWebSearchGroundingURLsRequiresTypedWebSearchAndSearchRequest(t *testing.T) {
+	original := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
+	translatedWithGoogleSearch := []byte(`{"requestType":"web_search","request":{"tools":[{"googleSearch":{}}]}}`)
+	translatedWithoutGoogleSearch := []byte(`{"request":{"contents":[]}}`)
+
+	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithGoogleSearch) {
+		t.Fatal("expected typed Claude web search translated to web_search request to resolve grounding URLs")
+	}
+	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithoutGoogleSearch) {
+		t.Fatal("expected request without googleSearch to skip grounding URL resolution")
+	}
+	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAI, original, translatedWithGoogleSearch) {
+		t.Fatal("expected non-Claude source format to skip grounding URL resolution")
 	}
 }
 
@@ -219,17 +300,20 @@ func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any 
 							"parametersJsonSchema": {
 								"$schema": "http://json-schema.org/draft-07/schema#",
 								"$id": "root-schema",
+								"$comment": "root comment should be removed",
 								"type": "object",
 								"properties": {
 									"$id": {"type": "string"},
 									"arg": {
 										"type": "object",
+										"$comment": "nested comment should be removed",
 										"prefill": "hello",
 										"properties": {
 											"mode": {
 												"type": "string",
 												"deprecated": true,
 												"enum": ["a", "b"],
+												"enumDescriptions": ["Alpha", "Beta"],
 												"enumTitles": ["A", "B"]
 											}
 										}
@@ -308,6 +392,9 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	if _, ok := params["$id"]; ok {
 		t.Fatalf("root $id should be removed from schema")
 	}
+	if _, ok := params["$comment"]; ok {
+		t.Fatalf("root $comment should be removed from schema")
+	}
 	if _, ok := params["patternProperties"]; ok {
 		t.Fatalf("patternProperties should be removed from schema")
 	}
@@ -327,6 +414,9 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	if _, ok := arg["prefill"]; ok {
 		t.Fatalf("prefill should be removed from nested schema")
 	}
+	if _, ok := arg["$comment"]; ok {
+		t.Fatalf("nested $comment should be removed from schema")
+	}
 
 	argProps, ok := arg["properties"].(map[string]any)
 	if !ok {
@@ -338,6 +428,9 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	}
 	if _, ok := mode["enumTitles"]; ok {
 		t.Fatalf("enumTitles should be removed from nested schema")
+	}
+	if _, ok := mode["enumDescriptions"]; ok {
+		t.Fatalf("enumDescriptions should be removed from nested schema")
 	}
 	if _, ok := mode["deprecated"]; ok {
 		t.Fatalf("deprecated should be removed from nested schema")

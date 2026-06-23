@@ -9,6 +9,122 @@ import (
 
 const testResponsesGeminiThoughtSignature = "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
 
+func TestConvertOpenAIResponsesRequestToGemini_StripsTrailingAssistantPrefill(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5.4",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "hello"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "previous answer"}]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-pro-high", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	contents := resultJSON.Get("contents").Array()
+
+	if len(contents) != 1 {
+		t.Fatalf("contents length = %d, want 1. contents=%s", len(contents), resultJSON.Get("contents").Raw)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("final remaining role = %q, want %q", got, "user")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_TextFormatJSONSchema(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"temperature": 0.2,
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "Return structured JSON."
+					}
+				]
+			}
+		],
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"strict": true,
+				"name": "response",
+				"schema": {
+					"type": "object",
+					"properties": {
+						"cleanedContent": {
+							"type": "string"
+						}
+					},
+					"required": [
+						"cleanedContent"
+					],
+					"additionalProperties": false
+				}
+			}
+		}
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	schema := genConfig.Get("responseJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("responseJsonSchema missing. Output: %s", output)
+	}
+	if genConfig.Get("responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set with responseJsonSchema. Output: %s", output)
+	}
+	if got := schema.Get("type").String(); got != "object" {
+		t.Fatalf("schema type = %q, want object. Output: %s", got, output)
+	}
+	if got := schema.Get("properties.cleanedContent.type").String(); got != "string" {
+		t.Fatalf("cleanedContent type = %q, want string. Output: %s", got, output)
+	}
+	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() || additionalProperties.Bool() {
+		t.Fatalf("additionalProperties = %s, want false. Output: %s", additionalProperties.Raw, output)
+	}
+	if got := genConfig.Get("temperature").Float(); got != 0.2 {
+		t.Fatalf("temperature = %v, want 0.2. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_TextFormatJSONObject(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-flash-lite",
+		"input": "Return a JSON object.",
+		"text": {
+			"format": {
+				"type": "json_object"
+			}
+		}
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-flash-lite", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+	genConfig := result.Get("generationConfig")
+
+	if got := genConfig.Get("responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, output)
+	}
+	if genConfig.Get("responseJsonSchema").Exists() {
+		t.Fatalf("responseJsonSchema should not be set for json_object. Output: %s", output)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToGemini_ReasoningSignatureCompatibility(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -126,6 +242,47 @@ func TestConvertOpenAIResponsesRequestToGemini_SystemAndDeveloperRoles(t *testin
 				return true
 			})
 		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiCleansToolSchemaRequiredFields(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.0-flash",
+		"input": "hi",
+		"tools": [{
+			"type": "function",
+			"name": "search_company",
+			"description": "Search",
+			"parameters": {
+				"type": "object",
+				"title": "SearchCompany",
+				"properties": {
+					"country": {"type": "string"},
+					"industry": {"type": "string"}
+				},
+				"required": ["country", "industry", "stale_field", "another_stale"]
+			}
+		}]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.0-flash", []byte(inputJSON), false)
+	schema := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema")
+
+	if !schema.Exists() {
+		t.Fatalf("parametersJsonSchema missing. Output: %s", output)
+	}
+	if schema.Get("title").Exists() {
+		t.Fatalf("schema title should be removed. Output: %s", output)
+	}
+	required := schema.Get("required").Array()
+	if len(required) != 2 {
+		t.Fatalf("required length = %d, want 2. Schema: %s", len(required), schema.Raw)
+	}
+	if got := required[0].String(); got != "country" {
+		t.Fatalf("required[0] = %q, want country. Schema: %s", got, schema.Raw)
+	}
+	if got := required[1].String(); got != "industry" {
+		t.Fatalf("required[1] = %q, want industry. Schema: %s", got, schema.Raw)
 	}
 }
 

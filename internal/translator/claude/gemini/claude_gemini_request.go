@@ -80,6 +80,25 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		return "toolu_" + b.String()
 	}
 
+	getGeminiToolID := func(value gjson.Result) string {
+		if toolID := strings.TrimSpace(value.Get("id").String()); toolID != "" {
+			return toolID
+		}
+		return strings.TrimSpace(value.Get("call_id").String())
+	}
+
+	removePendingToolID := func(ids []string, toolID string) []string {
+		if toolID == "" {
+			return ids
+		}
+		for idx, pendingID := range ids {
+			if pendingID == toolID {
+				return append(ids[:idx], ids[idx+1:]...)
+			}
+		}
+		return ids
+	}
+
 	// FIFO queue to store tool call IDs for matching with tool results
 	// Gemini uses sequential pairing across possibly multiple in-flight
 	// functionCalls, so we keep a FIFO queue of generated tool IDs and
@@ -262,9 +281,11 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					if fc := part.Get("functionCall"); fc.Exists() && role == "assistant" {
 						toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 
-						// Generate a unique tool ID and enqueue it for later matching
-						// with the corresponding functionResponse
-						toolID := genToolCallID()
+						// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
+						toolID := getGeminiToolID(fc)
+						if toolID == "" {
+							toolID = genToolCallID()
+						}
 						pendingToolIDs = append(pendingToolIDs, toolID)
 						toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
 
@@ -285,7 +306,10 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						// Attach the oldest queued tool_id to pair the response
 						// with its call. If the queue is empty, generate a new id.
 						var toolID string
-						if len(pendingToolIDs) > 0 {
+						if customID := getGeminiToolID(fr); customID != "" {
+							toolID = customID
+							pendingToolIDs = removePendingToolID(pendingToolIDs, toolID)
+						} else if len(pendingToolIDs) > 0 {
 							toolID = pendingToolIDs[0]
 							// Pop the first element from the queue
 							pendingToolIDs = pendingToolIDs[1:]

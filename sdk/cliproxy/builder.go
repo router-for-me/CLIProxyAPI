@@ -286,7 +286,13 @@ func (b *Builder) Build() (*Service, error) {
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
-	service.serverOptions = append(service.serverOptions, api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()), api.WithPluginHost(pluginHost))
+	service.serverOptions = append(service.serverOptions,
+		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
+		api.WithPluginHost(pluginHost),
+		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
+			service.reloadConfigFromWatcher()
+		}),
+	)
 	return service, nil
 }
 

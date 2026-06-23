@@ -74,12 +74,16 @@ func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeSt
 func TestForceHomeRuntimeConfigEnablesUsageStatistics(t *testing.T) {
 	cfg := &config.Config{
 		UsageStatisticsEnabled: false,
+		SaveCooldownStatus:     true,
 	}
 
 	forceHomeRuntimeConfig(cfg)
 
 	if !cfg.UsageStatisticsEnabled {
 		t.Fatal("expected home runtime config to force usage statistics enabled")
+	}
+	if cfg.SaveCooldownStatus {
+		t.Fatal("expected home runtime config to force cooldown status persistence disabled")
 	}
 }
 
@@ -90,6 +94,7 @@ func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
 
 	service.applyHomeOverlay(&config.Config{
 		UsageStatisticsEnabled: false,
+		SaveCooldownStatus:     true,
 	})
 
 	if service.cfg == nil || !service.cfg.UsageStatisticsEnabled {
@@ -97,5 +102,8 @@ func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
 	}
 	if !service.cfg.Home.Enabled {
 		t.Fatal("expected home overlay to preserve local home settings")
+	}
+	if service.cfg.SaveCooldownStatus {
+		t.Fatal("expected home overlay to force cooldown status persistence disabled")
 	}
 }

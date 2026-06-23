@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -19,7 +20,7 @@ import (
 const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 
 // ConvertClaudeRequestToGemini parses a Claude API request and returns a complete
-// Gemini CLI request body (as JSON bytes) ready to be sent via SendRawMessageStream.
+// Gemini request body (as JSON bytes) ready to be sent via SendRawMessageStream.
 // All JSON transformations are performed using gjson/sjson.
 //
 // Parameters:
@@ -28,10 +29,10 @@ const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 //   - stream: A boolean indicating if the request is for a streaming response.
 //
 // Returns:
-//   - []byte: The transformed request in Gemini CLI format.
+//   - []byte: The transformed request in Gemini format.
 func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
-	// Build output Gemini CLI request JSON
+	// Build output Gemini request JSON
 	out := []byte(`{"contents":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
@@ -79,6 +80,15 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			contentJSON, _ = sjson.SetBytes(contentJSON, "role", role)
 
 			contentsResult := messageResult.Get("content")
+			if roleResult.String() == "system" {
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
+					part := []byte(`{"text":""}`)
+					part, _ = sjson.SetBytes(part, "text", reminderText)
+					contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+					out, _ = sjson.SetRawBytes(out, "contents.-1", contentJSON)
+				}
+				return true
+			}
 			if contentsResult.IsArray() {
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {
@@ -119,11 +129,21 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							funcName = toolCallID
 						}
 						funcName = util.SanitizeFunctionName(funcName)
-						responseData := contentResult.Get("content").Raw
+						toolResult := util.ConvertClaudeToolResultContent(contentResult.Get("content"))
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
-						part, _ = sjson.SetBytes(part, "functionResponse.response.result", responseData)
+						if toolResult.ResultIsRaw {
+							part, _ = sjson.SetRawBytes(part, "functionResponse.response.result", []byte(toolResult.Result))
+						} else {
+							part, _ = sjson.SetBytes(part, "functionResponse.response.result", toolResult.Result)
+						}
 						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+						for _, img := range toolResult.Images {
+							imagePart := []byte(`{"inline_data":{"mime_type":"","data":""}}`)
+							imagePart, _ = sjson.SetBytes(imagePart, "inline_data.mime_type", img.MimeType)
+							imagePart, _ = sjson.SetBytes(imagePart, "inline_data.data", img.Data)
+							contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", imagePart)
+						}
 
 					case "image":
 						source := contentResult.Get("source")

@@ -37,5 +37,8 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		setPluginAuthParser: func(parser PluginAuthParser) {
 			w.SetPluginAuthParser(parser)
 		},
+		reloadConfigIfChanged: func() {
+			w.ReloadConfigIfChanged()
+		},
 	}, nil
 }

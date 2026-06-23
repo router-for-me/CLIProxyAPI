@@ -60,6 +60,18 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodHostModelStreamClose != "host.model.stream_close" {
 		t.Fatalf("MethodHostModelStreamClose = %q", MethodHostModelStreamClose)
 	}
+	if MethodHostAuthList != "host.auth.list" {
+		t.Fatalf("MethodHostAuthList = %q", MethodHostAuthList)
+	}
+	if MethodHostAuthGet != "host.auth.get" {
+		t.Fatalf("MethodHostAuthGet = %q", MethodHostAuthGet)
+	}
+	if MethodHostAuthGetRuntime != "host.auth.get_runtime" {
+		t.Fatalf("MethodHostAuthGetRuntime = %q", MethodHostAuthGetRuntime)
+	}
+	if MethodHostAuthSave != "host.auth.save" {
+		t.Fatalf("MethodHostAuthSave = %q", MethodHostAuthSave)
+	}
 	if MethodExecutorExecuteStream != "executor.execute_stream" {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
 	}
@@ -68,5 +80,8 @@ func TestMethodNamesAreStable(t *testing.T) {
 func TestSchedulerPickMethodName(t *testing.T) {
 	if MethodSchedulerPick != "scheduler.pick" {
 		t.Fatalf("MethodSchedulerPick = %q", MethodSchedulerPick)
+	}
+	if MethodModelRoute != "model.route" {
+		t.Fatalf("MethodModelRoute = %q", MethodModelRoute)
 	}
 }

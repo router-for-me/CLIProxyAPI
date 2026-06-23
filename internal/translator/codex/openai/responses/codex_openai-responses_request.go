@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
@@ -71,18 +72,38 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 		return rawJSON
 	}
 
-	inputArray := inputResult.Array()
-	result := rawJSON
-
-	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
-		}
+	inputItems := inputResult.Array()
+	if len(inputItems) == 0 {
+		return rawJSON
 	}
 
-	return result
+	changed := false
+	rebuiltInput := make([]json.RawMessage, 0, len(inputItems))
+	for _, item := range inputItems {
+		itemRaw := []byte(item.Raw)
+		if item.IsObject() && item.Get("role").String() == "system" {
+			updatedItem, errSetItem := sjson.SetRawBytes(itemRaw, "role", []byte(`"developer"`))
+			if errSetItem != nil {
+				return rawJSON
+			}
+			itemRaw = updatedItem
+			changed = true
+		}
+		rebuiltInput = append(rebuiltInput, json.RawMessage(itemRaw))
+	}
+	if !changed {
+		return rawJSON
+	}
+
+	inputRaw, errMarshalInput := json.Marshal(rebuiltInput)
+	if errMarshalInput != nil {
+		return rawJSON
+	}
+	updated, errSetInput := sjson.SetRawBytes(rawJSON, "input", inputRaw)
+	if errSetInput != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 // normalizeCodexBuiltinTools rewrites legacy/preview built-in tool variants to the

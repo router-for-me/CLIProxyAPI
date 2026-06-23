@@ -94,41 +94,61 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"qoder": {
-				{Name: "qmodel_latest", Alias: "qlatest"},
+			"sample-provider": {
+				{Name: "sample-model-latest", Alias: "sample-latest"},
 			},
 		},
 	}
 	models := []*ModelInfo{
-		{ID: "qmodel_latest", Name: "models/qmodel_latest"},
+		{ID: "sample-model-latest", Name: "models/sample-model-latest"},
 	}
 
-	out := applyOAuthModelAlias(cfg, "qoder", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "sample-provider", "oauth", models)
 	if len(out) != 1 {
 		t.Fatalf("expected 1 model, got %d", len(out))
 	}
-	if out[0].ID != "qlatest" {
-		t.Fatalf("expected plugin alias id %q, got %q", "qlatest", out[0].ID)
+	if out[0].ID != "sample-latest" {
+		t.Fatalf("expected plugin alias id %q, got %q", "sample-latest", out[0].ID)
 	}
-	if out[0].Name != "models/qlatest" {
-		t.Fatalf("expected plugin alias name %q, got %q", "models/qlatest", out[0].Name)
+	if out[0].Name != "models/sample-latest" {
+		t.Fatalf("expected plugin alias name %q, got %q", "models/sample-latest", out[0].Name)
 	}
 }
 
 func TestApplyOAuthModelAlias_PluginProviderSkipsAPIKey(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"qoder": {
-				{Name: "qmodel_latest", Alias: "qlatest"},
+			"sample-provider": {
+				{Name: "sample-model-latest", Alias: "sample-latest"},
 			},
 		},
 	}
 	models := []*ModelInfo{
-		{ID: "qmodel_latest", Name: "models/qmodel_latest"},
+		{ID: "sample-model-latest", Name: "models/sample-model-latest"},
 	}
 
-	out := applyOAuthModelAlias(cfg, "qoder", "api_key", models)
-	if len(out) != 1 || out[0].ID != "qmodel_latest" {
+	out := applyOAuthModelAlias(cfg, "sample-provider", "api_key", models)
+	if len(out) != 1 || out[0].ID != "sample-model-latest" {
 		t.Fatalf("expected API key plugin model to remain unchanged, got %#v", out)
+	}
+}
+
+func TestApplyOAuthModelAlias_PerAuthAlias(t *testing.T) {
+	models := []*ModelInfo{
+		{ID: "gpt-5.3-codex-spark", Name: "models/gpt-5.3-codex-spark"},
+	}
+	attributes := map[string]string{
+		"model_aliases": `[{"name":"gpt-5.3-codex-spark","alias":"gpt-5.5"}]`,
+	}
+
+	out := applyOAuthModelAliasForAuth(nil, "codex", "oauth", attributes, models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(out))
+	}
+	if out[0].ID != "gpt-5.5" {
+		t.Fatalf("expected per-auth alias id %q, got %q", "gpt-5.5", out[0].ID)
+	}
+	if out[0].Name != "models/gpt-5.5" {
+		t.Fatalf("expected per-auth alias name %q, got %q", "models/gpt-5.5", out[0].Name)
 	}
 }

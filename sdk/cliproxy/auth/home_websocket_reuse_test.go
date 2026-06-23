@@ -221,6 +221,50 @@ func TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth(t *testing.T) {
 	}
 }
 
+type homeAuthTransportErrorDispatcher struct {
+	err error
+}
+
+func (d homeAuthTransportErrorDispatcher) HeartbeatOK() bool {
+	return true
+}
+
+func (d homeAuthTransportErrorDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+	return nil, d.err
+}
+
+func TestPickNextViaHomeClassifiesTransportErrorsAsHomeUnavailable(t *testing.T) {
+	dispatcher := homeAuthTransportErrorDispatcher{err: errors.New("read tcp 127.0.0.1:46704->127.0.0.1:8327: i/o timeout")}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher {
+		return dispatcher
+	}
+	t.Cleanup(func() {
+		currentHomeDispatcher = oldCurrentHomeDispatcher
+	})
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+
+	_, _, _, errPick := manager.pickNextViaHome(context.Background(), "gpt-5.4", cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatal("pickNextViaHome() error is nil, want home unavailable error")
+	}
+	var authErr *Error
+	if !errors.As(errPick, &authErr) {
+		t.Fatalf("pickNextViaHome() error = %T, want *Error", errPick)
+	}
+	if authErr.Code != "home_unavailable" {
+		t.Fatalf("pickNextViaHome() error code = %q, want home_unavailable (%v)", authErr.Code, errPick)
+	}
+	if authErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("pickNextViaHome() status = %d, want %d", authErr.StatusCode(), http.StatusServiceUnavailable)
+	}
+	if !authErr.Retryable {
+		t.Fatal("pickNextViaHome() retryable = false, want true")
+	}
+}
+
 func TestHomeRuntimeAuthsClearWhenHomeDisabled(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})

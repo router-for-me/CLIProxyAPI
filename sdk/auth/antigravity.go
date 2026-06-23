@@ -172,7 +172,7 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: empty email returned from user info")
 	}
 
-	// Fetch project ID via loadCodeAssist (same approach as Gemini CLI)
+	// Fetch project ID via loadCodeAssist.
 	projectID := ""
 	if accessToken != "" {
 		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)

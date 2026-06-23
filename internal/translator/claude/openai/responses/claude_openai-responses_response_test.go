@@ -101,7 +101,7 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
 		[]byte(`data: {"type":"content_block_start","index":4,"content_block":{"type":"text","text":""}}`),
-		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"**对比竞品**\n- "}}`),
+		[]byte(`data: {"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"**Compare competitors**\n- "}}`),
 		[]byte(`data: {"type":"content_block_stop","index":4}`),
 		[]byte(`data: {"type":"content_block_start","index":5,"content_block":{"type":"server_tool_use","id":"srv_123","name":"web_search","input":{}}}`),
 		[]byte(`data: {"type":"content_block_delta","index":5,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Qwen3\"}"}}`),
@@ -154,7 +154,7 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 		t.Fatalf("response.function_call_arguments.delta count = %d, want 0", counts["response.function_call_arguments.delta"])
 	}
 
-	wantText := "**对比竞品**\n- Qwen 3.7 Max leads."
+	wantText := "**Compare competitors**\n- Qwen 3.7 Max leads."
 	if got := outputTextDone.Get("text").String(); got != wantText {
 		t.Fatalf("output_text.done text = %q, want %q", got, wantText)
 	}
@@ -163,6 +163,41 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	}
 	if got := completed.Get("response.output.0.content.0.annotations.0.type").String(); got != "web_search_result_location" {
 		t.Fatalf("completed annotation type = %q", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_ReportsCacheTokens(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":7}}}`),
+		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":4,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var completed gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.completed" {
+				completed = data
+			}
+		}
+	}
+
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("response.usage.input_tokens").Int(); got != 22044 {
+		t.Fatalf("response usage input_tokens = %d, want %d", got, 22044)
+	}
+	if got := completed.Get("response.usage.input_tokens_details.cached_tokens").Int(); got != 22000 {
+		t.Fatalf("response usage cached_tokens = %d, want %d", got, 22000)
+	}
+	if got := completed.Get("response.usage.output_tokens").Int(); got != 4 {
+		t.Fatalf("response usage output_tokens = %d, want %d", got, 4)
+	}
+	if got := completed.Get("response.usage.total_tokens").Int(); got != 22048 {
+		t.Fatalf("response usage total_tokens = %d, want %d", got, 22048)
 	}
 }
 
@@ -185,5 +220,129 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ThinkingIncludesSignatu
 	}
 	if got := root.Get("output.0.summary.0.text").String(); got != "nonstream reasoning" {
 		t.Fatalf("non-stream reasoning summary text = %q", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_ReportsCacheTokens(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}}`,
+		`data: {"type":"message_delta","usage":{"output_tokens":4}}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("usage.input_tokens").Int(); got != 22044 {
+		t.Fatalf("non-stream usage input_tokens = %d, want %d", got, 22044)
+	}
+	if got := root.Get("usage.input_tokens_details.cached_tokens").Int(); got != 22000 {
+		t.Fatalf("non-stream usage cached_tokens = %d, want %d", got, 22000)
+	}
+	if got := root.Get("usage.output_tokens").Int(); got != 4 {
+		t.Fatalf("non-stream usage output_tokens = %d, want %d", got, 4)
+	}
+	if got := root.Get("usage.total_tokens").Int(); got != 22048 {
+		t.Fatalf("non-stream usage total_tokens = %d, want %d", got, 22048)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_RestoresNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__node_repl",
+				"tools":[{"type":"function","name":"js","parameters":{"type":"object","properties":{}}}]
+			}
+		]
+	}`)
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_abc","name":"mcp__node_repl__js","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{"code":"nodeRepl.write('hello')"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var added gjson.Result
+	var done gjson.Result
+	var completed gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", originalRequest, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "function_call" {
+					added = data
+				}
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "function_call" {
+					done = data
+				}
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		label string
+		got   gjson.Result
+	}{
+		{"added", added},
+		{"done", done},
+	} {
+		if !tc.got.Exists() {
+			t.Fatalf("expected function_call %s event", tc.label)
+		}
+		if got := tc.got.Get("item.name").String(); got != "js" {
+			t.Fatalf("%s item.name = %q, want js", tc.label, got)
+		}
+		if got := tc.got.Get("item.namespace").String(); got != "mcp__node_repl" {
+			t.Fatalf("%s item.namespace = %q, want mcp__node_repl", tc.label, got)
+		}
+	}
+
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("response.output.0.name").String(); got != "js" {
+		t.Fatalf("completed output name = %q, want js", got)
+	}
+	if got := completed.Get("response.output.0.namespace").String(); got != "mcp__node_repl" {
+		t.Fatalf("completed output namespace = %q, want mcp__node_repl", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__node_repl",
+				"tools":[{"type":"function","name":"js","parameters":{"type":"object","properties":{}}}]
+			}
+		]
+	}`)
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_abc","name":"mcp__node_repl__js","input":{}}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"code\":\"nodeRepl.write('hello')\"}"}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", originalRequest, nil, raw, nil)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("output.0.name").String(); got != "js" {
+		t.Fatalf("non-stream output name = %q, want js", got)
+	}
+	if got := root.Get("output.0.namespace").String(); got != "mcp__node_repl" {
+		t.Fatalf("non-stream output namespace = %q, want mcp__node_repl", got)
 	}
 }

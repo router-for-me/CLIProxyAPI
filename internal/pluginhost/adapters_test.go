@@ -623,25 +623,25 @@ func TestRegisterExecutorsOAuthScopeSkipsStaticModelClientButRegistersExecutor(t
 	manager := newFakeExecutorManager()
 	staticCalled := false
 	host := newHostWithRecords(capabilityRecord{
-		id: "qoder",
+		id: "sample-provider",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			AuthProvider: fakeAuthProvider{identifier: "qoder"},
+			AuthProvider: fakeAuthProvider{identifier: "sample-provider"},
 			ModelProvider: modelProviderFunc{
 				staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
 					staticCalled = true
 					return pluginapi.ModelResponse{
-						Provider: "qoder",
+						Provider: "sample-provider",
 						Models:   []pluginapi.ModelInfo{{ID: "static-model"}},
 					}, nil
 				},
 				modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
 					return pluginapi.ModelResponse{
-						Provider: "qoder",
+						Provider: "sample-provider",
 						Models:   []pluginapi.ModelInfo{{ID: "oauth-model"}},
 					}, nil
 				},
 			},
-			Executor:           &fakeExecutor{identifier: "qoder"},
+			Executor:           &fakeExecutor{identifier: "sample-provider"},
 			ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
 		}},
 	})
@@ -652,21 +652,21 @@ func TestRegisterExecutorsOAuthScopeSkipsStaticModelClientButRegistersExecutor(t
 	if staticCalled {
 		t.Fatal("StaticModels was called for an OAuth-only executor")
 	}
-	if _, okExecutor := manager.executors["qoder"]; !okExecutor {
+	if _, okExecutor := manager.executors["sample-provider"]; !okExecutor {
 		t.Fatal("OAuth-only executor was not registered")
 	}
-	if _, okClient := modelRegistry.clients[pluginExecutorModelClientID("qoder", "qoder")]; okClient {
+	if _, okClient := modelRegistry.clients[pluginExecutorModelClientID("sample-provider", "sample-provider")]; okClient {
 		t.Fatal("OAuth-only executor registered a static model client")
 	}
-	if got := host.ModelsForProvider("qoder"); len(got) != 0 {
+	if got := host.ModelsForProvider("sample-provider"); len(got) != 0 {
 		t.Fatalf("OAuth-only provider models = %#v, want none", got)
 	}
 
 	result := host.ModelsForAuth(context.Background(), &coreauth.Auth{
-		ID:       "qoder-auth",
-		Provider: "qoder",
+		ID:       "sample-provider-auth",
+		Provider: "sample-provider",
 	})
-	if !result.Handled || result.Provider != "qoder" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
+	if !result.Handled || result.Provider != "sample-provider" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
 		t.Fatalf("OAuth model result = %#v, want oauth-model", result)
 	}
 }

@@ -4,7 +4,8 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 
 ## Layout
 
-- `simple/`: full provider-native skeleton that declares every supported capability.
+- `simple/`- : Go-only plugin resource that calls host auth file callbacks (, , , ).
+- : full provider-native skeleton that declares every supported capability.
 - `model/`: model capability only.
 - `auth/`: auth provider capability only.
 - `frontend-auth/`: frontend auth provider capability only.
@@ -15,6 +16,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `request-normalizer/`: request normalization capability only.
 - `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.5` requests to the priority service tier when enabled.
 - `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
+- `claude-web-search-router/`: ModelRouter + executor for Claude Code built-in `web_search` (antigravity / codex / xai / Tavily). See `claude-web-search-router/README.md`.
 - `response-translator/`: response translation capability only.
 - `response-normalizer/`: response normalization capability only.
 - `thinking/`: thinking applier capability only.
@@ -22,6 +24,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `cli/`: command-line capability only.
 - `management-api/`: Management API and resource capability only.
 - `host-callback/`: minimal plugin resource that demonstrates host callbacks.
+- `host-callback-auth-files/`: Go-only plugin resource that calls host auth file callbacks.
 - `host-model-callback/`: Go-only plugin resource that calls the host model execution callbacks.
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
@@ -38,6 +41,22 @@ plugins:
       priority: 1
       fast: false
 ```
+
+
+
+## Host Auth Files Callback
+
+`host-callback-auth-files` declares the Management API capability and exposes a browser resource named `Host Auth Files`. The resource demonstrates `host.auth.list`, `host.auth.get` (physical JSON file), `host.auth.get_runtime`, and `host.auth.save`.
+
+```yaml
+plugins:
+  configs:
+    host-callback-auth-files:
+      enabled: true
+      priority: 1
+```
+
+See `host-callback-auth-files/README.md` for URL examples.
 
 ## Host Model Callback
 
