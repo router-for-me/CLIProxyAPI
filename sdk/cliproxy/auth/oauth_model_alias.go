@@ -350,15 +350,7 @@ func modelAliasChannel(auth *Auth) string {
 		return ""
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	authKind := ""
-	if auth.Attributes != nil {
-		authKind = strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"]))
-	}
-	if authKind == "" {
-		if kind, _ := auth.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
-		}
-	}
+	authKind := auth.AuthKind()
 	return OAuthModelAliasChannel(provider, authKind)
 }
 

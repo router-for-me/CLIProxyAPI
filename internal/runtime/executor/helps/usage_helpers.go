@@ -444,12 +444,7 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	kind, _ := auth.AccountInfo()
-	kind = strings.TrimSpace(kind)
-	if kind == "api_key" {
-		return "apikey"
-	}
-	return kind
+	return auth.AuthKind()
 }
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
