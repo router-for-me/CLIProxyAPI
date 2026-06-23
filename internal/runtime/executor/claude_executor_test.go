@@ -2464,6 +2464,23 @@ func TestCheckSystemInstructionsWithSigningMode_OAuthPassthroughPreserveSanitize
 	}
 }
 
+func TestCheckSystemInstructionsWithSigningMode_OAuthSingleBlockPreservesAvailableSkills(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"You are OpenCode.\n<available_skills>\n  <skill><name>browser-automation</name><description>Browser automation.</description></skill>\n</available_skills>\nDo not forward this product-specific text."}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, "2.1.63", "cli", "")
+
+	content := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(content, "<available_skills>") || !strings.Contains(content, "browser-automation") {
+		t.Fatalf("single-block passthrough should preserve available skills, got %q", content)
+	}
+	if strings.Contains(content, "Do not forward this product-specific text") {
+		t.Fatalf("single-block passthrough forwarded unrelated product-specific text: %q", content)
+	}
+	if strings.Contains(content, "You are OpenCode") {
+		t.Fatalf("single-block passthrough should sanitize identity, got %q", content)
+	}
+}
+
 func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

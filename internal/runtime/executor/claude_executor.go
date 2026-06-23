@@ -1929,7 +1929,8 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 // sanitizeForwardedSystemPrompt sanitizes the first forwarded system block and
 // preserves all subsequent blocks unchanged: sanitize userSystemParts[0],
-// keep userSystemParts[1:].
+// keep userSystemParts[1:]. It also extracts <available_skills> from block[0]
+// before replacing it, since OpenCode typically sends everything in a single block.
 func sanitizeForwardedSystemPrompt(parts []string) string {
 	if len(parts) == 0 {
 		return ""
@@ -1938,9 +1939,28 @@ func sanitizeForwardedSystemPrompt(parts []string) string {
 Keep responses concise and focused on the user's request.
 Prefer acting on the user's task over describing product-specific workflows.`)
 	sanitized := make([]string, 0, len(parts))
-	sanitized = append(sanitized, genericReminder)
+	parts0 := genericReminder
+	if skills := extractAvailableSkillsBlock(parts[0]); skills != "" {
+		parts0 = genericReminder + "\n\n" + skills
+	}
+	sanitized = append(sanitized, parts0)
 	sanitized = append(sanitized, parts[1:]...)
 	return strings.Join(sanitized, "\n\n")
+}
+
+func extractAvailableSkillsBlock(text string) string {
+	const openTag = "<available_skills>"
+	const closeTag = "</available_skills>"
+	start := strings.Index(text, openTag)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(text[start:], closeTag)
+	if end < 0 {
+		return ""
+	}
+	end += start + len(closeTag)
+	return strings.TrimSpace(text[start:end])
 }
 
 // buildTextBlock constructs a JSON text block object with proper escaping.
