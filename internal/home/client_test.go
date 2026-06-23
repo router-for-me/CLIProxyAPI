@@ -273,6 +273,47 @@ func TestKVMSetUsesStableKeyOrder(t *testing.T) {
 	}
 }
 
+func TestRPushPluginStatusUsesPluginStatusKey(t *testing.T) {
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "RPUSH") {
+			return ":1\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+
+	if errPush := client.RPushPluginStatus(context.Background(), []byte(`{"ok":true}`)); errPush != nil {
+		t.Fatalf("RPushPluginStatus() error = %v", errPush)
+	}
+	got := commands.Last()
+	want := []string{"rpush", "plugin-status", `{"ok":true}`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RPUSH command = %#v, want %#v", got, want)
+	}
+}
+
+func TestGetPluginTasksUsesPluginTasksKey(t *testing.T) {
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+			payload := `[{"id":7,"operation":"delete","plugin_id":"sample"}]`
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+		}
+		return "-ERR unexpected command\r\n"
+	})
+
+	tasks, errTasks := client.GetPluginTasks(context.Background())
+	if errTasks != nil {
+		t.Fatalf("GetPluginTasks() error = %v", errTasks)
+	}
+	if len(tasks) != 1 || tasks[0].ID != 7 || tasks[0].Operation != "delete" || tasks[0].PluginID != "sample" {
+		t.Fatalf("tasks = %+v, want one delete task", tasks)
+	}
+	got := commands.Last()
+	want := []string{"get", "plugin-tasks"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GET command = %#v, want %#v", got, want)
+	}
+}
+
 type redisCommandLog struct {
 	mu       sync.Mutex
 	commands [][]string
