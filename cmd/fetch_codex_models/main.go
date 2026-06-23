@@ -9,7 +9,7 @@
 // Flags:
 //
 //	--auths-dir       <path>  Directory containing auth JSON files (default: config auth-dir)
-//	--config          <path>  Config file path                 (default: "config.yaml")
+//	--config          <path>  Config file path                 (default: "config/config.yaml")
 //	--output          <path>  Output JSON file path             (default: "codex_models.json")
 //	--client-version <ver>   Codex client_version query value  (default: "0.133.0")
 //	--pretty                 Pretty-print the output JSON      (default: true)
@@ -80,7 +80,7 @@ func main() {
 	}
 
 	if strings.TrimSpace(configPath) == "" {
-		configPath = filepath.Join(wd, "config.yaml")
+		configPath = filepath.Join(wd, "config", "config.yaml")
 	}
 	cfg, err := config.LoadConfigOptional(configPath, false)
 	if err != nil {

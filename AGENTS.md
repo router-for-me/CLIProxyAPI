@@ -17,7 +17,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
 ## Config
-- Default config: `config.yaml` (template: `config.example.yaml`)
+- Default config: `config/config.yaml` (template: `config.example.yaml`)
 - `.env` is auto-loaded from the working directory
 - Auth material defaults under `auths/`
 - Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)

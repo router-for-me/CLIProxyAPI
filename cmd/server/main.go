@@ -314,7 +314,7 @@ func main() {
 		if strings.TrimSpace(configPath) != "" {
 			configFilePath = configPath
 		} else {
-			configFilePath = filepath.Join(wd, "config.yaml")
+			configFilePath = defaultLocalConfigPath(wd)
 		}
 
 		// Local stores are intentionally disabled when config is loaded from home.
@@ -471,7 +471,7 @@ func main() {
 			log.Errorf("failed to get working directory: %v", err)
 			return
 		}
-		configFilePath = filepath.Join(wd, "config.yaml")
+		configFilePath = defaultLocalConfigPath(wd)
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 	}
 	if err != nil {
@@ -718,9 +718,13 @@ func defaultPluginBootstrapConfigPath(defaultPath string) string {
 	}
 	wd, errGetwd := os.Getwd()
 	if errGetwd != nil {
-		return "config.yaml"
+		return filepath.Join("config", "config.yaml")
 	}
-	return filepath.Join(wd, "config.yaml")
+	return defaultLocalConfigPath(wd)
+}
+
+func defaultLocalConfigPath(wd string) string {
+	return filepath.Join(wd, "config", "config.yaml")
 }
 
 func loadPluginBootstrapConfig(path string) *config.Config {

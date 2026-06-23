@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -85,5 +87,24 @@ func TestShouldStartExampleAPIKeyWarningServer(t *testing.T) {
 				t.Fatalf("shouldStartExampleAPIKeyWarningServer() = %t, want %t", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDefaultLocalConfigPath(t *testing.T) {
+	wd := filepath.Join("tmp", "workspace")
+	want := filepath.Join(wd, "config", "config.yaml")
+	if got := defaultLocalConfigPath(wd); got != want {
+		t.Fatalf("defaultLocalConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestPluginBootstrapConfigPathUsesNestedDefault(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd() error = %v", err)
+	}
+	want := filepath.Join(wd, "config", "config.yaml")
+	if got := pluginBootstrapConfigPath(nil, ""); got != want {
+		t.Fatalf("pluginBootstrapConfigPath() = %q, want %q", got, want)
 	}
 }
