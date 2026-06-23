@@ -306,7 +306,7 @@ func main() {
 		var errHomePlugins error
 		homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginHost)
 		cancelHomePlugins()
-		errReportPlugins := reportHomePluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
 		if errHomePlugins != nil {
 			log.Errorf("failed to fetch plugins from home: %v", errHomePlugins)
 		}
@@ -570,7 +570,7 @@ func main() {
 	pluginHost.ApplyConfig(context.Background(), cfg)
 	if configLoadedFromHome {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
-		errReportPlugins := reportHomePluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
 		if errHomePluginLoad != nil {
 			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
 		}

@@ -1,4 +1,4 @@
-package main
+package home
 
 import (
 	"context"
@@ -10,13 +10,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 )
 
-const homePluginStatusReportTimeout = 10 * time.Second
+const pluginStatusReportTimeout = 10 * time.Second
 
-type homePluginStatusClient interface {
+// PluginStatusClient defines the interface for pushing plugin status reports.
+type PluginStatusClient interface {
 	RPushPluginStatus(ctx context.Context, payload []byte) error
 }
 
-func reportHomePluginStatus(ctx context.Context, client homePluginStatusClient, nodeID string, report homeplugins.SyncReport) error {
+// ReportPluginStatus marshals the given report, sets NodeID and UpdatedAt,
+// and pushes it to the provided client with a timeout.
+func ReportPluginStatus(ctx context.Context, client PluginStatusClient, nodeID string, report homeplugins.SyncReport) error {
 	if client == nil {
 		return fmt.Errorf("home plugin status client is unavailable")
 	}
@@ -33,7 +36,7 @@ func reportHomePluginStatus(ctx context.Context, client homePluginStatusClient, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	reportCtx, cancel := context.WithTimeout(ctx, homePluginStatusReportTimeout)
+	reportCtx, cancel := context.WithTimeout(ctx, pluginStatusReportTimeout)
 	defer cancel()
 	return client.RPushPluginStatus(reportCtx, raw)
 }
