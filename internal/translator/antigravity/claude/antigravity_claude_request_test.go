@@ -162,13 +162,13 @@ func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserConten
 	if got := contents[1].Get("role").String(); got != "user" {
 		t.Fatalf("Expected message-level system content to be downgraded to user role, got %q", got)
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "String mid-conversation rule" {
+	if got := contents[1].Get("parts.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected string message-level system content text: %q", got)
 	}
 	if got := contents[2].Get("role").String(); got != "user" {
 		t.Fatalf("Expected array message-level system content to be downgraded to user role, got %q", got)
 	}
-	if got := contents[2].Get("parts.0.text").String(); got != "Array mid-conversation rule" {
+	if got := contents[2].Get("parts.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected array message-level system content text: %q", got)
 	}
 

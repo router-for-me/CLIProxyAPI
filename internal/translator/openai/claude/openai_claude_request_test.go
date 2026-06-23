@@ -357,7 +357,7 @@ func validGPTChatReasoningSignature() string {
 	return base64.URLEncoding.EncodeToString(raw)
 }
 
-func TestConvertClaudeRequestToOpenAI_MidConversationSystemMessagesMoveToInitialSystem(t *testing.T) {
+func TestConvertClaudeRequestToOpenAI_MessageSystemRoleWrapsAsUserReminder(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-5",
 		"system": [{"type": "text", "text": "Top-level rules"}],
@@ -374,27 +374,30 @@ func TestConvertClaudeRequestToOpenAI_MidConversationSystemMessagesMoveToInitial
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
-	if len(messages) != 4 {
-		t.Fatalf("Expected 4 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 6 {
+		t.Fatalf("Expected 6 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
 	roles := make([]string, 0, len(messages))
 	for _, message := range messages {
 		roles = append(roles, message.Get("role").String())
 	}
-	if got, want := roles, []string{"system", "user", "assistant", "user"}; fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+	if got, want := roles, []string{"system", "user", "user", "assistant", "user", "user"}; fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
 		t.Fatalf("Unexpected message roles: got %v, want %v", got, want)
 	}
 
 	systemContent := messages[0].Get("content").Array()
-	if len(systemContent) != 3 {
-		t.Fatalf("Expected 3 system content items, got %d: %s", len(systemContent), messages[0].Get("content").Raw)
+	if len(systemContent) != 1 {
+		t.Fatalf("Expected only top-level system content, got %d items: %s", len(systemContent), messages[0].Get("content").Raw)
 	}
-	wantTexts := []string{"Top-level rules", "String mid-conversation rule", "Array mid-conversation rule"}
-	for i, want := range wantTexts {
-		if got := systemContent[i].Get("text").String(); got != want {
-			t.Fatalf("system content[%d] = %q, want %q", i, got, want)
-		}
+	if got := systemContent[0].Get("text").String(); got != "Top-level rules" {
+		t.Fatalf("system content = %q, want Top-level rules", got)
+	}
+	if got := messages[2].Get("content.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
+		t.Fatalf("unexpected string reminder text: %q", got)
+	}
+	if got := messages[4].Get("content.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
+		t.Fatalf("unexpected array reminder text: %q", got)
 	}
 }
 
