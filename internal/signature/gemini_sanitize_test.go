@@ -120,3 +120,38 @@ func TestSanitizeGeminiRequestThoughtSignaturesRemovesFunctionResponseSignature(
 		t.Fatalf("functionResponse nested thoughtSignature should be removed. Output: %s", string(out))
 	}
 }
+
+// TestSanitizeGeminiRequestThoughtSignaturesMultipleFunctionCallsOnlyKeepsFirst 测试当一次调用多个工具（包含多个 functionCall）时，
+// 只有首个具有签名需要的 part 被保留或补齐签名，后续的 tool call 上的冗余签名是否会被彻底清除并且不再填入 skip 占位符。
+func TestSanitizeGeminiRequestThoughtSignaturesMultipleFunctionCallsOnlyKeepsFirst(t *testing.T) {
+	// 场景 1：构建两个 functionCall，第1个有合法签名，第2个没有。预期第1个签名被保留，第2个不被补置签名。
+	sig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+	input := []byte(`{"contents":[{"role":"model","parts":[
+		{"functionCall":{"name":"f1","args":{}},"thoughtSignature":"` + sig + `"},
+		{"functionCall":{"name":"f2","args":{}}}
+	]}]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != sig {
+		t.Fatalf("第一个 functionCall 的 thoughtSignature 应该保留: 实际为 %q, 预期为 %q。输出: %s", got, sig, string(out))
+	}
+	if gjson.GetBytes(out, "contents.0.parts.1.thoughtSignature").Exists() {
+		t.Fatalf("第二个 functionCall 不应产生或保留 thoughtSignature。输出: %s", string(out))
+	}
+
+	// 场景 2：构建两个 functionCall，第1个没有签名（会补置 skip 占位符），第2个原本也没有签名。预期第1个补齐占位符，第2个保持为空（不被补齐）。
+	input2 := []byte(`{"contents":[{"role":"model","parts":[
+		{"functionCall":{"name":"f1","args":{}}},
+		{"functionCall":{"name":"f2","args":{}}}
+	]}]}`)
+
+	out2 := SanitizeGeminiRequestThoughtSignatures(input2, "contents")
+
+	if got := gjson.GetBytes(out2, "contents.0.parts.0.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("第一个 functionCall 应该被补齐为 skip 占位符: 实际为 %q。输出: %s", got, string(out2))
+	}
+	if gjson.GetBytes(out2, "contents.0.parts.1.thoughtSignature").Exists() {
+		t.Fatalf("第二个 functionCall 原本无签名，不应被主动补齐。输出: %s", string(out2))
+	}
+}
