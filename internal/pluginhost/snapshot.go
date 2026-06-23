@@ -59,6 +59,27 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 	return out
 }
 
+// PluginRegistered reports whether a plugin is active in the current runtime snapshot.
+func (h *Host) PluginRegistered(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	snap := h.Snapshot()
+	if snap == nil || len(snap.records) == 0 {
+		return false
+	}
+	for _, record := range snap.records {
+		if record.id == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Host) registeredPluginMenus() map[string][]RegisteredPluginMenu {
 	out := make(map[string][]RegisteredPluginMenu)
 	if h == nil {
