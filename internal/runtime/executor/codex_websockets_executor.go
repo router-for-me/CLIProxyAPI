@@ -2386,11 +2386,10 @@ func (e *CodexWebsocketsExecutor) failCodexWebsocketRequestWithoutUpstreamContex
 	}
 	helps.RecordAPIWebsocketError(ctx, e.cfg, reason, err)
 	if conn != nil {
-		e.invalidateUpstreamConn(sess, conn, reason, err)
+		// The Responses websocket handler can recover this by replaying the
+		// cached transcript, so avoid closing downstream subscribers first.
+		e.clearUpstreamConn(sess, conn, reason, err, false)
 		return err
-	}
-	if sess != nil {
-		sess.notifyUpstreamDisconnect(err)
 	}
 	return err
 }

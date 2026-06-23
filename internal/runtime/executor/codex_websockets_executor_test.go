@@ -1370,17 +1370,7 @@ func TestCodexWebsocketsExecuteStreamRejectsAppendAfterUpstreamStateCleared(t *t
 		t.Fatalf("ExecuteStream() append request error = %v, want append without upstream context", err)
 	}
 
-	select {
-	case errDisconnect, ok := <-disconnectCh:
-		if !ok {
-			t.Fatal("disconnect channel closed before delivering error")
-		}
-		if !isCodexWebsocketRequestWithoutUpstreamContextError(errDisconnect) {
-			t.Fatalf("disconnect error = %v, want append without upstream context", errDisconnect)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream disconnect signal")
-	}
+	assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "for recoverable append without upstream context")
 	if got := websocketConnections.Load(); got != 1 {
 		t.Fatalf("websocket connection count = %d, want 1", got)
 	}
@@ -1496,17 +1486,7 @@ func TestCodexWebsocketsExecuteStreamRejectsPreviousResponseIDAfterUpstreamState
 				t.Fatalf("ExecuteStream() previous_response_id request error = %v, want request without upstream context", err)
 			}
 
-			select {
-			case errDisconnect, ok := <-disconnectCh:
-				if !ok {
-					t.Fatal("disconnect channel closed before delivering error")
-				}
-				if !isCodexWebsocketRequestWithoutUpstreamContextError(errDisconnect) {
-					t.Fatalf("disconnect error = %v, want request without upstream context", errDisconnect)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for upstream disconnect signal")
-			}
+			assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "for recoverable previous_response_id without upstream context")
 			if got := websocketConnections.Load(); got != 1 {
 				t.Fatalf("websocket connection count = %d, want 1", got)
 			}
@@ -1597,17 +1577,7 @@ func TestCodexWebsocketsExecuteStreamDoesNotRetryAppendAfterSendError(t *testing
 		t.Fatalf("ExecuteStream() append request error = %v, want append without upstream context", err)
 	}
 
-	select {
-	case errDisconnect, ok := <-disconnectCh:
-		if !ok {
-			t.Fatal("disconnect channel closed before delivering error")
-		}
-		if !isCodexWebsocketRequestWithoutUpstreamContextError(errDisconnect) {
-			t.Fatalf("disconnect error = %v, want append without upstream context", errDisconnect)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream disconnect signal")
-	}
+	assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "for recoverable append send error without upstream context")
 	if got := websocketConnections.Load(); got != 1 {
 		t.Fatalf("websocket connection count = %d, want 1", got)
 	}
@@ -1665,6 +1635,15 @@ func waitForCodexWebsocketSessionConnCleared(t *testing.T, sess *codexWebsocketS
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for websocket session conn to clear")
+}
+
+func assertNoCodexWebsocketDisconnectSignal(t *testing.T, disconnectCh <-chan error, context string) {
+	t.Helper()
+	select {
+	case errDisconnect, ok := <-disconnectCh:
+		t.Fatalf("upstream disconnect signaled %s: err=%v ok=%v", context, errDisconnect, ok)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 func TestCodexWebsocketsExecuteStreamDoesNotFallbackToHTTPForIncrementalRequest(t *testing.T) {
@@ -1750,17 +1729,7 @@ func TestCodexWebsocketsExecuteStreamDoesNotFallbackToHTTPForIncrementalRequest(
 				if !isCodexWebsocketRequestWithoutUpstreamContextError(err) {
 					t.Fatalf("ExecuteStream() error = %v, want append without upstream context", err)
 				}
-				select {
-				case errDisconnect, ok := <-disconnectCh:
-					if !ok {
-						t.Fatal("disconnect channel closed before delivering error")
-					}
-					if !isCodexWebsocketRequestWithoutUpstreamContextError(errDisconnect) {
-						t.Fatalf("disconnect error = %v, want append without upstream context", errDisconnect)
-					}
-				case <-time.After(5 * time.Second):
-					t.Fatal("timed out waiting for upstream disconnect signal")
-				}
+				assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "for recoverable incremental request without upstream context")
 				select {
 				case payload := <-httpPayloadCh:
 					t.Fatalf("unexpected HTTP fallback payload for incremental request: %s", payload)
