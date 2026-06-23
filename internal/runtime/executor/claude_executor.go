@@ -1894,7 +1894,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 	// Collect user system instructions and prepend to first user message.
 	// In OAuth mode, sanitize only the first forwarded system block and preserve
-	// all subsequent blocks unchanged (PR #3335 approach).
+	// all subsequent blocks unchanged.
 	if !strictMode {
 		var userSystemParts []string
 		if system.IsArray() {
@@ -1912,9 +1912,11 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		}
 
 		if len(userSystemParts) > 0 {
-			combined := strings.Join(userSystemParts, "\n\n")
+			var combined string
 			if oauthMode {
 				combined = sanitizeForwardedSystemPrompt(userSystemParts)
+			} else {
+				combined = strings.Join(userSystemParts, "\n\n")
 			}
 			if strings.TrimSpace(combined) != "" {
 				payload = prependToFirstUserMessage(payload, combined)
@@ -1926,8 +1928,8 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 }
 
 // sanitizeForwardedSystemPrompt sanitizes the first forwarded system block and
-// preserves all subsequent blocks unchanged. This is the PR #3335 approach:
-// sanitize userSystemParts[0], keep userSystemParts[1:].
+// preserves all subsequent blocks unchanged: sanitize userSystemParts[0],
+// keep userSystemParts[1:].
 func sanitizeForwardedSystemPrompt(parts []string) string {
 	if len(parts) == 0 {
 		return ""
