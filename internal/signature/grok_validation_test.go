@@ -176,6 +176,12 @@ func TestInspectGrokEncryptedContent_RejectsInvalidBase64Length(t *testing.T) {
 	}
 }
 
+func TestByteEntropyRatio_SingleByteReturnsZero(t *testing.T) {
+	if got := byteEntropyRatio([]byte{0xa5}); got != 0 {
+		t.Fatalf("byteEntropyRatio(single byte) = %v, want 0", got)
+	}
+}
+
 func testGeminiThoughtSignatureEnvelope() string {
 	payload := []byte{0x01, 0x0c}
 	for i := 0; i < 97; i++ {

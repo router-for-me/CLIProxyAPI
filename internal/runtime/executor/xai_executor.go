@@ -1011,6 +1011,9 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
 		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "reasoning")
+		}
 	}
 	return body
 }
@@ -1135,18 +1138,20 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 	if !input.Exists() || !input.IsArray() {
 		return body
 	}
-	updated := body
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	changed := false
 	dropCount := 0
 	firstReason := ""
 	firstItemType := ""
-	for index, item := range input.Array() {
+	for _, item := range input.Array() {
 		itemType := strings.TrimSpace(item.Get("type").String())
 		if itemType != "reasoning" && itemType != "compaction" {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
-		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", index)
-		encryptedContent := gjson.GetBytes(updated, encryptedContentPath)
+		encryptedContent := item.Get("encrypted_content")
 		if !encryptedContent.Exists() {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
 		reason := ""
@@ -1161,18 +1166,43 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
-		next, err := sjson.DeleteBytes(updated, encryptedContentPath)
+
+		if itemType == "compaction" {
+			changed = true
+			dropCount++
+			if firstReason == "" {
+				firstReason = reason
+				firstItemType = itemType
+			}
+			continue
+		}
+
+		next, err := sjson.DeleteBytes([]byte(item.Raw), "encrypted_content")
 		if err != nil {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
-		updated = next
+		items = append(items, json.RawMessage(next))
+		changed = true
 		dropCount++
 		if firstReason == "" {
 			firstReason = reason
 			firstItemType = itemType
 		}
+	}
+	if !changed {
+		return body
+	}
+	rawInput, err := json.Marshal(items)
+	if err != nil {
+		return body
+	}
+	updated, err := sjson.SetRawBytes(body, "input", rawInput)
+	if err != nil {
+		return body
 	}
 	if dropCount > 0 {
 		log.WithFields(log.Fields{
@@ -1182,7 +1212,7 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 			"first_reason":    firstReason,
 		}).Debug("xai executor: removed invalid encrypted_content before upstream")
 	}
-	return updated
+	return mergeAdjacentXAIInputReasoningSummaries(updated)
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {

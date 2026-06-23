@@ -74,10 +74,11 @@ func IsValidGrokEncryptedContent(raw string) bool {
 }
 
 func decodeGrokEncryptedContent(sig string) ([]byte, error) {
-	if decoded, err := base64.RawStdEncoding.DecodeString(sig); err == nil {
-		return decoded, nil
+	decoded, err := base64.RawStdEncoding.DecodeString(sig)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Grok encrypted_content: base64 decode failed: %w", err)
 	}
-	return nil, fmt.Errorf("invalid Grok encrypted_content: base64 decode failed")
+	return decoded, nil
 }
 
 func firstInvalidGrokEncryptedContentChar(sig string) (int, rune, bool) {
@@ -114,6 +115,9 @@ func byteEntropyRatio(buf []byte) float64 {
 	maxSymbols := len(buf)
 	if maxSymbols > 256 {
 		maxSymbols = 256
+	}
+	if maxSymbols <= 1 {
+		return 0
 	}
 	return entropy / math.Log2(float64(maxSymbols))
 }
