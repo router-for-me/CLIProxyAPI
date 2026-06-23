@@ -987,3 +987,41 @@ func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
 		t.Fatalf("tool_choice should not appear: %s", string(out))
 	}
 }
+
+func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	payload := []byte(`{"model":"grok-composer-2.5-fast","metadata":{"user_id":"{\"session_id\":\"cache-session-1\"}"},"input":"hello"}`)
+	req := cliproxyexecutor.Request{Model: "grok-composer-2.5-fast", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true}
+
+	first, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest first error: %v", err)
+	}
+	second, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest second error: %v", err)
+	}
+
+	firstKey := gjson.GetBytes(first.body, "prompt_cache_key").String()
+	secondKey := gjson.GetBytes(second.body, "prompt_cache_key").String()
+	if firstKey == "" {
+		t.Fatalf("first prompt_cache_key is empty; body=%s", string(first.body))
+	}
+	if secondKey != firstKey {
+		t.Fatalf("same Claude Code session produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
+	}
+
+	httpReq, errRequest := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(first.body))
+	if errRequest != nil {
+		t.Fatalf("NewRequest() error = %v", errRequest)
+	}
+	applyXAIHeaders(httpReq, auth, "xai-token", true, first.sessionID)
+	if got := httpReq.Header.Get("x-grok-conv-id"); got != firstKey {
+		t.Fatalf("x-grok-conv-id = %q, want %q", got, firstKey)
+	}
+}

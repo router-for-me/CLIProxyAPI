@@ -870,7 +870,7 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 
 	var cache helps.CodexCache
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
-		cached, ok, errCache := codexClaudeCodePromptCache(ctx, req)
+		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, req.Model, req.Payload, nil)
 		if errCache != nil {
 			return nil, nil, errCache
 		}

@@ -838,9 +838,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
-	sessionID := xaiExecutionSessionID(req, opts)
-	if sessionID == "" && xaiRequiresIsolatedConversation(baseModel) {
-		sessionID = uuid.NewString()
+	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
+	if errSession != nil {
+		return nil, errSession
 	}
 	if sessionID != "" {
 		body, _ = sjson.SetBytes(body, "prompt_cache_key", sessionID)
@@ -915,6 +915,23 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
+	if sessionID := xaiExecutionSessionID(req, opts); sessionID != "" {
+		return sessionID, nil
+	}
+	if !xaiRequiresIsolatedConversation(baseModel) {
+		return "", nil
+	}
+	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, req.Model, req.Payload, opts.Headers)
+	if errCache != nil {
+		return "", errCache
+	}
+	if ok {
+		return cached.ID, nil
+	}
+	return uuid.NewString(), nil
 }
 
 func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
