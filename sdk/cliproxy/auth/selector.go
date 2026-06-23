@@ -502,6 +502,29 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	}
 }
 
+// Bind records the resolved auth for the current session, overriding any
+// provisional binding selected earlier in the request.
+func (s *SessionAffinitySelector) Bind(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, authID string) {
+	if s == nil || s.cache == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return
+	}
+	cacheKey := provider + "::" + primaryID + "::" + model
+	s.cache.Set(cacheKey, authID)
+	if fallbackID != "" && fallbackID != primaryID {
+		fallbackKey := provider + "::" + fallbackID + "::" + model
+		s.cache.Set(fallbackKey, authID)
+	}
+	selectorLogEntry(ctx).Debugf("session-affinity: rebound session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), authID, provider, model)
+}
+
 // ExtractSessionID extracts session identifier from multiple sources.
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients

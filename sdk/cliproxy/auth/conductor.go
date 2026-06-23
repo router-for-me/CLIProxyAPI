@@ -177,6 +177,10 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+type sessionAffinityBinder interface {
+	Bind(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, authID string)
+}
+
 type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }
@@ -2377,6 +2381,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			m.bindSessionAffinitySuccess(execCtx, "mixed", routeModel, opts, auth.ID)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -2478,6 +2483,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			m.bindSessionAffinitySuccess(execCtx, "mixed", routeModel, opts, auth.ID)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -2564,6 +2570,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			continue
 		}
+		m.bindSessionAffinitySuccess(ctx, "mixed", routeModel, opts, auth.ID)
 		return streamResult, nil
 	}
 }
@@ -3311,6 +3318,18 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 		return ctx.Err()
 	case <-timer.C:
 		return nil
+	}
+}
+
+func (m *Manager) bindSessionAffinitySuccess(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, authID string) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	if binder, ok := selector.(sessionAffinityBinder); ok && binder != nil {
+		binder.Bind(ctx, provider, selectionArgForSelector(selector, model), opts, authID)
 	}
 }
 
