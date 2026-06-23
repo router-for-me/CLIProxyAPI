@@ -3,6 +3,8 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
@@ -255,6 +258,7 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 }
 
 func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
+	validEncryptedContent := testValidGrokEncryptedContent()
 	var gotPath string
 	var gotAuth string
 	var gotAccept string
@@ -283,9 +287,11 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 		},
 	}
 
+	payload := []byte(`{"model":"grok-4.3","stream":true,"input":[{"type":"compaction","encrypted_content":""},{"role":"user","content":"hello"}]}`)
+	payload, _ = sjson.SetBytes(payload, "input.0.encrypted_content", validEncryptedContent)
 	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","stream":true,"input":[{"type":"compaction","encrypted_content":"opaque-in"},{"role":"user","content":"hello"}]}`),
+		Payload: payload,
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Alt:          "responses/compact",
@@ -306,8 +312,8 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	if gjson.GetBytes(gotBody, "stream").Exists() {
 		t.Fatalf("stream exists in compact body: %s", string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "input.0.encrypted_content").String(); got != "opaque-in" {
-		t.Fatalf("input.0.encrypted_content = %q, want opaque-in; body=%s", got, string(gotBody))
+	if got := gjson.GetBytes(gotBody, "input.0.encrypted_content").String(); got != validEncryptedContent {
+		t.Fatalf("input.0.encrypted_content = %q, want valid sample; body=%s", got, string(gotBody))
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 		t.Fatalf("payload = %s", string(resp.Payload))
@@ -1024,4 +1030,120 @@ func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	if got := httpReq.Header.Get("x-grok-conv-id"); got != firstKey {
 		t.Fatalf("x-grok-conv-id = %q, want %q", got, firstKey)
 	}
+}
+
+func TestSanitizeXAIInputEncryptedContent_DropsInvalidReasoningBlob(t *testing.T) {
+	body := []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[],"encrypted_content":"bad"},{"type":"reasoning","summary":[],"encrypted_content":"gAAAAABinvalid-gpt-shape"},{"role":"user","content":"hi"}]}`)
+	got := sanitizeXAIInputEncryptedContent(body)
+	if gjson.GetBytes(got, "input.0.encrypted_content").Exists() || gjson.GetBytes(got, "input.1.encrypted_content").Exists() {
+		t.Fatalf("invalid encrypted_content should be removed: %s", string(got))
+	}
+}
+
+func TestSanitizeXAIInputEncryptedContent_PreservesValidBlob(t *testing.T) {
+	sample := testValidGrokEncryptedContent()
+	body := []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[],"encrypted_content":""}]}`)
+	body, _ = sjson.SetBytes(body, "input.0.encrypted_content", sample)
+	got := sanitizeXAIInputEncryptedContent(body)
+	if gotEnc := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotEnc != sample {
+		t.Fatalf("valid encrypted_content should be preserved, got %q", gotEnc)
+	}
+}
+
+func TestXAIExecutorReMergesReasoningAfterDroppingInvalidEncryptedContent(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":[` +
+			`{"type":"reasoning","summary":[{"type":"summary_text","text":"first"}]},` +
+			`{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}],"encrypted_content":"gAAAAABforeign-codex-replay"},` +
+			`{"role":"user","content":"hi"}` +
+			`]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "input.0.summary.0.text").String(); got != "first" {
+		t.Fatalf("input.0.summary.0.text = %q, want first; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.summary.1.text").String(); got != "second" {
+		t.Fatalf("input.0.summary.1.text = %q, want second; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.1.role").String(); got != "user" {
+		t.Fatalf("input.1.role = %q, want user; body=%s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input.2").Exists() {
+		t.Fatalf("input.2 exists, want invalid reasoning blob removed and summaries re-merged; body=%s", string(gotBody))
+	}
+}
+
+func TestXAIExecutorDropsInvalidCompactionItem(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"compaction","encrypted_content":"gAAAAABforeign-codex-replay"},{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if xaiInputHasItemType(gotBody, "compaction") {
+		t.Fatalf("invalid compaction item reached upstream body: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role = %q, want user after dropping invalid compaction; body=%s", got, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input.1").Exists() {
+		t.Fatalf("input.1 exists, want only user item after dropping invalid compaction; body=%s", string(gotBody))
+	}
+}
+
+func testValidGrokEncryptedContent() string {
+	buf := make([]byte, 0, 256)
+	for i := 0; len(buf) < 256; i++ {
+		sum := sha256.Sum256([]byte{byte(i), byte(i >> 8), byte(i >> 16)})
+		buf = append(buf, sum[:]...)
+	}
+	return base64.RawStdEncoding.EncodeToString(buf[:256])
 }

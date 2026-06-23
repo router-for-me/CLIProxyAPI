@@ -331,9 +331,11 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDForDownstream(t *te
 }
 
 func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedContext(t *testing.T) {
+	nativeEncryptedContent := testValidGrokEncryptedContent()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedWebsocketPayload := make(chan []byte, 1)
 	capturedCompactPayload := make(chan []byte, 1)
+	compactResponse := []byte(fmt.Sprintf(`{"id":"resp_compact","model":"grok-4.3","output":[{"type":"compaction","encrypted_content":%q}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`, nativeEncryptedContent))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/responses":
@@ -369,7 +371,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 			}
 			capturedCompactPayload <- bytes.Clone(body)
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"resp_compact","model":"grok-4.3","output":[{"type":"compaction","encrypted_content":"opaque"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+			_, _ = w.Write(compactResponse)
 		default:
 			t.Errorf("path = %q, want /responses", r.URL.Path)
 			http.Error(w, "unexpected path", http.StatusNotFound)
@@ -485,6 +487,9 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 		}
 		if got := input.Array()[0].Get("type").String(); got != "compaction" {
 			t.Fatalf("post-compaction input[0].type = %q, want compaction; payload=%s", got, payload)
+		}
+		if got := input.Array()[0].Get("encrypted_content").String(); got != nativeEncryptedContent {
+			t.Fatalf("post-compaction input[0].encrypted_content = %q, want native sample; payload=%s", got, payload)
 		}
 		if got := input.Array()[1].Get("id").String(); got != "msg-2" {
 			t.Fatalf("post-compaction input[1].id = %q, want msg-2; payload=%s", got, payload)
