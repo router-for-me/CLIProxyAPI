@@ -326,3 +326,21 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
+
+// Proxy URLs
+func (h *Handler) GetProxyURLs(c *gin.Context) { c.JSON(200, gin.H{"proxy_urls": h.cfg.ProxyURLs}) }
+func (h *Handler) PutProxyURLs(c *gin.Context) {
+	var body struct {
+		Value []string `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	h.cfg.ProxyURLs = config.NormalizeProxyURLList(body.Value)
+	h.persist(c)
+}
+func (h *Handler) DeleteProxyURLs(c *gin.Context) {
+	h.cfg.ProxyURLs = nil
+	h.persist(c)
+}
