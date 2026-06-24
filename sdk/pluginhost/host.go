@@ -87,6 +87,14 @@ func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*
 	return h.inner.ParseAuth(ctx, req)
 }
 
+// ParseAuths lets plugin auth providers expand one credential payload into multiple auth records.
+func (h *Host) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+	if h == nil || h.inner == nil {
+		return nil, false, nil
+	}
+	return h.inner.ParseAuths(ctx, req)
+}
+
 // ModelsForAuth lets plugin model providers discover auth-bound models.
 func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModelResult {
 	if h == nil || h.inner == nil {
