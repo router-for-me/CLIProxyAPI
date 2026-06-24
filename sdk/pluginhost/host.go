@@ -79,12 +79,33 @@ func (h *Host) ShutdownAll() {
 	h.inner.ShutdownAll()
 }
 
+// PluginBusy reports whether a plugin dynamic library is loaded or being loaded.
+func (h *Host) PluginBusy(id string) bool {
+	return h != nil && h.inner != nil && h.inner.PluginBusy(id)
+}
+
+// UnloadPlugin removes one plugin from the active runtime and closes its dynamic library.
+func (h *Host) UnloadPlugin(id string) bool {
+	if h == nil || h.inner == nil {
+		return false
+	}
+	return h.inner.UnloadPlugin(id)
+}
+
 // ParseAuth lets plugin auth providers parse a credential payload.
 func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
 	if h == nil || h.inner == nil {
 		return nil, false, nil
 	}
 	return h.inner.ParseAuth(ctx, req)
+}
+
+// ParseAuths lets plugin auth providers expand one credential payload into multiple auth records.
+func (h *Host) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+	if h == nil || h.inner == nil {
+		return nil, false, nil
+	}
+	return h.inner.ParseAuths(ctx, req)
 }
 
 // ModelsForAuth lets plugin model providers discover auth-bound models.
