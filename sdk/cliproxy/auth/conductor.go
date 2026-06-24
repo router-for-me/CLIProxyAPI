@@ -512,6 +512,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
 	}
+	m.refreshImplicitProxyBindings()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if clearedCooldowns {
 		m.persistCooldownStates(context.Background())
@@ -1940,6 +1941,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
+	m.refreshImplicitProxyBindings()
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
@@ -1987,6 +1989,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
+	m.refreshImplicitProxyBindings()
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
@@ -2036,6 +2039,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	if m.scheduler != nil {
 		m.scheduler.removeAuth(id)
 	}
+	m.refreshImplicitProxyBindings()
 	m.queueRefreshUnschedule(id)
 	m.invalidateSessionAffinity(id)
 
@@ -2082,6 +2086,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
+	m.rebindImplicitProxyURLsLocked(proxyURLsFromConfig(cfg))
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 	m.mu.Unlock()
 	m.syncScheduler()

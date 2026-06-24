@@ -157,12 +157,10 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // Falls back to standard transport for non-HTTPS requests.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
+	if cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
+	proxyURL = cliproxyauth.EffectiveProxyURL(proxyURL, auth)
 
 	var ctxRoundTripper http.RoundTripper
 	if ctx != nil {

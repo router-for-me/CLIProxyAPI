@@ -95,9 +95,17 @@ usage-statistics-enabled: false
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 
-# Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
-# Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
+# Global fallback proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
+# Runtime auths without their own proxy-url use this only when proxy_urls is empty or no implicit binding exists.
+# Per-entry proxy-url still takes priority and supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
+
+# System proxy pool for runtime auths without their own proxy-url.
+# Entries are invisibly bound by account category in order; extra accounts cycle through the list.
+# proxy_urls:
+#   - "socks5://proxy-a.example.com:1080"
+#   - "socks5://proxy-b.example.com:1080"
+proxy_urls: []
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false

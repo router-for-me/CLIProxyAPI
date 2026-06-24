@@ -87,6 +87,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
+		a.SetImplicitProxyOrder(fmt.Sprintf("%06d", i))
 		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
@@ -146,6 +147,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
+		a.SetImplicitProxyOrder(fmt.Sprintf("%06d", i))
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
@@ -204,6 +206,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
+		a.SetImplicitProxyOrder(fmt.Sprintf("%06d", i))
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
@@ -274,6 +277,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+			a.SetImplicitProxyOrder(fmt.Sprintf("%06d:%06d", i, j))
 			if len(a.Metadata) == 0 {
 				a.Metadata = nil
 			}
@@ -312,6 +316,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+			a.SetImplicitProxyOrder(fmt.Sprintf("%06d", i))
 			if len(a.Metadata) == 0 {
 				a.Metadata = nil
 			}
@@ -364,6 +369,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
+		a.SetImplicitProxyOrder(fmt.Sprintf("%06d", i))
 		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
 		out = append(out, a)
 	}

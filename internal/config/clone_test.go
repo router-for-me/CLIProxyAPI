@@ -94,7 +94,8 @@ func sampleCloneRuntimeConfig() *Config {
 
 	return &Config{
 		SDKConfig: SDKConfig{
-			APIKeys: []string{"client-key"},
+			APIKeys:   []string{"client-key"},
+			ProxyURLs: []string{"http://proxy-a.example.com:8080", "http://proxy-b.example.com:8080"},
 			Streaming: StreamingConfig{
 				KeepAliveSeconds: 3,
 				BootstrapRetries: 2,
