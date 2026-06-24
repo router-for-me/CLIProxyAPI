@@ -47,6 +47,84 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 	}
 }
 
+type responsesStreamExecutionResult struct {
+	Data            <-chan []byte
+	UpstreamHeaders http.Header
+	Errs            <-chan *interfaces.ErrorMessage
+}
+
+func (h *OpenAIResponsesAPIHandler) newResponsesStreamKeepAliveTicker() (*time.Ticker, <-chan time.Time) {
+	if h == nil || h.BaseAPIHandler == nil {
+		return nil, nil
+	}
+	interval := handlers.StreamingKeepAliveInterval(h.Cfg)
+	if interval <= 0 {
+		return nil, nil
+	}
+	ticker := time.NewTicker(interval)
+	return ticker, ticker.C
+}
+
+func writeResponsesStreamKeepAlive(c *gin.Context, flusher http.Flusher) {
+	_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+	flusher.Flush()
+}
+
+func (h *OpenAIResponsesAPIHandler) waitResponsesStreamExecution(c *gin.Context, flusher http.Flusher, setSSEHeaders func(), execute func() responsesStreamExecutionResult) (responsesStreamExecutionResult, bool, bool) {
+	resultChan := make(chan responsesStreamExecutionResult, 1)
+	go func() {
+		resultChan <- execute()
+	}()
+
+	keepAlive, keepAliveC := h.newResponsesStreamKeepAliveTicker()
+	defer func() {
+		if keepAlive != nil {
+			keepAlive.Stop()
+		}
+	}()
+
+	streamStarted := false
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return responsesStreamExecutionResult{}, streamStarted, true
+		case result := <-resultChan:
+			return result, streamStarted, false
+		case <-keepAliveC:
+			setSSEHeaders()
+			writeResponsesStreamKeepAlive(c, flusher)
+			streamStarted = true
+		}
+	}
+}
+
+func writeResponsesStreamErrorEvent(c *gin.Context, errMsg *interfaces.ErrorMessage, sequenceNumber int) {
+	if errMsg == nil {
+		return
+	}
+	status := http.StatusInternalServerError
+	if errMsg.StatusCode > 0 {
+		status = errMsg.StatusCode
+	}
+	errText := http.StatusText(status)
+	if errMsg.Error != nil && errMsg.Error.Error() != "" {
+		errText = errMsg.Error.Error()
+	}
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, sequenceNumber)
+	_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+}
+
+func stopResponsesStreamKeepAlive(ticker **time.Ticker, tickerC *<-chan time.Time) {
+	if ticker == nil || *ticker == nil {
+		return
+	}
+	(*ticker).Stop()
+	*ticker = nil
+	if tickerC != nil {
+		*tickerC = nil
+	}
+}
+
 type responsesSSEFramer struct {
 	pending              []byte
 	outputItems          map[int][]byte
@@ -490,14 +568,26 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	streamStart := time.Now()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
-
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
+	execution, streamStarted, canceled := h.waitResponsesStreamExecution(c, flusher, setSSEHeaders, func() responsesStreamExecutionResult {
+		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+		return responsesStreamExecutionResult{Data: dataChan, UpstreamHeaders: upstreamHeaders, Errs: errChan}
+	})
+	if canceled {
+		cliCancel(c.Request.Context().Err())
+		return
+	}
+	dataChan := execution.Data
+	upstreamHeaders := execution.UpstreamHeaders
+	errChan := execution.Errs
+
+	keepAlive, keepAliveC := h.newResponsesStreamKeepAliveTicker()
+	defer stopResponsesStreamKeepAlive(&keepAlive, &keepAliveC)
 	framer := &responsesSSEFramer{}
 
 	// Peek at the first chunk
@@ -512,8 +602,12 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				errChan = nil
 				continue
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			if streamStarted {
+				writeResponsesStreamErrorEvent(c, errMsg, 0)
+				flusher.Flush()
+			} else {
+				h.WriteErrorResponse(c, errMsg)
+			}
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -531,6 +625,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			}
 
 			log.Infof("responses ttfb: %dms model=%s ip=%s", time.Since(streamStart).Milliseconds(), modelName, c.ClientIP())
+			stopResponsesStreamKeepAlive(&keepAlive, &keepAliveC)
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
@@ -541,6 +636,11 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			// Continue
 			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
 			return
+		case <-keepAliveC:
+			setSSEHeaders()
+			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			writeResponsesStreamKeepAlive(c, flusher)
+			streamStarted = true
 		}
 	}
 }

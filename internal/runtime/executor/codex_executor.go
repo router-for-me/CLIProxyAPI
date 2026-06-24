@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -848,28 +847,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	})
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	ttft := codexTTFTTimeout(e.cfg)
-	var ttftFired atomic.Bool
-	var ttftTimer *time.Timer
-	if ttft > 0 {
-		var cancel context.CancelFunc
-		if ctx == nil {
-			ctx = httpReq.Context()
-		}
-		ctx, cancel = context.WithCancel(httpReq.Context())
-		httpReq = httpReq.WithContext(ctx)
-		ttftTimer = time.AfterFunc(ttft, func() {
-			ttftFired.Store(true)
-			cancel()
-		})
-		defer ttftTimer.Stop()
-	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		if ttftFired.Load() {
-			return resp, codexTTFTTimeoutErr(ttft)
-		}
 		return resp, err
 	}
 	defer func() {
@@ -890,9 +870,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		if ttftFired.Load() {
-			return resp, codexTTFTTimeoutErr(ttft)
-		}
 		return resp, err
 	}
 	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
@@ -907,10 +884,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		eventData := bytes.TrimSpace(line[5:])
-		if len(eventData) > 0 && ttftTimer != nil {
-			ttftTimer.Stop()
-			ttftTimer = nil
-		}
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if streamErr, terminalBody, ok := codexTerminalStreamErr(eventData); ok {
@@ -1150,30 +1123,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	ttft := codexTTFTTimeout(e.cfg)
-	var ttftFired atomic.Bool
-	var ttftTimer *time.Timer
-	if ttft > 0 {
-		var cancel context.CancelFunc
-		if ctx == nil {
-			ctx = httpReq.Context()
-		}
-		ctx, cancel = context.WithCancel(httpReq.Context())
-		httpReq = httpReq.WithContext(ctx)
-		ttftTimer = time.AfterFunc(ttft, func() {
-			ttftFired.Store(true)
-			cancel()
-		})
-	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		if ttftTimer != nil {
-			ttftTimer.Stop()
-		}
-		if ttftFired.Load() {
-			return nil, codexTTFTTimeoutErr(ttft)
-		}
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -1197,9 +1149,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	go func() {
 		defer close(out)
 		defer func() {
-			if ttftTimer != nil {
-				ttftTimer.Stop()
-			}
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
@@ -1216,10 +1165,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
-				if len(data) > 0 && ttftTimer != nil {
-					ttftTimer.Stop()
-					ttftTimer = nil
-				}
 				if streamErr, terminalBody, ok := codexTerminalStreamErr(data); ok {
 					clearCodexReasoningReplayOnInvalidSignature(replayScope, streamErr.StatusCode(), terminalBody)
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
@@ -1255,16 +1200,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			if ttftFired.Load() {
-				ttftErr := codexTTFTTimeoutErr(ttft)
-				helps.RecordAPIResponseError(ctx, e.cfg, ttftErr)
-				reporter.PublishFailure(ctx, ttftErr)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: ttftErr}:
-				case <-ctx.Done():
-				}
-				return
-			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			select {

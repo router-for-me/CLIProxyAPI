@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -30,6 +31,47 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 	}
 
 	return h, recorder, c, flusher
+}
+
+func TestWaitResponsesStreamExecutionEmitsBootstrapKeepAlive(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatalf("expected gin writer to implement http.Flusher")
+	}
+	setSSEHeaders := func() {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+	}
+
+	result, streamStarted, canceled := h.waitResponsesStreamExecution(c, flusher, setSSEHeaders, func() responsesStreamExecutionResult {
+		time.Sleep(1100 * time.Millisecond)
+		data := make(chan []byte)
+		close(data)
+		errs := make(chan *interfaces.ErrorMessage)
+		close(errs)
+		return responsesStreamExecutionResult{Data: data, Errs: errs}
+	})
+
+	if canceled {
+		t.Fatal("request should not be canceled")
+	}
+	if !streamStarted {
+		t.Fatal("expected bootstrap keep-alive to start the stream")
+	}
+	if result.Data == nil || result.Errs == nil {
+		t.Fatal("expected stream execution result channels")
+	}
+	if got := recorder.Body.String(); !strings.Contains(got, ": keep-alive\n\n") {
+		t.Fatalf("missing bootstrap keep-alive in body %q", got)
+	}
 }
 
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {

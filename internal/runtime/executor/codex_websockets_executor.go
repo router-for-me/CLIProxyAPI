@@ -347,7 +347,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 
-	ttft := codexTTFTTimeout(e.cfg)
 	firstEventSeen := false
 	sendDone := time.Now()
 	for {
@@ -355,20 +354,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, ctx.Err()
 		}
 		readWait := codexResponsesWebsocketIdleTimeout
-		if !firstEventSeen && ttft > 0 {
-			readWait = ttft
-		}
 		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, readWait)
 		if errRead != nil {
-			if !firstEventSeen && ttft > 0 && isDeadlineLikeError(errRead) {
-				ttftErr := codexTTFTTimeoutErr(ttft)
-				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "ttft_timeout", ttftErr)
-				}
-				log.Warnf("codex ws timing: ttft_timeout auth=%s session=%s waited=%dms", authID, executionSessionID, time.Since(sendDone).Milliseconds())
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "ttft_timeout", ttftErr)
-				return resp, ttftErr
-			}
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
 			return resp, errRead
 		}
@@ -623,7 +610,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 		}
 
-		ttft := codexTTFTTimeout(e.cfg)
 		firstEventSeen := false
 		streamSendDone := time.Now()
 		var param any
@@ -635,28 +621,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return
 			}
 			readWait := codexResponsesWebsocketIdleTimeout
-			if !firstEventSeen && ttft > 0 {
-				readWait = ttft
-			}
 			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, readWait)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
-					return
-				}
-				if !firstEventSeen && ttft > 0 && isDeadlineLikeError(errRead) {
-					ttftErr := codexTTFTTimeoutErr(ttft)
-					terminateReason = "ttft_timeout"
-					terminateErr = ttftErr
-					log.Warnf("codex ws timing: stream_ttft_timeout auth=%s session=%s waited=%dms", authID, executionSessionID, time.Since(streamSendDone).Milliseconds())
-					helps.RecordAPIWebsocketError(ctx, e.cfg, "ttft_timeout", ttftErr)
-					reporter.PublishFailure(ctx, ttftErr)
-					if sess != nil {
-						e.invalidateUpstreamConn(sess, conn, "ttft_timeout", ttftErr)
-					}
-					_ = send(cliproxyexecutor.StreamChunk{Err: ttftErr})
 					return
 				}
 				terminateReason = "read_error"

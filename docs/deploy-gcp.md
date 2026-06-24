@@ -68,9 +68,9 @@ The proxy also watches the local mirrored file via fsnotify, but on Cloud Run
 the mirror only refreshes on container startup, so a restart is the
 fastest reliable refresh path.
 
-For Cloud Run deployments, set `codex-ttft-timeout-seconds: 240` in
-`config.yaml` so Codex requests fail before the platform's 900-second request
-timeout when upstream produces no first response event.
+For Cloud Run deployments, keep `codex-ttft-timeout-seconds: 0` and enable
+streaming heartbeats (for example `streaming.keepalive-seconds: 15`) so clients
+stay connected while slow Codex upstreams are preparing the first response event.
 
 ## Building and deploying a new image
 
@@ -247,26 +247,22 @@ forwarding rule, certificate, and IP.
 | HTTPS Proxy | `cli-proxy-api-https-proxy` | global |
 | Forwarding Rule | `cli-proxy-api-https-fr` | global, :443 |
 
-## Codex TTFT timeout
+## Codex slow first event handling
 
 Cloud Run enforces a hard request timeout (`timeoutSeconds`, currently 900s).
-Codex upstream can occasionally stall before producing the first response event,
-causing the proxy to hold the HTTP response open without sending any bytes until
-Cloud Run kills it with 504.
+Codex upstream can occasionally take several minutes before producing the first
+response event. The proxy intentionally does not impose an additional
+first-event timeout, so slow streams keep waiting until the upstream provider,
+client, or Cloud Run request deadline closes the request.
 
-To mitigate this, set `codex-ttft-timeout-seconds` in `config.yaml`:
+Leave `codex-ttft-timeout-seconds` at `0` or remove it from `config.yaml`:
 
 ```yaml
-codex-ttft-timeout-seconds: 240
+codex-ttft-timeout-seconds: 0
 ```
 
-When enabled, the proxy cancels the upstream request if no first response event
-arrives within the configured duration and returns a 504 to the client
-immediately, freeing the connection slot. The existing 5-minute WebSocket idle
-timeout continues to apply after the first event is received.
-
-Recommended value: `240` (4 minutes) for Cloud Run deployments with
-`timeoutSeconds=900`.
+Older deployments may have used `240`; change those deployments back to `0` to
+avoid cutting off long Codex/GJC responses before the first token arrives.
 
 ## Known quirks
 
