@@ -9,6 +9,8 @@ import (
 
 type capabilityRecord struct {
 	id       string
+	path     string
+	version  string
 	priority int
 	meta     pluginapi.Metadata
 	plugin   pluginapi.Plugin
@@ -39,15 +41,32 @@ func emptySnapshot() *Snapshot {
 	return &Snapshot{}
 }
 
-// RegisteredPlugins returns a stable copy of plugin metadata in the current runtime snapshot.
-func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
-	snap := h.Snapshot()
+func (h *Host) activeRecords() []capabilityRecord {
+	return h.activeRecordsFromSnapshot(h.Snapshot())
+}
+
+func (h *Host) activeRecordsFromSnapshot(snap *Snapshot) []capabilityRecord {
 	if snap == nil || len(snap.records) == 0 {
 		return nil
 	}
-	menusByPlugin := h.registeredPluginMenus()
-	out := make([]RegisteredPluginInfo, 0, len(snap.records))
+	out := make([]capabilityRecord, 0, len(snap.records))
 	for _, record := range snap.records {
+		if h.recordCurrent(record) {
+			out = append(out, record)
+		}
+	}
+	return out
+}
+
+// RegisteredPlugins returns a stable copy of plugin metadata in the current runtime snapshot.
+func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
+	records := h.activeRecords()
+	if len(records) == 0 {
+		return nil
+	}
+	menusByPlugin := h.registeredPluginMenus()
+	out := make([]RegisteredPluginInfo, 0, len(records))
+	for _, record := range records {
 		out = append(out, RegisteredPluginInfo{
 			ID:            record.id,
 			Priority:      record.priority,
@@ -68,11 +87,7 @@ func (h *Host) PluginRegistered(id string) bool {
 	if id == "" {
 		return false
 	}
-	snap := h.Snapshot()
-	if snap == nil || len(snap.records) == 0 {
-		return false
-	}
-	for _, record := range snap.records {
+	for _, record := range h.activeRecords() {
 		if record.id == id {
 			return true
 		}

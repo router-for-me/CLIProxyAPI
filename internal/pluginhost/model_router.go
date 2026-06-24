@@ -22,7 +22,7 @@ func (h *Host) HasModelRoutersExcept(skipPluginID string) bool {
 		return false
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if record.plugin.Capabilities.ModelRouter != nil && !h.isPluginFused(record.id) && record.id != skipPluginID {
 			return true
 		}
@@ -36,7 +36,7 @@ func (h *Host) RouteModelExcept(ctx context.Context, req pluginapi.ModelRouteReq
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
 	req.AvailableProviders = h.availableProvidersSnapshot()
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		router := record.plugin.Capabilities.ModelRouter
 		if router == nil || h.isPluginFused(record.id) || record.id == skipPluginID {
 			continue

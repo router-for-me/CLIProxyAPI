@@ -199,37 +199,13 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 
 	pluginIsBusy := func() bool { return pluginBusy(host, id) }
-	unloadedBeforeWrite := false
 	result, errInstall := client.Install(installCtx, plugin, pluginstore.InstallOptions{
 		PluginsDir:   pluginsDir,
 		GOOS:         goos,
 		GOARCH:       goarch,
 		PluginLoaded: pluginIsBusy,
-		BeforeWrite: func() error {
-			if !pluginIsBusy() {
-				return nil
-			}
-			if host == nil {
-				return pluginstore.ErrLoadedPluginLocked
-			}
-			log.WithFields(log.Fields{
-				"plugin_id": id,
-				"version":   plugin.Version,
-			}).Info("pluginstore: unloading busy plugin before install")
-			if !host.UnloadPlugin(id) && pluginIsBusy() {
-				return pluginstore.ErrLoadedPluginLocked
-			}
-			unloadedBeforeWrite = true
-			return nil
-		},
 	})
 	if errInstall != nil {
-		if unloadedBeforeWrite {
-			h.mu.Lock()
-			cfgSnapshot := h.reloadSnapshotConfigLocked()
-			h.mu.Unlock()
-			h.reloadConfigAfterManagementSave(c.Request.Context(), cfgSnapshot)
-		}
 		if errors.Is(errInstall, pluginstore.ErrLoadedPluginLocked) {
 			c.JSON(http.StatusConflict, gin.H{
 				"error":            "plugin_update_requires_restart",

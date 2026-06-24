@@ -243,11 +243,12 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 	}
 
 	snap := h.Snapshot()
+	records := h.activeRecordsFromSnapshot(snap)
 	registrations := make([]modelClientRegistration, 0)
 	nextClients := make(map[string]struct{})
 	nextProviders := make(map[string]string)
 	nextModelRegistrations := make(map[string]pluginModelRegistration)
-	for _, record := range snap.records {
+	for _, record := range records {
 		modelProvider := record.plugin.Capabilities.ModelProvider
 		registrar := record.plugin.Capabilities.ModelRegistrar
 		if modelProvider == nil && registrar == nil {
@@ -320,7 +321,7 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 	if providerKey == "" {
 		return AuthModelResult{}
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		modelProvider := record.plugin.Capabilities.ModelProvider
 		if modelProvider == nil || h.isPluginFused(record.id) {
 			continue
@@ -458,7 +459,7 @@ type modelClientRegistration struct {
 }
 
 func (h *Host) callModelRegistrar(ctx context.Context, record capabilityRecord, registrar pluginapi.ModelRegistrar) (resp pluginapi.ModelRegistrationResponse, err error) {
-	if h == nil || registrar == nil || h.isPluginFused(record.id) {
+	if h == nil || registrar == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.ModelRegistrationResponse{}, nil
 	}
 	defer func() {
@@ -472,7 +473,7 @@ func (h *Host) callModelRegistrar(ctx context.Context, record capabilityRecord, 
 }
 
 func (h *Host) callModelProviderStaticModels(ctx context.Context, record capabilityRecord, provider pluginapi.ModelProvider) (resp pluginapi.ModelResponse, err error) {
-	if h == nil || provider == nil || h.isPluginFused(record.id) {
+	if h == nil || provider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.ModelResponse{}, nil
 	}
 	defer func() {
@@ -489,7 +490,7 @@ func (h *Host) callModelProviderStaticModels(ctx context.Context, record capabil
 }
 
 func (h *Host) callModelsForAuth(ctx context.Context, record capabilityRecord, provider pluginapi.ModelProvider, auth *coreauth.Auth) (resp pluginapi.ModelResponse, err error) {
-	if h == nil || provider == nil || auth == nil || h.isPluginFused(record.id) {
+	if h == nil || provider == nil || auth == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.ModelResponse{}, nil
 	}
 	defer func() {
@@ -511,58 +512,58 @@ func (h *Host) callModelsForAuth(ctx context.Context, record capabilityRecord, p
 	})
 }
 
-func (h *Host) callRequestInterceptor(ctx context.Context, pluginID, method string, call func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), req pluginapi.RequestInterceptRequest) (out pluginapi.RequestInterceptResponse, ok bool) {
-	if h == nil || call == nil || h.isPluginFused(pluginID) {
+func (h *Host) callRequestInterceptor(ctx context.Context, record capabilityRecord, method string, call func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error), req pluginapi.RequestInterceptRequest) (out pluginapi.RequestInterceptResponse, ok bool) {
+	if h == nil || call == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.RequestInterceptResponse{}, false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, method, recovered)
+			h.fusePlugin(record.id, method, recovered)
 			out = pluginapi.RequestInterceptResponse{}
 			ok = false
 		}
 	}()
 	resp, errIntercept := call(ctx, req)
 	if errIntercept != nil {
-		log.Warnf("pluginhost: request interceptor %s failed: %v", pluginID, errIntercept)
+		log.Warnf("pluginhost: request interceptor %s failed: %v", record.id, errIntercept)
 		return pluginapi.RequestInterceptResponse{}, false
 	}
 	return resp, true
 }
 
-func (h *Host) callResponseInterceptor(ctx context.Context, pluginID string, interceptor pluginapi.ResponseInterceptor, req pluginapi.ResponseInterceptRequest) (out pluginapi.ResponseInterceptResponse, ok bool) {
-	if h == nil || interceptor == nil || h.isPluginFused(pluginID) {
+func (h *Host) callResponseInterceptor(ctx context.Context, record capabilityRecord, interceptor pluginapi.ResponseInterceptor, req pluginapi.ResponseInterceptRequest) (out pluginapi.ResponseInterceptResponse, ok bool) {
+	if h == nil || interceptor == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.ResponseInterceptResponse{}, false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "ResponseInterceptor.InterceptResponse", recovered)
+			h.fusePlugin(record.id, "ResponseInterceptor.InterceptResponse", recovered)
 			out = pluginapi.ResponseInterceptResponse{}
 			ok = false
 		}
 	}()
 	resp, errIntercept := interceptor.InterceptResponse(ctx, req)
 	if errIntercept != nil {
-		log.Warnf("pluginhost: response interceptor %s failed: %v", pluginID, errIntercept)
+		log.Warnf("pluginhost: response interceptor %s failed: %v", record.id, errIntercept)
 		return pluginapi.ResponseInterceptResponse{}, false
 	}
 	return resp, true
 }
 
-func (h *Host) callStreamChunkInterceptor(ctx context.Context, pluginID string, interceptor pluginapi.StreamChunkInterceptor, req pluginapi.StreamChunkInterceptRequest) (out pluginapi.StreamChunkInterceptResponse, ok bool) {
-	if h == nil || interceptor == nil || h.isPluginFused(pluginID) {
+func (h *Host) callStreamChunkInterceptor(ctx context.Context, record capabilityRecord, interceptor pluginapi.StreamChunkInterceptor, req pluginapi.StreamChunkInterceptRequest) (out pluginapi.StreamChunkInterceptResponse, ok bool) {
+	if h == nil || interceptor == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.StreamChunkInterceptResponse{}, false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "StreamChunkInterceptor.InterceptStreamChunk", recovered)
+			h.fusePlugin(record.id, "StreamChunkInterceptor.InterceptStreamChunk", recovered)
 			out = pluginapi.StreamChunkInterceptResponse{}
 			ok = false
 		}
 	}()
 	resp, errIntercept := interceptor.InterceptStreamChunk(ctx, req)
 	if errIntercept != nil {
-		log.Warnf("pluginhost: stream chunk interceptor %s failed: %v", pluginID, errIntercept)
+		log.Warnf("pluginhost: stream chunk interceptor %s failed: %v", record.id, errIntercept)
 		return pluginapi.StreamChunkInterceptResponse{}, false
 	}
 	return resp, true
@@ -594,7 +595,7 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 		Body:    bytes.Clone(req.Body),
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.RequestInterceptor
 		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
@@ -603,7 +604,7 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 		nextReq.Headers = cloneHeader(current.Headers)
 		nextReq.Body = bytes.Clone(current.Body)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
-		if resp, ok := h.callRequestInterceptor(ctx, record.id, method, func(callCtx context.Context, callReq pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		if resp, ok := h.callRequestInterceptor(ctx, record, method, func(callCtx context.Context, callReq pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 			return invoke(interceptor, callCtx, callReq)
 		}, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
@@ -625,7 +626,7 @@ func (h *Host) InterceptResponseExcept(ctx context.Context, req pluginapi.Respon
 		Body:    bytes.Clone(req.Body),
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.ResponseInterceptor
 		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
@@ -637,7 +638,7 @@ func (h *Host) InterceptResponseExcept(ctx context.Context, req pluginapi.Respon
 		nextReq.RequestBody = bytes.Clone(req.RequestBody)
 		nextReq.Body = bytes.Clone(current.Body)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
-		if resp, ok := h.callResponseInterceptor(ctx, record.id, interceptor, nextReq); ok {
+		if resp, ok := h.callResponseInterceptor(ctx, record, interceptor, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
 			if len(resp.Body) > 0 {
 				current.Body = bytes.Clone(resp.Body)
@@ -657,7 +658,7 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 		Body:    bytes.Clone(req.Body),
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.StreamChunkInterceptor
 		if h.isPluginFused(record.id) || interceptor == nil || current.DropChunk || record.id == skipPluginID {
 			continue
@@ -670,7 +671,7 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 		nextReq.Body = bytes.Clone(current.Body)
 		nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
-		if resp, ok := h.callStreamChunkInterceptor(ctx, record.id, interceptor, nextReq); ok {
+		if resp, ok := h.callStreamChunkInterceptor(ctx, record, interceptor, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
 			if len(resp.Body) > 0 {
 				current.Body = bytes.Clone(resp.Body)
@@ -687,7 +688,7 @@ func (h *Host) HasStreamInterceptors() bool {
 	if h == nil {
 		return false
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) {
 			continue
 		}
@@ -702,7 +703,7 @@ func (h *Host) HasRequestInterceptors() bool {
 	if h == nil {
 		return false
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) {
 			continue
 		}
@@ -759,6 +760,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 	}
 
 	snap := h.Snapshot()
+	records := h.activeRecordsFromSnapshot(snap)
 	registrations := h.snapshotModelRegistrations()
 	selectedModels := make(map[string][]*registry.ModelInfo)
 	providerModels := make(map[string][]*registry.ModelInfo)
@@ -769,7 +771,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			appendModelsForProvider(providerModels, registration.provider, registration.models)
 		}
 	}
-	for _, record := range snap.records {
+	for _, record := range records {
 		executor := record.plugin.Capabilities.Executor
 		if executor == nil || h.isPluginFused(record.id) {
 			continue
@@ -811,7 +813,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 	nextModelClients := make(map[string]struct{})
 	executorRegistrations := make([]executorRegistration, 0)
 	modelClientRegistrations := make([]modelClientRegistration, 0)
-	for _, record := range snap.records {
+	for _, record := range records {
 		executor := record.plugin.Capabilities.Executor
 		if executor == nil || h.isPluginFused(record.id) {
 			continue
@@ -919,6 +921,8 @@ func newExecutorAdapterRegistration(h *Host, record capabilityRecord, provider s
 		adapter: &executorAdapter{
 			host:          h,
 			pluginID:      record.id,
+			path:          record.path,
+			version:       record.version,
 			provider:      provider,
 			executor:      executor,
 			inputFormats:  normalizeExecutorFormats(record.plugin.Capabilities.ExecutorInputFormats),
@@ -959,6 +963,9 @@ func (h *Host) modelRegistration(pluginID string) pluginModelRegistration {
 }
 
 func (h *Host) executorProvider(record capabilityRecord, executor pluginapi.ProviderExecutor) (string, bool) {
+	if h == nil || !h.recordCurrent(record) {
+		return "", false
+	}
 	provider := h.modelProvider(record.id)
 	if provider == "" {
 		identifier, okIdentifier := h.callExecutorIdentifier(record.id, executor)
@@ -1053,7 +1060,7 @@ func (h *Host) HasExecutorCandidateProvider(provider string) bool {
 	if provider == "" {
 		return false
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		executor := record.plugin.Capabilities.Executor
 		if executor == nil || h.isPluginFused(record.id) {
 			continue
@@ -1093,7 +1100,7 @@ func (h *Host) RegisterFrontendAuthProviders() {
 
 	nextKeys := make(map[string]struct{})
 	var bestExclusive exclusiveFrontendAuthCandidate
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		provider := record.plugin.Capabilities.FrontendAuthProvider
 		if provider == nil || h.isPluginFused(record.id) {
 			continue
@@ -1101,6 +1108,8 @@ func (h *Host) RegisterFrontendAuthProviders() {
 		adapter := &accessAdapter{
 			host:     h,
 			pluginID: record.id,
+			path:     record.path,
+			version:  record.version,
 			provider: provider,
 		}
 		key := strings.TrimSpace(adapter.Identifier())
@@ -1156,7 +1165,7 @@ func (h *Host) RegisterUsagePlugins() {
 		return
 	}
 
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.UsagePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
@@ -1186,6 +1195,8 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 		thinking.RegisterPluginProvider(record.id, provider, record.priority, &thinkingAdapter{
 			host:     h,
 			pluginID: record.id,
+			path:     record.path,
+			version:  record.version,
 			provider: provider,
 			applier:  applier,
 		})
@@ -1193,6 +1204,9 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 }
 
 func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi.ThinkingApplier) (provider string, ok bool) {
+	if h == nil || applier == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return "", false
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, "ThinkingApplier.Identifier", recovered)
@@ -1211,7 +1225,7 @@ func (h *Host) currentUsagePlugin(pluginID string) pluginapi.UsagePlugin {
 	if h == nil || strings.TrimSpace(pluginID) == "" {
 		return nil
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if record.id != pluginID {
 			continue
 		}
@@ -1247,6 +1261,8 @@ func (h *Host) isPluginFused(id string) bool {
 type accessAdapter struct {
 	host     *Host
 	pluginID string
+	path     string
+	version  string
 	provider pluginapi.FrontendAuthProvider
 }
 
@@ -1271,7 +1287,7 @@ func (a *accessAdapter) Identifier() (identifier string) {
 }
 
 func (a *accessAdapter) Authenticate(ctx context.Context, r *http.Request) (result *sdkaccess.Result, authErr *sdkaccess.AuthError) {
-	if a == nil || a.provider == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.provider == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, sdkaccess.NewNotHandledError()
 	}
 	defer func() {
@@ -1310,6 +1326,8 @@ func (a *accessAdapter) Authenticate(ctx context.Context, r *http.Request) (resu
 type executorAdapter struct {
 	host          *Host
 	pluginID      string
+	path          string
+	version       string
 	provider      string
 	executor      pluginapi.ProviderExecutor
 	inputFormats  []sdktranslator.Format
@@ -1439,7 +1457,7 @@ func (a *executorAdapter) executorResponseTranslationAvailable(from, to sdktrans
 }
 
 func (h *Host) hasResponseTranslator() bool {
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.ResponseTranslator == nil {
 			continue
 		}
@@ -1572,7 +1590,7 @@ func sendExecutorPluginStreamChunk(ctx context.Context, out chan<- pluginapi.Exe
 }
 
 func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 	defer func() {
@@ -1599,7 +1617,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 }
 
 func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (result *coreexecutor.StreamResult, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 	defer func() {
@@ -1625,7 +1643,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 }
 
 func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 	record := a.host.authProviderRecord(authProvider(auth))
@@ -1698,7 +1716,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 }
 
 func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 	defer func() {
@@ -1725,7 +1743,7 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 }
 
 func (a *executorAdapter) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (resp *http.Response, err error) {
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 	if req == nil {
@@ -1780,6 +1798,8 @@ type usageAdapter struct {
 type thinkingAdapter struct {
 	host     *Host
 	pluginID string
+	path     string
+	version  string
 	provider string
 	applier  pluginapi.ThinkingApplier
 }
@@ -1831,7 +1851,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 }
 
 func (a *thinkingAdapter) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) (out []byte, err error) {
-	if a == nil || a.applier == nil || a.host == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.applier == nil || a.host == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return bytes.Clone(body), nil
 	}
 	defer func() {
@@ -1859,7 +1879,7 @@ func (a *thinkingAdapter) Apply(body []byte, config thinking.ThinkingConfig, mod
 
 func (h *Host) NormalizeRequest(ctx context.Context, from, to sdktranslator.Format, model string, body []byte, stream bool) []byte {
 	current := bytes.Clone(body)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.RequestNormalizer == nil {
 			continue
 		}
@@ -1871,7 +1891,7 @@ func (h *Host) NormalizeRequest(ctx context.Context, from, to sdktranslator.Form
 }
 
 func (h *Host) TranslateRequest(ctx context.Context, from, to sdktranslator.Format, model string, body []byte, stream bool) ([]byte, bool) {
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.RequestTranslator == nil {
 			continue
 		}
@@ -1884,12 +1904,12 @@ func (h *Host) TranslateRequest(ctx context.Context, from, to sdktranslator.Form
 
 func (h *Host) NormalizeResponseBefore(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) []byte {
 	current := bytes.Clone(body)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		normalizer := record.plugin.Capabilities.ResponseBeforeTranslator
 		if h.isPluginFused(record.id) || normalizer == nil {
 			continue
 		}
-		if normalized, ok := h.callResponseNormalizer(ctx, record.id, "ResponseBeforeTranslator.NormalizeResponse", normalizer, from, to, model, originalRequestRawJSON, requestRawJSON, current, stream); ok {
+		if normalized, ok := h.callResponseNormalizer(ctx, record, "ResponseBeforeTranslator.NormalizeResponse", normalizer, from, to, model, originalRequestRawJSON, requestRawJSON, current, stream); ok {
 			current = normalized
 		}
 	}
@@ -1897,12 +1917,12 @@ func (h *Host) NormalizeResponseBefore(ctx context.Context, from, to sdktranslat
 }
 
 func (h *Host) TranslateResponse(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) ([]byte, bool) {
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		translator := record.plugin.Capabilities.ResponseTranslator
 		if h.isPluginFused(record.id) || translator == nil {
 			continue
 		}
-		if translated, ok := h.callResponseTranslator(ctx, record.id, translator, from, to, model, originalRequestRawJSON, requestRawJSON, body, stream); ok {
+		if translated, ok := h.callResponseTranslator(ctx, record, translator, from, to, model, originalRequestRawJSON, requestRawJSON, body, stream); ok {
 			return translated, true
 		}
 	}
@@ -1911,12 +1931,12 @@ func (h *Host) TranslateResponse(ctx context.Context, from, to sdktranslator.For
 
 func (h *Host) NormalizeResponseAfter(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) []byte {
 	current := bytes.Clone(body)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		normalizer := record.plugin.Capabilities.ResponseAfterTranslator
 		if h.isPluginFused(record.id) || normalizer == nil {
 			continue
 		}
-		if normalized, ok := h.callResponseNormalizer(ctx, record.id, "ResponseAfterTranslator.NormalizeResponse", normalizer, from, to, model, originalRequestRawJSON, requestRawJSON, current, stream); ok {
+		if normalized, ok := h.callResponseNormalizer(ctx, record, "ResponseAfterTranslator.NormalizeResponse", normalizer, from, to, model, originalRequestRawJSON, requestRawJSON, current, stream); ok {
 			current = normalized
 		}
 	}
@@ -1924,6 +1944,9 @@ func (h *Host) NormalizeResponseAfter(ctx context.Context, from, to sdktranslato
 }
 
 func (h *Host) callRequestNormalizer(ctx context.Context, record capabilityRecord, from, to sdktranslator.Format, model string, body []byte, stream bool) (out []byte, ok bool) {
+	if h == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) || record.plugin.Capabilities.RequestNormalizer == nil {
+		return nil, false
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, "RequestNormalizer.NormalizeRequest", recovered)
@@ -1945,6 +1968,9 @@ func (h *Host) callRequestNormalizer(ctx context.Context, record capabilityRecor
 }
 
 func (h *Host) callRequestTranslator(ctx context.Context, record capabilityRecord, from, to sdktranslator.Format, model string, body []byte, stream bool) (out []byte, ok bool) {
+	if h == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) || record.plugin.Capabilities.RequestTranslator == nil {
+		return nil, false
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, "RequestTranslator.TranslateRequest", recovered)
@@ -1965,10 +1991,13 @@ func (h *Host) callRequestTranslator(ctx context.Context, record capabilityRecor
 	return bytes.Clone(resp.Body), true
 }
 
-func (h *Host) callResponseNormalizer(ctx context.Context, pluginID, method string, normalizer pluginapi.ResponseNormalizer, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) (out []byte, ok bool) {
+func (h *Host) callResponseNormalizer(ctx context.Context, record capabilityRecord, method string, normalizer pluginapi.ResponseNormalizer, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) (out []byte, ok bool) {
+	if h == nil || normalizer == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return nil, false
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, method, recovered)
+			h.fusePlugin(record.id, method, recovered)
 			out = nil
 			ok = false
 		}
@@ -1988,10 +2017,13 @@ func (h *Host) callResponseNormalizer(ctx context.Context, pluginID, method stri
 	return bytes.Clone(resp.Body), true
 }
 
-func (h *Host) callResponseTranslator(ctx context.Context, pluginID string, translator pluginapi.ResponseTranslator, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) (out []byte, ok bool) {
+func (h *Host) callResponseTranslator(ctx context.Context, record capabilityRecord, translator pluginapi.ResponseTranslator, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, body []byte, stream bool) (out []byte, ok bool) {
+	if h == nil || translator == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return nil, false
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "ResponseTranslator.TranslateResponse", recovered)
+			h.fusePlugin(record.id, "ResponseTranslator.TranslateResponse", recovered)
 			out = nil
 			ok = false
 		}
