@@ -186,14 +186,14 @@ func TestRewriteSSEPayloadLines_CodexResponsesLiveFrame(t *testing.T) {
 
 func TestRewriteForceMappedResponse_NoRewriteWhenForceMappingDisabled(t *testing.T) {
 	upstream := []byte(`{"model":"gpt-5.4","choices":[]}`)
-	got := append([]byte(nil), upstream...)
-	rewriteForceMappedResponse(&cliproxyexecutor.Response{Payload: got}, OAuthModelAliasResult{
+	resp := &cliproxyexecutor.Response{Payload: append([]byte(nil), upstream...)}
+	rewriteForceMappedResponse(resp, OAuthModelAliasResult{
 		UpstreamModel: "gpt-5.4",
 		ForceMapping:  false,
 		OriginalAlias: "gpt-5.4-fast",
 	})
-	if string(got) != string(upstream) {
-		t.Fatalf("payload = %s, want unchanged %s", got, upstream)
+	if string(resp.Payload) != string(upstream) {
+		t.Fatalf("payload = %s, want unchanged %s", resp.Payload, upstream)
 	}
 }
 
