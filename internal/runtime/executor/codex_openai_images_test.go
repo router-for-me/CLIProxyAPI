@@ -42,12 +42,22 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 	var gotPath string
 	var gotAuth string
 	var gotAccept string
+	var gotUA string
+	var gotVersion string
+	var gotTurnMetadata string
+	var gotClientRequestID string
+	var gotOriginator string
 	var gotBody []byte
 	upstreamBody := []byte(`{"created":1713833628,"data":[{"b64_json":"AA=="}],"usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotAccept = r.Header.Get("Accept")
+		gotUA = r.Header.Get("User-Agent")
+		gotVersion = r.Header.Get("Version")
+		gotTurnMetadata = r.Header.Get("X-Codex-Turn-Metadata")
+		gotClientRequestID = r.Header.Get("X-Client-Request-Id")
+		gotOriginator = r.Header.Get("Originator")
 		var errRead error
 		gotBody, errRead = io.ReadAll(r.Body)
 		if errRead != nil {
@@ -58,8 +68,15 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 	}))
 	defer server.Close()
 
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent":            "downstream-client/9.9",
+		"Version":               "0.135.0",
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
+		"X-Client-Request-Id":   "client-request-1",
+		"Originator":            "Codex Desktop",
+	})
 	executor := NewCodexExecutor(&config.Config{})
-	resp, errExecute := executor.Execute(context.Background(), newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+	resp, errExecute := executor.Execute(ctx, newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "codex/gpt-image-1.5",
 		Payload: []byte(`{"model":"codex/gpt-image-1.5","prompt":"A cute baby sea otter","n":1,"size":"1024x1024","quality":"high","background":"opaque","output_format":"jpeg","output_compression":70,"moderation":"low","extra":{"preserve":true},"stream":false}`),
 	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
@@ -75,6 +92,21 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 	}
 	if gotAccept != "application/json" {
 		t.Fatalf("Accept = %q, want application/json", gotAccept)
+	}
+	if gotUA != codexUserAgent {
+		t.Fatalf("User-Agent = %q, want codex default %q", gotUA, codexUserAgent)
+	}
+	if gotVersion != "0.135.0" {
+		t.Fatalf("Version = %q, want %q", gotVersion, "0.135.0")
+	}
+	if gotTurnMetadata != `{"turn_id":"turn-1"}` {
+		t.Fatalf("X-Codex-Turn-Metadata = %q, want %q", gotTurnMetadata, `{"turn_id":"turn-1"}`)
+	}
+	if gotClientRequestID != "client-request-1" {
+		t.Fatalf("X-Client-Request-Id = %q, want %q", gotClientRequestID, "client-request-1")
+	}
+	if gotOriginator != "Codex Desktop" {
+		t.Fatalf("Originator = %q, want %q", gotOriginator, "Codex Desktop")
 	}
 	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-1.5" {
 		t.Fatalf("model = %q, want gpt-image-1.5; body=%s", got, string(gotBody))
@@ -170,8 +202,8 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForJSON(t *test
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 
-	if gotPath != "/images/edit" {
-		t.Fatalf("path = %q, want /images/edit", gotPath)
+	if gotPath != "/images/edits" {
+		t.Fatalf("path = %q, want /images/edits", gotPath)
 	}
 	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-2" {
 		t.Fatalf("model = %q, want gpt-image-2; body=%s", got, string(gotBody))
@@ -250,8 +282,8 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForMultipart(t 
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 
-	if gotPath != "/images/edit" {
-		t.Fatalf("path = %q, want /images/edit", gotPath)
+	if gotPath != "/images/edits" {
+		t.Fatalf("path = %q, want /images/edits", gotPath)
 	}
 	if !strings.HasPrefix(gotContentType, "application/json") {
 		t.Fatalf("Content-Type = %q, want application/json", gotContentType)
