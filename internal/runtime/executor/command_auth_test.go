@@ -180,6 +180,55 @@ func TestProviderRequestAuthPreparersRunCommandAuth(t *testing.T) {
 	}
 }
 
+func TestProviderRefreshRunsDueCommandAuth(t *testing.T) {
+	script := writeTokenScript(t, "refreshed-provider-token")
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		exec     interface {
+			Refresh(context.Context, *cliproxyauth.Auth) (*cliproxyauth.Auth, error)
+		}
+	}{
+		{name: "gemini", exec: NewGeminiExecutor(nil)},
+		{name: "claude", exec: NewClaudeExecutor(nil)},
+		{name: "codex", exec: NewCodexExecutor(nil)},
+		{name: "openai-compat", exec: NewOpenAICompatExecutor("openai-compatibility", nil)},
+		{name: "vertex", exec: NewGeminiVertexExecutor(nil)},
+		{name: "kimi", exec: NewKimiExecutor(nil)},
+		{name: "xai", exec: NewXAIExecutor(nil)},
+		{name: "xai-auto", exec: NewXAIAutoExecutor(nil)},
+		{name: "aistudio", exec: NewAIStudioExecutor(nil, "aistudio", nil)},
+		{name: "antigravity", metadata: map[string]any{"project_id": "test-project"}, exec: NewAntigravityExecutor(nil)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{
+				ID:         tt.name + "-command-auth",
+				Provider:   tt.name,
+				Attributes: commandAuthAttrs(script, 60000),
+				Metadata:   tt.metadata,
+			}
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["access_token"] = "stale-provider-token"
+			auth.NextRefreshAfter = time.Now().Add(-time.Second)
+
+			updated, err := tt.exec.Refresh(context.Background(), auth)
+			if err != nil {
+				t.Fatalf("Refresh error: %v", err)
+			}
+			if got, _ := updated.Metadata["access_token"].(string); got != "refreshed-provider-token" {
+				t.Fatalf("access_token = %q, want refreshed-provider-token", got)
+			}
+			if !updated.NextRefreshAfter.After(time.Now()) {
+				t.Fatalf("NextRefreshAfter = %v, want future", updated.NextRefreshAfter)
+			}
+		})
+	}
+}
+
 func TestCommandAuthPrepareExecutesCommandAndCaches(t *testing.T) {
 	script := writeTokenScript(t, "Bearer dynamic-token")
 	auth := &cliproxyauth.Auth{
