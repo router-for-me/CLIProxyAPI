@@ -172,11 +172,27 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							contentPart, _ = sjson.SetBytes(contentPart, "text", text)
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						case "input_image":
-							imageURL := contentItem.Get("image_url").String()
+							// image_url may be a plain string ("data:image/png;base64,...")
+							// or an object ({"url": "...", "detail": "..."}).
+							imageURLField := contentItem.Get("image_url")
+							var imageURL string
+							var detailResult gjson.Result
+							if imageURLField.Type == gjson.JSON {
+								// Object form: extract nested url and detail
+								imageURL = imageURLField.Get("url").String()
+								detailResult = imageURLField.Get("detail")
+							} else {
+								// Plain string form
+								imageURL = imageURLField.String()
+							}
+							// Also honour a top-level detail field
+							if !detailResult.Exists() {
+								detailResult = contentItem.Get("detail")
+							}
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
-							if detail := contentItem.Get("detail"); detail.Exists() {
-								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail.String())
+							if detailResult.Exists() {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detailResult.String())
 							}
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						}
