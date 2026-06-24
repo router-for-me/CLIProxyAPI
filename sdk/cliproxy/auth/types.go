@@ -559,22 +559,25 @@ func (a *Auth) AccountInfo() (string, string) {
 	if a == nil {
 		return "", ""
 	}
-	// Check metadata for email first (OAuth-style auth)
-	if a.Metadata != nil {
-		if v, ok := a.Metadata["email"].(string); ok {
-			email := strings.TrimSpace(v)
-			if email != "" {
-				return "oauth", email
+	switch a.AuthKind() {
+	case AuthKindOAuth:
+		if a.Metadata != nil {
+			if v, ok := a.Metadata["email"].(string); ok {
+				email := strings.TrimSpace(v)
+				if email != "" {
+					return "oauth", email
+				}
 			}
 		}
-	}
-	// Fall back to API key (API-key auth)
-	if a.Attributes != nil {
-		if v := a.Attributes["api_key"]; v != "" {
-			return "api_key", v
+		return "oauth", ""
+	case AuthKindAPIKey:
+		if apiKey := authAttribute(a, AttributeAPIKey); apiKey != "" {
+			return "api_key", apiKey
 		}
+		return "api_key", ""
+	default:
+		return "", ""
 	}
-	return "", ""
 }
 
 // ExpirationTime attempts to extract the credential expiration timestamp from metadata.

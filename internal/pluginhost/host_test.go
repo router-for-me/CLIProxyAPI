@@ -123,6 +123,9 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	if !h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = false, want true after load")
 	}
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want true after load")
+	}
 	if len(h.RegisteredPlugins()) != 1 {
 		t.Fatalf("RegisteredPlugins() len = %d, want 1", len(h.RegisteredPlugins()))
 	}
@@ -139,6 +142,9 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 
 	if len(h.RegisteredPlugins()) != 0 {
 		t.Fatalf("RegisteredPlugins() len = %d, want 0 after disable", len(h.RegisteredPlugins()))
+	}
+	if h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
 	}
 	if !h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = false, want true while library remains loaded")

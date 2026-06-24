@@ -149,6 +149,8 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var configLoadedFromHome bool
+	var homeClient *home.Client
+	var homePluginSyncReport homeplugins.SyncReport
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -278,7 +280,7 @@ func main() {
 		if homeDisableClusterDiscovery {
 			homeCfg.DisableClusterDiscovery = true
 		}
-		homeClient := home.New(homeCfg)
+		homeClient = home.New(homeCfg)
 		defer homeClient.Close()
 
 		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
@@ -301,10 +303,17 @@ func main() {
 		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
 		parsed.UsageStatisticsEnabled = true
 		ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
-		errHomePlugins := homeplugins.Sync(ctxHomePlugins, parsed, pluginHost)
+		var errHomePlugins error
+		homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginHost)
 		cancelHomePlugins()
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
 		if errHomePlugins != nil {
 			log.Errorf("failed to fetch plugins from home: %v", errHomePlugins)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+		}
+		if errHomePlugins != nil {
 			return
 		}
 		cfg = parsed
@@ -559,6 +568,19 @@ func main() {
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 	pluginHost.ApplyConfig(context.Background(), cfg)
+	if configLoadedFromHome {
+		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
+		if errHomePluginLoad != nil {
+			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin load status: %v", errReportPlugins)
+		}
+		if errHomePluginLoad != nil {
+			return
+		}
+	}
 	if pluginHost.HasTriggeredCommandLineFlags() {
 		if exitCode, handled := pluginHost.ExecuteCommandLine(context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine); handled {
 			if exitCode != 0 {
