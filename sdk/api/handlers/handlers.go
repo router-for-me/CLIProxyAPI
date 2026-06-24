@@ -223,6 +223,19 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+// StreamingMaxDuration returns the maximum duration a streaming response may run.
+// Returning 0 disables the limit (default when unset).
+func StreamingMaxDuration(cfg *config.SDKConfig) time.Duration {
+	if cfg == nil || cfg.Streaming.MaxDuration == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(cfg.Streaming.MaxDuration)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
 // NonStreamingKeepAliveInterval returns the keep-alive interval for non-streaming responses.
 // Returning 0 disables keep-alives (default when unset).
 func NonStreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {

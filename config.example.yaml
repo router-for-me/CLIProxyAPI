@@ -187,6 +187,9 @@ nonstream-keepalive-interval: 0
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+#   max-duration: "10m"     # Default: "" (disabled). Maximum duration for streaming responses.
+#                            # Accepts Go duration strings (e.g., "30s", "5m", "1m30s").
+#                            # When exceeded, the connection is terminated with a 504 Gateway Timeout.
 
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.

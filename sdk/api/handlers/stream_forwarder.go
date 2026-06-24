@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -61,6 +62,14 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		keepAliveC = keepAlive.C
 	}
 
+	maxDuration := StreamingMaxDuration(h.Cfg)
+	var maxDurationC <-chan time.Time
+	if maxDuration > 0 {
+		maxTimer := time.NewTimer(maxDuration)
+		defer maxTimer.Stop()
+		maxDurationC = maxTimer.C
+	}
+
 	var terminalErr *interfaces.ErrorMessage
 	for {
 		select {
@@ -116,6 +125,17 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		case <-keepAliveC:
 			writeKeepAlive()
 			flusher.Flush()
+		case <-maxDurationC:
+			maxDurationErr := errors.New("streaming response exceeded max duration")
+			if opts.WriteTerminalError != nil {
+				opts.WriteTerminalError(&interfaces.ErrorMessage{
+					StatusCode: http.StatusGatewayTimeout,
+					Error:      maxDurationErr,
+				})
+			}
+			flusher.Flush()
+			cancel(maxDurationErr)
+			return
 		}
 	}
 }

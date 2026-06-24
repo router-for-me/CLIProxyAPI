@@ -67,4 +67,9 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// MaxDuration is the maximum duration a streaming response may run before being forcibly terminated.
+	// Accepts Go duration strings (e.g., "30s", "5m", "1m30s"). Empty or invalid disables the limit.
+	// When exceeded, the connection is terminated with a 504 Gateway Timeout.
+	MaxDuration string `yaml:"max-duration,omitempty" json:"max-duration,omitempty"`
 }
