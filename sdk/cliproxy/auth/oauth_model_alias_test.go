@@ -335,3 +335,21 @@ func TestApplyOAuthModelAlias_PluginProviderSkipsAPIKey(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "sample-latest")
 	}
 }
+func TestApplyOAuthModelAliasWithResult_ForceMappingUsesConfigAliasNotRequestSuffix(t *testing.T) {
+	t.Parallel()
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{
+			Name: "gpt-5.4", Alias: "gpt-5.4-fast", Fork: true, ForceMapping: true,
+		}},
+	})
+	auth := &Auth{ID: "t", Provider: "codex"}
+	res := mgr.applyOAuthModelAliasWithResult(auth, "gpt-5.4-fast(high)")
+	if res.UpstreamModel != "gpt-5.4(high)" {
+		t.Fatalf("upstream = %q want gpt-5.4(high)", res.UpstreamModel)
+	}
+	if res.OriginalAlias != "gpt-5.4-fast" {
+		t.Fatalf("OriginalAlias = %q want gpt-5.4-fast", res.OriginalAlias)
+	}
+}
+

@@ -18,6 +18,7 @@ type modelAliasEntry interface {
 // oauthModelAliasEntry stores the upstream model name and mapping flags for an alias.
 type oauthModelAliasEntry struct {
 	upstreamModel string
+	configAlias   string
 	forceMapping  bool
 }
 
@@ -61,6 +62,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			}
 			rev[aliasKey] = oauthModelAliasEntry{
 				upstreamModel: name,
+				configAlias:   alias,
 				forceMapping:  entry.ForceMapping,
 			}
 		}
@@ -128,6 +130,10 @@ func preserveResolvedModelSuffix(resolved string, requestResult thinking.SuffixR
 		return resolved + "(" + requestResult.RawSuffix + ")"
 	}
 	return resolved
+}
+
+func oauthModelAliasForceMappingResponseModel(configAlias string) string {
+	return strings.TrimSpace(configAlias)
 }
 
 func resolveModelAliasPoolFromConfigModels(requestedModel string, models []modelAliasEntry) []string {
@@ -306,13 +312,13 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 				return OAuthModelAliasResult{
 					UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
 					ForceMapping:  entry.ForceMapping,
-					OriginalAlias: requestedModel,
+					OriginalAlias: oauthModelAliasForceMappingResponseModel(alias),
 				}
 			}
 			return OAuthModelAliasResult{
 				UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
 				ForceMapping:  entry.ForceMapping,
-				OriginalAlias: requestedModel,
+				OriginalAlias: oauthModelAliasForceMappingResponseModel(alias),
 			}
 		}
 	}
@@ -375,7 +381,7 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 			return OAuthModelAliasResult{
 				UpstreamModel: preserveResolvedModelSuffix(targetModel, requestResult),
 				ForceMapping:  entry.forceMapping,
-				OriginalAlias: requestedModel,
+				OriginalAlias: oauthModelAliasForceMappingResponseModel(entry.configAlias),
 			}
 		}
 
@@ -391,7 +397,7 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		return OAuthModelAliasResult{
 			UpstreamModel: upstreamModel,
 			ForceMapping:  entry.forceMapping,
-			OriginalAlias: requestedModel,
+			OriginalAlias: oauthModelAliasForceMappingResponseModel(entry.configAlias),
 		}
 	}
 
