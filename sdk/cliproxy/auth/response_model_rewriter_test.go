@@ -3,6 +3,8 @@ package auth
 import (
 	"strings"
 	"testing"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestStreamRewriter_RewriteChunk_KimiMessagesDataPrefixWithoutSpace(t *testing.T) {
@@ -179,5 +181,26 @@ func TestRewriteSSEPayloadLines_CodexResponsesLiveFrame(t *testing.T) {
 	}
 	if strings.Contains(got, `"model":"gpt-5.4"`) {
 		t.Fatalf("rewritten chunk still contains upstream model: %q", got)
+	}
+}
+
+func TestRewriteForceMappedResponse_NoRewriteWhenForceMappingDisabled(t *testing.T) {
+	upstream := []byte(`{"model":"gpt-5.4","choices":[]}`)
+	resp := &cliproxyexecutor.Response{Payload: append([]byte(nil), upstream...)}
+	rewriteForceMappedResponse(resp, OAuthModelAliasResult{
+		UpstreamModel: "gpt-5.4",
+		ForceMapping:  false,
+		OriginalAlias: "gpt-5.4-fast",
+	})
+	if string(resp.Payload) != string(upstream) {
+		t.Fatalf("payload = %s, want unchanged %s", resp.Payload, upstream)
+	}
+}
+
+func TestRewriteForceMappedStreamChunk_NoRewriteWhenRewriterNil(t *testing.T) {
+	chunk := []byte(`data: {"model":"gpt-5.4"}` + "\n\n")
+	got := rewriteForceMappedStreamChunk(nil, chunk)
+	if string(got) != string(chunk) {
+		t.Fatalf("chunk = %q, want unchanged upstream payload", got)
 	}
 }
