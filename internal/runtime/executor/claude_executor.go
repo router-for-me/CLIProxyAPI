@@ -545,11 +545,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if responseFormat == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
+			sawMessageStop := false
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
+				}
+				if bytes.Contains(line, []byte("message_stop")) {
+					sawMessageStop = true
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 				// Forward the line as-is to preserve SSE format
@@ -569,6 +573,19 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 				case <-ctx.Done():
 				}
+			} else if !sawMessageStop {
+				// The upstream closed the SSE stream cleanly without emitting a
+				// terminal message_stop event. Synthesize one so downstream
+				// clients receive a proper stream terminator instead of
+				// reporting "Connection closed mid-response. The response above
+				// may be incomplete." This mirrors the synthetic terminal-marker
+				// guard in openai_compat_executor.go. The leading blank line
+				// guarantees SSE event separation even if the upstream truncated
+				// mid-event.
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: []byte("\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")}:
+				case <-ctx.Done():
+				}
 			}
 			return
 		}
@@ -577,11 +594,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		sawMessageStop := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
+			}
+			if bytes.Contains(line, []byte("message_stop")) {
+				sawMessageStop = true
 			}
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 			chunks := sdktranslator.TranslateStream(
@@ -608,6 +629,30 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
+			}
+		} else if !sawMessageStop {
+			// The upstream closed the stream cleanly without a terminal
+			// message_stop. Feed a synthetic Claude message_stop event through
+			// the translator so it can finalize the downstream stream (e.g.
+			// emit the terminal chunk / [DONE]) exactly once, instead of the
+			// client seeing a truncated response. Mirrors the synthetic
+			// terminal-marker guard in openai_compat_executor.go.
+			chunks := sdktranslator.TranslateStream(
+				ctx,
+				to,
+				responseFormat,
+				req.Model,
+				opts.OriginalRequest,
+				bodyForTranslation,
+				[]byte("data: {\"type\":\"message_stop\"}"),
+				&param,
+			)
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
