@@ -252,11 +252,7 @@ func cleanupUnselectedPluginFiles(root string, loaded []pluginFile) error {
 			log.WithError(errRemove).Warnf("pluginhost: failed to remove old plugin file %s", candidate.Path)
 			continue
 		}
-		log.WithFields(log.Fields{
-			"plugin_id": candidate.ID,
-			"version":   candidate.Version,
-			"path":      candidate.Path,
-		}).Info("pluginhost: old plugin file removed")
+		log.WithFields(pluginLogFields(candidate.ID, "", candidate.Version, candidate.Path)).Info("pluginhost: old plugin file removed")
 	}
 	return errors.Join(errs...)
 }
