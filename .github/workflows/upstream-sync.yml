@@ -1,5 +1,9 @@
 name: upstream-sync
 
+concurrency:
+  group: upstream-sync-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   schedule:
     # Daily at 04:00 UTC (avoid peak CI hours on upstream)
