@@ -1,9 +1,11 @@
 package pluginhost
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
@@ -550,6 +553,98 @@ func TestHostApplyConfig_ReconfigureCalledOnReload(t *testing.T) {
 	}
 	if len(h.activeRecords()) != 1 {
 		t.Fatalf("Snapshot records = %d, want 1", len(h.activeRecords()))
+	}
+}
+
+func TestHostApplyConfigLogsLoadedAndRegisteredOnlyOnInitialLoad(t *testing.T) {
+	var out bytes.Buffer
+	originalOut := log.StandardLogger().Out
+	originalFormatter := log.StandardLogger().Formatter
+	originalLevel := log.GetLevel()
+	log.SetOutput(&out)
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors:    true,
+		DisableTimestamp: true,
+	})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(originalOut)
+		log.SetFormatter(originalFormatter)
+		log.SetLevel(originalLevel)
+	})
+
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	}
+
+	h.ApplyConfig(context.Background(), cfg)
+	h.ApplyConfig(context.Background(), cfg)
+
+	logs := out.String()
+	if count := strings.Count(logs, `msg="pluginhost: plugin loaded"`); count != 1 {
+		t.Fatalf("plugin loaded log count = %d, want 1\n%s", count, logs)
+	}
+	if count := strings.Count(logs, `msg="pluginhost: plugin registered"`); count != 1 {
+		t.Fatalf("plugin registered log count = %d, want 1\n%s", count, logs)
+	}
+	if !strings.Contains(logs, "plugin_name=alpha") {
+		t.Fatalf("plugin registered log missing plugin_name:\n%s", logs)
+	}
+	if !strings.Contains(logs, "path=") {
+		t.Fatalf("plugin logs missing path:\n%s", logs)
+	}
+}
+
+func TestHostApplyConfigLogsLoadedWhenRegistrationInvalid(t *testing.T) {
+	var out bytes.Buffer
+	originalOut := log.StandardLogger().Out
+	originalFormatter := log.StandardLogger().Formatter
+	originalLevel := log.GetLevel()
+	log.SetOutput(&out)
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors:    true,
+		DisableTimestamp: true,
+	})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(originalOut)
+		log.SetFormatter(originalFormatter)
+		log.SetLevel(originalLevel)
+	})
+
+	loader := newTestSymbolLoader()
+	loader.lookups["empty-name"] = newTestSymbolLookup(&testPlugin{
+		registerResult: validTestPlugin(""),
+	})
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "empty-name"),
+			Configs: enabledPluginConfigs("empty-name"),
+		},
+	})
+
+	logs := out.String()
+	if count := strings.Count(logs, `msg="pluginhost: plugin loaded"`); count != 1 {
+		t.Fatalf("plugin loaded log count = %d, want 1\n%s", count, logs)
+	}
+	if strings.Contains(logs, `msg="pluginhost: plugin registered"`) {
+		t.Fatalf("plugin registered log emitted for invalid registration:\n%s", logs)
 	}
 }
 
