@@ -9,6 +9,17 @@ func TestIsConfigAPIKeyAuth(t *testing.T) {
 	if IsConfigAPIKeyAuth(&Auth{Attributes: map[string]string{"source": "config:codex[x]"}}) {
 		t.Fatal("expected missing api_key to be false")
 	}
+	if IsConfigAPIKeyAuth(&Auth{
+		ID:       "codex:oauth:abc",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"api_key":   "k",
+			"source":    "config:codex[abc]",
+		},
+	}) {
+		t.Fatal("expected explicit oauth auth to be false")
+	}
 	if !IsConfigAPIKeyAuth(&Auth{
 		ID:       "codex:apikey:abc",
 		Provider: "codex",

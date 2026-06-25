@@ -2,6 +2,10 @@ package signature
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -390,4 +394,41 @@ func TestValidateGeminiFunctionCallPairing_RejectsSameContentInterleaving(t *tes
 	if !strings.Contains(err.Error(), "must not be interleaved") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestIsValidGeminiThoughtSignature_AgyNativeSamples(t *testing.T) {
+	samplesPath, ok := agyGeminiThoughtSignatureSamplesPath()
+	if !ok {
+		t.Skip("agy gemini corpus missing; run docs/native-prompt-capture/scripts/harvest_agy_gemini_signatures.py")
+	}
+	raw, err := os.ReadFile(samplesPath)
+	if err != nil {
+		t.Fatalf("read samples: %v", err)
+	}
+	var samples []string
+	if err := json.Unmarshal(raw, &samples); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(samples) < 10 {
+		t.Fatalf("expected >=10 agy gemini thoughtSignature samples, got %d", len(samples))
+	}
+	opts := GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: false} // agy native mix includes envelopes CPA may still transport-reject separately
+	for i, sig := range samples {
+		if !IsValidGeminiThoughtSignature(sig, opts) {
+			t.Fatalf("sample %d invalid (len=%d prefix=%q)", i, len(sig), sig[:12])
+		}
+	}
+}
+
+func agyGeminiThoughtSignatureSamplesPath() (string, bool) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", false
+	}
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	path := filepath.Join(repo, "docs", "native-prompt-capture", "corpus", "agy-gemini-thought-signatures", "samples.json")
+	if _, err := os.Stat(path); err != nil {
+		return path, false
+	}
+	return path, true
 }

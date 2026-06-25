@@ -51,6 +51,61 @@ func TestMetadataConfigFieldsExposePluginSchema(t *testing.T) {
 	}
 }
 
+func TestAuthParseResponseSupportsMultipleAuths(t *testing.T) {
+	resp := AuthParseResponse{
+		Handled: true,
+		Auth: AuthData{
+			Provider: "gemini-cli",
+			ID:       "primary.json",
+		},
+		Auths: []AuthData{
+			{Provider: "gemini-cli", ID: "primary.json"},
+			{Provider: "gemini-cli", ID: "primary-project-a.json"},
+		},
+	}
+
+	raw, errMarshal := json.Marshal(resp)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded AuthParseResponse
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if !decoded.Handled || len(decoded.Auths) != 2 || decoded.Auths[1].ID != "primary-project-a.json" {
+		t.Fatalf("decoded response = %#v, want two auths", decoded)
+	}
+	if decoded.Auth.ID != "primary.json" {
+		t.Fatalf("decoded Auth.ID = %q, want primary.json", decoded.Auth.ID)
+	}
+}
+
+func TestAuthLoginPollResponseSupportsMultipleAuths(t *testing.T) {
+	resp := AuthLoginPollResponse{
+		Status: AuthLoginStatusSuccess,
+		Auth: AuthData{
+			Provider: "gemini-cli",
+			ID:       "primary.json",
+		},
+		Auths: []AuthData{
+			{Provider: "gemini-cli", ID: "primary.json"},
+			{Provider: "gemini-cli", ID: "primary-project-a.json"},
+		},
+	}
+
+	raw, errMarshal := json.Marshal(resp)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded AuthLoginPollResponse
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded.Status != AuthLoginStatusSuccess || len(decoded.Auths) != 2 {
+		t.Fatalf("decoded response = %#v, want success with two auths", decoded)
+	}
+}
+
 func TestResourceRouteMenuFieldsExposeManagementUIHints(t *testing.T) {
 	route := ResourceRoute{
 		Path:        "/status",

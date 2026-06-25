@@ -14,8 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 )
 
 func TestInstallBlocksLoadedWindowsPlugin(t *testing.T) {
@@ -114,6 +112,53 @@ func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveSkipsIdenticalLoadedWindowsPlugin(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "windows", "amd64")
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	targetPath := filepath.Join(targetDir, "sample-provider.dll")
+	if errWrite := os.WriteFile(targetPath, []byte("same"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	beforeWriteCalled := false
+
+	result, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider.dll": "same",
+	}), testPlugin(), InstallOptions{
+		PluginsDir:   root,
+		GOOS:         "windows",
+		GOARCH:       "amd64",
+		PluginLoaded: func() bool { return true },
+		BeforeWrite: func() error {
+			beforeWriteCalled = true
+			return errors.New("before write should not run")
+		},
+	})
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if beforeWriteCalled {
+		t.Fatal("BeforeWrite was called for identical artifact")
+	}
+	if !result.Overwritten {
+		t.Fatal("Overwritten = false, want true")
+	}
+	if !result.Skipped {
+		t.Fatal("Skipped = false, want true")
+	}
+	data, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "same" {
+		t.Fatalf("installed data = %q, want same", data)
+	}
+}
+
 func TestInstallArchiveWritesPlatformPlugin(t *testing.T) {
 	t.Parallel()
 
@@ -164,13 +209,13 @@ func TestInstallArchiveOverwritesRuntimeSelectedPlugin(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	existingPath := filepath.Join(root, "sample-provider"+pluginhost.PluginExtension(runtime.GOOS))
+	existingPath := filepath.Join(root, "sample-provider"+pluginExtension(runtime.GOOS))
 	if errWrite := os.WriteFile(existingPath, []byte("old"), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
 
 	result, errInstall := InstallArchive(makeZip(t, map[string]string{
-		"sample-provider" + pluginhost.PluginExtension(runtime.GOOS): "new",
+		"sample-provider" + pluginExtension(runtime.GOOS): "new",
 	}), testPlugin(), InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH})
 	if errInstall != nil {
 		t.Fatalf("InstallArchive() error = %v", errInstall)
@@ -283,6 +328,45 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 		t.Fatalf("Version = %q, want 0.2.0 from latest release tag", result.Version)
 	}
 	data, errRead := os.ReadFile(filepath.Join(root, "darwin", "arm64", "sample-provider.dylib"))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "library-data" {
+		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestInstallVersionUsesPinnedReleaseTag(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.so": "library-data"})
+	archiveName := "sample-provider_0.3.0_linux_amd64.zip"
+	checksum := sha256.Sum256(archiveData)
+	client := Client{HTTPClient: mapHTTPDoer{
+		"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/tags/v0.3.0": []byte(`{
+			"tag_name": "v0.3.0",
+			"assets": [
+				{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+				{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+			]
+		}`),
+		"https://downloads.example/" + archiveName: archiveData,
+		"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}}
+
+	result, errInstall := client.InstallVersion(context.Background(), testPlugin(), "v0.3.0", "0.3.0", InstallOptions{
+		PluginsDir: root,
+		GOOS:       "linux",
+		GOARCH:     "amd64",
+	})
+	if errInstall != nil {
+		t.Fatalf("InstallVersion() error = %v", errInstall)
+	}
+	if result.Version != "0.3.0" {
+		t.Fatalf("Version = %q, want 0.3.0", result.Version)
+	}
+	data, errRead := os.ReadFile(filepath.Join(root, "linux", "amd64", "sample-provider.so"))
 	if errRead != nil {
 		t.Fatalf("ReadFile() error = %v", errRead)
 	}

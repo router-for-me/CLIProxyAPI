@@ -72,6 +72,33 @@ func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release,
 	return release, nil
 }
 
+// FetchReleaseByTag returns a published release by its exact GitHub tag.
+func (c Client) FetchReleaseByTag(ctx context.Context, plugin Plugin, tag string) (Release, error) {
+	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	if errRepository != nil {
+		return Release{}, errRepository
+	}
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return Release{}, fmt.Errorf("release tag is required")
+	}
+	releaseURL := fmt.Sprintf(
+		"https://api.github.com/repos/%s/%s/releases/tags/%s",
+		url.PathEscape(owner),
+		url.PathEscape(repo),
+		url.PathEscape(tag),
+	)
+	data, errDownload := c.get(ctx, releaseURL, "application/vnd.github+json")
+	if errDownload != nil {
+		return Release{}, errDownload
+	}
+	var release Release
+	if errDecode := json.Unmarshal(data, &release); errDecode != nil {
+		return Release{}, fmt.Errorf("decode release: %w", errDecode)
+	}
+	return release, nil
+}
+
 // ReleaseVersion derives the plugin version from the release tag, stripping a
 // leading "v"/"V" and validating the result.
 func ReleaseVersion(release Release) (string, error) {

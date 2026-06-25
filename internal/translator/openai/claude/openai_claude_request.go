@@ -10,6 +10,7 @@ import (
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -131,14 +132,6 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	if system := root.Get("system"); system.Exists() {
 		appendSystemContent(system)
 	}
-	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
-		messages.ForEach(func(_, message gjson.Result) bool {
-			if message.Get("role").String() == "system" {
-				appendSystemContent(message.Get("content"))
-			}
-			return true
-		})
-	}
 	// Only add system message if it has content
 	if hasSystemContent {
 		messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", systemMsgJSON)
@@ -148,10 +141,15 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
+			contentResult := message.Get("content")
 			if role == "system" {
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentResult); ok {
+					msgJSON := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+					msgJSON, _ = sjson.SetBytes(msgJSON, "content.0.text", reminderText)
+					messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+				}
 				return true
 			}
-			contentResult := message.Get("content")
 
 			// Handle content
 			if contentResult.Exists() && contentResult.IsArray() {

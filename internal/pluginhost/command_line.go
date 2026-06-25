@@ -28,7 +28,7 @@ func (h *Host) RegisterCommandLineFlags(ctx context.Context, flagSet *flag.FlagS
 		return
 	}
 
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.CommandLinePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
@@ -45,7 +45,7 @@ func (h *Host) RegisterCommandLineFlags(ctx context.Context, flagSet *flag.FlagS
 }
 
 func (h *Host) callCommandLineRegistrar(ctx context.Context, record capabilityRecord, plugin pluginapi.CommandLinePlugin) (resp pluginapi.CommandLineRegistrationResponse, err error) {
-	if h == nil || plugin == nil || h.isPluginFused(record.id) {
+	if h == nil || plugin == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.CommandLineRegistrationResponse{}, nil
 	}
 	defer func() {
@@ -247,7 +247,7 @@ func (h *Host) ExecuteCommandLine(ctx context.Context, program string, args []st
 
 	exitCode := 0
 	handled := false
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.CommandLinePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
@@ -349,7 +349,7 @@ func cloneCommandLineFlagValues(in map[string]pluginapi.CommandLineFlagValue) ma
 }
 
 func (h *Host) callCommandLineExecutor(ctx context.Context, record capabilityRecord, plugin pluginapi.CommandLinePlugin, req pluginapi.CommandLineExecutionRequest) (resp pluginapi.CommandLineExecutionResponse, err error) {
-	if h == nil || plugin == nil || h.isPluginFused(record.id) {
+	if h == nil || plugin == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.CommandLineExecutionResponse{}, nil
 	}
 	defer func() {

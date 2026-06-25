@@ -178,3 +178,92 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveAPIKeyModelAliasWithResult_ForceMapping(t *testing.T) {
+	cfg := &internalconfig.Config{
+		ClaudeKey: []internalconfig.ClaudeKey{{
+			APIKey: "claude-key",
+			Models: []internalconfig.ClaudeModel{{
+				Name:         "glm-5.2",
+				Alias:        "claude-sonnet-latest",
+				ForceMapping: true,
+			}},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	auth := &Auth{ID: "claude-auth", Provider: "claude", Attributes: map[string]string{"api_key": "claude-key"}}
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	result := mgr.resolveAPIKeyModelAliasWithResult(auth, "claude-sonnet-latest")
+	if result.UpstreamModel != "glm-5.2" || !result.ForceMapping || result.OriginalAlias != "claude-sonnet-latest" {
+		t.Fatalf("resolveAPIKeyModelAliasWithResult() = %+v, want upstream glm-5.2 with force mapping", result)
+	}
+
+	noRewrite := mgr.resolveAPIKeyModelAliasWithResult(auth, "glm-5.2")
+	if noRewrite.UpstreamModel != "glm-5.2" || noRewrite.ForceMapping || noRewrite.OriginalAlias != "" {
+		t.Fatalf("resolveAPIKeyModelAliasWithResult() direct upstream = %+v, want passthrough without rewrite", noRewrite)
+	}
+}
+
+func TestResolveAPIKeyModelAliasWithResult_SameBasePreservesSuffix(t *testing.T) {
+	cfg := &internalconfig.Config{
+		GeminiKey: []internalconfig.GeminiKey{{
+			APIKey: "k",
+			Models: []internalconfig.GeminiModel{{
+				Name:         "gemini-2.5-pro",
+				Alias:        "gemini-2.5-pro(8192)",
+				ForceMapping: true,
+			}},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	auth := &Auth{ID: "gemini-auth", Provider: "gemini", Attributes: map[string]string{"api_key": "k"}}
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	result := mgr.resolveAPIKeyModelAliasWithResult(auth, "gemini-2.5-pro(8192)")
+	if result.UpstreamModel != "gemini-2.5-pro(8192)" || !result.ForceMapping || result.OriginalAlias != "gemini-2.5-pro(8192)" {
+		t.Fatalf("resolveAPIKeyModelAliasWithResult() = %+v, want same-base suffix preserved", result)
+	}
+}
+
+func TestResolveAPIKeyModelAliasWithResult_ForceMappingUsesConfigAliasNotRequestSuffix(t *testing.T) {
+	cfg := &internalconfig.Config{
+		CodexKey: []internalconfig.CodexKey{{
+			APIKey: "codex-key",
+			Models: []internalconfig.CodexModel{{
+				Name:         "gpt-5.5",
+				Alias:        "claude-sonnet-4-5",
+				ForceMapping: true,
+			}},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	auth := &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"api_key": "codex-key"}}
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	result := mgr.resolveAPIKeyModelAliasWithResult(auth, "claude-sonnet-4-5(high)")
+	if result.UpstreamModel != "gpt-5.5(high)" {
+		t.Fatalf("upstream = %q want gpt-5.5(high)", result.UpstreamModel)
+	}
+	if result.OriginalAlias != "claude-sonnet-4-5" {
+		t.Fatalf("OriginalAlias = %q want claude-sonnet-4-5", result.OriginalAlias)
+	}
+}
