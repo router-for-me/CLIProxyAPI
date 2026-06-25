@@ -13,6 +13,7 @@ const oauthModelAliasesAttributeKey = "model_aliases"
 type modelAliasEntry interface {
 	GetName() string
 	GetAlias() string
+	GetForceMapping() bool
 }
 
 // oauthModelAliasEntry stores the upstream model name and mapping flags for an alias.
@@ -198,6 +199,54 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 		return resolved[0]
 	}
 	return ""
+}
+
+func resolveModelAliasResultFromConfigModels(requestedModel string, models []modelAliasEntry) OAuthModelAliasResult {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" || len(models) == 0 {
+		return OAuthModelAliasResult{}
+	}
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return OAuthModelAliasResult{}
+	}
+	baseModel := requestResult.ModelName
+	if baseModel == "" {
+		baseModel = requestedModel
+	}
+	for i := range models {
+		original := strings.TrimSpace(models[i].GetName())
+		alias := strings.TrimSpace(models[i].GetAlias())
+		if original == "" || alias == "" {
+			continue
+		}
+		for _, candidate := range candidates {
+			key := strings.TrimSpace(candidate)
+			if key == "" || !strings.EqualFold(alias, key) {
+				continue
+			}
+			if strings.EqualFold(original, baseModel) {
+				if !models[i].GetForceMapping() {
+					return OAuthModelAliasResult{}
+				}
+				return OAuthModelAliasResult{
+					UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
+					ForceMapping:  models[i].GetForceMapping(),
+					OriginalAlias: oauthModelAliasForceMappingResponseModel(alias),
+				}
+			}
+			originalAlias := requestedModel
+			if models[i].GetForceMapping() {
+				originalAlias = oauthModelAliasForceMappingResponseModel(alias)
+			}
+			return OAuthModelAliasResult{
+				UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
+				ForceMapping:  models[i].GetForceMapping(),
+				OriginalAlias: originalAlias,
+			}
+		}
+	}
+	return OAuthModelAliasResult{}
 }
 
 // resolveOAuthUpstreamModel resolves the upstream model name from OAuth model alias.
