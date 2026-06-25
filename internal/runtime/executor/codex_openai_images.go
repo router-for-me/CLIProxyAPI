@@ -334,7 +334,7 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	if errCache != nil {
 		return resp, errCache
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+	applyCodexDirectImageHeaders(httpReq, auth, apiKey, false, e.cfg)
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
 	}
@@ -394,7 +394,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	if errCache != nil {
 		return nil, errCache
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	applyCodexDirectImageHeaders(httpReq, auth, apiKey, true, e.cfg)
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
 	}

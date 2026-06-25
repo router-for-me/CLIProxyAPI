@@ -23,11 +23,11 @@ type InstallOptions struct {
 	GOOS       string
 	GOARCH     string
 	// PluginLoaded reports whether the plugin's dynamic library is currently
-	// loaded by the running host. Windows installs are rejected while it returns
-	// true unless BeforeWrite can unload the plugin before replacement.
+	// loaded by the running host. Windows installs are rejected only when they
+	// would overwrite an existing target file while it returns true.
 	PluginLoaded func() bool
 	// BeforeWrite runs after the archive has been downloaded and verified, but
-	// before the target plugin file is replaced.
+	// before an existing target plugin file is replaced.
 	BeforeWrite func() error
 }
 
@@ -48,9 +48,6 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
-	if loadedPluginInstallBlocked(options) && options.BeforeWrite == nil {
-		return InstallResult{}, ErrLoadedPluginLocked
-	}
 	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
 		return InstallResult{}, errRelease
@@ -69,9 +66,6 @@ func (c Client) InstallVersion(ctx context.Context, plugin Plugin, releaseTag st
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
-	if loadedPluginInstallBlocked(options) && options.BeforeWrite == nil {
-		return InstallResult{}, ErrLoadedPluginLocked
-	}
 	version = normalizeVersion(version)
 	if !validPluginVersion(version) {
 		return InstallResult{}, fmt.Errorf("invalid plugin version %q", version)
@@ -125,17 +119,22 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	if !validPluginID(id) {
 		return InstallResult{}, fmt.Errorf("invalid plugin id %q", plugin.ID)
 	}
+	version := normalizeVersion(plugin.Version)
+	if !validPluginVersion(version) {
+		return InstallResult{}, fmt.Errorf("invalid plugin version %q", plugin.Version)
+	}
+	plugin.Version = version
 	reader, errZip := zip.NewReader(bytes.NewReader(archiveData), int64(len(archiveData)))
 	if errZip != nil {
 		return InstallResult{}, fmt.Errorf("open zip: %w", errZip)
 	}
 
-	libraryData, mode, errLibrary := readTargetLibrary(reader, id, options.GOOS)
+	libraryData, mode, errLibrary := readTargetLibrary(reader, id, version, options.GOOS)
 	if errLibrary != nil {
 		return InstallResult{}, errLibrary
 	}
 
-	targetPath, errTarget := installTargetPath(options, id)
+	targetPath, errTarget := installTargetPath(options, id, version)
 	if errTarget != nil {
 		return InstallResult{}, errTarget
 	}
@@ -160,14 +159,14 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 			}, nil
 		}
 	}
-	// Re-check immediately before writing: the plugin may have been loaded
-	// while the archive was being downloaded and verified.
-	if options.BeforeWrite != nil {
+	// Re-check immediately before replacing an existing file: the same version
+	// may have been loaded while the archive was being downloaded and verified.
+	if overwritten && options.BeforeWrite != nil {
 		if errBeforeWrite := options.BeforeWrite(); errBeforeWrite != nil {
 			return InstallResult{}, fmt.Errorf("prepare plugin write: %w", errBeforeWrite)
 		}
 	}
-	if loadedPluginInstallBlocked(options) {
+	if overwritten && loadedPluginInstallBlocked(options) {
 		return InstallResult{}, ErrLoadedPluginLocked
 	}
 	if errWrite := writeFileAtomic(targetPath, libraryData, mode); errWrite != nil {
@@ -181,25 +180,17 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	}, nil
 }
 
-func installTargetPath(options InstallOptions, id string) (string, error) {
-	defaultPath := filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, id+pluginExtension(options.GOOS))
-	if options.GOOS != runtime.GOOS || options.GOARCH != runtime.GOARCH {
-		return defaultPath, nil
+func installTargetPath(options InstallOptions, id string, version string) (string, error) {
+	version = normalizeVersion(version)
+	if !validPluginVersion(version) {
+		return "", fmt.Errorf("invalid plugin version %q", version)
 	}
-	files, errDiscover := discoverCurrentPluginFiles(options.PluginsDir)
-	if errDiscover != nil {
-		return "", fmt.Errorf("discover current plugin files: %w", errDiscover)
-	}
-	for _, file := range files {
-		if file.ID == id && strings.TrimSpace(file.Path) != "" {
-			return file.Path, nil
-		}
-	}
-	return defaultPath, nil
+	return filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, versionedPluginFileName(id, version, options.GOOS)), nil
 }
 
-func readTargetLibrary(reader *zip.Reader, id string, goos string) ([]byte, os.FileMode, error) {
+func readTargetLibrary(reader *zip.Reader, id string, version string, goos string) ([]byte, os.FileMode, error) {
 	targetName := strings.TrimSpace(id) + pluginExtension(goos)
+	versionedTargetName := versionedPluginFileName(id, version, goos)
 	var target *zip.File
 	for _, file := range reader.File {
 		cleanedName, errClean := cleanZipName(file.Name)
@@ -215,11 +206,11 @@ func readTargetLibrary(reader *zip.Reader, id string, goos string) ([]byte, os.F
 		if !hasDynamicLibraryExtension(cleanedName) {
 			continue
 		}
-		if cleanedName != targetName {
-			if path.Base(cleanedName) == targetName {
+		if cleanedName != targetName && cleanedName != versionedTargetName {
+			if path.Base(cleanedName) == targetName || path.Base(cleanedName) == versionedTargetName {
 				return nil, 0, fmt.Errorf("target dynamic library must be at zip root")
 			}
-			return nil, 0, fmt.Errorf("dynamic library filename must be %s", targetName)
+			return nil, 0, fmt.Errorf("dynamic library filename must be %s or %s", targetName, versionedTargetName)
 		}
 		if target != nil {
 			return nil, 0, fmt.Errorf("zip contains multiple target dynamic libraries")
@@ -250,6 +241,10 @@ func readTargetLibrary(reader *zip.Reader, id string, goos string) ([]byte, os.F
 	return data, mode, nil
 }
 
+func versionedPluginFileName(id string, version string, goos string) string {
+	return strings.TrimSpace(id) + "-v" + normalizeVersion(version) + pluginExtension(goos)
+}
+
 func cleanZipName(name string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", fmt.Errorf("zip entry has empty name")
@@ -278,8 +273,9 @@ func hasDynamicLibraryExtension(name string) bool {
 }
 
 type pluginFileInfo struct {
-	ID   string
-	Path string
+	ID      string
+	Path    string
+	Version string
 }
 
 func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
@@ -310,15 +306,15 @@ func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
 		}
 		sort.Strings(files)
 		for _, path := range files {
-			id := pluginIDFromPath(path)
-			if !validPluginID(id) {
+			file, okFile := pluginFileInfoFromPath(path, extension)
+			if !okFile {
 				continue
 			}
-			if _, exists := seen[id]; exists {
+			if _, exists := seen[file.ID]; exists {
 				continue
 			}
-			seen[id] = struct{}{}
-			selected = append(selected, pluginFileInfo{ID: id, Path: path})
+			seen[file.ID] = struct{}{}
+			selected = append(selected, file)
 		}
 	}
 	return selected, nil
@@ -335,6 +331,10 @@ func pluginCandidateDirs(root string, goos string, goarch string, variant string
 }
 
 func pluginIDFromPath(path string) string {
+	file, ok := pluginFileInfoFromPath(path, "")
+	if ok {
+		return file.ID
+	}
 	base := filepath.Base(path)
 	lowerBase := strings.ToLower(base)
 	for _, extension := range []string{".so", ".dylib", ".dll"} {
@@ -343,6 +343,42 @@ func pluginIDFromPath(path string) string {
 		}
 	}
 	return base
+}
+
+func pluginFileInfoFromPath(filePath string, requiredExtension string) (pluginFileInfo, bool) {
+	base := filepath.Base(filePath)
+	lowerBase := strings.ToLower(base)
+	extension := strings.TrimSpace(requiredExtension)
+	if extension != "" {
+		if !strings.HasSuffix(lowerBase, strings.ToLower(extension)) {
+			return pluginFileInfo{}, false
+		}
+	} else {
+		for _, candidateExtension := range []string{".so", ".dylib", ".dll"} {
+			if strings.HasSuffix(lowerBase, candidateExtension) {
+				extension = candidateExtension
+				break
+			}
+		}
+		if extension == "" {
+			return pluginFileInfo{}, false
+		}
+	}
+	name := base[:len(base)-len(extension)]
+	id := name
+	version := ""
+	if versionIndex := strings.LastIndex(name, "-v"); versionIndex > 0 {
+		candidateID := name[:versionIndex]
+		candidateVersion := name[versionIndex+2:]
+		if validPluginID(candidateID) && validPluginVersion(candidateVersion) {
+			id = candidateID
+			version = candidateVersion
+		}
+	}
+	if !validPluginID(id) {
+		return pluginFileInfo{}, false
+	}
+	return pluginFileInfo{ID: id, Path: filePath, Version: version}, true
 }
 
 func pluginExtension(goos string) string {

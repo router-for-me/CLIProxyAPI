@@ -21,11 +21,15 @@ const (
 
 type managementRouteRecord struct {
 	pluginID string
+	path     string
+	version  string
 	route    pluginapi.ManagementRoute
 }
 
 type resourceRouteRecord struct {
 	pluginID string
+	path     string
+	version  string
 	route    pluginapi.ResourceRoute
 }
 
@@ -37,7 +41,7 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 
 	nextRoutes := make(map[string]managementRouteRecord)
 	nextResources := make(map[string]resourceRouteRecord)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.ManagementAPI
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
@@ -55,7 +59,7 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 				continue
 			}
 			if routeDeclaresLegacyMenuResource(method, item) {
-				if !registerResourceRoute(nextResources, record.id, resourceRouteFromManagementRoute(item)) {
+				if !registerResourceRoute(nextResources, record, resourceRouteFromManagementRoute(item)) {
 					log.Warnf("pluginhost: plugin %s declared invalid resource route %s", record.id, item.Path)
 				}
 				continue
@@ -73,12 +77,14 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 			item.Path = path
 			nextRoutes[key] = managementRouteRecord{
 				pluginID: record.id,
+				path:     record.path,
+				version:  record.version,
 				route:    item,
 			}
 		}
 
 		for _, item := range resp.Resources {
-			if !registerResourceRoute(nextResources, record.id, item) {
+			if !registerResourceRoute(nextResources, record, item) {
 				log.Warnf("pluginhost: plugin %s declared invalid resource route %s", record.id, item.Path)
 			}
 		}
@@ -91,7 +97,7 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 }
 
 func (h *Host) callManagementRegistrar(ctx context.Context, record capabilityRecord, plugin pluginapi.ManagementAPI) (resp pluginapi.ManagementRegistrationResponse, err error) {
-	if h == nil || plugin == nil || h.isPluginFused(record.id) {
+	if h == nil || plugin == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.ManagementRegistrationResponse{}, nil
 	}
 	defer func() {
@@ -157,19 +163,21 @@ func resourceRouteFromManagementRoute(item pluginapi.ManagementRoute) pluginapi.
 	}
 }
 
-func registerResourceRoute(routes map[string]resourceRouteRecord, pluginID string, item pluginapi.ResourceRoute) bool {
-	path, okRoute := normalizeResourceRoute(pluginID, item)
+func registerResourceRoute(routes map[string]resourceRouteRecord, record capabilityRecord, item pluginapi.ResourceRoute) bool {
+	path, okRoute := normalizeResourceRoute(record.id, item)
 	if !okRoute {
 		return false
 	}
 	key := managementRouteKey(http.MethodGet, path)
 	if _, exists := routes[key]; exists {
-		log.Warnf("pluginhost: plugin %s resource route %s conflicts with a higher-priority plugin and was skipped", pluginID, key)
+		log.Warnf("pluginhost: plugin %s resource route %s conflicts with a higher-priority plugin and was skipped", record.id, key)
 		return true
 	}
 	item.Path = path
 	routes[key] = resourceRouteRecord{
-		pluginID: pluginID,
+		pluginID: record.id,
+		path:     record.path,
+		version:  record.version,
 		route:    item,
 	}
 	return true
@@ -319,7 +327,7 @@ func (h *Host) ServeResourceHTTP(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (h *Host) callManagementHandler(ctx context.Context, record managementRouteRecord, req pluginapi.ManagementRequest) (resp pluginapi.ManagementResponse, err error) {
-	if h == nil || record.route.Handler == nil || h.isPluginFused(record.pluginID) {
+	if h == nil || record.route.Handler == nil || h.isPluginFused(record.pluginID) || !h.pluginIdentityCurrent(record.pluginID, record.path, record.version) {
 		return pluginapi.ManagementResponse{}, nil
 	}
 	defer func() {
@@ -341,7 +349,7 @@ func escapeManagementResponseBody(resp pluginapi.ManagementResponse) []byte {
 }
 
 func (h *Host) callResourceHandler(ctx context.Context, record resourceRouteRecord, req pluginapi.ManagementRequest) (resp pluginapi.ManagementResponse, err error) {
-	if h == nil || record.route.Handler == nil || h.isPluginFused(record.pluginID) {
+	if h == nil || record.route.Handler == nil || h.isPluginFused(record.pluginID) || !h.pluginIdentityCurrent(record.pluginID, record.path, record.version) {
 		return pluginapi.ManagementResponse{}, nil
 	}
 	defer func() {

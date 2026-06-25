@@ -206,15 +206,6 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 		GOOS:         platform.GOOS,
 		GOARCH:       platform.GOARCH,
 		PluginLoaded: pluginIsBusy,
-		BeforeWrite: func() error {
-			if !pluginIsBusy() {
-				return nil
-			}
-			if pluginRuntime == nil || !pluginRuntime.UnloadPlugin(id) && pluginIsBusy() {
-				return sdkpluginstore.ErrLoadedPluginLocked
-			}
-			return nil
-		},
 	})
 	if errInstall != nil {
 		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
@@ -291,6 +282,7 @@ func currentPluginFilePath(root string, id string) (string, error) {
 	}
 	platform := CurrentPlatform()
 	extension := pluginExtension(platform.GOOS)
+	var selected pluginFileInfo
 	for _, dir := range pluginCandidateDirs(root, platform.GOOS, platform.GOARCH, platform.Variant) {
 		entries, errReadDir := os.ReadDir(dir)
 		if errReadDir != nil {
@@ -310,12 +302,22 @@ func currentPluginFilePath(root string, id string) (string, error) {
 		}
 		sort.Strings(files)
 		for _, filePath := range files {
-			if pluginIDFromPath(filePath) == id {
-				return filePath, nil
+			file, okFile := pluginFileFromPath(filePath, extension)
+			if !okFile || file.ID != id {
+				continue
+			}
+			if pluginFilePreferred(file, selected) {
+				selected = file
 			}
 		}
 	}
-	return "", nil
+	return selected.Path, nil
+}
+
+type pluginFileInfo struct {
+	ID      string
+	Path    string
+	Version string
 }
 
 func pluginCandidateDirs(root string, goos string, goarch string, variant string) []string {
@@ -329,6 +331,10 @@ func pluginCandidateDirs(root string, goos string, goarch string, variant string
 }
 
 func pluginIDFromPath(path string) string {
+	file, ok := pluginFileFromPath(path, "")
+	if ok {
+		return file.ID
+	}
 	base := filepath.Base(path)
 	lowerBase := strings.ToLower(base)
 	for _, extension := range []string{".so", ".dylib", ".dll"} {
@@ -337,6 +343,55 @@ func pluginIDFromPath(path string) string {
 		}
 	}
 	return base
+}
+
+func pluginFileFromPath(filePath string, requiredExtension string) (pluginFileInfo, bool) {
+	base := filepath.Base(filePath)
+	lowerBase := strings.ToLower(base)
+	extension := strings.TrimSpace(requiredExtension)
+	if extension != "" {
+		if !strings.HasSuffix(lowerBase, strings.ToLower(extension)) {
+			return pluginFileInfo{}, false
+		}
+	} else {
+		for _, candidateExtension := range []string{".so", ".dylib", ".dll"} {
+			if strings.HasSuffix(lowerBase, candidateExtension) {
+				extension = candidateExtension
+				break
+			}
+		}
+		if extension == "" {
+			return pluginFileInfo{}, false
+		}
+	}
+	name := base[:len(base)-len(extension)]
+	id := name
+	version := ""
+	if versionIndex := strings.LastIndex(name, "-v"); versionIndex > 0 {
+		candidateID := name[:versionIndex]
+		candidateVersion := name[versionIndex+2:]
+		if validPluginFileID(candidateID) && validPluginFileVersion(candidateVersion) {
+			id = candidateID
+			version = candidateVersion
+		}
+	}
+	if !validPluginFileID(id) {
+		return pluginFileInfo{}, false
+	}
+	return pluginFileInfo{ID: id, Path: filePath, Version: version}, true
+}
+
+func pluginFilePreferred(candidate pluginFileInfo, current pluginFileInfo) bool {
+	if strings.TrimSpace(current.Path) == "" {
+		return true
+	}
+	if candidate.Version == "" {
+		return false
+	}
+	if current.Version == "" {
+		return true
+	}
+	return sdkpluginstore.UpdateAvailable(current.Version, candidate.Version)
 }
 
 func pluginExtension(goos string) string {
@@ -366,6 +421,15 @@ func validPluginFileID(id string) bool {
 		}
 	}
 	return true
+}
+
+func validPluginFileVersion(version string) bool {
+	version = strings.TrimSpace(version)
+	if version == "" || strings.HasPrefix(version, "v") {
+		return false
+	}
+	first := version[0]
+	return first >= '0' && first <= '9'
 }
 
 func MarkLoadResults(report *SyncReport, inspector PluginLoadInspector) error {
