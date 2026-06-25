@@ -553,3 +553,144 @@ func TestManagerExecuteStream_AntigravityCreditsFallbackForceMappingRewritesResp
 		t.Fatalf("stream payload = %s, want alias %q without upstream %q", got, aliasModel, upstreamModel)
 	}
 }
+
+func setupAPIKeyForceMappingManager(t *testing.T, provider, upstreamModel, aliasModel string) (*Manager, *forceMappingExecutor) {
+	t.Helper()
+	manager := NewManager(nil, nil, nil)
+	executor := &forceMappingExecutor{id: provider}
+	manager.RegisterExecutor(executor)
+
+	cfg := &internalconfig.Config{}
+	apiKey := provider + "-key"
+	switch provider {
+	case "claude":
+		cfg.ClaudeKey = []internalconfig.ClaudeKey{{
+			APIKey: apiKey,
+			Models: []internalconfig.ClaudeModel{{
+				Name:         upstreamModel,
+				Alias:        aliasModel,
+				ForceMapping: true,
+			}},
+		}}
+	case "codex":
+		cfg.CodexKey = []internalconfig.CodexKey{{
+			APIKey: apiKey,
+			Models: []internalconfig.CodexModel{{
+				Name:         upstreamModel,
+				Alias:        aliasModel,
+				ForceMapping: true,
+			}},
+		}}
+	case "vertex":
+		cfg.VertexCompatAPIKey = []internalconfig.VertexCompatKey{{
+			APIKey: apiKey,
+			Models: []internalconfig.VertexCompatModel{{
+				Name:         upstreamModel,
+				Alias:        aliasModel,
+				ForceMapping: true,
+			}},
+		}}
+	case "openai-compatibility":
+		cfg.OpenAICompatibility = []internalconfig.OpenAICompatibility{{
+			Name: provider,
+			Models: []internalconfig.OpenAICompatibilityModel{{
+				Name:         upstreamModel,
+				Alias:        aliasModel,
+				ForceMapping: true,
+			}},
+		}}
+	default:
+		t.Fatalf("unsupported provider %q", provider)
+	}
+	manager.SetConfig(cfg)
+
+	auth := &Auth{
+		ID:         provider + "-api-key-force-mapping-auth",
+		Provider:   provider,
+		Attributes: map[string]string{"api_key": apiKey},
+	}
+	if provider == "openai-compatibility" {
+		auth.Attributes["compat_name"] = provider
+		auth.Attributes["provider_key"] = provider
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: aliasModel}, {ID: upstreamModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	return manager, executor
+}
+
+func TestManagerExecute_APIKeyAliasForceMappingRewritesResponse(t *testing.T) {
+	tests := []struct {
+		provider      string
+		upstreamModel string
+		aliasModel    string
+	}{
+		{provider: "claude", upstreamModel: "glm-5.2", aliasModel: "claude-sonnet-latest"},
+		{provider: "codex", upstreamModel: "gpt-5.5", aliasModel: "claude-sonnet-4-5"},
+		{provider: "vertex", upstreamModel: "gemini-3-pro", aliasModel: "claude-opus-4-5"},
+		{provider: "openai-compatibility", upstreamModel: "deepseek-v3.1", aliasModel: "claude-opus-4.66"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			manager, executor := setupAPIKeyForceMappingManager(t, tt.provider, tt.upstreamModel, tt.aliasModel)
+			resp, errExecute := manager.Execute(context.Background(), []string{tt.provider}, cliproxyexecutor.Request{Model: tt.aliasModel}, cliproxyexecutor.Options{})
+			if errExecute != nil {
+				t.Fatalf("execute error = %v, want success", errExecute)
+			}
+
+			gotModels := executor.ExecuteModels()
+			if len(gotModels) != 1 || gotModels[0] != tt.upstreamModel {
+				t.Fatalf("execute models = %v, want [%s]", gotModels, tt.upstreamModel)
+			}
+			if got := string(resp.Payload); !strings.Contains(got, tt.aliasModel) || forceMappingPayloadLeaksUpstream(got, tt.upstreamModel) {
+				t.Fatalf("response payload = %s, want alias %q without upstream %q", got, tt.aliasModel, tt.upstreamModel)
+			}
+		})
+	}
+}
+
+func TestManagerExecuteStream_APIKeyAliasForceMappingRewritesResponse(t *testing.T) {
+	tests := []struct {
+		provider      string
+		upstreamModel string
+		aliasModel    string
+	}{
+		{provider: "claude", upstreamModel: "glm-5.2", aliasModel: "claude-sonnet-latest"},
+		{provider: "codex", upstreamModel: "gpt-5.5", aliasModel: "claude-sonnet-4-5"},
+		{provider: "vertex", upstreamModel: "gemini-3-pro", aliasModel: "claude-opus-4-5"},
+		{provider: "openai-compatibility", upstreamModel: "deepseek-v3.1", aliasModel: "claude-opus-4.66"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			manager, executor := setupAPIKeyForceMappingManager(t, tt.provider, tt.upstreamModel, tt.aliasModel)
+			streamResult, errExecute := manager.ExecuteStream(context.Background(), []string{tt.provider}, cliproxyexecutor.Request{Model: tt.aliasModel}, cliproxyexecutor.Options{})
+			if errExecute != nil {
+				t.Fatalf("execute stream error = %v, want success", errExecute)
+			}
+
+			gotModels := executor.StreamModels()
+			if len(gotModels) != 1 || gotModels[0] != tt.upstreamModel {
+				t.Fatalf("stream models = %v, want [%s]", gotModels, tt.upstreamModel)
+			}
+
+			var payload []byte
+			for chunk := range streamResult.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("unexpected stream error: %v", chunk.Err)
+				}
+				payload = append(payload, chunk.Payload...)
+			}
+			if got := string(payload); !strings.Contains(got, tt.aliasModel) || forceMappingPayloadLeaksUpstream(got, tt.upstreamModel) {
+				t.Fatalf("stream payload = %s, want alias %q without upstream %q", got, tt.aliasModel, tt.upstreamModel)
+			}
+		})
+	}
+}
