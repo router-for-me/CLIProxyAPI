@@ -1,0 +1,75 @@
+name: upstream-sync
+
+on:
+  schedule:
+    # Daily at 04:00 UTC (avoid peak CI hours on upstream)
+    - cron: '0 4 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout our fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "kooshapari-bot"
+          git config user.email "kooshapari-bot@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git remote -v
+
+      - name: Fetch upstream (shallow)
+        run: |
+          git fetch upstream main --depth=200 || git fetch upstream master --depth=200
+
+      - name: Compute merge-base
+        id: base
+        run: |
+          UPSTREAM_REF=$(git remote show upstream | sed -n 's/.*HEAD branch: //p' | tr -d '\r')
+          echo "upstream_ref=${UPSTREAM_REF}" >> "$GITHUB_OUTPUT"
+          echo "Upstream HEAD branch: ${UPSTREAM_REF}"
+
+      - name: Fast-forward merge upstream into our main
+        run: |
+          UPSTREAM_REF="${{ steps.base.upstream_ref }}"
+          echo "Merging upstream/${UPSTREAM_REF} into main..."
+          git checkout main
+          git merge --no-edit --no-ff \
+            -m "chore(upstream-sync): merge router-for-me/CLIProxyAPI@${UPSTREAM_REF} into main" \
+            "upstream/${UPSTREAM_REF}" || {
+            echo "::warning::Merge conflict detected; opening PR instead of direct push"
+            git checkout -b upstream-sync/automated
+            git merge --no-edit --no-ff \
+              -m "chore(upstream-sync): automated merge of upstream changes" \
+              "upstream/${UPSTREAM_REF}" || true
+            git push -u origin upstream-sync/automated || true
+            gh pr create \
+              --base main \
+              --head upstream-sync/automated \
+              --title "chore(upstream-sync): automated merge of router-for-me/CLIProxyAPI" \
+              --body "Automated daily sync from upstream router-for-me/CLIProxyAPI. Please review and resolve any conflicts." \
+              || echo "::warning::PR creation failed; manual review needed"
+            exit 0
+          }
+          git push origin main
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "## Upstream sync summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upstream: router-for-me/CLIProxyAPI" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Sync time: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
