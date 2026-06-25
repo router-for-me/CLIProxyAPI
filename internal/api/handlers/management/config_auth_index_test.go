@@ -109,6 +109,40 @@ func TestManagementConfigSnapshotExposesCommandAuthMetadata(t *testing.T) {
 	}
 }
 
+func TestManagementConfigSnapshotDeepCopiesConfigData(t *testing.T) {
+	h := &Handler{cfg: &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "source", Alias: "alias"}},
+		},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "proxy",
+			BaseURL: "https://proxy.example.com/v1",
+			Headers: map[string]string{
+				"X-Test": "source",
+			},
+			Models: []config.OpenAICompatibilityModel{{
+				Name:  "gpt-5",
+				Alias: "gpt",
+			}},
+		}},
+	}}
+
+	got := h.managementConfigSnapshot()
+	got.OAuthModelAlias["codex"][0].Alias = "snapshot"
+	got.OpenAICompatibility[0].Headers["X-Test"] = "snapshot"
+	got.OpenAICompatibility[0].Models[0].Alias = "snapshot"
+
+	if h.cfg.OAuthModelAlias["codex"][0].Alias != "alias" {
+		t.Fatalf("source OAuthModelAlias mutated to %q", h.cfg.OAuthModelAlias["codex"][0].Alias)
+	}
+	if h.cfg.OpenAICompatibility[0].Headers["X-Test"] != "source" {
+		t.Fatalf("source header mutated to %q", h.cfg.OpenAICompatibility[0].Headers["X-Test"])
+	}
+	if h.cfg.OpenAICompatibility[0].Models[0].Alias != "gpt" {
+		t.Fatalf("source model alias mutated to %q", h.cfg.OpenAICompatibility[0].Models[0].Alias)
+	}
+}
+
 func TestNormalizeCommandAuthPseudoAPIKeyDropsDisplayOnlyValue(t *testing.T) {
 	authCfg := &config.CommandAuthConfig{Command: "fetch-token"}
 	pseudoKey := commandAuthConfigManagementKey(authCfg)

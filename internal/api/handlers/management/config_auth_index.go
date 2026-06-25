@@ -75,19 +75,25 @@ func (h *Handler) managementConfigSnapshot() configWithAuthMetadata {
 		return configWithAuthMetadata{}
 	}
 	h.mu.Lock()
-	base := config.Config{}
+	var base *config.Config
+	manager := h.authManager
 	if h.cfg != nil {
-		base = *h.cfg
+		base = h.cfg.CloneForRuntime()
 	}
 	h.mu.Unlock()
+	if base == nil {
+		base = &config.Config{}
+	}
+
+	snapshotHandler := &Handler{cfg: base, authManager: manager}
 
 	return configWithAuthMetadata{
-		Config:              base,
-		GeminiKey:           h.geminiKeysWithAuthIndex(),
-		CodexKey:            h.codexKeysWithAuthIndex(),
-		ClaudeKey:           h.claudeKeysWithAuthIndex(),
-		VertexCompatAPIKey:  h.vertexCompatKeysWithAuthIndex(),
-		OpenAICompatibility: h.openAICompatibilityWithAuthIndex(),
+		Config:              *base,
+		GeminiKey:           snapshotHandler.geminiKeysWithAuthIndex(),
+		CodexKey:            snapshotHandler.codexKeysWithAuthIndex(),
+		ClaudeKey:           snapshotHandler.claudeKeysWithAuthIndex(),
+		VertexCompatAPIKey:  snapshotHandler.vertexCompatKeysWithAuthIndex(),
+		OpenAICompatibility: snapshotHandler.openAICompatibilityWithAuthIndex(),
 	}
 }
 

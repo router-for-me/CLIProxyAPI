@@ -473,6 +473,37 @@ func TestConfigSynthesizer_OpenAICompatCommandAuth(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompatDisabledCommandAuth(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:     "proxy",
+				BaseURL:  "https://proxy.example.com/v1",
+				Disabled: true,
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 disabled command auth, got %d", len(auths))
+	}
+	if !auths[0].Disabled || auths[0].Status != coreauth.StatusDisabled {
+		t.Fatalf("disabled command auth status = %v/%s, want true/%s", auths[0].Disabled, auths[0].Status, coreauth.StatusDisabled)
+	}
+}
+
 func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	tests := []struct {
 		name    string

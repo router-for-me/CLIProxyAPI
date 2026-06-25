@@ -131,7 +131,7 @@ func TestGetAPIKeyUsage_IncludesCommandAuthCredentials(t *testing.T) {
 		t.Fatalf("decode payload: %v", err)
 	}
 
-	entry := payload["gemini"]["https://gemini.example.com|"]
+	entry := payload["gemini"]["https://gemini.example.com|"+commandAuthManagementKey("command-identity")]
 	if entry.Success != 1 || entry.Failed != 1 {
 		t.Fatalf("command auth totals = %d/%d, want 1/1", entry.Success, entry.Failed)
 	}
@@ -147,6 +147,75 @@ func TestGetAPIKeyUsage_IncludesCommandAuthCredentials(t *testing.T) {
 	success, failed := sumRecentRequestBuckets(entry.RecentRequests)
 	if success != 1 || failed != 1 {
 		t.Fatalf("command auth bucket totals = %d/%d, want 1/1", success, failed)
+	}
+}
+
+func TestGetAPIKeyUsage_SeparatesCommandAuthCredentialsWithSameBaseURL(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{
+			ID:       "command-auth-a",
+			Provider: "gemini",
+			Attributes: map[string]string{
+				coreauth.AttrAuthKind:       coreauth.AttrAuthKindAPIKey,
+				coreauth.AttrAuthSource:     coreauth.AttrAuthSourceCommand,
+				coreauth.AttrAuthCommand:    "fetch-token-a",
+				coreauth.AttrAuthCommandKey: "command-identity-a",
+				"base_url":                  "https://gemini.example.com",
+			},
+		},
+		{
+			ID:       "command-auth-b",
+			Provider: "gemini",
+			Attributes: map[string]string{
+				coreauth.AttrAuthKind:       coreauth.AttrAuthKindAPIKey,
+				coreauth.AttrAuthSource:     coreauth.AttrAuthSourceCommand,
+				coreauth.AttrAuthCommand:    "fetch-token-b",
+				coreauth.AttrAuthCommandKey: "command-identity-b",
+				"base_url":                  "https://gemini.example.com",
+			},
+		},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register command auth %s: %v", auth.ID, err)
+		}
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "command-auth-a", Provider: "gemini", Model: "gemini-pro", Success: true})
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "command-auth-b", Provider: "gemini", Model: "gemini-pro", Success: false})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	ginCtx.Request = req
+	h.GetAPIKeyUsage(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	geminiBucket := payload["gemini"]
+	firstKey := "https://gemini.example.com|" + commandAuthManagementKey("command-identity-a")
+	secondKey := "https://gemini.example.com|" + commandAuthManagementKey("command-identity-b")
+	first := geminiBucket[firstKey]
+	second := geminiBucket[secondKey]
+	if first.Success != 1 || first.Failed != 0 {
+		t.Fatalf("first command auth totals = %d/%d, want 1/0 payload=%#v", first.Success, first.Failed, geminiBucket)
+	}
+	if second.Success != 0 || second.Failed != 1 {
+		t.Fatalf("second command auth totals = %d/%d, want 0/1 payload=%#v", second.Success, second.Failed, geminiBucket)
+	}
+	if _, exists := geminiBucket["https://gemini.example.com|"]; exists {
+		t.Fatalf("legacy command auth key should not be used when auth_key is available: %#v", geminiBucket)
 	}
 }
 

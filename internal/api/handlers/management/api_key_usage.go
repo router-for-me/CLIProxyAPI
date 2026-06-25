@@ -72,10 +72,7 @@ func apiKeyUsageIdentityForAuth(auth *coreauth.Auth) (apiKeyUsageIdentity, bool)
 		}
 		identity.authKey = commandAuthManagementKey(commandKey)
 		identity.source = coreauth.AttrAuthSourceCommand
-		// Keep the legacy composite key so older management frontends that look up
-		// command auth entries as "base_url|" continue to receive statistics. Newer
-		// frontends should prefer the explicit auth_key/auth_source fields.
-		identity.key = baseURL + "|"
+		identity.key = baseURL + "|" + identity.authKey
 		return identity, true
 	}
 
