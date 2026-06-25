@@ -608,7 +608,31 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 			err.retryAfter = retryAfter
 		}
 	}
+	if hint := antigravityRegionBlockedHint(statusCode, body); hint != "" {
+		log.Warnf("antigravity executor: %s", hint)
+		err.msg = strings.TrimRight(err.msg, "\n") + "\n\n" + hint
+	}
 	return err
+}
+
+// antigravityRegionBlockedHint returns an actionable hint when the Antigravity
+// (Gemini Code Assist) upstream rejects a request with the opaque
+// "User location is not supported for the API use." 400. That error is keyed on
+// the request's egress region, not on the request body, and frequently affects
+// datacenter/hosting IPs even when they geolocate to an otherwise supported
+// country. Routing the affected credential through an egress in a supported
+// region (per-auth proxy-url) resolves it. Returns "" for any other response so
+// unrelated errors pass through unchanged.
+func antigravityRegionBlockedHint(statusCode int, body []byte) string {
+	if statusCode != http.StatusBadRequest {
+		return ""
+	}
+	if !strings.Contains(strings.ToLower(string(body)), "user location is not supported") {
+		return ""
+	}
+	return "Gemini is region-restricted and this request's egress IP appears to be in an unsupported region " +
+		"(common for datacenter/hosting IPs even when geolocated to a supported country). " +
+		"Route this credential through an egress in a supported region, e.g. set a per-auth proxy-url."
 }
 
 // Execute performs a non-streaming request to the Antigravity API.
