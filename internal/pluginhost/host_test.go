@@ -585,6 +585,9 @@ func TestRegisteredPluginsIncludesMetadataAndOAuthCapability(t *testing.T) {
 	if !infos[0].SupportsOAuth {
 		t.Fatalf("RegisteredPlugins()[0].SupportsOAuth = false, want true; infos=%#v", infos)
 	}
+	if infos[0].OAuthProvider != "alpha" {
+		t.Fatalf("RegisteredPlugins()[0].OAuthProvider = %q, want alpha; infos=%#v", infos[0].OAuthProvider, infos)
+	}
 	if infos[0].Metadata.Logo == "" || len(infos[0].Metadata.ConfigFields) != 1 {
 		t.Fatalf("RegisteredPlugins()[0].Metadata = %#v, want logo and config fields", infos[0].Metadata)
 	}

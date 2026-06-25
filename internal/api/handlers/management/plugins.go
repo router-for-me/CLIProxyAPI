@@ -32,6 +32,7 @@ type pluginListEntry struct {
 	Enabled          bool                    `json:"enabled"`
 	EffectiveEnabled bool                    `json:"effective_enabled"`
 	SupportsOAuth    bool                    `json:"supports_oauth"`
+	OAuthProvider    string                  `json:"oauth_provider"`
 	Logo             string                  `json:"logo"`
 	ConfigFields     []pluginConfigFieldInfo `json:"config_fields"`
 	Menus            []pluginMenuInfo        `json:"menus"`
@@ -114,6 +115,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.ID = htmlsanitize.String(info.ID)
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
+			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
 			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			entry.Menus = pluginMenus(info.Menus)
