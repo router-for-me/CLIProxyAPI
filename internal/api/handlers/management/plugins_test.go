@@ -122,6 +122,7 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 			Enabled          bool   `json:"enabled"`
 			EffectiveEnabled bool   `json:"effective_enabled"`
 			SupportsOAuth    bool   `json:"supports_oauth"`
+			OAuthProvider    string `json:"oauth_provider"`
 			Logo             string `json:"logo"`
 			ConfigFields     []any  `json:"config_fields"`
 			Menus            []any  `json:"menus"`
@@ -154,7 +155,12 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 			EffectiveEnabled: item.EffectiveEnabled,
 			Path:             item.Path,
 		}
-		if item.Registered || item.SupportsOAuth || item.Logo != "" || len(item.ConfigFields) != 0 || len(item.Menus) != 0 {
+		if item.Registered ||
+			item.SupportsOAuth ||
+			item.OAuthProvider != "" ||
+			item.Logo != "" ||
+			len(item.ConfigFields) != 0 ||
+			len(item.Menus) != 0 {
 			t.Fatalf("unregistered plugin entry has runtime fields: %#v", item)
 		}
 	}
