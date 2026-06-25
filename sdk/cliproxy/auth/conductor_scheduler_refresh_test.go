@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,95 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestCredentialInvalidGrantIsAuthFailureNotRequestInvalid(t *testing.T) {
+	err := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":"invalid_grant","error_description":"Token has been expired or revoked."}`,
+	}
+
+	if isRequestInvalidError(err) {
+		t.Fatal("invalid_grant refresh failure must not be treated as request-invalid")
+	}
+	if !isUnauthorizedError(err) {
+		t.Fatal("invalid_grant refresh failure must be treated as unauthorized auth failure")
+	}
+	if got := statusCodeFromResult(err); got != http.StatusUnauthorized {
+		t.Fatalf("statusCodeFromResult = %d, want %d", got, http.StatusUnauthorized)
+	}
+}
+
+type invalidGrantFallbackTestExecutor struct {
+	schedulerProviderTestExecutor
+	calls []string
+}
+
+func (e *invalidGrantFallbackTestExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.calls = append(e.calls, auth.ID)
+	if strings.Contains(auth.ID, "invalid") {
+		return cliproxyexecutor.Response{}, &Error{
+			HTTPStatus: http.StatusBadRequest,
+			Message:    `{"error":"invalid_grant","error_description":"Token has been expired or revoked."}`,
+		}
+	}
+	return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+}
+
+func TestManagerExecute_InvalidGrantFallsBackToNextAuth(t *testing.T) {
+	ctx := context.Background()
+	provider := "antigravity"
+	model := "gemini-3.1-flash-image"
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 2)
+
+	executor := &invalidGrantFallbackTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: provider},
+	}
+	manager.RegisterExecutor(executor)
+
+	invalidAuth := &Auth{ID: "aa-invalid-auth", Provider: provider, Status: StatusActive}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: provider, Status: StatusActive}
+	if _, err := manager.Register(ctx, invalidAuth); err != nil {
+		t.Fatalf("register invalid auth: %v", err)
+	}
+	if _, err := manager.Register(ctx, goodAuth); err != nil {
+		t.Fatalf("register good auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(invalidAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(invalidAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	resp, err := manager.Execute(ctx, []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want fallback success", err)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+	if got := strings.Join(executor.calls, ","); got != invalidAuth.ID+","+goodAuth.ID {
+		t.Fatalf("executor calls = %s, want invalid auth then good auth", got)
+	}
+
+	updatedInvalid, ok := manager.GetByID(invalidAuth.ID)
+	if !ok {
+		t.Fatalf("missing auth %q", invalidAuth.ID)
+	}
+	state := updatedInvalid.ModelStates[model]
+	if state == nil {
+		t.Fatalf("missing model state for %q", model)
+	}
+	if state.StatusMessage != "unauthorized" {
+		t.Fatalf("status message = %q, want unauthorized", state.StatusMessage)
+	}
+	if !state.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("NextRetryAfter = %s, want future cooldown", state.NextRetryAfter)
 	}
 }
 

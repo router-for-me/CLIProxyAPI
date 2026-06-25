@@ -3572,6 +3572,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					} else {
 						switch statusCode {
 						case 401:
+							state.StatusMessage = "unauthorized"
+							if auth.LastError != nil {
+								auth.StatusMessage = "unauthorized"
+							}
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -3876,6 +3880,9 @@ func isUnauthorizedError(err error) bool {
 	if statusCodeFromError(err) == http.StatusUnauthorized {
 		return true
 	}
+	if isCredentialAuthErrorMessage(err.Error()) {
+		return true
+	}
 	raw := strings.ToLower(err.Error())
 	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
 }
@@ -3926,7 +3933,32 @@ func statusCodeFromResult(err *Error) int {
 	if err == nil {
 		return 0
 	}
+	if isCredentialAuthResultError(err) {
+		return http.StatusUnauthorized
+	}
 	return err.StatusCode()
+}
+
+func isCredentialAuthErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "invalid_grant") ||
+		strings.Contains(lower, "token has been expired or revoked") ||
+		strings.Contains(lower, "token has expired or been revoked") ||
+		strings.Contains(lower, "token was expired or revoked")
+}
+
+func isCredentialAuthResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(err.Code), "unauthorized") ||
+		strings.EqualFold(strings.TrimSpace(err.Code), "invalid_grant") {
+		return true
+	}
+	return isCredentialAuthErrorMessage(err.Message)
 }
 
 func isModelSupportErrorMessage(message string) bool {
@@ -4037,6 +4069,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // routing can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isCredentialAuthErrorMessage(err.Error()) {
 		return false
 	}
 	if isCloudflareChallengeError(err) {
