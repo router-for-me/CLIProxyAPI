@@ -134,6 +134,28 @@ func TestWeightedRoundRobinSelectorPick_ZeroWeightFallsBackToLowerPriority(t *te
 	}
 }
 
+func TestWeightedRoundRobinSelectorPick_WebsocketZeroWeightFallsBackToPositiveWeight(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "draining-ws", Provider: "codex", Attributes: map[string]string{"selection_weight": "0", "websockets": "true"}},
+		{ID: "ready-http", Provider: "codex", Attributes: map[string]string{"selection_weight": "1"}},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	got, err := selector.Pick(ctx, "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "ready-http" {
+		t.Fatalf("Pick() auth.ID = %q, want ready-http", got.ID)
+	}
+}
+
 func TestWeightedRoundRobinSelectorPick_PinnedZeroWeightAuth(t *testing.T) {
 	t.Parallel()
 

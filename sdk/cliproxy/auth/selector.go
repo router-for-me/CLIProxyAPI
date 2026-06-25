@@ -205,7 +205,7 @@ func authWebsocketsEnabled(auth *Auth) bool {
 	return false
 }
 
-func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
+func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth, selectable func(*Auth) bool) []*Auth {
 	if len(available) == 0 {
 		return available
 	}
@@ -219,7 +219,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	wsEnabled := make([]*Auth, 0, len(available))
 	for i := 0; i < len(available); i++ {
 		candidate := available[i]
-		if authWebsocketsEnabled(candidate) {
+		if authWebsocketsEnabled(candidate) && (selectable == nil || selectable(candidate)) {
 			wsEnabled = append(wsEnabled, candidate)
 		}
 	}
@@ -363,7 +363,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferCodexWebsocketAuths(ctx, provider, available, nil)
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -394,7 +394,9 @@ func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model s
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferCodexWebsocketAuths(ctx, provider, available, func(auth *Auth) bool {
+		return authSelectionWeight(auth) > 0
+	})
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -473,7 +475,7 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferCodexWebsocketAuths(ctx, provider, available, nil)
 	return available[0], nil
 }
 
