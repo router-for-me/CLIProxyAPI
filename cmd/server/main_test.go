@@ -9,12 +9,12 @@ import (
 func TestShouldStartExampleAPIKeyWarningServer(t *testing.T) {
 	cfgWithExampleKey := &config.Config{
 		SDKConfig: config.SDKConfig{
-			APIKeys: []string{"real-key", " your-api-key-1 "},
+			ClientAPIKeys: config.ClientAPIKeys{{Key: "real-key"}, {Key: " your-api-key-1 "}},
 		},
 	}
 	cfgWithRealKey := &config.Config{
 		SDKConfig: config.SDKConfig{
-			APIKeys: []string{"real-key"},
+			ClientAPIKeys: config.ClientAPIKeys{{Key: "real-key"}},
 		},
 	}
 

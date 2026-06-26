@@ -40,7 +40,7 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			ClientAPIKeys: proxyconfig.ClientAPIKeys{{Key: "test-key"}},
 		},
 		Port:                   0,
 		AuthDir:                authDir,

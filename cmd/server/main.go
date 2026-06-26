@@ -61,7 +61,7 @@ func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiM
 	if tuiMode && !standalone {
 		return false
 	}
-	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+	return safemode.HasExampleAPIKeys(cfg.ClientAPIKeys.APIKeyStrings())
 }
 
 // main is the entry point of the application.
@@ -548,7 +548,7 @@ func main() {
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode) {
-		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
+		matches := safemode.ExampleAPIKeys(cfg.ClientAPIKeys.APIKeyStrings())
 		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; starting warning-only server")
 		cmd.StartExampleAPIKeyWarningServer(cfg, configFilePath, matches)
 		return

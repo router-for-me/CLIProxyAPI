@@ -244,6 +244,9 @@ type Manager struct {
 	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
 	apiKeyModelAlias atomic.Value
 
+	// clientAPIKeyModelAlias maps client api-key (lower) -> alias(lower) -> upstream entry.
+	clientAPIKeyModelAlias atomic.Value
+
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
 
@@ -282,6 +285,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.clientAPIKeyModelAlias.Store(clientAPIKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
@@ -508,6 +512,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	m.SetClientAPIKeyModelAliases(cfg.ClientAPIKeys)
 	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
@@ -1202,14 +1207,14 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
-func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
-	candidates, pooled, aliasResult := m.executionModelCandidatesWithAlias(auth, routeModel)
+func (m *Manager) preparedExecutionModelsWithAlias(ctx context.Context, auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
+	candidates, pooled, aliasResult := m.executionModelCandidatesWithAlias(ctx, auth, routeModel)
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult
 }
 
-func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
+func (m *Manager) executionModelCandidatesWithAlias(ctx context.Context, auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
-	aliasResult := m.resolveExecutionAliasResultForRequested(auth, requestedModel)
+	aliasResult := m.resolveExecutionAliasResultForRequestedWithClient(ctx, auth, requestedModel)
 	upstreamModel := executionAliasPoolModel(auth, requestedModel, aliasResult)
 
 	var candidates []string
@@ -2507,7 +2512,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(ctx, auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -2609,7 +2614,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(ctx, auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -2709,7 +2714,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(ctx, auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -5134,7 +5139,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(creditsCtx, c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -5185,7 +5190,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(creditsCtx, c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
