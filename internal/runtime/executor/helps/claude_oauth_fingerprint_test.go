@@ -1,0 +1,265 @@
+package helps
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+)
+
+func testClaudeOAuthFingerprintConfig(mode string) *config.Config {
+	return &config.Config{
+		ClaudeOAuthFingerprint: config.ClaudeOAuthFingerprintConfig{
+			Enabled:        true,
+			Mode:           mode,
+			MaxSessions:    4,
+			SessionTTL:     "1h",
+			LogFingerprint: false,
+		},
+	}
+}
+
+func testClaudeOAuthAuth(id string) *cliproxyauth.Auth {
+	return &cliproxyauth.Auth{
+		ID:       id,
+		Provider: "claude",
+		Metadata: map[string]any{"email": "john.doe@example.com"},
+	}
+}
+
+func jsonUserPayload(deviceID, accountUUID, sessionID string) []byte {
+	return []byte(`{"model":"claude-sonnet-4-5","metadata":{"user_id":"{\"device_id\":\"` + deviceID + `\",\"account_uuid\":\"` + accountUUID + `\",\"session_id\":\"` + sessionID + `\"}"},"messages":[{"role":"user","content":"hi"}]}`)
+}
+
+func TestClaudeOAuthFingerprintGate_PinsAccountIdentity(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("monitor")
+	auth := testClaudeOAuthAuth("auth-1")
+	apiKey := "sk-ant-oat-test"
+
+	body1 := jsonUserPayload("device-a", "account-a", "session-1")
+	out1, res1, err1 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body1, "claude-sonnet-4-5")
+	if err1 != nil {
+		t.Fatalf("first gate error = %v", err1)
+	}
+	if res1 == nil || res1.Slot != 1 {
+		t.Fatalf("first slot = %v, want 1", res1)
+	}
+
+	body2 := jsonUserPayload("device-a", "account-a", "session-2")
+	out2, res2, err2 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body2, "claude-sonnet-4-5")
+	if err2 != nil {
+		t.Fatalf("second gate error = %v", err2)
+	}
+	if !strings.Contains(string(out1), "device-a") || !strings.Contains(string(out2), "device-a") {
+		t.Fatalf("expected pinned device-a in outbound bodies: %s | %s", out1, out2)
+	}
+	if res2 == nil || res2.Slot != 2 {
+		t.Fatalf("second slot = %v, want 2", res2)
+	}
+	if !ClaudeOAuthFingerprintEnabled(cfg, apiKey) {
+		t.Fatal("expected fingerprint enabled for oauth token")
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_SessionLimitEnforce(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("enforce")
+	auth := testClaudeOAuthAuth("auth-limit")
+
+	for i := 1; i <= 4; i++ {
+		body := jsonUserPayload("device-a", "account-a", "session-"+itoa(i))
+		_, _, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "claude-sonnet-4-5")
+		if err != nil {
+			t.Fatalf("session %d error = %v", i, err)
+		}
+	}
+
+	body5 := jsonUserPayload("device-a", "account-a", "session-5")
+	_, res5, err5 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body5, "claude-sonnet-4-5")
+	if err5 == nil {
+		t.Fatal("expected enforce error for 5th session")
+	}
+	if res5 == nil || res5.Violation != claudeOAuthViolationSessionLimit {
+		t.Fatalf("violation = %q, want %q", res5.Violation, claudeOAuthViolationSessionLimit)
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_SessionLimitMonitorAllows(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("monitor")
+	auth := testClaudeOAuthAuth("auth-monitor")
+
+	for i := 1; i <= 4; i++ {
+		body := jsonUserPayload("device-a", "account-a", "session-"+itoa(i))
+		if _, _, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "claude-sonnet-4-5"); err != nil {
+			t.Fatalf("session %d error = %v", i, err)
+		}
+	}
+
+	body5 := jsonUserPayload("device-a", "account-a", "session-5")
+	_, res5, err5 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body5, "claude-sonnet-4-5")
+	if err5 != nil {
+		t.Fatalf("monitor mode should allow 5th session, got %v", err5)
+	}
+	if res5 == nil || res5.Violation != claudeOAuthViolationSessionLimit {
+		t.Fatalf("violation = %q, want %q", res5.Violation, claudeOAuthViolationSessionLimit)
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_SameSessionDifferentModel(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("monitor")
+	auth := testClaudeOAuthAuth("auth-model")
+
+	body := jsonUserPayload("device-a", "account-a", "session-shared")
+	_, res1, err1 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "claude-sonnet-4-5")
+	if err1 != nil {
+		t.Fatalf("first gate error = %v", err1)
+	}
+	_, res2, err2 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "claude-opus-4-5")
+	if err2 != nil {
+		t.Fatalf("second gate error = %v", err2)
+	}
+	if res1.Slot != 1 || res2.Slot != 1 {
+		t.Fatalf("slots = %d and %d, want both 1", res1.Slot, res2.Slot)
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_IdentityMismatchEnforce(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("enforce")
+	auth := testClaudeOAuthAuth("auth-identity")
+
+	body1 := jsonUserPayload("device-a", "account-a", "session-1")
+	if _, _, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body1, "m"); err != nil {
+		t.Fatalf("first gate error = %v", err)
+	}
+
+	body2 := jsonUserPayload("device-b", "account-a", "session-2")
+	_, res2, err2 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body2, "m")
+	if err2 == nil {
+		t.Fatal("expected identity mismatch enforce error")
+	}
+	if res2 == nil || res2.Violation != claudeOAuthViolationIdentityMismatch {
+		t.Fatalf("violation = %q, want %q", res2.Violation, claudeOAuthViolationIdentityMismatch)
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_SessionTTLRelease(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("enforce")
+	cfg.ClaudeOAuthFingerprint.SessionTTL = "50ms"
+	auth := testClaudeOAuthAuth("auth-ttl")
+
+	for i := 1; i <= 4; i++ {
+		body := jsonUserPayload("device-a", "account-a", "session-"+itoa(i))
+		if _, _, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "m"); err != nil {
+			t.Fatalf("session %d error = %v", i, err)
+		}
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	body5 := jsonUserPayload("device-a", "account-a", "session-5")
+	_, res5, err5 := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body5, "m")
+	if err5 != nil {
+		t.Fatalf("expected slot after ttl expiry, got %v", err5)
+	}
+	if res5 == nil || res5.Slot == 0 {
+		t.Fatalf("slot after expiry = %v, want >= 1", res5)
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_SessionHeaderMismatchFlag(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("monitor")
+	auth := testClaudeOAuthAuth("auth-mismatch")
+	headers := http.Header{}
+	headers.Set(ClaudeCodeSessionHeader, "header-session-id")
+	body := jsonUserPayload("device-a", "account-a", "body-session-id")
+
+	_, res, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, headers, body, "m")
+	if err != nil {
+		t.Fatalf("gate error = %v", err)
+	}
+	if res == nil || !res.SessionMismatch {
+		t.Fatal("expected session mismatch flag")
+	}
+	if res.SessionID != "body-session-id" {
+		t.Fatalf("session = %q, want body-session-id", res.SessionID)
+	}
+}
+
+func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
+	auth := testClaudeOAuthAuth("auth-log")
+	headers := http.Header{}
+	headers.Set("User-Agent", "claude-cli/2.1.63 (external, cli)")
+	headers.Set("X-Stainless-Package-Version", "0.74.0")
+	headers.Set("X-Stainless-Os", "MacOS")
+	headers.Set("X-Stainless-Arch", "arm64")
+	body := jsonUserPayload("device-a", "account-a", "body-session-id")
+	result := &ClaudeOAuthFingerprintGateResult{
+		SessionID:       "body-session-id",
+		Slot:            2,
+		DeviceID:        "device-a",
+		AccountID:       "account-a",
+		Format:          "json",
+		SessionMismatch: true,
+		HeaderSessionID: "header-sess",
+		BodySessionID:   "body-session-id",
+		Violation:       "-",
+	}
+	line := formatClaudeOAuthFingerprintLine(auth, nil, headers, body, "claude-sonnet-4-5", result)
+	if !strings.Contains(line, "acct=john") {
+		t.Fatalf("line missing acct prefix: %s", line)
+	}
+	if !strings.Contains(line, "slot=2") {
+		t.Fatalf("line missing slot: %s", line)
+	}
+	if !strings.Contains(line, "warn=session_mismatch") {
+		t.Fatalf("line missing warn: %s", line)
+	}
+	if !strings.Contains(line, "hdr=header-") || !strings.Contains(line, "body=body-ses") {
+		t.Fatalf("line missing hdr/body tokens: %s", line)
+	}
+}
+
+func TestClaudeOAuthFingerprintLogEnabled_IgnoresCommercialMode(t *testing.T) {
+	cfg := &config.Config{
+		CommercialMode: true,
+		ClaudeOAuthFingerprint: config.ClaudeOAuthFingerprintConfig{
+			Enabled:        true,
+			LogFingerprint: true,
+		},
+	}
+	if !ClaudeOAuthFingerprintLogEnabled(cfg) {
+		t.Fatal("log-fingerprint should be independent of commercial-mode")
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_LegacyUserID(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig("monitor")
+	auth := testClaudeOAuthAuth("auth-legacy")
+	userHash := strings.Repeat("a", 64)
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	sessionID := "22222222-2222-2222-2222-222222222222"
+	userID := "user_" + userHash + "_account_" + accountUUID + "_session_" + sessionID
+	body := []byte(`{"metadata":{"user_id":"` + userID + `"},"messages":[{"role":"user","content":"hi"}]}`)
+
+	out, res, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "m")
+	if err != nil {
+		t.Fatalf("gate error = %v", err)
+	}
+	if res.Format != "legacy" {
+		t.Fatalf("format = %q, want legacy", res.Format)
+	}
+	if !strings.Contains(string(out), userHash) {
+		t.Fatalf("legacy outbound missing user hash: %s", out)
+	}
+}

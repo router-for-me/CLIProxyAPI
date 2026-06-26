@@ -291,6 +291,14 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
+# Claude OAuth outbound fingerprint monitoring (OAuth tokens only, sk-ant-oat*).
+# claude-oauth-fingerprint:
+#   enabled: false
+#   mode: monitor              # monitor | enforce
+#   max-sessions: 4
+#   session-ttl: "1h"
+#   log-fingerprint: false     # independent of commercial-mode and request-log
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;

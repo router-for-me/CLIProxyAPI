@@ -260,6 +260,19 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
 
+	var fpResult *helps.ClaudeOAuthFingerprintGateResult
+	if helps.ClaudeOAuthFingerprintEnabled(e.cfg, apiKey) {
+		var errFP error
+		body, fpResult, errFP = helps.ClaudeOAuthFingerprintGate(ctx, e.cfg, auth, opts.Headers, body, baseModel)
+		if errFP != nil {
+			helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, nil, body, baseModel, fpResult)
+			return resp, statusErr{code: http.StatusTooManyRequests, msg: errFP.Error()}
+		}
+		if fpResult != nil {
+			ctx = helps.ContextWithClaudeOAuthFingerprint(ctx, fpResult)
+		}
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -286,6 +299,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return resp, errHeaders
 	}
+	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -447,6 +461,19 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
 
+	var fpResult *helps.ClaudeOAuthFingerprintGateResult
+	if helps.ClaudeOAuthFingerprintEnabled(e.cfg, apiKey) {
+		var errFP error
+		body, fpResult, errFP = helps.ClaudeOAuthFingerprintGate(ctx, e.cfg, auth, opts.Headers, body, baseModel)
+		if errFP != nil {
+			helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, nil, body, baseModel, fpResult)
+			return nil, statusErr{code: http.StatusTooManyRequests, msg: errFP.Error()}
+		}
+		if fpResult != nil {
+			ctx = helps.ContextWithClaudeOAuthFingerprint(ctx, fpResult)
+		}
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -472,6 +499,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
 		return nil, errHeaders
 	}
+	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -1133,6 +1161,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// scanner regardless of user preference, so this is non-negotiable for streams.
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
+	}
+	if fpResult := helps.ClaudeOAuthFingerprintGateResultFromContext(r.Context()); fpResult != nil && fpResult.SessionID != "" {
+		helps.ClaudeOAuthFingerprintApplySessionHeader(r, fpResult.SessionID)
 	}
 	return nil
 }
