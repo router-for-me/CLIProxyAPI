@@ -8,11 +8,7 @@ import (
 	"sort"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/watcher/diff/model_hash.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/watcher/diff/model_hash.go
 )
 
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.

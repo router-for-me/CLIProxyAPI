@@ -9,19 +9,11 @@ import (
 	"os"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/cmd/vertex_import.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/vertex"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/vertex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/cmd/vertex_import.go
 	log "github.com/sirupsen/logrus"
 )
 

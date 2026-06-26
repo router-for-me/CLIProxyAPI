@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 )
 
 func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryDoesNotBlockAuth(t *testing.T) {

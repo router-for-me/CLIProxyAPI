@@ -6,15 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/openai/chat-completions/antigravity_openai_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/antigravity/openai/chat-completions/antigravity_openai_request.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	homekv "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/home"
 )
 
 type CodexCache struct {

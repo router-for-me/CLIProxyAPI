@@ -4,12 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	"encoding/json"
-=======
-	"crypto/sha256"
-	"encoding/hex"
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	codexauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
@@ -26,19 +20,6 @@ import (
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
-=======
-	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -788,7 +769,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	// Preserve compaction fields for openai-response format (GitHub #1667)
 	// These fields are used for conversation context management in the Responses API
 	if from != "openai-response" {
@@ -800,23 +780,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
 	body = normalizeCodexToolSchemas(body)
-=======
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
-	}
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
-	body = normalizeCodexParallelToolCallsForTools(body)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return resp, errReplay
-	}
-	reporter.SetTranslatedReasoningEffort(body, to.String())
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -843,16 +806,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	httpResp, err := ExecuteHTTPRequest(ctx, e.cfg, auth, httpReq, "codex executor")
 	if err != nil {
-=======
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 		return resp, err
 	}
 	defer func() {
@@ -860,21 +815,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 	}()
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
-=======
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
-			return resp, errClearReplay
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = newCodexStatusErr(httpResp.StatusCode, b)
-		return resp, err
-	}
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -988,17 +928,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	body = normalizeCodexToolSchemas(body)
-=======
-	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth)
-	}
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
-	body = normalizeCodexParallelToolCallsForTools(body)
-	reporter.SetTranslatedReasoningEffort(body, to.String())
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	var identityState codexIdentityConfuseState
@@ -1025,16 +955,8 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	httpResp, err := ExecuteHTTPRequest(ctx, e.cfg, auth, httpReq, "codex executor")
 	if err != nil {
-=======
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 		return resp, err
 	}
 	defer func() {
@@ -1042,18 +964,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 	}()
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
-=======
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = newCodexStatusErr(httpResp.StatusCode, b)
-		return resp, err
-	}
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -1100,7 +1010,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	// Preserve compaction fields for openai-response format (GitHub #1667)
@@ -1110,31 +1019,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 		body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	}
-=======
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	body = normalizeCodexToolSchemas(body)
-=======
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
-	body = normalizeCodexParallelToolCallsForTools(body)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return nil, errReplay
-	}
-	reporter.SetTranslatedReasoningEffort(body, to.String())
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -1162,35 +1052,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	httpResp, err := ExecuteHTTPRequestForStreaming(ctx, e.cfg, auth, httpReq, "codex executor")
 	if err != nil {
-=======
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, readErr := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("codex executor: close response body error: %v", errClose)
-		}
-		if readErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
-			return nil, readErr
-		}
-		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
-			return nil, errClearReplay
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErr(httpResp.StatusCode, data)
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1204,12 +1067,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 		completed := false
-=======
-		outputItemsByIndex := make(map[int64][]byte)
-		var outputItemsFallback [][]byte
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -1217,22 +1075,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 				if gjson.GetBytes(data, "type").String() == "response.completed" {
 					completed = true
 					if detail, ok := parseCodexUsage(data); ok {
 						reporter.publish(ctx, detail)
-=======
-				if streamErr, terminalBody, ok := codexTerminalStreamErr(data); ok {
-					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
-						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
-						reporter.PublishFailure(ctx, errClearReplay)
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
-						case <-ctx.Done():
-						}
-						return
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
@@ -1267,7 +1113,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
@@ -1277,13 +1122,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{
 				Err: statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"},
-=======
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 			}
 		}
 	}()
@@ -1304,7 +1142,6 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	// Preserve compaction fields for openai-response format (GitHub #1667)
 	// These fields are used for conversation context management in the Responses API
 	if from != "openai-response" {
@@ -1312,12 +1149,6 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 		body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	}
-=======
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 	body, _ = sjson.SetBytes(body, "stream", false)
 	body = normalizeCodexInstructions(body)
 
@@ -1500,7 +1331,6 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	return auth, nil
 }
 
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 func normalizeCodexToolSchemas(body []byte) []byte {
 	if len(body) == 0 {
 		return body
@@ -1672,43 +1502,12 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 			}
 		}
 	case "openai-response":
-=======
-type codexIdentityConfuseState struct {
-	enabled                bool
-	authID                 string
-	originalPromptCacheKey string
-	promptCacheKey         string
-	turnIDs                []codexIdentityReplacement
-}
-
-type codexIdentityReplacement struct {
-	original string
-	confused string
-}
-
-func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, userPayload []byte, rawJSON []byte) (*http.Request, []byte, codexIdentityConfuseState, error) {
-	var cache helps.CodexCache
-	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
-		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, req.Model, req.Payload, nil)
-		if errCache != nil {
-			return nil, nil, codexIdentityConfuseState{}, errCache
-		}
-		if ok {
-			cache = cached
-		}
-	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
 		if promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
 		}
-<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
 	case "openai":
 		if apiKey := strings.TrimSpace(apiKeyFromContext(ctx)); apiKey != "" {
-=======
-	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAI) {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
->>>>>>> upstream/main:internal/runtime/executor/codex_executor.go
 			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
 		}
 	}

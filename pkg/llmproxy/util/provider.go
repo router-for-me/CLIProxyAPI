@@ -7,13 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/util/provider.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
->>>>>>> upstream/main:internal/util/provider.go
 	log "github.com/sirupsen/logrus"
 )
 

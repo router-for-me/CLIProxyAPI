@@ -3,14 +3,8 @@ package cliproxy
 import (
 	"testing"
 
-<<<<<<< HEAD
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
->>>>>>> upstream/main
 )
 
 func TestEnsureExecutorsForAuth_CodexDoesNotReplaceInNormalMode(t *testing.T) {

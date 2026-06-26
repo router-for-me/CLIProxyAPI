@@ -6,11 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/config_lists.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/api/handlers/management/config_lists.go
 )
 
 // Generic helpers for list[string]

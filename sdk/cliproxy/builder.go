@@ -9,23 +9,12 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD
 	configaccess "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/access/config_access"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	sdkaccess "github.com/kooshapari/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
->>>>>>> upstream/main
 )
 
 // Builder constructs a Service instance with customizable providers.

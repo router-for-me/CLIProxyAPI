@@ -2,8 +2,8 @@
 package claude
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 )
 
 const maxBypassSignatureLen = signature.MaxClaudeThinkingSignatureLen

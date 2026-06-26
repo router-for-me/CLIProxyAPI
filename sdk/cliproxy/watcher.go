@@ -3,15 +3,9 @@ package cliproxy
 import (
 	"context"
 
-<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
->>>>>>> upstream/main
 )
 
 func defaultWatcherFactory(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
@@ -37,19 +31,8 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		dispatchRuntimeUpdate: func(update watcher.AuthUpdate) bool {
 			return w.DispatchRuntimeAuthUpdate(update)
 		},
-<<<<<<< HEAD
 		notifyTokenRefreshed: func(tokenID, accessToken, refreshToken, expiresAt string) {
 			w.NotifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt)
-=======
-		dispatchPersistedAuth: func(update watcher.AuthUpdate) bool {
-			return w.DispatchPersistedAuthUpdate(update)
-		},
-		setPluginAuthParser: func(parser PluginAuthParser) {
-			w.SetPluginAuthParser(parser)
-		},
-		reloadConfigIfChanged: func() {
-			w.ReloadConfigIfChanged()
->>>>>>> upstream/main
 		},
 	}, nil
 }

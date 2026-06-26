@@ -7,11 +7,7 @@ import (
 	"sort"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/watcher/diff/oauth_model_alias.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/watcher/diff/oauth_model_alias.go
 )
 
 type OAuthModelAliasSummary struct {

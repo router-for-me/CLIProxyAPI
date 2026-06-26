@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/executor/gemini_vertex_executor.go
 	vertexauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/vertex"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
@@ -22,16 +21,6 @@ import (
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
-=======
-	vertexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/vertex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
->>>>>>> upstream/main:internal/runtime/executor/gemini_vertex_executor.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -869,12 +858,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
-<<<<<<< HEAD:pkg/llmproxy/executor/gemini_vertex_executor.go
 	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
-=======
-	translatedReq = helps.StripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
->>>>>>> upstream/main:internal/runtime/executor/gemini_vertex_executor.go
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
@@ -964,12 +948,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
-<<<<<<< HEAD:pkg/llmproxy/executor/gemini_vertex_executor.go
 	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
-=======
-	translatedReq = helps.StripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
->>>>>>> upstream/main:internal/runtime/executor/gemini_vertex_executor.go
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")

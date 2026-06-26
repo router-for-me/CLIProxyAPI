@@ -11,11 +11,7 @@ import (
 	"regexp"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/util/util.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/util/util.go
 	log "github.com/sirupsen/logrus"
 )
 

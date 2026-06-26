@@ -3,11 +3,7 @@ package cliproxy
 import (
 	"testing"
 
-<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
->>>>>>> upstream/main
 )
 
 func TestApplyOAuthModelAlias_Rename(t *testing.T) {
@@ -95,7 +91,6 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.SanitizeOAuthModelAlias()
@@ -116,66 +111,5 @@ func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T)
 	}
 	if out[1].Name != "models/claude-opus-4-6" {
 		t.Fatalf("expected aliased model name %q, got %q", "models/claude-opus-4-6", out[1].Name)
-=======
-func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
-	cfg := &config.Config{
-		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"sample-provider": {
-				{Name: "sample-model-latest", Alias: "sample-latest"},
-			},
-		},
-	}
-	models := []*ModelInfo{
-		{ID: "sample-model-latest", Name: "models/sample-model-latest"},
-	}
-
-	out := applyOAuthModelAlias(cfg, "sample-provider", "oauth", models)
-	if len(out) != 1 {
-		t.Fatalf("expected 1 model, got %d", len(out))
-	}
-	if out[0].ID != "sample-latest" {
-		t.Fatalf("expected plugin alias id %q, got %q", "sample-latest", out[0].ID)
-	}
-	if out[0].Name != "models/sample-latest" {
-		t.Fatalf("expected plugin alias name %q, got %q", "models/sample-latest", out[0].Name)
-	}
-}
-
-func TestApplyOAuthModelAlias_PluginProviderSkipsAPIKey(t *testing.T) {
-	cfg := &config.Config{
-		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"sample-provider": {
-				{Name: "sample-model-latest", Alias: "sample-latest"},
-			},
-		},
-	}
-	models := []*ModelInfo{
-		{ID: "sample-model-latest", Name: "models/sample-model-latest"},
-	}
-
-	out := applyOAuthModelAlias(cfg, "sample-provider", "api_key", models)
-	if len(out) != 1 || out[0].ID != "sample-model-latest" {
-		t.Fatalf("expected API key plugin model to remain unchanged, got %#v", out)
-	}
-}
-
-func TestApplyOAuthModelAlias_PerAuthAlias(t *testing.T) {
-	models := []*ModelInfo{
-		{ID: "gpt-5.3-codex-spark", Name: "models/gpt-5.3-codex-spark"},
-	}
-	attributes := map[string]string{
-		"model_aliases": `[{"name":"gpt-5.3-codex-spark","alias":"gpt-5.5"}]`,
-	}
-
-	out := applyOAuthModelAliasForAuth(nil, "codex", "oauth", attributes, models)
-	if len(out) != 1 {
-		t.Fatalf("expected 1 model, got %d", len(out))
-	}
-	if out[0].ID != "gpt-5.5" {
-		t.Fatalf("expected per-auth alias id %q, got %q", "gpt-5.5", out[0].ID)
-	}
-	if out[0].Name != "models/gpt-5.5" {
-		t.Fatalf("expected per-auth alias name %q, got %q", "models/gpt-5.5", out[0].Name)
->>>>>>> upstream/main
 	}
 }

@@ -18,13 +18,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
-<<<<<<< HEAD:pkg/llmproxy/store/gitstore.go
 	githttp "github.com/go-git/go-git/v6/plumbing/transport/http"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/go-git/go-git/v6/plumbing/transport/http"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/store/gitstore.go
 )
 
 // gcInterval defines minimum time between garbage collection runs.
@@ -134,15 +129,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: create repo dir: %w", errMk)
 		}
-<<<<<<< HEAD:pkg/llmproxy/store/gitstore.go
 		if _, errClone := git.PlainClone(repoDir, &git.CloneOptions{ClientOptions: authMethod, URL: s.remote}); errClone != nil {
-=======
-		cloneOpts := &git.CloneOptions{Auth: authMethod, URL: s.remote}
-		if s.branch != "" {
-			cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
-		}
-		if _, errClone := git.PlainClone(repoDir, cloneOpts); errClone != nil {
->>>>>>> upstream/main:internal/store/gitstore.go
 			if errors.Is(errClone, transport.ErrEmptyRemoteRepository) {
 				_ = os.RemoveAll(gitDir)
 				repo, errInit := git.PlainInit(repoDir, false)
@@ -205,29 +192,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: worktree: %w", errWorktree)
 		}
-<<<<<<< HEAD:pkg/llmproxy/store/gitstore.go
 		if errPull := worktree.Pull(&git.PullOptions{ClientOptions: authMethod, RemoteName: "origin"}); errPull != nil {
-=======
-		if s.branch != "" {
-			if errCheckout := s.checkoutConfiguredBranch(repo, worktree, authMethod); errCheckout != nil {
-				s.dirLock.Unlock()
-				return errCheckout
-			}
-		} else {
-			// When branch is unset, ensure the working tree follows the remote default branch
-			if err := checkoutRemoteDefaultBranch(repo, worktree, authMethod); err != nil {
-				if !shouldFallbackToCurrentBranch(repo, err) {
-					s.dirLock.Unlock()
-					return fmt.Errorf("git token store: checkout remote default: %w", err)
-				}
-			}
-		}
-		pullOpts := &git.PullOptions{Auth: authMethod, RemoteName: "origin"}
-		if s.branch != "" {
-			pullOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
-		}
-		if errPull := worktree.Pull(pullOpts); errPull != nil {
->>>>>>> upstream/main:internal/store/gitstore.go
 			switch {
 			case errors.Is(errPull, git.NoErrAlreadyUpToDate),
 				errors.Is(errPull, git.ErrUnstagedChanges),
@@ -899,21 +864,8 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
 	}
-<<<<<<< HEAD:pkg/llmproxy/store/gitstore.go
 	s.maybeRunGC(repo)
 	if err = repo.Push(&git.PushOptions{ClientOptions: s.gitAuth(), Force: true}); err != nil {
-=======
-	pushOpts := &git.PushOptions{Auth: s.gitAuth(), Force: true}
-	if s.branch != "" {
-		pushOpts.RefSpecs = []config.RefSpec{config.RefSpec("refs/heads/" + s.branch + ":refs/heads/" + s.branch)}
-	} else {
-		// When branch is unset, pin push to the currently checked-out branch.
-		if headRef, err := repo.Head(); err == nil {
-			pushOpts.RefSpecs = []config.RefSpec{config.RefSpec(headRef.Name().String() + ":" + headRef.Name().String())}
-		}
-	}
-	if err = repo.Push(pushOpts); err != nil {
->>>>>>> upstream/main:internal/store/gitstore.go
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}

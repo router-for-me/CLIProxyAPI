@@ -9,12 +9,8 @@ import (
 	"bytes"
 	"context"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/gemini/antigravity_gemini_response.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
-=======
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
->>>>>>> upstream/main:internal/translator/antigravity/gemini/antigravity_gemini_response.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

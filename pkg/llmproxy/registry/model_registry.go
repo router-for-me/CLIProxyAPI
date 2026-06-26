@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/registry/model_registry.go
 	misc "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 	log "github.com/sirupsen/logrus"
 )
@@ -23,19 +22,6 @@ func redactClientID(id string) string {
 	}
 	return "[REDACTED]"
 }
-=======
-	misc "github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	log "github.com/sirupsen/logrus"
-)
-
-// OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
-const OpenAIImageModelType = "openai-image"
-
-const (
-	DefaultClaudeMaxInputTokens  = 200000
-	DefaultClaudeMaxOutputTokens = 64000
-)
->>>>>>> upstream/main:internal/registry/model_registry.go
 
 // ModelInfo represents information about an available model
 type ModelInfo struct {
@@ -1190,7 +1176,6 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		} else {
 			result["display_name"] = model.ID
 		}
-<<<<<<< HEAD:pkg/llmproxy/registry/model_registry.go
 		// Add thinking support for Claude Code client
 		// Claude Code checks for "thinking" field (simple boolean) to enable tab toggle
 		// Also add "extended_thinking" for detailed budget info
@@ -1204,18 +1189,6 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 				"dynamic_allowed": model.Thinking.DynamicAllowed,
 			}
 		}
-=======
-		maxInput := model.ContextLength
-		if maxInput <= 0 {
-			maxInput = DefaultClaudeMaxInputTokens
-		}
-		maxOutput := model.MaxCompletionTokens
-		if maxOutput <= 0 {
-			maxOutput = DefaultClaudeMaxOutputTokens
-		}
-		result["max_input_tokens"] = maxInput
-		result["max_tokens"] = maxOutput
->>>>>>> upstream/main:internal/registry/model_registry.go
 		return result
 
 	case "gemini":

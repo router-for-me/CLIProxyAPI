@@ -8,14 +8,8 @@ import (
 	"testing"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/synthesizer/file_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
->>>>>>> upstream/main:internal/watcher/synthesizer/file_test.go
 )
 
 func TestNewFileSynthesizer(t *testing.T) {
@@ -586,7 +580,6 @@ func TestFileSynthesizer_Synthesize_IgnoresGeminiOAuthFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-<<<<<<< HEAD:pkg/llmproxy/auth/synthesizer/file_test.go
 	// Should have 4 auths: 1 primary (disabled) + 3 virtuals
 	if len(auths) != 4 {
 		t.Fatalf("expected 4 auths (1 primary + 3 virtuals), got %d", len(auths))
@@ -655,96 +648,14 @@ func TestBuildGeminiVirtualID(t *testing.T) {
 			baseID:    "auth.json",
 			projectID: "   ",
 			want:      "auth.json::project",
-=======
-	if len(auths) != 0 {
-		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
-	}
-}
-
-func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
-	tests := []struct {
-		name     string
-		note     any
-		want     string
-		hasValue bool
-	}{
-		{
-			name:     "valid string note",
-			note:     "hello world",
-			want:     "hello world",
-			hasValue: true,
-		},
-		{
-			name:     "string note with whitespace",
-			note:     "  trimmed note  ",
-			want:     "trimmed note",
-			hasValue: true,
-		},
-		{
-			name:     "empty string note",
-			note:     "",
-			hasValue: false,
-		},
-		{
-			name:     "whitespace only note",
-			note:     "   ",
-			hasValue: false,
-		},
-		{
-			name:     "non-string note ignored",
-			note:     12345,
-			hasValue: false,
->>>>>>> upstream/main:internal/watcher/synthesizer/file_test.go
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-<<<<<<< HEAD:pkg/llmproxy/auth/synthesizer/file_test.go
 			got := buildGeminiVirtualID(tt.baseID, tt.projectID)
 			if got != tt.want {
 				t.Errorf("expected %q, got %q", tt.want, got)
-=======
-			tempDir := t.TempDir()
-			authData := map[string]any{
-				"type": "claude",
-				"note": tt.note,
-			}
-			data, _ := json.Marshal(authData)
-			errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
-			if errWriteFile != nil {
-				t.Fatalf("failed to write auth file: %v", errWriteFile)
-			}
-
-			synth := NewFileSynthesizer()
-			ctx := &SynthesisContext{
-				Config:      &config.Config{},
-				AuthDir:     tempDir,
-				Now:         time.Now(),
-				IDGenerator: NewStableIDGenerator(),
-			}
-
-			auths, errSynthesize := synth.Synthesize(ctx)
-			if errSynthesize != nil {
-				t.Fatalf("unexpected error: %v", errSynthesize)
-			}
-			if len(auths) != 1 {
-				t.Fatalf("expected 1 auth, got %d", len(auths))
-			}
-
-			value, ok := auths[0].Attributes["note"]
-			if tt.hasValue {
-				if !ok {
-					t.Fatal("expected note attribute to be set")
-				}
-				if value != tt.want {
-					t.Fatalf("expected note %q, got %q", tt.want, value)
-				}
-				return
-			}
-			if ok {
-				t.Fatalf("expected note attribute to be absent, got %q", value)
->>>>>>> upstream/main:internal/watcher/synthesizer/file_test.go
 			}
 		})
 	}

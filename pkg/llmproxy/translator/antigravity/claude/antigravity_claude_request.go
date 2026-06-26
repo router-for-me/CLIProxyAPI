@@ -9,20 +9,11 @@ import (
 	"context"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/claude/antigravity_claude_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/antigravity/claude/antigravity_claude_request.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -318,13 +309,7 @@ func logDroppedAntigravityToolUseSignature(modelName string, messageIndex, conte
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/claude/antigravity_claude_request.go
 	modelOverrides := registry.GetAntigravityModelConfig()
-=======
-	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
-		return buildAntigravityWebSearchRequest(modelName, rawJSON)
-	}
->>>>>>> upstream/main:internal/translator/antigravity/claude/antigravity_claude_request.go
 
 	// system instruction
 	var systemInstructionJSON []byte
@@ -337,19 +322,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemPromptResult := systemResults[i]
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/claude/antigravity_claude_request.go
 				systemPrompt := strings.TrimSpace(systemPromptResult.Get("text").String())
 				if systemPrompt == "" {
 					continue
-=======
-				systemPrompt := systemPromptResult.Get("text").String()
-				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
-					continue
-				}
-				partJSON := []byte(`{}`)
-				if systemPrompt != "" {
-					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
->>>>>>> upstream/main:internal/translator/antigravity/claude/antigravity_claude_request.go
 				}
 				partJSON := []byte(`{}`)
 				partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
@@ -357,7 +332,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				hasSystemInstruction = true
 			}
 		}
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/claude/antigravity_claude_request.go
 	} else if systemResult.Type == gjson.String {
 		systemPrompt := strings.TrimSpace(systemResult.String())
 		if systemPrompt != "" {
@@ -365,12 +339,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemInstructionJSON, _ = sjson.SetBytes(systemInstructionJSON, "parts.0.text", systemPrompt)
 			hasSystemInstruction = true
 		}
-=======
-	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
-		systemInstructionJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
-		systemInstructionJSON, _ = sjson.SetBytes(systemInstructionJSON, "parts.0.text", systemResult.String())
-		hasSystemInstruction = true
->>>>>>> upstream/main:internal/translator/antigravity/claude/antigravity_claude_request.go
 	}
 
 	// contents

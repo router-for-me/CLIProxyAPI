@@ -9,14 +9,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -155,50 +148,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// input array processing
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 	pendingReasoning := ""
-=======
-	var pendingReasoningParts []string
-	type pendingToolUseMessage struct {
-		callID string
-		raw    []byte
-	}
-	var pendingToolUseMessages []pendingToolUseMessage
-	appendMessage := func(msg []byte) {
-		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-	}
-	flushPendingReasoning := func() {
-		if len(pendingReasoningParts) == 0 {
-			return
-		}
-		asst := []byte(`{"role":"assistant","content":[]}`)
-		for _, partJSON := range pendingReasoningParts {
-			asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
-		}
-		appendMessage(asst)
-		pendingReasoningParts = nil
-	}
-	flushPendingToolUses := func() {
-		for _, pending := range pendingToolUseMessages {
-			appendMessage(pending.raw)
-		}
-		pendingToolUseMessages = nil
-	}
-	flushPendingToolUseFor := func(callID string) {
-		if len(pendingToolUseMessages) == 0 {
-			return
-		}
-		for i, pending := range pendingToolUseMessages {
-			if pending.callID == callID {
-				appendMessage(pending.raw)
-				pendingToolUseMessages = append(pendingToolUseMessages[:i], pendingToolUseMessages[i+1:]...)
-				return
-			}
-		}
-		flushPendingToolUses()
-	}
-
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			if extractedFromSystem && strings.EqualFold(item.Get("role").String(), "system") {
@@ -294,42 +244,18 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 				}
 
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 				if role == "assistant" && pendingReasoning != "" {
 					partsJSON = append([]string{buildRedactedThinkingPart(pendingReasoning)}, partsJSON...)
 					pendingReasoning = ""
 					hasRedactedThinking = true
-=======
-				hasReasoningParts := false
-				if role != "assistant" {
-					flushPendingToolUses()
-				}
-				if len(pendingReasoningParts) > 0 {
-					if role == "assistant" {
-						if len(partsJSON) == 0 && textAggregate.Len() > 0 {
-							contentPart := []byte(`{"type":"text","text":""}`)
-							contentPart, _ = sjson.SetBytes(contentPart, "text", textAggregate.String())
-							partsJSON = append(partsJSON, string(contentPart))
-						}
-						partsJSON = append(append([]string{}, pendingReasoningParts...), partsJSON...)
-						pendingReasoningParts = nil
-						hasReasoningParts = true
-					} else {
-						flushPendingReasoning()
-					}
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 				}
 
 				if len(partsJSON) > 0 {
 					msg := []byte(`{"role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 					// Preserve legacy single-text flattening, but keep structured arrays when
 					// image/thinking content is present.
 					if len(partsJSON) == 1 && !hasImage && !hasRedactedThinking {
-=======
-					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasReasoningParts {
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.DeleteBytes(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])
@@ -372,7 +298,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 				}
 
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 				asst := `{"role":"assistant","content":[]}`
 				if pendingReasoning != "" {
 					asst, _ = sjson.SetRaw(asst, "content.-1", buildRedactedThinkingPart(pendingReasoning))
@@ -380,18 +305,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				asst, _ = sjson.SetRaw(asst, "content.-1", toolUse)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", []byte(asst))
-=======
-				asst := []byte(`{"role":"assistant","content":[]}`)
-				for _, partJSON := range pendingReasoningParts {
-					asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
-				}
-				pendingReasoningParts = nil
-				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				pendingToolUseMessages = append(pendingToolUseMessages, pendingToolUseMessage{
-					callID: callID,
-					raw:    asst,
-				})
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 
 			case "function_call_output":
 				flushPendingReasoning()
@@ -404,7 +317,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				toolResult, _ = sjson.Set(toolResult, "tool_use_id", callID)
 				toolResult, _ = sjson.Set(toolResult, "content", outputStr)
 
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 				usr := `{"role":"user","content":[]}`
 				usr, _ = sjson.SetRaw(usr, "content.-1", toolResult)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", []byte(usr))
@@ -418,34 +330,20 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						pendingReasoning = pendingReasoning + "\n\n" + text
 					}
 				}
-=======
-				usr := []byte(`{"role":"user","content":[]}`)
-				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
-				appendMessage(usr)
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 			}
 			return true
 		})
 	}
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 	if pendingReasoning != "" {
 		asst := `{"role":"assistant","content":[]}`
 		asst, _ = sjson.SetRaw(asst, "content.-1", buildRedactedThinkingPart(pendingReasoning))
 		out, _ = sjson.SetRawBytes(out, "messages.-1", []byte(asst))
 	}
-=======
-	flushPendingReasoning()
-	flushPendingToolUses()
-
-	includedToolNames := map[string]struct{}{}
-	toolNameMap := map[string]string{}
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 
 	// tools mapping: parameters -> input_schema
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		toolsJSON := "[]"
 		tools.ForEach(func(_, tool gjson.Result) bool {
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 			tJSON := `{"name":"","description":"","input_schema":{}}`
 			if n := tool.Get("name"); n.Exists() {
 				tJSON, _ = sjson.Set(tJSON, "name", n.String())
@@ -461,16 +359,6 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 
 			toolsJSON, _ = sjson.SetRaw(toolsJSON, "-1", tJSON)
-=======
-			convertedTools := convertResponsesToolToClaudeTools(tool, toolNameMap)
-			for _, tJSON := range convertedTools {
-				toolName := gjson.GetBytes(tJSON, "name").String()
-				if toolName != "" {
-					includedToolNames[toolName] = struct{}{}
-				}
-				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)
-			}
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 			return true
 		})
 		if gjson.Parse(toolsJSON).IsArray() && len(gjson.Parse(toolsJSON).Array()) > 0 {
@@ -495,23 +383,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		case gjson.JSON:
 			if toolChoice.Get("type").String() == "function" {
 				fn := toolChoice.Get("function.name").String()
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_request.go
 				toolChoiceJSON := `{"name":"","type":"tool"}`
 				toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "name", fn)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoiceJSON))
-=======
-				if fn == "" {
-					fn = toolChoice.Get("name").String()
-				}
-				if mappedName := toolNameMap[fn]; mappedName != "" {
-					fn = mappedName
-				}
-				if _, ok := includedToolNames[fn]; ok {
-					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
-					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
-				}
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_request.go
 			}
 		default:
 

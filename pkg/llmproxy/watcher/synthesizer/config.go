@@ -5,16 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/watcher/synthesizer/config.go
 	kiroauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/kiro"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher/diff"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/watcher/synthesizer/config.go
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.

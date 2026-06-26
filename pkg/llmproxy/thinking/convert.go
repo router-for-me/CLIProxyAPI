@@ -3,11 +3,7 @@ package thinking
 import (
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/thinking/convert.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
->>>>>>> upstream/main:internal/thinking/convert.go
 )
 
 // levelToBudgetMap defines the standard Level → Budget mapping.

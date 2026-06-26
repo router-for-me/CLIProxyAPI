@@ -15,15 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/claude/antigravity_claude_response.go
 	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/antigravity/claude/antigravity_claude_response.go
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tidwall/gjson"

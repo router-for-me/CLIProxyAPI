@@ -11,11 +11,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files_download_windows_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/api/handlers/management/auth_files_download_windows_test.go
 )
 
 func TestDownloadAuthFile_PreventsWindowsSlashTraversal(t *testing.T) {

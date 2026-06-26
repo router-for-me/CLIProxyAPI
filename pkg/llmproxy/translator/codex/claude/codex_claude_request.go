@@ -12,15 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/codex/claude/codex_claude_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/util"
-=======
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/codex/claude/codex_claude_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -272,14 +265,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
-<<<<<<< HEAD:pkg/llmproxy/translator/codex/claude/codex_claude_request.go
 			if util.IsWebSearchTool(toolResult.Get("name").String(), toolResult.Get("type").String()) {
 				// Replace the tool content entirely with {"type":"web_search"}
 				template, _ = sjson.SetRawBytes(template, "tools.-1", []byte(`{"type":"web_search"}`))
-=======
-			if isClaudeWebSearchToolType(toolResult.Get("type").String()) {
-				template, _ = sjson.SetRawBytes(template, "tools.-1", convertClaudeWebSearchToolToCodex(toolResult))
->>>>>>> upstream/main:internal/translator/codex/claude/codex_claude_request.go
 				continue
 			}
 			// Special handling: Codex sends "custom" type tools (e.g., apply_patch with Lark grammar)

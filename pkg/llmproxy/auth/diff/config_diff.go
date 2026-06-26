@@ -6,11 +6,7 @@ import (
 	"reflect"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/diff/config_diff.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/watcher/diff/config_diff.go
 )
 
 // BuildConfigChangeDetails computes a redacted, human-readable list of config changes.
@@ -238,7 +234,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/auth/diff/config_diff.go
 	// AmpCode settings (redacted where needed)
 	oldAmpURL := strings.TrimSpace(oldCfg.AmpCode.UpstreamURL)
 	newAmpURL := strings.TrimSpace(newCfg.AmpCode.UpstreamURL)
@@ -272,8 +267,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("ampcode.upstream-api-keys: updated (%d -> %d entries)", oldUpstreamEntryCount, newUpstreamEntryCount))
 	}
 
-=======
->>>>>>> upstream/main:internal/watcher/diff/config_diff.go
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}

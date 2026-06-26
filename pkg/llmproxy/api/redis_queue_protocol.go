@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/redisqueue"
 	log "github.com/sirupsen/logrus"
 )
 

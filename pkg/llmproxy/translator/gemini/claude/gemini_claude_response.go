@@ -13,13 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini/claude/gemini_claude_response.go
 	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/gemini/claude/gemini_claude_response.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

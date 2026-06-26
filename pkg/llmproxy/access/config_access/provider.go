@@ -5,13 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/access/config_access/provider.go
 	sdkaccess "github.com/kooshapari/CLIProxyAPI/v7/sdk/access"
 	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
-=======
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
->>>>>>> upstream/main:internal/access/config_access/provider.go
 )
 
 // Register ensures the config-access provider is available to the access manager.

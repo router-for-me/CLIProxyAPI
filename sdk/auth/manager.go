@@ -4,13 +4,8 @@ import (
 	"context"
 	"fmt"
 
-<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main
 )
 
 // Manager aggregates authenticators and coordinates persistence via a token store.

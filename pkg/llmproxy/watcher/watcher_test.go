@@ -14,20 +14,11 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-<<<<<<< HEAD:pkg/llmproxy/watcher/watcher_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher/diff"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher/synthesizer"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/watcher/watcher_test.go
 	"gopkg.in/yaml.v3"
 )
 

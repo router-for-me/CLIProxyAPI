@@ -6,16 +6,10 @@ import (
 	"sort"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/access/reconcile.go
 	configaccess "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/access/config_access"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	sdkaccess "github.com/kooshapari/CLIProxyAPI/v7/sdk/access"
 	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
-=======
-	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
->>>>>>> upstream/main:internal/access/reconcile.go
 	log "github.com/sirupsen/logrus"
 )
 

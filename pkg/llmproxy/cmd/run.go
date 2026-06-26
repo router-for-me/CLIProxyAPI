@@ -10,17 +10,9 @@ import (
 	"syscall"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/cmd/run.go
 	internalapi "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
->>>>>>> upstream/main:internal/cmd/run.go
 	log "github.com/sirupsen/logrus"
 )
 

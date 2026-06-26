@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
@@ -36,21 +35,6 @@ import (
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -58,7 +42,6 @@ import (
 )
 
 const (
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.googleapis.com"
 	antigravitySandboxBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
@@ -71,23 +54,6 @@ const (
 	defaultAntigravityAgent        = "antigravity/1.19.6 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
-=======
-	antigravityBaseURLDaily                = "https://daily-cloudcode-pa.googleapis.com"
-	antigravitySandboxBaseURLDaily         = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd                 = "https://cloudcode-pa.googleapis.com"
-	antigravityCountTokensPath             = "/v1internal:countTokens"
-	antigravityStreamPath                  = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath                = "/v1internal:generateContent"
-	antigravityClientID                    = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret                = "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"
-	defaultAntigravityAgent                = "antigravity/cli/1.0.8 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
-	antigravityAuthType                    = "antigravity"
-	refreshSkew                            = 3000 * time.Second
-	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
-	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
-	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
-	antigravityInstantRetryThreshold       = 3 * time.Second
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -699,15 +665,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	baseURLs := antigravityBaseURLFallbackOrder(e.cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
-=======
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
@@ -830,21 +790,10 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 				sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						sErr.retryAfter = retryAfter
-=======
-				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
-						delay := antigravitySoftRateLimitDelay(attempt)
-						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
-						if errWait := antigravityWait(ctx, delay); errWait != nil {
-							return resp, errWait
-						}
-						continue attemptLoop
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 					}
 				}
 				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
@@ -871,7 +820,6 @@ attemptLoop:
 
 		switch {
 		case lastStatus != 0:
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 			sErr := newAntigravityStatusErr(lastStatus, lastBody)
 			if lastStatus == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
@@ -879,9 +827,6 @@ attemptLoop:
 				}
 			}
 			err = sErr
-=======
-			err = newAntigravityStatusErr(lastStatus, lastBody)
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 		case lastErr != nil:
 			err = lastErr
 		default:
@@ -952,14 +897,8 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	baseURLs := antigravityBaseURLFallbackOrder(e.cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-=======
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -1086,21 +1025,10 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 				sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						sErr.retryAfter = retryAfter
-=======
-				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
-						delay := antigravitySoftRateLimitDelay(attempt)
-						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
-						if errWait := antigravityWait(ctx, delay); errWait != nil {
-							return resp, errWait
-						}
-						continue attemptLoop
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 					}
 				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
@@ -1173,7 +1101,6 @@ attemptLoop:
 
 		switch {
 		case lastStatus != 0:
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 			sErr := newAntigravityStatusErr(lastStatus, lastBody)
 			if lastStatus == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
@@ -1181,9 +1108,6 @@ attemptLoop:
 				}
 			}
 			err = sErr
-=======
-			err = newAntigravityStatusErr(lastStatus, lastBody)
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 		case lastErr != nil:
 			err = lastErr
 		default:
@@ -1395,18 +1319,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	ctx = context.WithValue(ctx, interfaces.ContextKeyAlt, "")
-=======
-	ctx = context.WithValue(ctx, "alt", "")
-	if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
-		return nil, homeKVUnavailableStatusErr(errCooldown)
-	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
-		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
-		d := remaining
-		return nil, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
-	}
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -1448,14 +1361,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	baseURLs := antigravityBaseURLFallbackOrder(e.cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-=======
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -1590,21 +1497,10 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 				sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						sErr.retryAfter = retryAfter
-=======
-				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
-						delay := antigravitySoftRateLimitDelay(attempt)
-						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
-						if errWait := antigravityWait(ctx, delay); errWait != nil {
-							return nil, errWait
-						}
-						continue attemptLoop
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 					}
 				}
 				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
@@ -1688,7 +1584,6 @@ attemptLoop:
 
 		switch {
 		case lastStatus != 0:
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 			sErr := newAntigravityStatusErr(lastStatus, lastBody)
 			if lastStatus == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
@@ -1696,9 +1591,6 @@ attemptLoop:
 				}
 			}
 			err = sErr
-=======
-			err = newAntigravityStatusErr(lastStatus, lastBody)
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 		case lastErr != nil:
 			err = lastErr
 		default:
@@ -1788,13 +1680,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
 
-=======
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	// Prepare payload once (doesn't depend on baseURL)
 	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
@@ -2278,7 +2167,6 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if refreshToken == "" {
 		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing refresh token"}
 	}
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 
 	form := url.Values{}
 	form.Set("client_id", antigravityClientID)
@@ -2293,10 +2181,6 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedTokenURL, strings.NewReader(form.Encode()))
 	if errReq != nil {
 		return auth, errReq
-=======
-	if ctx == nil {
-		ctx = context.Background()
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
 
@@ -2306,7 +2190,6 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if errRefresh != nil {
 		return auth, errRefresh
 	}
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
@@ -2336,11 +2219,6 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
 		return auth, errUnmarshal
-=======
-	tokenResp, ok := result.(*antigravityTokenRefreshData)
-	if !ok || tokenResp == nil {
-		return auth, fmt.Errorf("antigravity token refresh failed: invalid single-flight result")
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	}
 
 	if auth.Metadata == nil {
@@ -2621,43 +2499,9 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	if useAntigravitySchema {
 		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
 		payloadStr = util.DeleteKeysByName(payloadStr, "$ref", "$defs")
-=======
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
-	var (
-		bodyReader io.Reader
-		payloadLog []byte
-	)
-	if antigravityRequestNeedsSchemaSanitization(payload) {
-		payloadStr := string(payload)
-		paths := make([]string, 0)
-		util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
-		for _, p := range paths {
-			payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
-		}
-
-		if useAntigravitySchema {
-			payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
-		} else {
-			payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
-		}
-
-		if strings.Contains(modelName, "claude") {
-			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-			payloadStr = string(updated)
-		} else {
-			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
-		}
-
-		payloadStrBytes := applyAntigravityNativeSignatureReplayIfNeeded(modelName, []byte(payloadStr))
-		bodyReader = bytes.NewReader(payloadStrBytes)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = append([]byte(nil), payloadStrBytes...)
-		}
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	} else {
 		if strings.Contains(modelName, "claude") {
 			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
@@ -2685,7 +2529,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	// 	}
 	// }
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 	if strings.Contains(modelName, "claude") {
 		updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		payloadStr = string(updated)
@@ -2698,9 +2541,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		return nil, gerr
 	}
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedReqURL, strings.NewReader(payloadStr))
-=======
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 	if errReq != nil {
 		return nil, errReq
 	}
@@ -3181,13 +3021,8 @@ func antigravityWait(ctx context.Context, wait time.Duration) error {
 	}
 }
 
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 func antigravityBaseURLFallbackOrder(cfg *config.Config, auth *cliproxyauth.Auth) []string {
 	if base := resolveOAuthBaseURLWithOverride(cfg, antigravityAuthType, "", resolveCustomAntigravityBaseURL(auth)); base != "" {
-=======
-var antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
-	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go
 		return []string{base}
 	}
 	return []string{
@@ -3320,7 +3155,6 @@ func generateStableSessionID(payload []byte) string {
 	}
 	return generateSessionID()
 }
-<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
 
 func generateProjectID() string {
 	adjectives := []string{"useful", "bright", "swift", "calm", "bold"}
@@ -3334,5 +3168,3 @@ func generateProjectID() string {
 }
 
 func (e *AntigravityExecutor) CloseExecutionSession(sessionID string) {}
-=======
->>>>>>> upstream/main:internal/runtime/executor/antigravity_executor.go

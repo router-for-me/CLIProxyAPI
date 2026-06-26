@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/antigravity"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/claude"
@@ -44,22 +43,6 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -67,7 +50,6 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	anthropicCallbackPort   = 54545
 	geminiCallbackPort      = 8085
 	codexCallbackPort       = 1455
@@ -76,10 +58,6 @@ const (
 	geminiCLIUserAgent      = "google-api-nodejs-client/9.15.1"
 	geminiCLIApiClient      = "gl-node/22.17.0"
 	geminiCLIClientMetadata = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
-=======
-	anthropicCallbackPort = 54545
-	codexCallbackPort     = 1455
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 )
 
 type callbackForwarder struct {
@@ -95,17 +73,8 @@ type codexOAuthService interface {
 }
 
 var (
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	callbackForwardersMu sync.Mutex
 	callbackForwarders   = make(map[int]*callbackForwarder)
-=======
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
-	errPluginVirtualAuth  = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
-	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -327,7 +296,6 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
 }
 
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 func normalizeManagementCallbackPath(rawPath string) string {
 	normalized := strings.TrimSpace(rawPath)
 	normalized = strings.ReplaceAll(normalized, "\\", "/")
@@ -357,81 +325,6 @@ func normalizeManagementCallbackPath(rawPath string) string {
 		return "/" + normalized
 	}
 	return normalized
-=======
-func pluginAuthProviderFromPath(path string) (string, bool) {
-	path = strings.TrimSpace(path)
-	const prefix = "/v0/management/"
-	const suffix = "-auth-url"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return "", false
-	}
-	provider := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return "", false
-	}
-	for _, r := range provider {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= '0' && r <= '9':
-		case r == '-':
-		default:
-			return "", false
-		}
-	}
-	return provider, true
-}
-
-func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
-	if h == nil || c == nil || c.Request == nil || c.Request.URL == nil {
-		return false
-	}
-	h.mu.Lock()
-	host := h.pluginHost
-	h.mu.Unlock()
-	if host == nil {
-		return false
-	}
-	provider, ok := pluginAuthProviderFromPath(c.Request.URL.Path)
-	if !ok || !host.HasAuthProvider(provider) {
-		return false
-	}
-
-	ctx := PopulateAuthContext(context.Background(), c)
-	baseURL, errBaseURL := h.managementCallbackURL("/v0/management/oauth-callback")
-	if errBaseURL != nil {
-		log.WithError(errBaseURL).Error("failed to compute plugin auth callback URL")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return true
-	}
-	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL)
-	if !handled {
-		return false
-	}
-	if errStart != nil {
-		log.WithError(errStart).Error("failed to start plugin auth login")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return true
-	}
-	state := strings.TrimSpace(resp.State)
-	if state == "" {
-		log.WithField("provider", provider).Error("plugin auth provider returned empty state")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
-		return true
-	}
-	if errState := ValidateOAuthState(state); errState != nil {
-		log.WithError(errState).WithField("provider", provider).Error("plugin auth provider returned invalid state")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
-		return true
-	}
-	if errRegister := RegisterPluginOAuthSession(state, provider, resp.Metadata); errRegister != nil {
-		log.WithError(errRegister).WithField("provider", provider).Error("failed to register plugin oauth session")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
-		return true
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": resp.URL, "state": state})
-	return true
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -532,39 +425,6 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
-=======
-				if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
-					fileData["project_id"] = projectID
-				}
-				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
-					switch pv.Type {
-					case gjson.Number:
-						fileData["priority"] = int(pv.Int())
-					case gjson.String:
-						if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(pv.String())); errAtoi == nil {
-							fileData["priority"] = parsed
-						}
-					}
-				}
-				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
-					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
-						fileData["note"] = trimmed
-					}
-				}
-				if wv := gjson.GetBytes(data, "websockets"); wv.Exists() {
-					switch wv.Type {
-					case gjson.True:
-						fileData["websockets"] = true
-					case gjson.False:
-						fileData["websockets"] = false
-					case gjson.String:
-						if parsed, errParse := strconv.ParseBool(strings.TrimSpace(wv.String())); errParse == nil {
-							fileData["websockets"] = parsed
-						}
-					}
-				}
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 			}
 
 			files = append(files, fileData)
@@ -651,43 +511,6 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
-=======
-	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
-	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
-	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil {
-			entry["priority"] = parsed
-		}
-	} else if auth.Metadata != nil {
-		if rawPriority, ok := auth.Metadata["priority"]; ok {
-			switch v := rawPriority.(type) {
-			case float64:
-				entry["priority"] = int(v)
-			case int:
-				entry["priority"] = v
-			case string:
-				if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-					entry["priority"] = parsed
-				}
-			}
-		}
-	}
-	// Expose note from Attributes (set by synthesizer from JSON "note" field).
-	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
-	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {
-		entry["note"] = note
-	} else if auth.Metadata != nil {
-		if rawNote, ok := auth.Metadata["note"].(string); ok {
-			if trimmed := strings.TrimSpace(rawNote); trimmed != "" {
-				entry["note"] = trimmed
-			}
-		}
-	}
-	if websockets, ok := authWebsocketsValue(auth); ok {
-		entry["websockets"] = websockets
-	}
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 	return entry
 }
 
@@ -980,210 +803,8 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	h.disableAuth(ctx, full)
 	c.JSON(200, gin.H{"status": "ok"})
-=======
-	form, err := c.MultipartForm()
-	if err != nil {
-		return nil, err
-	}
-	if form == nil || len(form.File) == 0 {
-		return nil, nil
-	}
-
-	keys := make([]string, 0, len(form.File))
-	for key := range form.File {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	headers := make([]*multipart.FileHeader, 0)
-	for _, key := range keys {
-		headers = append(headers, form.File[key]...)
-	}
-	return headers, nil
-}
-
-func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.FileHeader) (string, error) {
-	if file == nil {
-		return "", fmt.Errorf("no file uploaded")
-	}
-	name := filepath.Base(strings.TrimSpace(file.Filename))
-	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		return "", errAuthFileMustBeJSON
-	}
-	src, err := file.Open()
-	if err != nil {
-		return "", fmt.Errorf("failed to open uploaded file: %w", err)
-	}
-	defer src.Close()
-
-	data, err := io.ReadAll(src)
-	if err != nil {
-		return "", fmt.Errorf("failed to read uploaded file: %w", err)
-	}
-	if err := h.writeAuthFile(ctx, name, data); err != nil {
-		return "", err
-	}
-	return name, nil
-}
-
-func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) error {
-	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(dst) {
-		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-			dst = abs
-		}
-	}
-	auth, err := h.buildAuthFromFileData(dst, data)
-	if err != nil {
-		return err
-	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
-		return fmt.Errorf("failed to write file: %w", errWrite)
-	}
-	if err := h.upsertAuthRecord(ctx, auth); err != nil {
-		return err
-	}
-	return nil
-}
-
-func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
-	if c == nil {
-		return nil, nil
-	}
-	names := uniqueAuthFileNames(c.QueryArray("name"))
-	if len(names) > 0 {
-		return names, nil
-	}
-
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read body")
-	}
-	body = bytes.TrimSpace(body)
-	if len(body) == 0 {
-		return nil, nil
-	}
-
-	var objectBody struct {
-		Name  string   `json:"name"`
-		Names []string `json:"names"`
-	}
-	if body[0] == '[' {
-		var arrayBody []string
-		if err := json.Unmarshal(body, &arrayBody); err != nil {
-			return nil, fmt.Errorf("invalid request body")
-		}
-		return uniqueAuthFileNames(arrayBody), nil
-	}
-	if err := json.Unmarshal(body, &objectBody); err != nil {
-		return nil, fmt.Errorf("invalid request body")
-	}
-
-	out := make([]string, 0, len(objectBody.Names)+1)
-	if strings.TrimSpace(objectBody.Name) != "" {
-		out = append(out, objectBody.Name)
-	}
-	out = append(out, objectBody.Names...)
-	return uniqueAuthFileNames(out), nil
-}
-
-func uniqueAuthFileNames(names []string) []string {
-	if len(names) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(names))
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		out = append(out, name)
-	}
-	return out
-}
-
-func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, int, error) {
-	name = strings.TrimSpace(name)
-	if isUnsafeAuthFileName(name) {
-		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
-	}
-
-	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	targetID := ""
-	if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
-		if !isPluginVirtualSourceDelete(name, targetAuth) {
-			return filepath.Base(name), http.StatusConflict, errPluginVirtualAuth
-		}
-		targetID = strings.TrimSpace(targetAuth.ID)
-		if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
-			targetPath = path
-		}
-	}
-	if !filepath.IsAbs(targetPath) {
-		if abs, errAbs := filepath.Abs(targetPath); errAbs == nil {
-			targetPath = abs
-		}
-	}
-	if errRemove := os.Remove(targetPath); errRemove != nil {
-		if os.IsNotExist(errRemove) {
-			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
-		}
-		return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
-	}
-	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
-		return filepath.Base(name), http.StatusInternalServerError, errDeleteRecord
-	}
-	h.removeAuthsForPath(ctx, targetPath, targetID)
-	return filepath.Base(name), http.StatusOK, nil
-}
-
-func isPluginVirtualSourceDelete(name string, auth *coreauth.Auth) bool {
-	if !coreauth.IsPluginVirtualAuth(auth) {
-		return true
-	}
-	sourcePath := strings.TrimSpace(authAttribute(auth, coreauth.AttributeVirtualSource))
-	if sourcePath == "" {
-		sourcePath = strings.TrimSpace(authAttribute(auth, "path"))
-	}
-	if sourcePath == "" {
-		return false
-	}
-	return strings.EqualFold(filepath.Base(strings.TrimSpace(name)), filepath.Base(sourcePath))
-}
-
-func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
-	if h == nil || h.authManager == nil {
-		return nil
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
-	if auth, ok := h.authManager.GetByID(name); ok {
-		return auth
-	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		if strings.TrimSpace(auth.FileName) == name {
-			return auth
-		}
-		if filepath.Base(strings.TrimSpace(authAttribute(auth, "path"))) == name {
-			return auth
-		}
-	}
-	return nil
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 }
 
 func (h *Handler) authIDForPath(path string) string {
@@ -1274,7 +895,6 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	if authID == "" {
 		authID = safePath
 	}
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	attr := map[string]string{
 		"path":   safePath,
 		"source": safePath,
@@ -1289,63 +909,13 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		Metadata:   metadata,
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
-=======
-	auth := (*coreauth.Auth)(nil)
-	if h != nil && h.cfg != nil {
-		sctx := &synthesizer.SynthesisContext{
-			Config:      h.cfg,
-			AuthDir:     h.cfg.AuthDir,
-			Now:         time.Now(),
-			IDGenerator: synthesizer.NewStableIDGenerator(),
-		}
-		if generated := synthesizer.SynthesizeAuthFile(sctx, path, data); len(generated) > 0 && generated[0] != nil {
-			auth = generated[0].Clone()
-		}
-	}
-	if auth == nil {
-		auth = &coreauth.Auth{
-			ID:       authID,
-			Provider: provider,
-			Label:    label,
-			Status:   coreauth.StatusActive,
-			Attributes: map[string]string{
-				"path":   path,
-				"source": path,
-			},
-			Metadata:  metadata,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		}
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 	}
 	auth.ID = authID
 	auth.FileName = filepath.Base(path)
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
 	}
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	if existing, ok := h.authManager.GetByID(authID); ok {
-=======
-	if h != nil && h.authManager != nil {
-		if existing, ok := h.authManager.GetByID(authID); ok {
-			auth.CreatedAt = existing.CreatedAt
-			if !hasLastRefresh {
-				auth.LastRefreshedAt = existing.LastRefreshedAt
-			}
-			auth.NextRefreshAfter = existing.NextRefreshAfter
-			auth.Runtime = existing.Runtime
-		}
-	}
-	coreauth.ApplyCustomHeadersFromMetadata(auth)
-	return auth, nil
-}
-
-func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) error {
-	if h == nil || h.authManager == nil || auth == nil {
-		return nil
-	}
-	if existing, ok := h.authManager.GetByID(auth.ID); ok {
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 		auth.CreatedAt = existing.CreatedAt
 		if !hasLastRefresh {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -1458,7 +1028,6 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": desiredDisabled})
 }
 
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 func (h *Handler) findAuthByIdentifier(name string) *coreauth.Auth {
 	name = strings.TrimSpace(name)
 	if name == "" || h.authManager == nil {
@@ -1482,16 +1051,12 @@ func (h *Handler) findAuthByIdentifier(name string) *coreauth.Auth {
 }
 
 // PatchAuthFileFields updates editable fields (prefix, proxy_url, priority) of an auth file.
-=======
-// PatchAuthFileFields updates arbitrary metadata fields of an auth file.
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	var req struct {
 		Name     string  `json:"name"`
 		Prefix   *string `json:"prefix"`
@@ -1499,12 +1064,6 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		Priority *int    `json:"priority"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-=======
-	var req map[string]json.RawMessage
-	decoder := json.NewDecoder(c.Request.Body)
-	decoder.UseNumber()
-	if err := decoder.Decode(&req); err != nil {
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
@@ -1540,7 +1099,6 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	changed := false
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	if req.Prefix != nil {
 		targetAuth.Prefix = *req.Prefix
 		changed = true
@@ -1557,32 +1115,6 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(targetAuth.Metadata, "priority")
 		} else {
 			targetAuth.Metadata["priority"] = *req.Priority
-=======
-	touchedRoots := make(map[string]struct{}, len(req))
-	for key, rawValue := range req {
-		fieldPath := strings.TrimSpace(key)
-		if fieldPath == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "field name is required"})
-			return
-		}
-		value, errDecode := decodeAuthFileFieldValue(rawValue)
-		if errDecode != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
-			return
-		}
-		if targetAuth.Metadata == nil {
-			targetAuth.Metadata = make(map[string]any)
-		}
-
-		if fieldPath == "headers" {
-			applyAuthFileHeadersPatch(targetAuth, value)
-		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
-			return
-		}
-		if root := rootAuthFileField(fieldPath); root != "" {
-			touchedRoots[root] = struct{}{}
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 		}
 		changed = true
 	}
@@ -1871,17 +1403,6 @@ func (h *Handler) removeAuth(ctx context.Context, id string) {
 	if h == nil || h.authManager == nil {
 		return
 	}
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
-=======
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return
-	}
-	if _, ok := h.authManager.GetByID(id); ok {
-		h.authManager.Remove(ctx, id)
-		return
-	}
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 	authID := h.authIDForPath(id)
 	if authID == "" {
 		authID = strings.TrimSpace(id)
@@ -1975,25 +1496,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	return store.Save(ctx, record)
-=======
-	if h.postAuthHook != nil {
-		if err := h.postAuthHook(ctx, record); err != nil {
-			return "", fmt.Errorf("post-auth hook failed: %w", err)
-		}
-	}
-	savedPath, errSave := store.Save(ctx, record)
-	if errSave != nil {
-		return savedPath, errSave
-	}
-	if h.postAuthPersistHook != nil {
-		if errHook := h.postAuthPersistHook(ctx, record); errHook != nil {
-			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
-		}
-	}
-	return savedPath, nil
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
@@ -2134,7 +1637,6 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 		fmt.Println("You can now use Claude services through this CLI")
 		CompleteOAuthSession(state)
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 		CompleteOAuthSessionsByProvider("anthropic")
 	}()
 
@@ -2396,8 +1898,6 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		CompleteOAuthSession(state)
 		CompleteOAuthSessionsByProvider("gemini")
 		fmt.Printf("You can now use Gemini CLI services through this CLI; token saved to %s\n", savedPath)
-=======
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
@@ -2715,18 +2215,9 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 
 	fmt.Println("Initializing xAI authentication...")
 
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 	state := fmt.Sprintf("gem-%d", time.Now().UnixNano())
 	// Initialize Qwen auth service
 	qwenAuth := qwen.NewQwenAuth(h.cfg, http.DefaultClient)
-=======
-	pkceCodes, errPKCE := xaiauth.GeneratePKCECodes()
-	if errPKCE != nil {
-		log.Errorf("Failed to generate xAI PKCE codes: %v", errPKCE)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
-		return
-	}
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -2968,7 +2459,6 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := context.Background()
 
@@ -3654,8 +3144,6 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 	return true, nil
 }
 
-=======
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 func (h *Handler) GetAuthStatus(c *gin.Context) {
 	state := strings.TrimSpace(c.Query("state"))
 	if state == "" {
@@ -3748,7 +3236,6 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
 
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files.go
 const kiroCallbackPort = 9876
 
 func (h *Handler) RequestKiroToken(c *gin.Context) {
@@ -4027,60 +3514,6 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid method, use 'aws', 'google', or 'github'"})
-=======
-func pluginLoginPollAuths(host *pluginhost.Host, resp pluginapi.AuthLoginPollResponse) []*coreauth.Auth {
-	if host == nil {
-		return nil
-	}
-	authDatas := resp.Auths
-	if len(authDatas) == 0 {
-		authDatas = []pluginapi.AuthData{resp.Auth}
-	}
-	records := make([]*coreauth.Auth, 0, len(authDatas))
-	for _, authData := range authDatas {
-		record := host.AuthDataToCoreAuth(authData, "", "")
-		if record == nil {
-			return nil
-		}
-		records = append(records, record)
-	}
-	return records
-}
-
-func (h *Handler) savePluginLoginRecords(ctx context.Context, records []*coreauth.Auth) error {
-	savedPaths := make([]string, 0, len(records))
-	for _, record := range records {
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
-		if strings.TrimSpace(savedPath) != "" {
-			savedPaths = append(savedPaths, savedPath)
-		}
-		if errSave != nil {
-			h.rollbackSavedTokenRecords(ctx, savedPaths)
-			return errSave
-		}
-	}
-	return nil
-}
-
-func (h *Handler) rollbackSavedTokenRecords(ctx context.Context, savedPaths []string) {
-	for i := len(savedPaths) - 1; i >= 0; i-- {
-		path := strings.TrimSpace(savedPaths[i])
-		if path == "" {
-			continue
-		}
-		if errDelete := h.deleteTokenRecord(ctx, path); errDelete != nil {
-			log.WithError(errDelete).WithField("path", path).Warn("failed to roll back plugin auth token")
-		}
-		h.removeAuthsForPath(ctx, path, path)
-	}
-}
-
-// PopulateAuthContext extracts request info and adds it to the context
-func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
-	info := &coreauth.RequestInfo{
-		Query:   c.Request.URL.Query(),
-		Headers: c.Request.Header,
->>>>>>> upstream/main:internal/api/handlers/management/auth_files.go
 	}
 }
 

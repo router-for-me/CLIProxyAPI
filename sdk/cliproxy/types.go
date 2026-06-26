@@ -6,16 +6,9 @@ package cliproxy
 import (
 	"context"
 
-<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
->>>>>>> upstream/main
 )
 
 // TokenClientProvider loads clients backed by stored authentication tokens.
@@ -107,13 +100,7 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
-<<<<<<< HEAD
 	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // 方案 A: 后台刷新通知
-=======
-	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
-	setPluginAuthParser   func(parser PluginAuthParser)
-	reloadConfigIfChanged func()
->>>>>>> upstream/main
 }
 
 // Start proxies to the underlying watcher Start implementation.

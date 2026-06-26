@@ -24,7 +24,6 @@ import (
 	"unsafe"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/access"
 	managementHandlers "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api/handlers/management"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api/middleware"
@@ -44,27 +43,6 @@ import (
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
-	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/api/server.go
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -332,11 +310,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create server instance
 	s := &Server{
 		engine:              engine,
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 		handlers:            handlers.NewBaseAPIHandlers(castToSDKConfig(&cfg.SDKConfig), authManager),
-=======
-		handlers:            handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager),
->>>>>>> upstream/main:internal/api/server.go
 		cfg:                 cfg,
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
@@ -525,7 +499,6 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 
 	// Event logging endpoint - handles Claude Code telemetry requests
 	// Returns 200 OK to prevent 404 errors in logs
@@ -533,8 +506,6 @@ func (s *Server) setupRoutes() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
-=======
->>>>>>> upstream/main:internal/api/server.go
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
@@ -567,7 +538,6 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 	s.engine.GET("/gitlab/callback", func(c *gin.Context) {
 		code := c.Query("code")
 		state := c.Query("state")
@@ -610,8 +580,6 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
-=======
->>>>>>> upstream/main:internal/api/server.go
 	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
 		code := c.Query("code")
 		state := c.Query("state")
@@ -626,11 +594,7 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 	s.engine.GET("/kiro/callback", func(c *gin.Context) {
-=======
-	s.engine.GET("/xai/callback", func(c *gin.Context) {
->>>>>>> upstream/main:internal/api/server.go
 		code := c.Query("code")
 		state := c.Query("state")
 		errStr := c.Query("error")
@@ -638,11 +602,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
-=======
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "xai", state, code, errStr)
->>>>>>> upstream/main:internal/api/server.go
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -834,7 +794,6 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 		mgmt.GET("/gitlab-auth-url", s.mgmt.RequestGitLabToken)
 		mgmt.POST("/gitlab-auth-url", s.mgmt.RequestGitLabPATToken)
 		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
@@ -848,11 +807,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
-=======
-		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
-		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
->>>>>>> upstream/main:internal/api/server.go
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
 }
@@ -1805,16 +1759,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 	s.handlers.UpdateClients(castToSDKConfig(&cfg.SDKConfig))
-=======
-	s.handlers.UpdateClients(effectiveSDKConfig(cfg))
-	s.handlers.SetPluginHost(s.pluginHost)
-	if s.pluginHost != nil {
-		s.pluginHost.SetModelExecutor(s.handlers)
-		s.pluginHost.SetAuthManager(s.handlers.AuthManager)
-	}
->>>>>>> upstream/main:internal/api/server.go
 
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
@@ -1832,16 +1777,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 		authEntries = util.CountAuthFiles(context.Background(), tokenStore)
 	}
-<<<<<<< HEAD:pkg/llmproxy/api/server.go
 	authEntries := util.CountAuthFiles(context.Background(), tokenStore)
 	geminiClientCount := len(cfg.GeminiKey)
 	claudeClientCount := len(cfg.ClaudeKey)
 	codexClientCount := len(cfg.CodexKey)
-=======
-	geminiAPIKeyCount := len(cfg.GeminiKey)
-	claudeAPIKeyCount := len(cfg.ClaudeKey)
-	codexAPIKeyCount := len(cfg.CodexKey)
->>>>>>> upstream/main:internal/api/server.go
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {

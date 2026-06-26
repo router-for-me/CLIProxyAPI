@@ -15,12 +15,8 @@ import (
 	"sync"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/claude/anthropic_auth.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/auth/claude/anthropic_auth.go
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -153,7 +149,6 @@ type ClaudeAuth struct {
 //
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
-<<<<<<< HEAD:pkg/llmproxy/auth/claude/anthropic_auth.go
 func NewClaudeAuth(cfg *config.Config, httpClient *http.Client) *ClaudeAuth {
 	if httpClient != nil {
 		return &ClaudeAuth{httpClient: httpClient}
@@ -161,29 +156,6 @@ func NewClaudeAuth(cfg *config.Config, httpClient *http.Client) *ClaudeAuth {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-=======
-func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
-	return NewClaudeAuthWithProxyURL(cfg, "")
-}
-
-// NewClaudeAuthWithProxyURL creates a new Anthropic authentication service with a proxy override.
-// proxyURL takes precedence over cfg.ProxyURL when non-empty.
-func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth {
-	effectiveProxyURL := strings.TrimSpace(proxyURL)
-	var sdkCfg *config.SDKConfig
-	if cfg != nil {
-		sdkCfgCopy := cfg.SDKConfig
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
-		}
-		sdkCfgCopy.ProxyURL = effectiveProxyURL
-		sdkCfg = &sdkCfgCopy
-	} else if effectiveProxyURL != "" {
-		sdkCfgCopy := config.SDKConfig{ProxyURL: effectiveProxyURL}
-		sdkCfg = &sdkCfgCopy
-	}
-
->>>>>>> upstream/main:internal/auth/claude/anthropic_auth.go
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
 	return &ClaudeAuth{

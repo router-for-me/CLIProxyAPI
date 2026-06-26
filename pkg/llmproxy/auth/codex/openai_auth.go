@@ -14,14 +14,9 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/codex/openai_auth.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/auth/codex/openai_auth.go
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )

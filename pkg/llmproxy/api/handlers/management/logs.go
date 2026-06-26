@@ -19,11 +19,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/logs.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
->>>>>>> upstream/main:internal/api/handlers/management/logs.go
 )
 
 const (

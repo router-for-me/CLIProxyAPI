@@ -128,44 +128,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.content", deltaResult.String())
 		}
-<<<<<<< HEAD:pkg/llmproxy/translator/codex/openai/chat-completions/codex_openai_response.go
 	case "response.completed":
-=======
-	} else if dataType == "response.image_generation_call.partial_image" {
-		itemID := rootResult.Get("item_id").String()
-		b64 := rootResult.Get("partial_image_b64").String()
-		if b64 == "" {
-			return [][]byte{}
-		}
-		if itemID != "" {
-			p := (*param).(*ConvertCliToOpenAIParams)
-			if p.LastImageHashByItemID == nil {
-				p.LastImageHashByItemID = make(map[string][32]byte)
-			}
-			hash := sha256.Sum256([]byte(b64))
-			if last, ok := p.LastImageHashByItemID[itemID]; ok && last == hash {
-				return [][]byte{}
-			}
-			p.LastImageHashByItemID[itemID] = hash
-		}
-
-		outputFormat := rootResult.Get("output_format").String()
-		mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
-		imageURL := "data:" + mimeType + ";base64," + b64
-
-		imagesResult := gjson.GetBytes(template, "choices.0.delta.images")
-		if !imagesResult.Exists() || !imagesResult.IsArray() {
-			template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
-		}
-		imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
-		imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-		imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
-		imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
-
-		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
-		template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
-	} else if dataType == "response.completed" {
->>>>>>> upstream/main:internal/translator/codex/openai/chat-completions/codex_openai_response.go
 		finishReason := "stop"
 		if (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex != -1 {
 			finishReason = "tool_calls"
@@ -478,7 +441,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	if statusResult := responseResult.Get("status"); statusResult.Exists() {
 		status := statusResult.String()
 		if status == "completed" {
-<<<<<<< HEAD:pkg/llmproxy/translator/codex/openai/chat-completions/codex_openai_response.go
 			// Check if there are tool calls to set appropriate finish_reason
 			toolCallsResult := gjson.GetBytes(template, "choices.0.message.tool_calls")
 			if toolCallsResult.IsArray() && len(toolCallsResult.Array()) > 0 {
@@ -488,14 +450,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 				template, _ = sjson.SetBytes(template, "choices.0.finish_reason", "stop")
 				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", "stop")
 			}
-=======
-			finishReason := "stop"
-			if len(toolCalls) > 0 {
-				finishReason = "tool_calls"
-			}
-			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
->>>>>>> upstream/main:internal/translator/codex/openai/chat-completions/codex_openai_response.go
 		}
 	}
 

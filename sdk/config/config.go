@@ -4,17 +4,12 @@
 // embed CLIProxyAPI without importing internal packages.
 package config
 
-<<<<<<< HEAD
 import llmproxyconfig "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-import internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main
 
 type SDKConfig = llmproxyconfig.SDKConfig
 
 type Config = llmproxyconfig.Config
 
-<<<<<<< HEAD
 type StreamingConfig = llmproxyconfig.StreamingConfig
 type TLSConfig = llmproxyconfig.TLSConfig
 type RemoteManagement = llmproxyconfig.RemoteManagement
@@ -24,16 +19,6 @@ type PayloadConfig = llmproxyconfig.PayloadConfig
 type PayloadRule = llmproxyconfig.PayloadRule
 type PayloadFilterRule = llmproxyconfig.PayloadFilterRule
 type PayloadModelRule = llmproxyconfig.PayloadModelRule
-=======
-type StreamingConfig = internalconfig.StreamingConfig
-type TLSConfig = internalconfig.TLSConfig
-type RemoteManagement = internalconfig.RemoteManagement
-type OAuthModelAlias = internalconfig.OAuthModelAlias
-type PayloadConfig = internalconfig.PayloadConfig
-type PayloadRule = internalconfig.PayloadRule
-type PayloadFilterRule = internalconfig.PayloadFilterRule
-type PayloadModelRule = internalconfig.PayloadModelRule
->>>>>>> upstream/main
 
 type GeminiKey = llmproxyconfig.GeminiKey
 type CodexKey = llmproxyconfig.CodexKey

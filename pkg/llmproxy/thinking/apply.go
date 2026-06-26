@@ -5,12 +5,8 @@ import (
 	"strings"
 	"sync"
 
-<<<<<<< HEAD:pkg/llmproxy/thinking/apply.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
->>>>>>> upstream/main:internal/thinking/apply.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -375,7 +371,6 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
 	log.WithFields(log.Fields{
-<<<<<<< HEAD:pkg/llmproxy/thinking/apply.go
 		"provider": redactLogText(toFormat),
 		"model":    redactLogText(modelID),
 		"mode":     redactLogMode(config.Mode),
@@ -384,14 +379,6 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	}).Debug("thinking: applying config for user-defined model (skip validation)")
 
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
-=======
-		"provider": toFormat,
-		"model":    modelID,
-		"mode":     config.Mode,
-		"budget":   config.Budget,
-		"level":    config.Level,
-	}).Debug("thinking: processed config to apply |")
->>>>>>> upstream/main:internal/thinking/apply.go
 	return applier.Apply(body, config, modelInfo)
 }
 
@@ -695,7 +682,6 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 
 	return ThinkingConfig{}
 }
-<<<<<<< HEAD:pkg/llmproxy/thinking/apply.go
 
 // extractIFlowConfig extracts thinking configuration from iFlow format request body.
 //
@@ -797,5 +783,3 @@ func isForcedThinkingModel(modelID, fullModelName string) bool {
 	return strings.Contains(strings.ToLower(modelID), "thinking") ||
 		strings.Contains(strings.ToLower(fullModelName), "thinking")
 }
-=======
->>>>>>> upstream/main:internal/thinking/apply.go

@@ -10,11 +10,6 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/proxyutil"
 	tls "github.com/refraction-networking/utls"
-<<<<<<< HEAD:pkg/llmproxy/auth/claude/utls_transport.go
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
->>>>>>> upstream/main:internal/auth/claude/utls_transport.go
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"

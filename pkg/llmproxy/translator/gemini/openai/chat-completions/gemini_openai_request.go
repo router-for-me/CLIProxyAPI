@@ -6,16 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini/openai/chat-completions/gemini_openai_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/gemini/openai/chat-completions/gemini_openai_request.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -365,19 +358,10 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					if !params.Exists() {
 						params = fn.Get("parametersJsonSchema")
 					}
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini/openai/chat-completions/gemini_openai_request.go
 					strict := fn.Get("strict").Exists() && fn.Get("strict").Bool()
 					schema := common.NormalizeOpenAIFunctionSchemaForGemini(params, strict)
 					fnRaw, _ = sjson.Delete(fnRaw, "parameters")
 					fnRaw, _ = sjson.Delete(fnRaw, "parametersJsonSchema")
-=======
-					fnRawBytes := []byte(fnRaw)
-					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.SanitizeFunctionName(fn.Get("name").String()))
-					fnRaw = string(fnRawBytes)
-					if parameters := gjson.Get(fnRaw, "parametersJsonSchema"); parameters.Exists() {
-						fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", util.CleanJSONSchemaForGemini(parameters.Raw))
-					}
->>>>>>> upstream/main:internal/translator/gemini/openai/chat-completions/gemini_openai_request.go
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
 					fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", schema)
 					if !hasFunction {
@@ -464,30 +448,6 @@ func openAIToolCallGeminiThoughtSignature(toolCall gjson.Result) string {
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
 
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini/openai/chat-completions/gemini_openai_request.go
 func hasGeminiParts(node []byte) bool {
 	return gjson.GetBytes(node, "parts.#").Int() > 0
-=======
-func openAIInputAudioMimeType(audioFormat string) string {
-	switch audioFormat {
-	case "", "wav":
-		return "audio/wav"
-	case "mp3":
-		return "audio/mpeg"
-	case "ogg":
-		return "audio/ogg"
-	case "flac":
-		return "audio/flac"
-	case "aac":
-		return "audio/aac"
-	case "webm":
-		return "audio/webm"
-	case "pcm16":
-		return "audio/pcm"
-	case "g711_ulaw", "g711_alaw":
-		return "audio/basic"
-	default:
-		return "audio/" + audioFormat
-	}
->>>>>>> upstream/main:internal/translator/gemini/openai/chat-completions/gemini_openai_request.go
 }

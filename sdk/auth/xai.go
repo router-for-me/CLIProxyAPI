@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	xaiauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/xai"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )

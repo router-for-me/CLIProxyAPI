@@ -15,10 +15,6 @@ import (
 	"strings"
 	"syscall"
 
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
->>>>>>> upstream/main:internal/config/config.go
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -115,18 +111,9 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
 	// ResponsesWebsocketEnabled gates the dedicated /v1/responses/ws route rollout.
 	// Nil means enabled (default behavior).
 	ResponsesWebsocketEnabled *bool `yaml:"responses-websocket-enabled,omitempty" json:"responses-websocket-enabled,omitempty"`
-=======
-	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
-	// When true (default), cached signatures are preferred and validated.
-	// When false, client signatures are used directly after normalization (bypass mode).
-	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
-
-	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
->>>>>>> upstream/main:internal/config/config.go
 
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
@@ -148,16 +135,6 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
-=======
-	// Codex configures provider-wide Codex request behavior.
-	Codex CodexConfig `yaml:"codex" json:"codex"`
-
-	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
-	// These are used only when the client does not send its own headers.
-	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
-
->>>>>>> upstream/main:internal/config/config.go
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -165,18 +142,8 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
 	// CodexHeaderDefaults configures default header values for Codex WebSocket connections.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
-=======
-	// DisableClaudeCloakMode globally disables Claude request cloaking when true.
-	// Cloaking disguises requests as the official Claude Code CLI and replaces the
-	// system prompt. When true, every Claude credential defaults to no cloaking
-	// ("never"); a specific credential can still re-enable or override it via its own
-	// cloak settings (the per claude-api-key "cloak" block, or a "cloak_mode" value in
-	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
-	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
->>>>>>> upstream/main:internal/config/config.go
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
@@ -191,11 +158,7 @@ type Config struct {
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
 	// gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
-=======
-	// vertex, aistudio, antigravity, claude, codex, kimi, xai.
->>>>>>> upstream/main:internal/config/config.go
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
@@ -210,7 +173,6 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 }
 
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
 	// IncognitoBrowser enables opening OAuth URLs in incognito/private browsing mode.
 	// This is useful when you want to login with a different account without logging out
 	// from your current session. Default: false.
@@ -223,89 +185,6 @@ type Config struct {
 	// KiroFingerprint configures the Kiro/CodeWhisperer fingerprint manager.
 	// When nil, fingerprint defaults from kiro.NewFingerprintManager are used.
 	KiroFingerprint *KiroFingerprintConfig `yaml:"kiro-fingerprint,omitempty" json:"kiro-fingerprint,omitempty"`
-=======
-// PluginsConfig holds dynamic plugin system settings.
-type PluginsConfig struct {
-	// Enabled toggles dynamic plugin loading.
-	Enabled bool `yaml:"enabled" json:"enabled"`
-	// Dir is the plugin discovery directory.
-	Dir string `yaml:"dir" json:"dir"`
-	// StoreSources appends third-party plugin store registries to the built-in official source.
-	StoreSources []string `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
-	// Configs stores per-plugin instance configuration by plugin ID.
-	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
-}
-
-// PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
-type PluginInstanceConfig struct {
-	// Enabled toggles this plugin instance. Nil is normalized to false during YAML parsing.
-	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// Priority controls plugin startup and routing order.
-	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
-	// Raw preserves the full original plugin configuration YAML subtree.
-	Raw yaml.Node `yaml:"-" json:"-"`
-}
-
-// UnmarshalYAML extracts host-owned fields while preserving the full original YAML node.
-func (c *PluginInstanceConfig) UnmarshalYAML(value *yaml.Node) error {
-	if c == nil {
-		return nil
-	}
-
-	c.Priority = 0
-	defaultEnabled := false
-	c.Enabled = &defaultEnabled
-
-	if value == nil || value.Kind == 0 {
-		c.Raw = *defaultPluginInstanceConfigNode()
-		return nil
-	}
-
-	c.Raw = *deepCopyNode(value)
-	if value.Kind != yaml.MappingNode {
-		return nil
-	}
-
-	for i := 0; i+1 < len(value.Content); i += 2 {
-		key := value.Content[i]
-		node := value.Content[i+1]
-		if key == nil {
-			continue
-		}
-		switch key.Value {
-		case "enabled":
-			var enabled bool
-			if errDecodeEnabled := node.Decode(&enabled); errDecodeEnabled != nil {
-				return fmt.Errorf("parse plugin enabled: %w", errDecodeEnabled)
-			}
-			c.Enabled = &enabled
-		case "priority":
-			var priority int
-			if errDecodePriority := node.Decode(&priority); errDecodePriority != nil {
-				return fmt.Errorf("parse plugin priority: %w", errDecodePriority)
-			}
-			c.Priority = priority
-		}
-	}
-
-	return nil
-}
-
-// MarshalYAML returns the preserved raw plugin YAML subtree for lossless config output.
-func (c PluginInstanceConfig) MarshalYAML() (any, error) {
-	if c.Raw.Kind == 0 {
-		return defaultPluginInstanceConfigNode(), nil
-	}
-	return deepCopyNode(&c.Raw), nil
-}
-
-func defaultPluginInstanceConfigNode() *yaml.Node {
-	return &yaml.Node{
-		Kind:    yaml.MappingNode,
-		Tag:     "!!map",
-		Content: []*yaml.Node{},
-	}
->>>>>>> upstream/main:internal/config/config.go
 }
 
 // KiroFingerprintConfig defines configurable Kiro fingerprint identity fields.
@@ -430,7 +309,6 @@ type OAuthModelAlias struct {
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
 // When Amp requests a model that isn't available locally, this mapping
 // allows routing to an alternative model that IS available.
@@ -491,9 +369,6 @@ type AmpUpstreamAPIKeyEntry struct {
 
 	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
-=======
-	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
->>>>>>> upstream/main:internal/config/config.go
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -914,19 +789,6 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
-=======
-
-	// ForceMapping rewrites upstream response model fields back to Alias.
-	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
-
-	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
-	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
-
-	// Thinking configures the thinking/reasoning capability for this model.
-	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
-	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
->>>>>>> upstream/main:internal/config/config.go
 }
 
 func (m OpenAICompatibilityModel) GetName() string       { return m.Name }
@@ -1100,7 +962,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
-<<<<<<< HEAD:pkg/llmproxy/config/config.go
 	// NOTE: Legacy migration persistence is intentionally disabled together with
 	// startup legacy migration to keep startup read-only for config.yaml.
 	// Re-enable the block below if automatic startup migration is needed again.
@@ -1119,8 +980,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Apply environment variable overrides (for Docker deployment convenience)
 	cfg.ApplyEnvOverrides()
 
-=======
->>>>>>> upstream/main:internal/config/config.go
 	// Return the populated configuration struct.
 	return &cfg, nil
 }

@@ -13,11 +13,7 @@ import (
 	"sync"
 	"time"
 
-<<<<<<< HEAD
 	baseauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth"
-=======
-	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
->>>>>>> upstream/main
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -576,7 +572,6 @@ func (a *Auth) AccountInfo() (string, string) {
 				}
 			}
 		}
-<<<<<<< HEAD
 	}
 
 	// For GitHub provider (including github-copilot), return username
@@ -619,12 +614,6 @@ func (a *Auth) AccountInfo() (string, string) {
 			if email != "" {
 				return "oauth", email
 			}
-=======
-		return "oauth", ""
-	case AuthKindAPIKey:
-		if apiKey := authAttribute(a, AttributeAPIKey); apiKey != "" {
-			return "api_key", apiKey
->>>>>>> upstream/main
 		}
 		return "api_key", ""
 	default:

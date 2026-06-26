@@ -3,11 +3,7 @@ package auth
 import (
 	"testing"
 
-<<<<<<< HEAD
 	internalconfig "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main
 )
 
 func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
@@ -213,7 +209,6 @@ func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 func TestOAuthModelAliasChannel_GitHubCopilot(t *testing.T) {
 	t.Parallel()
 
@@ -227,16 +222,6 @@ func TestOAuthModelAliasChannel_Kiro(t *testing.T) {
 
 	if got := OAuthModelAliasChannel("kiro", ""); got != "kiro" {
 		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "kiro")
-=======
-func TestOAuthModelAliasChannel_PluginProvider(t *testing.T) {
-	t.Parallel()
-
-	if got := OAuthModelAliasChannel(" Sample-Provider ", "oauth"); got != "sample-provider" {
-		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "sample-provider")
-	}
-	if got := OAuthModelAliasChannel("sample-provider", "api_key"); got != "" {
-		t.Fatalf("OAuthModelAliasChannel() = %q, want empty channel for API key", got)
->>>>>>> upstream/main
 	}
 }
 

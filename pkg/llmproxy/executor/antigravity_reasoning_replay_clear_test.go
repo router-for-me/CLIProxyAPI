@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalcache "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"

@@ -14,14 +14,12 @@ import (
 	"sync"
 	"time"
 
-<<<<<<<< HEAD:pkg/llmproxy/executor/claude_device_profile.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 ========
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	homekv "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>>> upstream/main:pkg/llmproxy/executor/helps/claude_device_profile.go
 )
 
 const (

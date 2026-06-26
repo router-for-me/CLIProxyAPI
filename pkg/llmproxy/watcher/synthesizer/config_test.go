@@ -4,13 +4,8 @@ import (
 	"testing"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/watcher/synthesizer/config_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/watcher/synthesizer/config_test.go
 )
 
 func TestNewConfigSynthesizer(t *testing.T) {

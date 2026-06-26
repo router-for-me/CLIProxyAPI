@@ -6,12 +6,8 @@ package kimi
 import (
 	"fmt"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/kimi/token.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"time"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
->>>>>>> upstream/main:internal/auth/kimi/token.go
 )
 
 // KimiTokenStorage stores OAuth2 token information for Kimi API authentication.

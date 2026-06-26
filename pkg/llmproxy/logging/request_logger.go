@@ -25,16 +25,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
 
-<<<<<<< HEAD:pkg/llmproxy/logging/request_logger.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/buildinfo"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/logging/request_logger.go
 )
 
 var requestLogID atomic.Uint64
@@ -1335,135 +1328,6 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 	return nil
 }
 
-<<<<<<< HEAD:pkg/llmproxy/logging/request_logger.go
-=======
-func responseBodyStartsWithLeadingNewline(reader *bufio.Reader) bool {
-	if reader == nil {
-		return false
-	}
-	if peeked, _ := reader.Peek(2); len(peeked) >= 2 && peeked[0] == '\r' && peeked[1] == '\n' {
-		return true
-	}
-	if peeked, _ := reader.Peek(1); len(peeked) >= 1 && peeked[0] == '\n' {
-		return true
-	}
-	return false
-}
-
-// formatLogContent creates the complete log content for non-streaming requests.
-//
-// Parameters:
-//   - url: The request URL
-//   - method: The HTTP method
-//   - headers: The request headers
-//   - body: The request body
-//   - websocketTimeline: The downstream websocket event timeline
-//   - apiRequest: The API request data
-//   - apiResponse: The API response data
-//   - response: The raw response data
-//   - status: The response status code
-//   - responseHeaders: The response headers
-//
-// Returns:
-//   - string: The formatted log content
-func (l *FileRequestLogger) formatLogContent(url, method string, headers map[string][]string, body, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, response []byte, status int, responseHeaders map[string][]string, apiResponseErrors []*interfaces.ErrorMessage) string {
-	var content strings.Builder
-	isWebsocketTranscript := hasSectionPayload(websocketTimeline)
-	downstreamTransport := inferDownstreamTransport(headers, websocketTimeline, nil)
-	upstreamTransport := inferUpstreamTransport(apiRequest, nil, apiResponse, nil, apiWebsocketTimeline, nil, apiResponseErrors)
-
-	// Request info
-	content.WriteString(l.formatRequestInfo(url, method, headers, body, downstreamTransport, upstreamTransport, !isWebsocketTranscript))
-
-	if len(websocketTimeline) > 0 {
-		if bytes.HasPrefix(websocketTimeline, []byte("=== WEBSOCKET TIMELINE")) {
-			content.Write(websocketTimeline)
-			if !bytes.HasSuffix(websocketTimeline, []byte("\n")) {
-				content.WriteString("\n")
-			}
-		} else {
-			content.WriteString("=== WEBSOCKET TIMELINE ===\n")
-			content.Write(websocketTimeline)
-			content.WriteString("\n")
-		}
-		content.WriteString("\n")
-	}
-
-	if len(apiWebsocketTimeline) > 0 {
-		if bytes.HasPrefix(apiWebsocketTimeline, []byte("=== API WEBSOCKET TIMELINE")) {
-			content.Write(apiWebsocketTimeline)
-			if !bytes.HasSuffix(apiWebsocketTimeline, []byte("\n")) {
-				content.WriteString("\n")
-			}
-		} else {
-			content.WriteString("=== API WEBSOCKET TIMELINE ===\n")
-			content.Write(apiWebsocketTimeline)
-			content.WriteString("\n")
-		}
-		content.WriteString("\n")
-	}
-
-	if len(apiRequest) > 0 {
-		if bytes.HasPrefix(apiRequest, []byte("=== API REQUEST")) {
-			content.Write(apiRequest)
-			if !bytes.HasSuffix(apiRequest, []byte("\n")) {
-				content.WriteString("\n")
-			}
-		} else {
-			content.WriteString("=== API REQUEST ===\n")
-			content.Write(apiRequest)
-			content.WriteString("\n")
-		}
-		content.WriteString("\n")
-	}
-
-	for i := 0; i < len(apiResponseErrors); i++ {
-		content.WriteString("=== API ERROR RESPONSE ===\n")
-		content.WriteString(fmt.Sprintf("HTTP Status: %d\n", apiResponseErrors[i].StatusCode))
-		content.WriteString(apiResponseErrors[i].Error.Error())
-		content.WriteString("\n\n")
-	}
-
-	if len(apiResponse) > 0 {
-		if bytes.HasPrefix(apiResponse, []byte("=== API RESPONSE")) {
-			content.Write(apiResponse)
-			if !bytes.HasSuffix(apiResponse, []byte("\n")) {
-				content.WriteString("\n")
-			}
-		} else {
-			content.WriteString("=== API RESPONSE ===\n")
-			content.Write(apiResponse)
-			content.WriteString("\n")
-		}
-		content.WriteString("\n")
-	}
-
-	if isWebsocketTranscript {
-		// Mirror writeNonStreamingLog: websocket transcripts end with the dedicated
-		// timeline sections instead of a generic downstream HTTP response block.
-		return content.String()
-	}
-
-	// Response section
-	content.WriteString("=== RESPONSE ===\n")
-	content.WriteString(fmt.Sprintf("Status: %d\n", status))
-
-	if responseHeaders != nil {
-		for key, values := range responseHeaders {
-			for _, value := range values {
-				content.WriteString(fmt.Sprintf("%s: %s\n", key, value))
-			}
-		}
-	}
-
-	content.WriteString("\n")
-	content.Write(response)
-	content.WriteString("\n")
-
-	return content.String()
-}
-
->>>>>>> upstream/main:internal/logging/request_logger.go
 // decompressResponse decompresses response data based on Content-Encoding header.
 //
 // Parameters:
@@ -1595,55 +1459,6 @@ func (l *FileRequestLogger) decompressZstd(data []byte) ([]byte, error) {
 	return decompressed, nil
 }
 
-<<<<<<< HEAD:pkg/llmproxy/logging/request_logger.go
-=======
-// formatRequestInfo creates the request information section of the log.
-//
-// Parameters:
-//   - url: The request URL
-//   - method: The HTTP method
-//   - headers: The request headers
-//   - body: The request body
-//
-// Returns:
-//   - string: The formatted request information
-func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[string][]string, body []byte, downstreamTransport string, upstreamTransport string, includeBody bool) string {
-	var content strings.Builder
-
-	content.WriteString("=== REQUEST INFO ===\n")
-	content.WriteString(fmt.Sprintf("Version: %s\n", buildinfo.Version))
-	content.WriteString(fmt.Sprintf("URL: %s\n", url))
-	content.WriteString(fmt.Sprintf("Method: %s\n", method))
-	if strings.TrimSpace(downstreamTransport) != "" {
-		content.WriteString(fmt.Sprintf("Downstream Transport: %s\n", downstreamTransport))
-	}
-	if strings.TrimSpace(upstreamTransport) != "" {
-		content.WriteString(fmt.Sprintf("Upstream Transport: %s\n", upstreamTransport))
-	}
-	content.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
-	content.WriteString("\n")
-
-	content.WriteString("=== HEADERS ===\n")
-	for key, values := range headers {
-		for _, value := range values {
-			masked := util.MaskSensitiveHeaderValue(key, value)
-			content.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
-		}
-	}
-	content.WriteString("\n")
-
-	if !includeBody {
-		return content.String()
-	}
-
-	content.WriteString("=== REQUEST BODY ===\n")
-	content.Write(body)
-	content.WriteString("\n\n")
-
-	return content.String()
-}
-
->>>>>>> upstream/main:internal/logging/request_logger.go
 // FileStreamingLogWriter implements StreamingLogWriter for file-based streaming logs.
 // It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
 // The final log file is assembled when Close is called.

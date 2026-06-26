@@ -8,11 +8,7 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_response.go
 	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
-=======
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_response.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -228,7 +224,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			return noSSEOutput(out)
 		}
 		idx := int(root.Get("index").Int())
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_response.go
 		switch cb.Get("type").String() {
 		case "text":
 			// open message item + content part
@@ -244,29 +239,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			part, _ = sjson.SetBytes(part, "item_id", st.CurrentMsgID)
 			out = append(out, emitEvent("response.content_part.added", part))
 		case "tool_use":
-=======
-		typ := cb.Get("type").String()
-		if typ == "text" {
-			st.InTextBlock = true
-			if st.CurrentMsgID == "" {
-				st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
-			}
-			if !st.MessageOpen {
-				item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
-				item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
-				item, _ = sjson.SetBytes(item, "item.id", st.CurrentMsgID)
-				out = append(out, emitEvent("response.output_item.added", item))
-				st.MessageOpen = true
-			}
-			if !st.ContentPartOpen {
-				part := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
-				part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
-				part, _ = sjson.SetBytes(part, "item_id", st.CurrentMsgID)
-				out = append(out, emitEvent("response.content_part.added", part))
-				st.ContentPartOpen = true
-			}
-		} else if typ == "tool_use" {
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_response.go
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
 			name := cb.Get("name").String()
@@ -324,14 +296,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				st.TextBuf.WriteString(t.String())
 				st.CurrentTextBuf.WriteString(t.String())
 			}
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/responses/claude_openai-responses_response.go
 		case "input_json_delta":
-=======
-		} else if dt == "input_json_delta" {
-			if !st.InFuncBlock || st.CurrentFCID == "" {
-				return [][]byte{}
-			}
->>>>>>> upstream/main:internal/translator/claude/openai/responses/claude_openai-responses_response.go
 			idx := int(root.Get("index").Int())
 			if pj := d.Get("partial_json"); pj.Exists() {
 				if st.FuncArgsBuf[idx] == nil {

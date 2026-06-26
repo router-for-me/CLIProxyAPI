@@ -8,11 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/vertex/vertex_credentials.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
->>>>>>> upstream/main:internal/auth/vertex/vertex_credentials.go
 	log "github.com/sirupsen/logrus"
 )
 

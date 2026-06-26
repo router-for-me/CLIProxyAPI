@@ -5,11 +5,7 @@ import (
 	"net/http"
 	"net/url"
 
-<<<<<<< HEAD
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
-=======
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
->>>>>>> upstream/main
 )
 
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.

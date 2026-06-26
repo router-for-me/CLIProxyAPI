@@ -4,11 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-<<<<<<< HEAD:pkg/llmproxy/watcher/diff/oauth_excluded.go
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
->>>>>>> upstream/main:internal/watcher/diff/oauth_excluded.go
 )
 
 type ExcludedModelsSummary struct {

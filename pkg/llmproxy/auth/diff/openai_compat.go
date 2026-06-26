@@ -6,11 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/diff/openai_compat.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/watcher/diff/openai_compat.go
 )
 
 // DiffOpenAICompatibility produces human-readable change descriptions.

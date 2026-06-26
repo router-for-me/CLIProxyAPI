@@ -11,11 +11,7 @@ import (
 	"testing"
 	"time"
 
-<<<<<<< HEAD
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
-=======
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
->>>>>>> upstream/main
 )
 
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {

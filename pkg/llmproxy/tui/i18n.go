@@ -54,14 +54,9 @@ var locales = map[string]map[string]string{
 // ──────────────────────────────────────────
 // Tab names
 // ──────────────────────────────────────────
-<<<<<<< HEAD:pkg/llmproxy/tui/i18n.go
 var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
 var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
 var faTabNames = []string{"داشبورد", "پیکربندی", "فایل\u200cهای احراز هویت", "کلیدهای API", "OAuth", "کاربرد", "لاگ\u200cها"}
-=======
-var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "日志"}
-var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Logs"}
->>>>>>> upstream/main:internal/tui/i18n.go
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {

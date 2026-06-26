@@ -12,13 +12,8 @@
 package gemini
 
 import (
-<<<<<<< HEAD:pkg/llmproxy/thinking/provider/gemini/apply.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
->>>>>>> upstream/main:internal/thinking/provider/gemini/apply.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

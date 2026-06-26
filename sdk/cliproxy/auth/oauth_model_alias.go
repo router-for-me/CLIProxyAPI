@@ -4,13 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 
-<<<<<<< HEAD
 	internalconfig "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
-=======
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
->>>>>>> upstream/main
 )
 
 const oauthModelAliasesAttributeKey = "model_aliases"
@@ -482,7 +477,6 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-<<<<<<< HEAD
 // Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot, kimi.
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -510,14 +504,6 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 	case "gemini-cli", "aistudio", "antigravity", "qwen", "iflow", "kiro", "github-copilot", "kimi":
 		return provider
 	default:
-=======
-// Built-in channels: vertex, aistudio, antigravity, claude, codex, kimi.
-// Plugin OAuth providers use their normalized provider key as the channel.
-func OAuthModelAliasChannel(provider, authKind string) string {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	authKind = normalizeOAuthModelAliasAuthKind(authKind)
-	if authKind == "apikey" {
->>>>>>> upstream/main
 		return ""
 	}
 	switch provider {

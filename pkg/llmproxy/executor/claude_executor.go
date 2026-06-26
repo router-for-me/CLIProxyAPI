@@ -17,7 +17,6 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	claudeauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/claude"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
@@ -26,19 +25,6 @@ import (
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
-=======
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -241,14 +227,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel)
-=======
-	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	if err != nil {
-		return resp, err
-	}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -317,43 +296,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		AuthValue: authValue,
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	httpResp, err := ExecuteHTTPRequest(ctx, e.cfg, auth, httpReq, "claude executor")
 	if err != nil {
-=======
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses — pass the Content-Encoding value (may be empty)
-		// and let decodeResponseBody handle both header-declared and magic-byte-detected
-		// compression.  This keeps error-path behaviour consistent with the success path.
-		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
-		if decErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
-			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
-			helps.LogWithRequestID(ctx).Warn(msg)
-			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
-		}
-		b, readErr := io.ReadAll(errBody)
-		if readErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
-			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			helps.LogWithRequestID(ctx).Warn(msg)
-			b = []byte(msg)
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if errClose := errBody.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -438,14 +382,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel)
-=======
-	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	if err != nil {
-		return nil, err
-	}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -510,43 +447,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	httpResp, err := ExecuteHTTPRequestForStreaming(ctx, e.cfg, auth, httpReq, "claude executor")
 	if err != nil {
-=======
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses — pass the Content-Encoding value (may be empty)
-		// and let decodeResponseBody handle both header-declared and magic-byte-detected
-		// compression.  This keeps error-path behaviour consistent with the success path.
-		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
-		if decErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
-			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
-			helps.LogWithRequestID(ctx).Warn(msg)
-			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
-		}
-		b, readErr := io.ReadAll(errBody)
-		if readErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
-			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			helps.LogWithRequestID(ctx).Warn(msg)
-			b = []byte(msg)
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := errBody.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -558,7 +460,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	var result *cliproxyexecutor.StreamResult
 	if from == to {
 		// Claude → Claude: direct passthrough without translation
@@ -569,36 +470,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-=======
-		// If the response target is Claude, directly forward the SSE stream without translation.
-		if responseFormat == to {
-			scanner := bufio.NewScanner(decodedBody)
-			scanner.Buffer(nil, 52_428_800) // 50MB
-			for scanner.Scan() {
-				line := scanner.Bytes()
-				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
-				}
-				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
-				// Forward the line as-is to preserve SSE format
-				cloned := make([]byte, len(line)+1)
-				copy(cloned, line)
-				cloned[len(line)] = '\n'
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
-				case <-ctx.Done():
-					return
-				}
-			}
-			if errScan := scanner.Err(); errScan != nil {
-				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx, errScan)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-				case <-ctx.Done():
-				}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 			}
 			// Forward the line as-is to preserve SSE format
 			cloned := make([]byte, len(line)+1)
@@ -617,7 +488,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	} else {
 		// Claude → Other format: use translation
 		var param any
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 		processor := func(ctx context.Context, line []byte) ([]string, error) {
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := parseClaudeStreamUsage(line); ok {
@@ -625,13 +495,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-=======
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 			}
 			line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
 			chunks := sdktranslator.TranslateStream(
@@ -644,22 +507,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				bytes.Clone(line),
 				&param,
 			)
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 			result := make([]string, len(chunks))
 			for i, chunk := range chunks {
 				result[i] = string(chunk)
-=======
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
-				}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 			}
 			return result, nil
 		}
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 
 		result = ProcessSSEStream(ctx, &http.Response{
 			Body:   decodedBody,
@@ -671,18 +524,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	return result, nil
-=======
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
-			}
-		}
-	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 }
 
 func validateClaudeStreamingResponse(data []byte) error {
@@ -802,44 +643,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		AuthValue: authValue,
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	resp, err := ExecuteHTTPRequest(ctx, e.cfg, auth, httpReq, "claude executor")
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-=======
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Decompress error responses — pass the Content-Encoding value (may be empty)
-		// and let decodeResponseBody handle both header-declared and magic-byte-detected
-		// compression.  This keeps error-path behaviour consistent with the success path.
-		errBody, decErr := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
-		if decErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
-			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
-			helps.LogWithRequestID(ctx).Warn(msg)
-			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
-		}
-		b, readErr := io.ReadAll(errBody)
-		if readErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
-			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			helps.LogWithRequestID(ctx).Warn(msg)
-			b = []byte(msg)
-		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		if errClose := errBody.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
-	}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -881,13 +688,8 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if refreshToken == "" {
 		return auth, nil
 	}
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	svc := claudeauth.NewClaudeAuth(e.cfg, nil)
 	td, err := svc.RefreshTokens(ctx, refreshToken)
-=======
-	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	if err != nil {
 		return nil, err
 	}
@@ -1772,53 +1574,11 @@ func getClientUserAgent(ctx context.Context) string {
 	return ""
 }
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 // getCloakConfigFromAuth extracts cloak configuration from auth attributes.
 // Returns (cloakMode, strictMode, sensitiveWords).
 func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string) {
 	if auth == nil || auth.Attributes == nil {
 		return "auto", false, nil
-=======
-// parseEntrypointFromUA extracts the entrypoint from a Claude Code User-Agent.
-// Format: "claude-cli/x.y.z (external, cli)" → "cli"
-// Format: "claude-cli/x.y.z (external, vscode)" → "vscode"
-// Returns "cli" if parsing fails or UA is not Claude Code.
-func parseEntrypointFromUA(userAgent string) string {
-	// Find content inside parentheses
-	start := strings.Index(userAgent, "(")
-	end := strings.LastIndex(userAgent, ")")
-	if start < 0 || end <= start {
-		return "cli"
-	}
-	inner := userAgent[start+1 : end]
-	// Split by comma, take the second part (entrypoint is at index 1, after USER_TYPE)
-	// Format: "(USER_TYPE, ENTRYPOINT[, extra...])"
-	parts := strings.Split(inner, ",")
-	if len(parts) >= 2 {
-		ep := strings.TrimSpace(parts[1])
-		if ep != "" {
-			return ep
-		}
-	}
-	return "cli"
-}
-
-// getWorkloadFromContext extracts workload identifier from the gin request headers.
-func getWorkloadFromContext(ctx context.Context) string {
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		return strings.TrimSpace(ginCtx.GetHeader("X-CPA-Claude-Workload"))
-	}
-	return ""
-}
-
-// getCloakConfigFromAuth extracts cloak configuration from the auth's attributes,
-// falling back to its stored metadata (the raw OAuth/token JSON). Returns
-// (cloakMode, strictMode, sensitiveWords, cacheUserID); an empty cloakMode means
-// the credential did not explicitly configure a mode.
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, sensitiveWords []string, cacheUserID bool) {
-	if auth == nil {
-		return "", false, nil, false
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	}
 
 	// lookupCloakAttr prefers the executor-facing Attributes, then falls back to the
@@ -1851,7 +1611,6 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 		}
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	return cloakMode, strictMode, sensitiveWords
 }
 
@@ -1887,21 +1646,6 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 func nextFakeUserID(apiKey string, useCache bool) string {
 	if useCache && apiKey != "" {
 		return cachedUserID(apiKey)
-=======
-	cacheUserID = strings.EqualFold(lookupCloakAttr("cloak_cache_user_id"), "true")
-
-	return cloakMode, strictMode, sensitiveWords, cacheUserID
-}
-
-// injectFakeUserID generates and injects a fake user ID into the request metadata.
-// When useCache is false, a new user ID is generated for every call.
-func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCache bool) ([]byte, error) {
-	generateID := func() (string, error) {
-		if useCache {
-			return helps.CachedUserIDRequired(ctx, apiKey)
-		}
-		return helps.GenerateFakeUserID(), nil
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	}
 	return generateFakeUserID()
 }
@@ -1910,7 +1654,6 @@ func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCac
 func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	metadata := gjson.GetBytes(payload, "metadata")
 	if !metadata.Exists() {
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
 		return payload
 	}
@@ -1918,23 +1661,6 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if existingUserID == "" || !isValidUserID(existingUserID) {
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
-=======
-		userID, errUserID := generateID()
-		if errUserID != nil {
-			return nil, errUserID
-		}
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", userID)
-		return payload, nil
-	}
-
-	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if existingUserID == "" || !helps.IsValidUserID(existingUserID) {
-		userID, errUserID := generateID()
-		if errUserID != nil {
-			return nil, errUserID
-		}
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", userID)
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	}
 	return payload, nil
 }
@@ -2155,11 +1881,7 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string) []byte {
-=======
-func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) ([]byte, error) {
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	clientUserAgent := getClientUserAgent(ctx)
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -2169,7 +1891,6 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
 	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	// Determine cloak settings
 	var cloakMode string
 	var strictMode bool
@@ -2193,40 +1914,6 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		}
 	}
 
-=======
-	// Determine cloak settings. Precedence (low -> high):
-	//   built-in "auto" default
-	//   -> global disable-claude-cloak-mode switch (forces "never")
-	//   -> per-credential settings from auth attributes/metadata
-	//   -> per claude-api-key cloak config
-	cloakMode := "auto"
-	if cfg != nil && cfg.DisableClaudeCloakMode {
-		cloakMode = "never"
-	}
-	strictMode := attrStrict
-	sensitiveWords := attrWords
-	cacheUserID := attrCache
-
-	if attrMode != "" {
-		cloakMode = attrMode
-	}
-
-	if cloakCfg != nil {
-		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
-			cloakMode = mode
-		}
-		if cloakCfg.StrictMode {
-			strictMode = true
-		}
-		if len(cloakCfg.SensitiveWords) > 0 {
-			sensitiveWords = cloakCfg.SensitiveWords
-		}
-		if cloakCfg.CacheUserID != nil {
-			cacheUserID = *cloakCfg.CacheUserID
-		}
-	}
-
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
 		return payload, nil
@@ -2240,19 +1927,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
 	}
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	// Reuse a stable fake user ID when a matching ClaudeKey cloak config exists.
 	// This keeps consistent metadata across model variants for the same credential.
 	apiKey, _ := claudeCreds(auth)
 	payload = injectFakeUserID(payload, apiKey, cloakCfg != nil)
-=======
-	// Inject fake user ID
-	var errFakeUserID error
-	payload, errFakeUserID = injectFakeUserID(ctx, payload, apiKey, cacheUserID)
-	if errFakeUserID != nil {
-		return nil, errFakeUserID
-	}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go
 
 	// Apply sensitive word obfuscation
 	if len(sensitiveWords) > 0 {
@@ -2781,29 +2459,4 @@ func injectSystemCacheControl(payload []byte) []byte {
 	return payload
 }
 
-<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 func (e *ClaudeExecutor) CloseExecutionSession(sessionID string) {}
-=======
-func ensureModelMaxTokens(body []byte, modelID string) []byte {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		return body
-	}
-
-	if maxTokens := gjson.GetBytes(body, "max_tokens"); maxTokens.Exists() {
-		return body
-	}
-
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(strings.TrimSpace(modelID)) {
-		if strings.EqualFold(provider, "claude") {
-			maxTokens := defaultModelMaxTokens
-			if info := registry.GetGlobalRegistry().GetModelInfo(strings.TrimSpace(modelID), "claude"); info != nil && info.MaxCompletionTokens > 0 {
-				maxTokens = info.MaxCompletionTokens
-			}
-			body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
-			return body
-		}
-	}
-
-	return body
-}
->>>>>>> upstream/main:internal/runtime/executor/claude_executor.go

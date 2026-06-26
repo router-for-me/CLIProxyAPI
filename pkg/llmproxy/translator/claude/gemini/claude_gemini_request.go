@@ -14,15 +14,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/gemini/claude_gemini_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/claude/gemini/claude_gemini_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

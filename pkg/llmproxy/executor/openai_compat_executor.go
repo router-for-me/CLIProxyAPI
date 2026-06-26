@@ -5,10 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
 	"errors"
-=======
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 	"fmt"
 	"io"
 	"mime"
@@ -18,22 +15,12 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -182,16 +169,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
 	httpResp, err := ExecuteHTTPRequest(ctx, e.cfg, auth, httpReq, "openai compat executor")
 	if err != nil {
-=======
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 		return resp, err
 	}
 	defer func() {
@@ -199,33 +178,17 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
 	}()
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
-=======
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
-	}
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
 	if err = validateOpenAICompatJSON(body); err != nil {
 		reporter.publishFailure(ctx)
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
 	reporter.publish(ctx, parseOpenAIUsage(body))
-=======
-	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
@@ -400,27 +363,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		AuthValue: authValue,
 	})
 
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
 	httpResp, err := ExecuteHTTPRequestForStreaming(ctx, e.cfg, auth, httpReq, "openai compat executor")
 	if err != nil {
 		if shouldFallbackOpenAICompatStream(err, from) {
 			return e.executeStreamViaNonStreamFallback(ctx, auth, req, opts)
-=======
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("openai compat executor: close response body error: %v", errClose)
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 		}
 		return nil, err
 	}
@@ -437,7 +383,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			if err := validateOpenAICompatJSON(bytes.Clone(line)); err != nil {
 				reporter.publishFailure(ctx)
@@ -446,11 +391,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
-=======
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 			}
 			trimmedLine := bytes.TrimSpace(line)
 			if len(trimmedLine) == 0 {
@@ -987,47 +927,6 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 	return
 }
 
-<<<<<<< HEAD:pkg/llmproxy/executor/openai_compat_executor.go
-=======
-func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
-	if auth == nil || e.cfg == nil {
-		return nil
-	}
-	candidates := make([]string, 0, 3)
-	if auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["compat_name"]); v != "" {
-			candidates = append(candidates, v)
-		}
-		if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
-			candidates = append(candidates, v)
-		}
-	}
-	if v := strings.TrimSpace(auth.Provider); v != "" {
-		candidates = append(candidates, v)
-	}
-	for i := range e.cfg.OpenAICompatibility {
-		compat := &e.cfg.OpenAICompatibility[i]
-		if compat.Disabled {
-			continue
-		}
-		for _, candidate := range candidates {
-			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
-				return compat
-			}
-		}
-	}
-	return nil
-}
-
-func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
-	if len(payload) == 0 || model == "" {
-		return payload
-	}
-	payload, _ = sjson.SetBytes(payload, "model", model)
-	return payload
-}
-
->>>>>>> upstream/main:internal/runtime/executor/openai_compat_executor.go
 type statusErr struct {
 	code       int
 	msg        string

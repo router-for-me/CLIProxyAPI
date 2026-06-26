@@ -3,11 +3,7 @@ package diff
 import (
 	"testing"
 
-<<<<<<< HEAD:pkg/llmproxy/auth/diff/model_hash_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/watcher/diff/model_hash_test.go
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {

@@ -3,11 +3,7 @@ package diff
 import (
 	"testing"
 
-<<<<<<< HEAD:pkg/llmproxy/watcher/diff/oauth_excluded_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main:internal/watcher/diff/oauth_excluded_test.go
 )
 
 func TestSummarizeExcludedModels_NormalizesAndDedupes(t *testing.T) {

@@ -13,14 +13,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	log "github.com/sirupsen/logrus"
->>>>>>> upstream/main:internal/api/middleware/response_writer.go
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -445,7 +439,6 @@ func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time
 }
 
 func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
-<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 	if c != nil {
 		if bodyOverride, isExist := c.Get(requestBodyOverrideContextKey); isExist {
 			switch value := bodyOverride.(type) {
@@ -459,10 +452,6 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 				}
 			}
 		}
-=======
-	if body := extractBodyOverride(c, requestBodyOverrideContextKey); len(body) > 0 {
-		return body
->>>>>>> upstream/main:internal/api/middleware/response_writer.go
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
 		return redactLoggedBody(w.requestInfo.Body)
@@ -628,17 +617,9 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 			redactLoggedBody(requestBody),
 			statusCode,
 			headers,
-<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 			redactLoggedBody(body),
 			redactLoggedBody(apiRequestBody),
 			redactLoggedBody(apiResponseBody),
-=======
-			body,
-			websocketTimeline,
-			apiRequestBody,
-			apiResponseBody,
-			apiWebsocketTimeline,
->>>>>>> upstream/main:internal/api/middleware/response_writer.go
 			apiResponseErrors,
 			forceLog,
 			safeRequestID,
@@ -654,17 +635,9 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		redactLoggedBody(requestBody),
 		statusCode,
 		headers,
-<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 		redactLoggedBody(body),
 		redactLoggedBody(apiRequestBody),
 		redactLoggedBody(apiResponseBody),
-=======
-		body,
-		websocketTimeline,
-		apiRequestBody,
-		apiResponseBody,
-		apiWebsocketTimeline,
->>>>>>> upstream/main:internal/api/middleware/response_writer.go
 		apiResponseErrors,
 		safeRequestID,
 		w.requestInfo.Timestamp,
@@ -672,7 +645,6 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	)
 }
 
-<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 func sanitizeForLogging(value string) string {
 	return html.EscapeString(strings.TrimSpace(value))
 }
@@ -683,37 +655,4 @@ func redactLoggedBody(body []byte) []byte {
 	}
 	sum := sha256.Sum256(body)
 	return []byte(fmt.Sprintf("[REDACTED] len=%d sha256=%x", len(body), sum[:8]))
-=======
-func mergeFileBodySource(payload []byte, source *logging.FileBodySource) ([]byte, error) {
-	if source == nil {
-		return payload, nil
-	}
-	defer cleanupFileBodySources(source)
-	if !source.HasPayload() {
-		return payload, nil
-	}
-	var buf bytes.Buffer
-	if len(payload) > 0 {
-		buf.Write(payload)
-		if !bytes.HasSuffix(payload, []byte("\n")) {
-			buf.WriteByte('\n')
-		}
-		buf.WriteByte('\n')
-	}
-	if errWrite := source.WriteTo(&buf); errWrite != nil {
-		return nil, errWrite
-	}
-	return buf.Bytes(), nil
-}
-
-func cleanupFileBodySources(sources ...*logging.FileBodySource) {
-	for _, source := range sources {
-		if source == nil {
-			continue
-		}
-		if errCleanup := source.Cleanup(); errCleanup != nil {
-			log.WithError(errCleanup).Warn("failed to clean up log part files")
-		}
-	}
->>>>>>> upstream/main:internal/api/middleware/response_writer.go
 }

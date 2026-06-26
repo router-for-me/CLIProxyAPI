@@ -14,17 +14,8 @@ import (
 	"sync"
 	"time"
 
-<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
-=======
-	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
->>>>>>> upstream/main
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.

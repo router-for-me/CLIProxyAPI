@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/runtime/executor/helps"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

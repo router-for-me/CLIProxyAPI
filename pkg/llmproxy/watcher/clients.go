@@ -13,19 +13,10 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher/diff"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/watcher/clients.go
 	log "github.com/sirupsen/logrus"
 )
 
@@ -78,26 +69,10 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	}
 
 	if rescanAuth {
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
 		w.clientsMutex.Lock()
 
 		w.lastAuthHashes = make(map[string]string)
 		w.lastAuthContents = make(map[string]*coreauth.Auth)
-=======
-		w.authRescanMu.Lock()
-		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
-		newAuthHashes := make(map[string]string)
-		var newAuthContents map[string]*coreauth.Auth
-		if cacheAuthContents {
-			newAuthContents = make(map[string]*coreauth.Auth)
-		}
-		newFileAuthsByPath := make(map[string]map[string]*coreauth.Auth)
-
-		w.clientsMutex.RLock()
-		parser := w.pluginAuthParser
-		w.clientsMutex.RUnlock()
-
->>>>>>> upstream/main:internal/watcher/clients.go
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
@@ -116,35 +91,12 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 					fullPath := filepath.Join(resolvedAuthDir, name)
 					if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
 						normalizedPath := w.normalizeAuthPath(path)
 						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
 						// Parse and cache auth content for future diff comparisons
 						var auth coreauth.Auth
 						if errParse := json.Unmarshal(data, &auth); errParse == nil {
 							w.lastAuthContents[normalizedPath] = &auth
-=======
-						normalizedPath := w.normalizeAuthPath(fullPath)
-						newAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons (debug only).
-						if cacheAuthContents {
-							var auth coreauth.Auth
-							if errParse := json.Unmarshal(data, &auth); errParse == nil {
-								newAuthContents[normalizedPath] = &auth
-							}
-						}
-						ctx := &synthesizer.SynthesisContext{
-							Config:           cfg,
-							AuthDir:          resolvedAuthDir,
-							Now:              time.Now(),
-							IDGenerator:      synthesizer.NewStableIDGenerator(),
-							PluginAuthParser: parser,
-						}
-						if generated := synthesizer.SynthesizeAuthFile(ctx, fullPath, data); len(generated) > 0 {
-							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
-								newFileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
-							}
->>>>>>> upstream/main:internal/watcher/clients.go
 						}
 					}
 				}
@@ -217,15 +169,6 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 		w.clientsMutex.Unlock()
 		return
 	}
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
-=======
-	cfg := w.config
-	authDir := w.authDir
-	parser := w.pluginAuthParser
-	if w.fileAuthsByPath == nil {
-		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
-	}
->>>>>>> upstream/main:internal/watcher/clients.go
 	if prev, ok := w.lastAuthHashes[normalized]; ok && prev == curHash {
 		log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(path))
 		w.clientsMutex.Unlock()
@@ -234,7 +177,6 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 
 	// Get old auth for diff comparison
 	var oldAuth *coreauth.Auth
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
 	if w.lastAuthContents != nil {
 		oldAuth = w.lastAuthContents[normalized]
 	}
@@ -244,11 +186,6 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 		log.Debugf("auth field changes for %s:", filepath.Base(path))
 		for _, c := range changes {
 			log.Debugf("  %s", c)
-=======
-	if cacheAuthContents && w.lastAuthContents != nil {
-		if cached := w.lastAuthContents[normalized]; cached != nil {
-			oldAuth = cached.Clone()
->>>>>>> upstream/main:internal/watcher/clients.go
 		}
 	}
 
@@ -262,57 +199,15 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	}
 	w.lastAuthContents[normalized] = &newAuth
 
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
 	w.clientsMutex.Unlock() // Unlock before the callback
 
 	w.refreshAuthState(false)
-=======
-	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
-	for id, a := range w.fileAuthsByPath[normalized] {
-		oldByID[id] = a
-	}
-	w.clientsMutex.Unlock()
-
-	// Compute and log field changes
-	if cacheAuthContents {
-		if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
-			log.Debugf("auth field changes for %s:", filepath.Base(path))
-			for _, c := range changes {
-				log.Debugf("  %s", c)
-			}
-		}
-	}
-
-	// Build synthesized auth entries for this single file only.
-	sctx := &synthesizer.SynthesisContext{
-		Config:           cfg,
-		AuthDir:          authDir,
-		Now:              time.Now(),
-		IDGenerator:      synthesizer.NewStableIDGenerator(),
-		PluginAuthParser: parser,
-	}
-	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
-	newByID := authSliceToMap(generated)
-	w.clientsMutex.Lock()
-	if len(newByID) > 0 {
-		w.fileAuthsByPath[normalized] = authIDSet(newByID)
-	} else {
-		delete(w.fileAuthsByPath, normalized)
-	}
-	updates := w.computePerPathUpdatesLocked(oldByID, newByID)
-	w.clientsMutex.Unlock()
->>>>>>> upstream/main:internal/watcher/clients.go
 
 	if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback after add/update")
 		w.reloadCallback(cfg)
 	}
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
-=======
-	w.dispatchAuthUpdates(updates)
-	redisqueue.NotifyUsageRefresh()
->>>>>>> upstream/main:internal/watcher/clients.go
 }
 
 func (w *Watcher) removeClient(path string) {
@@ -339,57 +234,6 @@ func (w *Watcher) removeClientLocked(path string) {
 		w.reloadCallback(cfg)
 	}
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
-<<<<<<< HEAD:pkg/llmproxy/watcher/clients.go
-=======
-	w.dispatchAuthUpdates(updates)
-	redisqueue.NotifyUsageRefresh()
-}
-
-func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*coreauth.Auth) []AuthUpdate {
-	if w.currentAuths == nil {
-		w.currentAuths = make(map[string]*coreauth.Auth)
-	}
-	updates := make([]AuthUpdate, 0, len(oldByID)+len(newByID))
-	for id, newAuth := range newByID {
-		existing, ok := w.currentAuths[id]
-		if !ok {
-			w.currentAuths[id] = newAuth.Clone()
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: newAuth.Clone()})
-			continue
-		}
-		if !authEqual(existing, newAuth) {
-			w.currentAuths[id] = newAuth.Clone()
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: newAuth.Clone()})
-		}
-	}
-	for id := range oldByID {
-		if _, stillExists := newByID[id]; stillExists {
-			continue
-		}
-		delete(w.currentAuths, id)
-		updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
-	}
-	return updates
-}
-
-func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
-	byID := make(map[string]*coreauth.Auth, len(auths))
-	for _, a := range auths {
-		if a == nil || strings.TrimSpace(a.ID) == "" {
-			continue
-		}
-		byID[a.ID] = a
-	}
-	return byID
-}
-
-func authIDSet(auths map[string]*coreauth.Auth) map[string]*coreauth.Auth {
-	set := make(map[string]*coreauth.Auth, len(auths))
-	for id := range auths {
-		set[id] = nil
-	}
-	return set
->>>>>>> upstream/main:internal/watcher/clients.go
 }
 
 func (w *Watcher) loadFileClients(cfg *config.Config) int {

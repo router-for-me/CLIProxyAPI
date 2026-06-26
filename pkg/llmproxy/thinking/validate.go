@@ -5,11 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/thinking/validate.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
->>>>>>> upstream/main:internal/thinking/validate.go
 	log "github.com/sirupsen/logrus"
 )
 

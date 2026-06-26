@@ -275,7 +275,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var chatCompletionsTools []interface{}
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_request.go
 			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
 			// Only function tools need structural conversion because Chat Completions nests details under "function".
 			toolType := tool.Get("type").String()
@@ -283,10 +282,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				// Pass through built-in tools (e.g. web_search_preview) as-is
 				chatCompletionsTools = append(chatCompletionsTools, tool.Value())
 				return true
-=======
-			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
-				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_request.go
 			}
 			return true
 		})
@@ -331,16 +326,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_request.go
 		switch toolChoice.Type {
 		case gjson.JSON:
 			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 		default:
 			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 		}
-=======
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_request.go
 	}
 
 	return out

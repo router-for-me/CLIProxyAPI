@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/home"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/homeplugins"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )

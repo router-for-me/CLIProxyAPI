@@ -9,13 +9,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/vertex_import.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/vertex"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/vertex"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
->>>>>>> upstream/main:internal/api/handlers/management/vertex_import.go
 )
 
 // ImportVertexCredential handles uploading a Vertex service account JSON and saving it as an auth record.

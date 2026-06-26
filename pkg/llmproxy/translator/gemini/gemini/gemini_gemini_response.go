@@ -4,11 +4,7 @@ import (
 	"bytes"
 	"context"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini/gemini/gemini_gemini_response.go
 	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
-=======
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
->>>>>>> upstream/main:internal/translator/gemini/gemini/gemini_gemini_response.go
 )
 
 // PassthroughGeminiResponseStream forwards Gemini responses unchanged.

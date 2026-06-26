@@ -9,10 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
-=======
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -70,15 +66,10 @@ type oaiToResponsesState struct {
 	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
 	MsgItemDone     map[int]bool // whether message done events were emitted
 	// function item done state
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
 	FuncArgsDone map[int]bool
 	FuncItemDone map[int]bool
 	// Accumulated annotations per output index
 	Annotations map[int][]interface{}
-=======
-	FuncArgsDone map[string]bool
-	FuncItemDone map[string]bool
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 	// usage aggregation
 	PromptTokens     int64
 	CachedTokens     int64
@@ -297,16 +288,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
 		// GitHub #1085: Emit completion events on [DONE] marker instead of returning empty
 		return emitCompletionEvents(st)
-=======
-		if st.CompletionPending && !st.CompletedEmitted {
-			st.CompletedEmitted = true
-			return [][]byte{buildResponsesCompletedEvent(st, requestForNamespace, func() int { st.Seq++; return st.Seq })}
-		}
-		return [][]byte{}
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 	}
 
 	root := gjson.ParseBytes(rawJSON)
@@ -348,17 +331,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 
 	nextSeq := func() int { st.Seq++; return st.Seq }
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
 	var out []string
-=======
-	allocOutputIndex := func() int {
-		ix := st.NextOutputIx
-		st.NextOutputIx++
-		return ix
-	}
-	toolStateKey := func(outputIndex, toolIndex int) string { return fmt.Sprintf("%d:%d", outputIndex, toolIndex) }
-	var out [][]byte
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 
 	if !st.Started {
 		st.ResponseID = root.Get("id").String()
@@ -385,14 +358,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.TotalTokens = 0
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
 		st.CompletionSent = false
 		st.StopSeen = false
 		st.Annotations = make(map[int][]interface{})
-=======
-		st.CompletionPending = false
-		st.CompletedEmitted = false
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
@@ -715,7 +683,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						st.FuncArgsDone[key] = true
 					}
 				}
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
 				completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
 				completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 				completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
@@ -865,9 +832,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 				out = append(out, emitRespEvent("response.completed", completed))
 				st.CompletionSent = true
-=======
-				st.CompletionPending = true
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 			}
 
 			return true
@@ -879,14 +843,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream builds a single Responses JSON
 // from a non-streaming OpenAI Chat Completions response.
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	root := unwrapOpenAIChatCompletionResult(gjson.ParseBytes(rawJSON))
-=======
-func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	root := gjson.ParseBytes(rawJSON)
-	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 
 	// Basic response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -1039,13 +997,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/openai/responses/openai_openai-responses_response.go
 						item, _ = sjson.SetBytes(item, "name", name)
 						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", string(item))
-=======
-						item = applyResponsesFunctionCallNamespaceFields(item, requestForNamespace, name, "")
-						outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
->>>>>>> upstream/main:internal/translator/openai/openai/responses/openai_openai-responses_response.go
 						return true
 					})
 				}

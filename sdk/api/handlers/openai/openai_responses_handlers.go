@@ -16,18 +16,11 @@ import (
 	"sort"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/constant"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	responsesconverter "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/openai/openai/responses"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/handlers"
-=======
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
->>>>>>> upstream/main
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -589,7 +582,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 }
 
-<<<<<<< HEAD
 func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Context, originalResponsesJSON, chatJSON []byte) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -705,12 +697,6 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-=======
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
-	if framer == nil {
-		framer = &responsesSSEFramer{}
-	}
->>>>>>> upstream/main
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			framer.WriteChunk(c.Writer, chunk)

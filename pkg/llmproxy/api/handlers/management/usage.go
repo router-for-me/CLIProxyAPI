@@ -8,11 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/usage.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/usage"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
->>>>>>> upstream/main:internal/api/handlers/management/usage.go
 )
 
 type usageQueueRecord []byte

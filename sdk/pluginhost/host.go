@@ -3,9 +3,9 @@ package pluginhost
 import (
 	"context"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	internalpluginhost "github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalconfig "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	internalpluginhost "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginhost"
+	internalregistry "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"

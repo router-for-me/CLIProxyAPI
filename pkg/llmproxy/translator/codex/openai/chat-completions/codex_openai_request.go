@@ -189,37 +189,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 							}
 						case "file":
-<<<<<<< HEAD:pkg/llmproxy/translator/codex/openai/chat-completions/codex_openai_request.go
 							// Files are not specified in examples; skip for now
-=======
-							if role == "user" {
-								fileData := it.Get("file.file_data").String()
-								filename := it.Get("file.filename").String()
-								if fileData != "" {
-									part := []byte(`{}`)
-									part, _ = sjson.SetBytes(part, "type", "input_file")
-									part, _ = sjson.SetBytes(part, "file_data", fileData)
-									if filename != "" {
-										part, _ = sjson.SetBytes(part, "filename", filename)
-									}
-									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
-								}
-							}
-						case "input_audio":
-							if role == "user" {
-								audioData := it.Get("input_audio.data").String()
-								audioFormat := it.Get("input_audio.format").String()
-								if audioData != "" {
-									part := []byte(`{}`)
-									part, _ = sjson.SetBytes(part, "type", "input_audio")
-									part, _ = sjson.SetBytes(part, "data", audioData)
-									if audioFormat != "" {
-										part, _ = sjson.SetBytes(part, "format", audioFormat)
-									}
-									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
-								}
-							}
->>>>>>> upstream/main:internal/translator/codex/openai/chat-completions/codex_openai_request.go
 						}
 					}
 				}

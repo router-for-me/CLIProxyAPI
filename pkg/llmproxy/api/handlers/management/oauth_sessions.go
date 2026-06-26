@@ -310,7 +310,6 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "anthropic", nil
 	case "codex", "openai":
 		return "codex", nil
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/oauth_sessions.go
 	case "gitlab":
 		return "gitlab", nil
 	case "gemini", "google":
@@ -325,12 +324,6 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "kiro", nil
 	case "github":
 		return "github", nil
-=======
-	case "antigravity", "anti-gravity":
-		return "antigravity", nil
-	case "xai", "x-ai", "x.ai", "grok":
-		return "xai", nil
->>>>>>> upstream/main:internal/api/handlers/management/oauth_sessions.go
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
@@ -374,7 +367,6 @@ type oauthCallbackFilePayload struct {
 	Error string `json:"error"`
 }
 
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/oauth_sessions.go
 func sanitizeOAuthCallbackPath(authDir, fileName string) (string, error) {
 	trimmedAuthDir := strings.TrimSpace(authDir)
 	if trimmedAuthDir == "" {
@@ -405,39 +397,17 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 	canonicalProvider, err := NormalizeOAuthProvider(provider)
 	if err != nil {
 		return "", err
-=======
-func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
-	canonicalProvider, err := NormalizeOAuthCallbackProvider(provider)
-	if err != nil {
-		return "", err
-	}
-	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
-}
-
-func writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage string) (string, error) {
-	if strings.TrimSpace(authDir) == "" {
-		return "", fmt.Errorf("auth dir is empty")
-	}
-	canonicalProvider = strings.TrimSpace(canonicalProvider)
-	if canonicalProvider == "" {
-		return "", errUnsupportedOAuthFlow
->>>>>>> upstream/main:internal/api/handlers/management/oauth_sessions.go
 	}
 	if err := ValidateOAuthState(state); err != nil {
 		return "", err
 	}
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/oauth_sessions.go
 	filePath, err := sanitizeOAuthCallbackPath(authDir, fileName)
 	if err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
-=======
-	filePath := filepath.Join(authDir, fileName)
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
->>>>>>> upstream/main:internal/api/handlers/management/oauth_sessions.go
 		return "", fmt.Errorf("create oauth callback dir: %w", err)
 	}
 	payload := oauthCallbackFilePayload{

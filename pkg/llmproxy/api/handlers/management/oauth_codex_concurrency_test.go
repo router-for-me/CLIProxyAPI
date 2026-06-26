@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 )
 
 type fakeCodexOAuthService struct{}

@@ -15,14 +15,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-<<<<<<< HEAD:pkg/llmproxy/auth/kimi/kimi.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/auth/kimi/kimi.go
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -112,28 +107,11 @@ func NewDeviceFlowClient(cfg *config.Config) *DeviceFlowClient {
 }
 
 // NewDeviceFlowClientWithDeviceID creates a new device flow client with the specified device ID.
-<<<<<<< HEAD:pkg/llmproxy/auth/kimi/kimi.go
 func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string, httpClient *http.Client) *DeviceFlowClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 		if cfg != nil {
 			httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
-=======
-func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string) *DeviceFlowClient {
-	return NewDeviceFlowClientWithDeviceIDAndProxyURL(cfg, deviceID, "")
-}
-
-// NewDeviceFlowClientWithDeviceIDAndProxyURL creates a new device flow client with a proxy override.
-// proxyURL takes precedence over cfg.ProxyURL when non-empty.
-func NewDeviceFlowClientWithDeviceIDAndProxyURL(cfg *config.Config, deviceID string, proxyURL string) *DeviceFlowClient {
-	client := &http.Client{Timeout: 30 * time.Second}
-	effectiveProxyURL := strings.TrimSpace(proxyURL)
-	var sdkCfg config.SDKConfig
-	if cfg != nil {
-		sdkCfg = cfg.SDKConfig
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
->>>>>>> upstream/main:internal/auth/kimi/kimi.go
 		}
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL

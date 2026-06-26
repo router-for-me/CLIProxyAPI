@@ -44,7 +44,6 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 		}
 	case "codex", "xai":
 		paths = []string{"reasoning.effort"}
-<<<<<<< HEAD:pkg/llmproxy/thinking/strip.go
 	case "iflow":
 		paths = []string{
 			"chat_template_kwargs",
@@ -53,8 +52,6 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 			"reasoning",
 			"variant",
 		}
-=======
->>>>>>> upstream/main:internal/thinking/strip.go
 	default:
 		return body
 	}

@@ -16,21 +16,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/handler.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/buildinfo"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/usage"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	log "github.com/sirupsen/logrus"
->>>>>>> upstream/main:internal/api/handlers/management/handler.go
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -48,7 +38,6 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/handler.go
 	cfg                 *config.Config
 	configFilePath      string
 	mu                  sync.Mutex
@@ -63,35 +52,6 @@ type Handler struct {
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
 	routingSelect       *RoutingSelectHandler
-=======
-	cfg                     *config.Config
-	configFilePath          string
-	mu                      sync.Mutex
-	reloadMu                sync.Mutex
-	reloadGeneration        uint64
-	appliedReloadGeneration uint64
-	attemptsMu              sync.Mutex
-	failedAttempts          map[string]*attemptInfo // keyed by client IP
-	authManager             *coreauth.Manager
-	tokenStore              coreauth.Store
-	localPassword           string
-	allowRemoteOverride     bool
-	envSecret               string
-	logDir                  string
-	postAuthHook            coreauth.PostAuthHook
-	postAuthPersistHook     coreauth.PostAuthHook
-	pluginHost              *pluginhost.Host
-	configReloadHook        func(context.Context, *config.Config)
-	pluginStoreRegistryURL  string
-	pluginStoreHTTPClient   pluginstore.HTTPDoer
-	pluginReleaseCacheMu    sync.Mutex
-	pluginReleaseCache      map[string]pluginReleaseCacheEntry
-}
-
-type configReloadSnapshot struct {
-	cfg        *config.Config
-	generation uint64
->>>>>>> upstream/main:internal/api/handlers/management/handler.go
 }
 
 // NewHandler creates a new management handler instance.

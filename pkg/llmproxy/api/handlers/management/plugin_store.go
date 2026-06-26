@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/htmlsanitize"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginhost"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginstore"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 )

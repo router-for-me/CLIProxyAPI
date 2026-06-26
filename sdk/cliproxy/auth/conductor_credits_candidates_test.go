@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	internalconfig "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	homekv "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/home"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 

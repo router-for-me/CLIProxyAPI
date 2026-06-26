@@ -5,15 +5,13 @@ import (
 	"net/http"
 	"testing"
 
-<<<<<<<< HEAD:pkg/llmproxy/executor/proxy_helpers_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 ========
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
->>>>>>>> upstream/main:pkg/llmproxy/executor/helps/proxy_helpers_test.go
 )
 
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {

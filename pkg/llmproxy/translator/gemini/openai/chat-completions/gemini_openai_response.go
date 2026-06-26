@@ -13,11 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini/openai/chat-completions/gemini_openai_response.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/gemini/openai/chat-completions/gemini_openai_response.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

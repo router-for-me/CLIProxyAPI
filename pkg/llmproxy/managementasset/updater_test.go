@@ -3,7 +3,7 @@ package managementasset
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 )
 
 func TestAutoUpdateSkipReason(t *testing.T) {

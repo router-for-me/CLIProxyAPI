@@ -7,14 +7,7 @@ import (
 	"strings"
 	"testing"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/claude/antigravity_claude_request_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	log "github.com/sirupsen/logrus"
-	"github.com/sirupsen/logrus/hooks/test"
->>>>>>> upstream/main:internal/translator/antigravity/claude/antigravity_claude_request_test.go
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )

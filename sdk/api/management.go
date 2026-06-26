@@ -8,15 +8,9 @@ import (
 	"context"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD
 	internalmanagement "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api/handlers/management"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-=======
-	internalmanagement "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
->>>>>>> upstream/main
 )
 
 // Handler re-exports the management handler used by the internal HTTP API.

@@ -12,11 +12,7 @@ import (
 	"strings"
 	"time"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/claude/gemini/claude_gemini_response.go
 	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
-=======
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
->>>>>>> upstream/main:internal/translator/claude/gemini/claude_gemini_response.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

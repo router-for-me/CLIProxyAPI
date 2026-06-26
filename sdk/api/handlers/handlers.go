@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD
 	"github.com/google/uuid"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
@@ -37,20 +36,6 @@ const (
 	CtxKeyGin CtxKey = "gin"
 	// ctxKeyHandler is the context key for the handler value.
 	ctxKeyHandler CtxKey = "handler"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
-	"golang.org/x/net/context"
->>>>>>> upstream/main
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -1373,43 +1358,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					return
 				}
 				if len(chunk.Payload) > 0 {
-<<<<<<< HEAD
-=======
-					applyStreamHeaderInit()
-					payload := cloneBytes(chunk.Payload)
-					if streamInterceptorsActive {
-						executedReq, executedOpts := executedRequest()
-						intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
-							SourceFormat:    responseProtocol,
-							Model:           normalizedModel,
-							RequestedModel:  originalRequestedModel,
-							RequestHeaders:  cloneHeader(executedOpts.Headers),
-							ResponseHeaders: cloneHeader(rawStreamHeaders),
-							OriginalRequest: cloneBytes(executedOpts.OriginalRequest),
-							RequestBody:     cloneBytes(executedReq.Payload),
-							Body:            payload,
-							HistoryChunks:   cloneByteSlices(historyChunks),
-							ChunkIndex:      chunkIndex,
-							Metadata:        executedOpts.Metadata,
-						}, execOptions.SkipInterceptorPluginID)
-						applyStreamHeaders(intercepted.Headers)
-						if len(intercepted.Body) > 0 {
-							payload = cloneBytes(intercepted.Body)
-						}
-						chunkIndex++
-						if intercepted.DropChunk {
-							continue
-						}
-					} else {
-						chunkIndex++
-					}
-					if responseProtocol == "openai-response" {
-						if errValidate := validateSSEDataJSON(payload); errValidate != nil {
-							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate})
-							return
-						}
-					}
->>>>>>> upstream/main
 					sentPayload = true
 					streamHeadersCommitted = true
 					if okSendData := sendData(payload); !okSendData {
@@ -1440,32 +1388,7 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-<<<<<<< HEAD
 	var resolvedModelName string
-=======
-	return h.getRequestDetailsWithOptions(modelName, false)
-}
-
-// providersForExecution resolves the providers and normalized model for a request. When a model
-// router selected a built-in provider, it skips model->provider resolution and uses the router's
-// provider (with an optional target model); otherwise it falls back to the registry-based path.
-func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision) ([]string, string, *interfaces.ErrorMessage) {
-	if routeDecision.Provider != "" {
-		normalizedModel := originalRequestedModel
-		if routeDecision.Model != "" {
-			normalizedModel = routeDecision.Model
-		}
-		if errMsg := h.validateImageOnlyModel(normalizedModel, allowImageModel); errMsg != nil {
-			return nil, "", errMsg
-		}
-		return []string{routeDecision.Provider}, normalizedModel, nil
-	}
-	return h.getRequestDetailsWithOptions(modelName, allowImageModel)
-}
-
-func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	resolvedModelName := modelName
->>>>>>> upstream/main
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {

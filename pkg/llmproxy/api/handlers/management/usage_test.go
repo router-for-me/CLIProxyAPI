@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/redisqueue"
 )
 
 func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {

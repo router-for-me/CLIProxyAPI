@@ -12,13 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/codex/gemini/codex_gemini_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-=======
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/codex/gemini/codex_gemini_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

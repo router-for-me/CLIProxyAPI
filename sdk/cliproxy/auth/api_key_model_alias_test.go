@@ -4,11 +4,7 @@ import (
 	"context"
 	"testing"
 
-<<<<<<< HEAD
 	internalconfig "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-=======
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
->>>>>>> upstream/main
 )
 
 func TestLookupAPIKeyUpstreamModel(t *testing.T) {

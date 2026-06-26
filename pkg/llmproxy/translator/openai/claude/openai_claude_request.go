@@ -8,14 +8,7 @@ package claude
 import (
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/claude/openai_claude_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
-=======
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
->>>>>>> upstream/main:internal/translator/openai/claude/openai_claude_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -108,7 +101,6 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	// Handle system message first
 	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
 	hasSystemContent := false
-<<<<<<< HEAD:pkg/llmproxy/translator/openai/claude/openai_claude_request.go
 	if system := root.Get("system"); system.Exists() {
 		switch system.Type {
 		case gjson.String:
@@ -128,11 +120,6 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 				}
 			}
-=======
-	appendSystemContent := func(content gjson.Result) {
-		if !content.Exists() {
-			return
->>>>>>> upstream/main:internal/translator/openai/claude/openai_claude_request.go
 		}
 		if content.Type == gjson.String {
 			if content.String() == "" || util.IsClaudeCodeAttributionSystemText(content.String()) {

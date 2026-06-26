@@ -5,27 +5,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
-<<<<<<<< HEAD:pkg/llmproxy/executor/usage_helpers.go
 	"strconv"
 ========
 	"io"
 	"net/http"
 	"reflect"
->>>>>>>> upstream/main:pkg/llmproxy/executor/helps/usage_helpers.go
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-<<<<<<<< HEAD:pkg/llmproxy/executor/usage_helpers.go
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/usage"
 ========
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	internallogging "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
->>>>>>>> upstream/main:pkg/llmproxy/executor/helps/usage_helpers.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -477,7 +473,6 @@ func ParseOpenAIUsage(data []byte) usage.Detail {
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}
 	}
-<<<<<<<< HEAD:pkg/llmproxy/executor/usage_helpers.go
 	return parseOpenAIUsageDetail(usageNode)
 ========
 	return parseOpenAIStyleUsageNode(usageNode)
@@ -527,7 +522,6 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		detail.ReasoningTokens = reasoning.Int()
 	}
 	return detail
->>>>>>>> upstream/main:pkg/llmproxy/executor/helps/usage_helpers.go
 }
 
 func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
@@ -539,7 +533,6 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
-<<<<<<<< HEAD:pkg/llmproxy/executor/usage_helpers.go
 	return parseOpenAIUsageDetail(usageNode), true
 }
 
@@ -628,7 +621,6 @@ func parseUsageNumber(raw string) int64 {
 	return 0
 ========
 	return parseOpenAIStyleUsageNode(usageNode), true
->>>>>>>> upstream/main:pkg/llmproxy/executor/helps/usage_helpers.go
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
