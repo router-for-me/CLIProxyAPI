@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -24,6 +25,8 @@ const (
 	claudeOAuthViolationNone              = ""
 	claudeOAuthViolationIdentityMismatch  = "identity_mismatch"
 	claudeOAuthViolationSessionLimit      = "session_limit"
+	claudeOAuthHTTPStatusTooManySessions  = 529
+	claudeOAuthSessionLimitErrorBody      = `{"type":"error","error":{"type":"too_many_sessions","message":"too many sessions"}}`
 	claudeOAuthFingerprintCleanupInterval = 15 * time.Minute
 )
 
@@ -79,7 +82,30 @@ func (e *ClaudeOAuthFingerprintError) Error() string {
 	if e == nil {
 		return ""
 	}
+	if e.Code == claudeOAuthViolationSessionLimit {
+		return claudeOAuthSessionLimitErrorBody
+	}
 	return e.Message
+}
+
+// HTTPStatus returns the HTTP status code for an enforce-mode fingerprint error.
+func (e *ClaudeOAuthFingerprintError) HTTPStatus() int {
+	if e == nil {
+		return http.StatusTooManyRequests
+	}
+	if e.Code == claudeOAuthViolationSessionLimit {
+		return claudeOAuthHTTPStatusTooManySessions
+	}
+	return http.StatusTooManyRequests
+}
+
+// ClaudeOAuthFingerprintHTTPStatus resolves the HTTP status for fingerprint gate errors.
+func ClaudeOAuthFingerprintHTTPStatus(err error) int {
+	var fpErr *ClaudeOAuthFingerprintError
+	if errors.As(err, &fpErr) && fpErr != nil {
+		return fpErr.HTTPStatus()
+	}
+	return http.StatusTooManyRequests
 }
 
 // ClaudeOAuthFingerprintEnabled reports whether OAuth fingerprint handling is active.
@@ -259,7 +285,7 @@ func claudeOAuthFingerprintErrorFor(violation string) error {
 	case claudeOAuthViolationSessionLimit:
 		return &ClaudeOAuthFingerprintError{
 			Code:    claudeOAuthViolationSessionLimit,
-			Message: "claude oauth fingerprint: active session limit exceeded",
+			Message: "too many sessions",
 		}
 	default:
 		return &ClaudeOAuthFingerprintError{Code: violation, Message: "claude oauth fingerprint: request blocked"}

@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 func testClaudeOAuthFingerprintConfig(mode string) *config.Config {
@@ -88,6 +90,19 @@ func TestClaudeOAuthFingerprintGate_SessionLimitEnforce(t *testing.T) {
 	}
 	if res5 == nil || res5.Violation != claudeOAuthViolationSessionLimit {
 		t.Fatalf("violation = %q, want %q", res5.Violation, claudeOAuthViolationSessionLimit)
+	}
+	var fpErr *ClaudeOAuthFingerprintError
+	if !errors.As(err5, &fpErr) {
+		t.Fatalf("expected ClaudeOAuthFingerprintError, got %T", err5)
+	}
+	if fpErr.HTTPStatus() != claudeOAuthHTTPStatusTooManySessions {
+		t.Fatalf("HTTPStatus() = %d, want %d", fpErr.HTTPStatus(), claudeOAuthHTTPStatusTooManySessions)
+	}
+	if fpErr.Error() != claudeOAuthSessionLimitErrorBody {
+		t.Fatalf("Error() = %q, want %q", fpErr.Error(), claudeOAuthSessionLimitErrorBody)
+	}
+	if gjson.Get(fpErr.Error(), "error.type").String() != "too_many_sessions" {
+		t.Fatalf("error.type = %q, want too_many_sessions", gjson.Get(fpErr.Error(), "error.type").String())
 	}
 }
 

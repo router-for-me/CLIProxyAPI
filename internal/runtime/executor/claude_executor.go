@@ -266,7 +266,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body, fpResult, errFP = helps.ClaudeOAuthFingerprintGate(ctx, e.cfg, auth, opts.Headers, body, baseModel)
 		if errFP != nil {
 			helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, nil, body, baseModel, fpResult)
-			return resp, statusErr{code: http.StatusTooManyRequests, msg: errFP.Error()}
+			return resp, statusErr{code: helps.ClaudeOAuthFingerprintHTTPStatus(errFP), msg: errFP.Error()}
 		}
 		if fpResult != nil {
 			ctx = helps.ContextWithClaudeOAuthFingerprint(ctx, fpResult)
@@ -467,7 +467,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		body, fpResult, errFP = helps.ClaudeOAuthFingerprintGate(ctx, e.cfg, auth, opts.Headers, body, baseModel)
 		if errFP != nil {
 			helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, nil, body, baseModel, fpResult)
-			return nil, statusErr{code: http.StatusTooManyRequests, msg: errFP.Error()}
+			return nil, statusErr{code: helps.ClaudeOAuthFingerprintHTTPStatus(errFP), msg: errFP.Error()}
 		}
 		if fpResult != nil {
 			ctx = helps.ContextWithClaudeOAuthFingerprint(ctx, fpResult)
