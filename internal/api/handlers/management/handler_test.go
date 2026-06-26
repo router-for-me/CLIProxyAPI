@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestAuthenticateManagementKey_MissingKeyDoesNotTriggerIPBan(t *testing.T) {
@@ -88,6 +89,31 @@ func TestAuthenticateManagementKey_CorrectKeyClearsActiveIPBan(t *testing.T) {
 	}
 	if statusCode != http.StatusUnauthorized || errMsg != "invalid management key" {
 		t.Fatalf("expected ban counter to reset after correct key, status=%d msg=%q", statusCode, errMsg)
+	}
+}
+
+func TestAuthenticateManagementKey_ConfigSecretClearsActiveIPBan(t *testing.T) {
+	secretHash, err := bcrypt.GenerateFromPassword([]byte("test-secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword() error = %v", err)
+	}
+	h := &Handler{
+		cfg: &config.Config{
+			RemoteManagement: config.RemoteManagement{SecretKey: string(secretHash)},
+		},
+		failedAttempts: make(map[string]*attemptInfo),
+	}
+
+	for i := 0; i < 5; i++ {
+		allowed, _, _ := h.AuthenticateManagementKey("127.0.0.1", true, "wrong-secret")
+		if allowed {
+			t.Fatalf("expected auth to be denied at invalid-key attempt %d", i+1)
+		}
+	}
+
+	allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret")
+	if !allowed {
+		t.Fatalf("expected bcrypt config secret to clear active ban, status=%d msg=%q", statusCode, errMsg)
 	}
 }
 
