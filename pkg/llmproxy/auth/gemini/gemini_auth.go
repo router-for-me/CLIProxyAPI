@@ -12,7 +12,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
+
+	"sync"
 
 	"golang.org/x/net/proxy"
 
@@ -29,15 +32,38 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// OAuth configuration constants for Gemini
-const (
-	// ClientID and ClientSecret are set from env vars with defaults
-	// They are publicly-broadcast OAuth native-app credentials, not secrets,
-	// but we load them from env for production deployment flexibility.
-	ClientID     = envWithDefault("GEMINI_CLIENT_ID", "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com")
-	ClientSecret = envWithDefault("GEMINI_CLIENT_SECRET", "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")
+// OAuth configuration for Gemini
+// ClientID and ClientSecret are publicly-broadcast OAuth native-app credentials,
+// not secrets, but we load them from env for production deployment flexibility.
+var (
 	DefaultCallbackPort = 8085
+	clientIDOnce        sync.Once
+	clientSecretOnce    sync.Once
+	oauthClientID       string
+	oauthClientSecret   string
 )
+
+// ClientID returns the Gemini OAuth client ID, loading from env or using default.
+func ClientID() string {
+	clientIDOnce.Do(func() {
+		oauthClientID = os.Getenv("GEMINI_CLIENT_ID")
+		if oauthClientID == "" {
+			oauthClientID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+		}
+	})
+	return oauthClientID
+}
+
+// ClientSecret returns the Gemini OAuth client secret, loading from env or using default.
+func ClientSecret() string {
+	clientSecretOnce.Do(func() {
+		oauthClientSecret = os.Getenv("GEMINI_CLIENT_SECRET")
+		if oauthClientSecret == "" {
+			oauthClientSecret = "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"
+		}
+	})
+	return oauthClientSecret
+}
 
 // OAuth scopes for Gemini authentication
 var Scopes = []string{
@@ -117,8 +143,8 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 
 	// Configure the OAuth2 client.
 	conf := &oauth2.Config{
-		ClientID:     ClientID,
-		ClientSecret: ClientSecret,
+		ClientID:     ClientID(),
+		ClientSecret: ClientSecret(),
 		RedirectURL:  callbackURL, // This will be used by the local server.
 		Scopes:       Scopes,
 		Endpoint:     google.Endpoint,
@@ -203,8 +229,8 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 	}
 
 	ifToken["token_uri"] = "https://oauth2.googleapis.com/token"
-	ifToken["client_id"] = ClientID
-	ifToken["client_secret"] = ClientSecret
+	ifToken["client_id"] = ClientID()
+	ifToken["client_secret"] = ClientSecret()
 	ifToken["scopes"] = Scopes
 	ifToken["universe_domain"] = "googleapis.com"
 

@@ -1,8 +1,10 @@
 // Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
+import "os"
+
 // OAuth client credentials and configuration
-const (
+var (
 	// ClientID and ClientSecret are Google OAuth native-app credentials.
 	// For native/installed apps these values are publicly visible in the binary;
 	// we load them from env vars when set, falling back to the hardcoded defaults.
@@ -10,6 +12,13 @@ const (
 	ClientSecret = envWithDefault("ANTIGRAVITY_CLIENT_SECRET", "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")
 	CallbackPort = 51121
 )
+
+func envWithDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 // Scopes defines the OAuth scopes required for Antigravity authentication
 var Scopes = []string{
