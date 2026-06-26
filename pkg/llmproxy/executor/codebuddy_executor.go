@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/auth/codebuddy"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codebuddy"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"

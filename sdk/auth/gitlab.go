@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	gitlabauth "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/gitlab"
+	gitlabauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/gitlab"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"

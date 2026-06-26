@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/runtime/executor/helps"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"

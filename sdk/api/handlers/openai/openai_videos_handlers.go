@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/runtime/executor/helps"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"

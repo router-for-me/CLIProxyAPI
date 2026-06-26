@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

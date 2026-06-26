@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	internalcache "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/runtime/executor/helps"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

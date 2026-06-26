@@ -8,7 +8,7 @@ import (
 	"bytes"
 	"context"
 
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
 	"github.com/tidwall/sjson"
 )
 
