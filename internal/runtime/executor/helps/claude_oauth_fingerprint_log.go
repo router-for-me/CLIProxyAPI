@@ -105,12 +105,7 @@ func formatClaudeOAuthFingerprintLine(inboundHeaders, outboundHeaders http.Heade
 	}
 	parts = append(parts, claudeOAuthIdentityLogParts(gateResult, outboundBody)...)
 	if outboundHeaders != nil {
-		parts = append(parts,
-			"ua="+truncateClaudeOAuthLogValue(outboundHeaders.Get("User-Agent"), 40),
-			"pkg="+truncateClaudeOAuthLogValue(outboundHeaders.Get("X-Stainless-Package-Version"), 16),
-			"os="+truncateClaudeOAuthLogValue(outboundHeaders.Get("X-Stainless-Os"), 16),
-			"arch="+truncateClaudeOAuthLogValue(outboundHeaders.Get("X-Stainless-Arch"), 16),
-		)
+		parts = append(parts, claudeOAuthOutboundHeaderLogParts(outboundHeaders)...)
 	}
 	if gateResult.Slot > 0 {
 		parts = append(parts, "slot="+itoa(gateResult.Slot))
@@ -135,6 +130,21 @@ func formatClaudeOAuthFingerprintLine(inboundHeaders, outboundHeaders http.Heade
 	}
 	_ = inboundHeaders
 	return strings.Join(parts, " ")
+}
+
+func claudeOAuthOutboundHeaderLogParts(headers http.Header) []string {
+	// Log only headers that vary per client/version or are not fully pinned by
+	// claude-header-defaults + stabilize-device-profile. Constants such as
+	// X-App, Anthropic-Version, X-Stainless-Runtime/Lang/Retry-Count, and Timeout
+	// are omitted.
+	return []string{
+		"ua=" + truncateClaudeOAuthLogValue(headers.Get("User-Agent"), 40),
+		"pkg=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Package-Version"), 16),
+		"rtver=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Runtime-Version"), 16),
+		"os=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Os"), 16),
+		"arch=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Arch"), 16),
+		"beta=" + truncateClaudeOAuthLogValue(headers.Get("Anthropic-Beta"), 64),
+	}
 }
 
 func claudeOAuthIdentityLogParts(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) []string {

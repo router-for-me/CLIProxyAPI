@@ -200,9 +200,11 @@ func TestClaudeOAuthFingerprintGate_SessionHeaderMismatchFlag(t *testing.T) {
 func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("User-Agent", "claude-cli/2.1.63 (external, cli)")
+	headers.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
 	headers.Set("X-Stainless-Package-Version", "0.74.0")
 	headers.Set("X-Stainless-Os", "MacOS")
 	headers.Set("X-Stainless-Arch", "arm64")
+	headers.Set("X-Stainless-Runtime-Version", "v24.3.0")
 	body := jsonUserPayload("device-a", "account-a", "body-session-id")
 	result := &ClaudeOAuthFingerprintGateResult{
 		SessionID:       "body-session-id",
@@ -219,6 +221,35 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 	if strings.Contains(line, "acct=") {
 		t.Fatalf("line should not include acct: %s", line)
 	}
+	if !strings.Contains(line, "device=") {
+		t.Fatalf("line missing device: %s", line)
+	}
+	if strings.Contains(line, "fmt=") || strings.Contains(line, "user=") {
+		t.Fatalf("json format should use device= not fmt=/user=: %s", line)
+	}
+	if !strings.Contains(line, "ua=claude-cli/2.1.63") {
+		t.Fatalf("line missing ua: %s", line)
+	}
+	if !strings.Contains(line, "beta=claude-code-20250219") {
+		t.Fatalf("line missing beta: %s", line)
+	}
+	if !strings.Contains(line, "pkg=0.74.0") {
+		t.Fatalf("line missing pkg: %s", line)
+	}
+	if !strings.Contains(line, "rtver=v24.3.0") {
+		t.Fatalf("line missing rtver: %s", line)
+	}
+	if !strings.Contains(line, "os=MacOS") {
+		t.Fatalf("line missing os: %s", line)
+	}
+	if !strings.Contains(line, "arch=arm64") {
+		t.Fatalf("line missing arch: %s", line)
+	}
+	for _, omitted := range []string{"app=", "aver=", "runtime=", "lang=", "retry=", "timeout=", "xccs="} {
+		if strings.Contains(line, omitted) {
+			t.Fatalf("line should omit %s: %s", omitted, line)
+		}
+	}
 	if !strings.Contains(line, "slot=2") {
 		t.Fatalf("line missing slot: %s", line)
 	}
@@ -227,6 +258,27 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 	}
 	if !strings.Contains(line, "hdr=header-") || !strings.Contains(line, "body=body-ses") {
 		t.Fatalf("line missing hdr/body tokens: %s", line)
+	}
+}
+
+func TestFormatClaudeOAuthFingerprintLine_LegacyUsesUser(t *testing.T) {
+	userHash := strings.Repeat("b", 64)
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	sessionID := "22222222-2222-2222-2222-222222222222"
+	userID := "user_" + userHash + "_account_" + accountUUID + "_session_" + sessionID
+	body := []byte(`{"metadata":{"user_id":"` + userID + `"}}`)
+	result := &ClaudeOAuthFingerprintGateResult{
+		SessionID: sessionID,
+		AccountID: accountUUID,
+		UserHash:  userHash,
+		Format:    "legacy",
+	}
+	line := formatClaudeOAuthFingerprintLine(nil, nil, body, "", result)
+	if !strings.Contains(line, "user=bbbbbbbb") {
+		t.Fatalf("line missing user: %s", line)
+	}
+	if strings.Contains(line, "device=") || strings.Contains(line, "fmt=") {
+		t.Fatalf("legacy format should use user= not device=/fmt=: %s", line)
 	}
 }
 
