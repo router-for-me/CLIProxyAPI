@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -201,7 +202,8 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		return
 	}
 
-	files, errSelect := selectPluginFiles(rc.Dir)
+	desiredVersions := desiredPluginVersions(rc.Items)
+	files, errSelect := selectPluginFiles(rc.Dir, desiredVersions)
 	if errSelect != nil {
 		log.Warnf("pluginhost: failed to select plugin files: %v", errSelect)
 		h.mu.Lock()
@@ -213,9 +215,11 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		h.refreshThinkingProviders(nil)
 		return
 	}
+	files = h.withLoadedPluginFallbacks(files, rc.Items, desiredVersions)
 
 	records := make([]capabilityRecord, 0, len(files))
 	loadedFiles := make([]pluginFile, 0, len(files))
+	hotReloadLogs := make([]log.Fields, 0)
 	for _, file := range files {
 		item, ok := rc.Items[file.ID]
 		if !ok {
@@ -238,6 +242,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		}
 
 		loadedNow := false
+		var hotReloadFields log.Fields
 		if lp == nil {
 			h.mu.Lock()
 			h.loading[file.ID] = struct{}{}
@@ -255,6 +260,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			// so a nil read cannot race into a duplicate load.
 			lp = loaded
 			if replaced != nil {
+				hotReloadFields = pluginHotReloadLogFields(file.ID, file.Version, file.Path, replaced.version, replaced.path)
 				h.retireLoadedPluginLocked(replaced)
 				delete(h.fused, file.ID)
 				h.removePluginRuntimeStateLocked(file.ID)
@@ -281,6 +287,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		if loadedNow {
 			log.WithFields(pluginLogFieldsFromMetadata(file.ID, plugin.Metadata, file.Path)).Info("pluginhost: plugin registered")
 		}
+		if hotReloadFields != nil {
+			hotReloadLogs = append(hotReloadLogs, hotReloadFields)
+		}
 		records = append(records, capabilityRecord{
 			id:       file.ID,
 			path:     file.Path,
@@ -302,6 +311,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	h.snapshot.Store(&Snapshot{enabled: true, records: records})
 	h.mu.Unlock()
 	h.refreshThinkingProviders(records)
+	for _, fields := range hotReloadLogs {
+		log.WithFields(fields).Info("pluginhost: plugin hot reloaded")
+	}
 	if cleanupFiles && len(loadedFiles) > 0 {
 		if errCleanup := cleanupUnselectedPluginFiles(rc.Dir, loadedFiles); errCleanup != nil {
 			log.Warnf("pluginhost: failed to clean old plugin files: %v", errCleanup)
@@ -321,6 +333,46 @@ func (h *Host) load(file pluginFile) (*loadedPlugin, error) {
 		version: file.Version,
 		client:  newGuardedPluginClient(client),
 	}, nil
+}
+
+func (h *Host) withLoadedPluginFallbacks(files []pluginFile, items map[string]runtimeItemConfig, desired map[string]string) []pluginFile {
+	if h == nil || len(desired) == 0 {
+		return files
+	}
+	selected := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		id := strings.TrimSpace(file.ID)
+		if id != "" {
+			selected[id] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(desired))
+	for id := range desired {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, id := range ids {
+		if _, ok := selected[id]; ok {
+			continue
+		}
+		if item, ok := items[id]; ok && !item.Enabled {
+			continue
+		}
+		lp := h.loaded[id]
+		if lp == nil || strings.TrimSpace(lp.path) == "" {
+			continue
+		}
+		files = append(files, pluginFile{
+			ID:      id,
+			Path:    lp.path,
+			Version: strings.TrimSpace(lp.version),
+		})
+		selected[id] = struct{}{}
+	}
+	return files
 }
 
 // UnloadPlugin removes one plugin from the active runtime and closes its dynamic library.
