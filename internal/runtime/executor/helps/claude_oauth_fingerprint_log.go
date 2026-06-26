@@ -2,14 +2,24 @@ package helps
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+)
+
+var (
+	claudeOAuthFingerprintLogMu    sync.Mutex
+	claudeOAuthFingerprintSafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 )
 
 // ClaudeOAuthFingerprintLogEnabled reports whether per-request fingerprint lines should print.
@@ -20,25 +30,77 @@ func ClaudeOAuthFingerprintLogEnabled(cfg *config.Config) bool {
 	return cfg.ClaudeOAuthFingerprint.LogFingerprint
 }
 
-// MaybeLogClaudeOAuthFingerprint prints one concise fingerprint line when enabled.
+// MaybeLogClaudeOAuthFingerprint appends one concise fingerprint line to a per-account log file.
 func MaybeLogClaudeOAuthFingerprint(cfg *config.Config, auth *cliproxyauth.Auth, inboundHeaders, outboundHeaders http.Header, outboundBody []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) {
 	if !ClaudeOAuthFingerprintLogEnabled(cfg) {
 		return
 	}
-	line := formatClaudeOAuthFingerprintLine(auth, inboundHeaders, outboundHeaders, outboundBody, model, gateResult)
+	line := formatClaudeOAuthFingerprintLine(inboundHeaders, outboundHeaders, outboundBody, model, gateResult)
 	if line == "" {
 		return
 	}
-	log.Info(line)
+	if errWrite := appendClaudeOAuthFingerprintLogLine(cfg, auth, line); errWrite != nil {
+		log.WithError(errWrite).Warn("claude oauth fingerprint: failed to write log file")
+	}
 }
 
-func formatClaudeOAuthFingerprintLine(auth *cliproxyauth.Auth, inboundHeaders, outboundHeaders http.Header, outboundBody []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) string {
+func claudeOAuthFingerprintLogDir(cfg *config.Config) string {
+	if cfg != nil {
+		if dir := strings.TrimSpace(cfg.ClaudeOAuthFingerprint.LogDir); dir != "" {
+			return dir
+		}
+	}
+	return filepath.Join(logging.ResolveLogDirectory(cfg), "oauth-fingerprint")
+}
+
+func claudeOAuthFingerprintLogFileName(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return "unknown.log"
+	}
+	_, account := auth.AccountInfo()
+	account = strings.TrimSpace(account)
+	if account != "" {
+		return claudeOAuthFingerprintSafeName.ReplaceAllString(account, "_") + ".log"
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return "unknown.log"
+	}
+	return claudeOAuthFingerprintSafeName.ReplaceAllString(authID, "_") + ".log"
+}
+
+func appendClaudeOAuthFingerprintLogLine(cfg *config.Config, auth *cliproxyauth.Auth, line string) error {
+	dir := claudeOAuthFingerprintLogDir(cfg)
+	if errMkdir := os.MkdirAll(dir, 0o755); errMkdir != nil {
+		return errMkdir
+	}
+	path := filepath.Join(dir, claudeOAuthFingerprintLogFileName(auth))
+
+	claudeOAuthFingerprintLogMu.Lock()
+	defer claudeOAuthFingerprintLogMu.Unlock()
+
+	f, errOpen := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if errOpen != nil {
+		return errOpen
+	}
+	defer func() {
+		if errClose := f.Close(); errClose != nil {
+			log.WithError(errClose).Warn("claude oauth fingerprint: failed to close log file")
+		}
+	}()
+
+	if _, errWrite := f.WriteString(line + "\n"); errWrite != nil {
+		return errWrite
+	}
+	return nil
+}
+
+func formatClaudeOAuthFingerprintLine(inboundHeaders, outboundHeaders http.Header, outboundBody []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) string {
 	if gateResult == nil {
 		return ""
 	}
 	parts := []string{
 		time.Now().Format("01-02 15:04:05"),
-		"acct=" + claudeOAuthAccountPrefix(auth),
 		"session=" + truncateClaudeOAuthLogToken(gateResult.SessionID),
 	}
 	parts = append(parts, claudeOAuthIdentityLogParts(gateResult, outboundBody)...)
@@ -71,6 +133,7 @@ func formatClaudeOAuthFingerprintLine(auth *cliproxyauth.Auth, inboundHeaders, o
 			"body="+truncateClaudeOAuthLogToken(gateResult.BodySessionID),
 		)
 	}
+	_ = inboundHeaders
 	return strings.Join(parts, " ")
 }
 
@@ -98,25 +161,6 @@ func claudeOAuthIdentityLogParts(gateResult *ClaudeOAuthFingerprintGateResult, o
 		"device=" + truncateClaudeOAuthLogToken(deviceID),
 		"account=" + truncateClaudeOAuthLogToken(accountID),
 	}
-}
-
-func claudeOAuthAccountPrefix(auth *cliproxyauth.Auth) string {
-	if auth == nil {
-		return "unknown"
-	}
-	_, account := auth.AccountInfo()
-	account = strings.TrimSpace(account)
-	if at := strings.Index(account, "@"); at > 0 {
-		return account[:at]
-	}
-	if account != "" {
-		return truncateClaudeOAuthLogValue(account, 24)
-	}
-	label := strings.TrimSpace(auth.Label)
-	if label != "" {
-		return truncateClaudeOAuthLogValue(label, 24)
-	}
-	return truncateClaudeOAuthLogToken(auth.ID)
 }
 
 func claudeOAuthEntrypointFromBody(body []byte) string {

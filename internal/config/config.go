@@ -273,6 +273,7 @@ type ClaudeOAuthFingerprintConfig struct {
 	MaxSessions    int    `yaml:"max-sessions" json:"max-sessions"`
 	SessionTTL     string `yaml:"session-ttl" json:"session-ttl"`
 	LogFingerprint bool   `yaml:"log-fingerprint" json:"log-fingerprint"`
+	LogDir         string `yaml:"fingerprint-log-dir" json:"fingerprint-log-dir"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -942,6 +943,7 @@ func (cfg *Config) SanitizeClaudeOAuthFingerprint() {
 	if cfg.ClaudeOAuthFingerprint.SessionTTL == "" {
 		cfg.ClaudeOAuthFingerprint.SessionTTL = "1h"
 	}
+	cfg.ClaudeOAuthFingerprint.LogDir = strings.TrimSpace(cfg.ClaudeOAuthFingerprint.LogDir)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

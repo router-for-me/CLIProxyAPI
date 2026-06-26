@@ -298,6 +298,7 @@ nonstream-keepalive-interval: 0
 #   max-sessions: 4
 #   session-ttl: "1h"
 #   log-fingerprint: false     # independent of commercial-mode and request-log
+#   fingerprint-log-dir: ""    # optional; default <logs>/oauth-fingerprint (e.g. /CLIProxyAPI/logs/oauth-fingerprint)
 
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client

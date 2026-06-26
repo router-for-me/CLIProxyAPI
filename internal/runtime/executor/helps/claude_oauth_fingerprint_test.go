@@ -3,6 +3,8 @@ package helps
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -196,7 +198,6 @@ func TestClaudeOAuthFingerprintGate_SessionHeaderMismatchFlag(t *testing.T) {
 }
 
 func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
-	auth := testClaudeOAuthAuth("auth-log")
 	headers := http.Header{}
 	headers.Set("User-Agent", "claude-cli/2.1.63 (external, cli)")
 	headers.Set("X-Stainless-Package-Version", "0.74.0")
@@ -214,9 +215,9 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 		BodySessionID:   "body-session-id",
 		Violation:       "-",
 	}
-	line := formatClaudeOAuthFingerprintLine(auth, nil, headers, body, "claude-sonnet-4-5", result)
-	if !strings.Contains(line, "acct=john") {
-		t.Fatalf("line missing acct prefix: %s", line)
+	line := formatClaudeOAuthFingerprintLine(nil, headers, body, "claude-sonnet-4-5", result)
+	if strings.Contains(line, "acct=") {
+		t.Fatalf("line should not include acct: %s", line)
 	}
 	if !strings.Contains(line, "slot=2") {
 		t.Fatalf("line missing slot: %s", line)
@@ -261,5 +262,26 @@ func TestClaudeOAuthFingerprintGate_LegacyUserID(t *testing.T) {
 	}
 	if !strings.Contains(string(out), userHash) {
 		t.Fatalf("legacy outbound missing user hash: %s", out)
+	}
+}
+
+func TestAppendClaudeOAuthFingerprintLogLine_PerAccountFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testClaudeOAuthFingerprintConfig("monitor")
+	cfg.ClaudeOAuthFingerprint.LogDir = dir
+	auth := testClaudeOAuthAuth("auth-file")
+
+	line := "06-26 13:31:46 session=abc device=dev account=acc violation=-"
+	if err := appendClaudeOAuthFingerprintLogLine(cfg, auth, line); err != nil {
+		t.Fatalf("appendClaudeOAuthFingerprintLogLine() error = %v", err)
+	}
+
+	path := filepath.Join(dir, "john.doe_example.com.log")
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if !strings.Contains(string(raw), "session=abc") {
+		t.Fatalf("unexpected log content: %s", raw)
 	}
 }
