@@ -49,3 +49,51 @@ func TestRuntimeConfigYAMLDefaultsEnabledFalse(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeConfigFromConfigExtractsStoreVersion(t *testing.T) {
+	var node yaml.Node
+	if errDecode := yaml.Unmarshal([]byte("store:\n  version: 1.0.3\n  release-tag: v1.0.3\n"), &node); errDecode != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", errDecode)
+	}
+	enabled := true
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {
+					Enabled: &enabled,
+					Raw:     *node.Content[0],
+				},
+			},
+		},
+	}
+
+	got := runtimeConfigFromConfig(cfg)
+	if got.Items["alpha"].Version != "1.0.3" {
+		t.Fatalf("runtimeConfigFromConfig() version = %q, want 1.0.3", got.Items["alpha"].Version)
+	}
+}
+
+func TestRuntimeConfigFromConfigDerivesStoreVersionFromReleaseTag(t *testing.T) {
+	var node yaml.Node
+	if errDecode := yaml.Unmarshal([]byte("store:\n  release-tag: v1.0.3\n"), &node); errDecode != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", errDecode)
+	}
+	enabled := true
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {
+					Enabled: &enabled,
+					Raw:     *node.Content[0],
+				},
+			},
+		},
+	}
+
+	got := runtimeConfigFromConfig(cfg)
+	if got.Items["alpha"].Version != "1.0.3" {
+		t.Fatalf("runtimeConfigFromConfig() version = %q, want 1.0.3", got.Items["alpha"].Version)
+	}
+}

@@ -32,3 +32,25 @@ func TestPluginLogFieldsOmitsEmptyName(t *testing.T) {
 		t.Fatalf("plugin_name = %v, want omitted", fields["plugin_name"])
 	}
 }
+
+func TestPluginHotReloadLogFieldsIncludesActiveAndRetiredIdentity(t *testing.T) {
+	fields := pluginHotReloadLogFields(
+		"sample",
+		"0.1.0",
+		"/tmp/plugins/sample-v0.1.0.dll",
+		"0.2.0",
+		"/tmp/plugins/sample-v0.2.0.dll",
+	)
+
+	for key, want := range map[string]string{
+		"plugin_id":       "sample",
+		"active_version":  "0.1.0",
+		"active_path":     "/tmp/plugins/sample-v0.1.0.dll",
+		"retired_version": "0.2.0",
+		"retired_path":    "/tmp/plugins/sample-v0.2.0.dll",
+	} {
+		if fields[key] != want {
+			t.Fatalf("%s = %v, want %s", key, fields[key], want)
+		}
+	}
+}

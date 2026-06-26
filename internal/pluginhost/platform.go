@@ -112,16 +112,17 @@ func pluginExtension(goos string) string {
 	}
 }
 
-func selectPluginFiles(root string) ([]pluginFile, error) {
-	selected, _, errSelect := selectPluginFilesWithCandidates(root)
+func selectPluginFiles(root string, desiredVersions ...map[string]string) ([]pluginFile, error) {
+	selected, _, errSelect := selectPluginFilesWithCandidates(root, desiredVersions...)
 	return selected, errSelect
 }
 
-func selectPluginFilesWithCandidates(root string) ([]pluginFile, []pluginFile, error) {
+func selectPluginFilesWithCandidates(root string, desiredVersions ...map[string]string) ([]pluginFile, []pluginFile, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		root = "plugins"
 	}
+	desired := normalizeDesiredPluginVersions(desiredVersions...)
 
 	candidates := candidateDirs(root, runtime.GOOS, runtime.GOARCH, cpuVariant())
 	extension := pluginExtension(runtime.GOOS)
@@ -158,16 +159,47 @@ func selectPluginFilesWithCandidates(root string) ([]pluginFile, []pluginFile, e
 				order = append(order, file.ID)
 				continue
 			}
-			if pluginFilePreferred(file, current) {
+			if pluginFilePreferredForDesired(file, current, desired[file.ID]) {
 				selectedByID[file.ID] = file
 			}
 		}
 	}
 	selected := make([]pluginFile, 0, len(order))
 	for _, id := range order {
-		selected = append(selected, selectedByID[id])
+		file := selectedByID[id]
+		if desiredVersion := desired[id]; desiredVersion != "" && file.Version != desiredVersion {
+			continue
+		}
+		selected = append(selected, file)
 	}
 	return selected, all, nil
+}
+
+func normalizeDesiredPluginVersions(sources ...map[string]string) map[string]string {
+	out := make(map[string]string)
+	for _, source := range sources {
+		for id, version := range source {
+			id = strings.TrimSpace(id)
+			version = normalizePluginDesiredVersion(version)
+			if id == "" || version == "" {
+				continue
+			}
+			out[id] = version
+		}
+	}
+	return out
+}
+
+func pluginFilePreferredForDesired(candidate pluginFile, current pluginFile, desiredVersion string) bool {
+	desiredVersion = normalizePluginDesiredVersion(desiredVersion)
+	if desiredVersion != "" {
+		candidateMatches := candidate.Version == desiredVersion
+		currentMatches := current.Version == desiredVersion
+		if candidateMatches != currentMatches {
+			return candidateMatches
+		}
+	}
+	return pluginFilePreferred(candidate, current)
 }
 
 func pluginFilePreferred(candidate pluginFile, current pluginFile) bool {

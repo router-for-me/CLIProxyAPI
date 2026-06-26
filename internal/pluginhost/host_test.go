@@ -607,6 +607,144 @@ func TestHostApplyConfigLogsLoadedAndRegisteredOnlyOnInitialLoad(t *testing.T) {
 	}
 }
 
+func TestHostApplyConfigLogsHotReloadActiveAndRetiredVersions(t *testing.T) {
+	var out bytes.Buffer
+	originalOut := log.StandardLogger().Out
+	originalFormatter := log.StandardLogger().Formatter
+	originalLevel := log.GetLevel()
+	log.SetOutput(&out)
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors:    true,
+		DisableTimestamp: true,
+	})
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(originalOut)
+		log.SetFormatter(originalFormatter)
+		log.SetLevel(originalLevel)
+	})
+
+	loader := newTestSymbolLoader()
+	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{
+		registerResult: validTestPlugin("alpha"),
+	})
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.4")
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.4"),
+			},
+		},
+	})
+	paths["1.0.3"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "1.0.3")
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.3"),
+			},
+		},
+	})
+
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.3"], "1.0.3") {
+		t.Fatalf("active plugin identity did not switch to %s", paths["1.0.3"])
+	}
+	if h.pluginIdentityCurrent("alpha", paths["1.0.4"], "1.0.4") {
+		t.Fatalf("old plugin identity is still active: %s", paths["1.0.4"])
+	}
+
+	logs := out.String()
+	if count := strings.Count(logs, `msg="pluginhost: plugin hot reloaded"`); count != 1 {
+		t.Fatalf("plugin hot reloaded log count = %d, want 1\n%s", count, logs)
+	}
+	for _, want := range []string{
+		"plugin_id=alpha",
+		"active_version=1.0.3",
+		"retired_version=1.0.4",
+		"active_path=",
+		"retired_path=",
+		"alpha-v1.0.3",
+		"alpha-v1.0.4",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("plugin hot reload log missing %s:\n%s", want, logs)
+		}
+	}
+}
+
+func TestHostApplyConfigKeepsLoadedVersionWhenPinnedVersionMissing(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.4")
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.4"),
+			},
+		},
+	})
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.4"], "1.0.4") {
+		t.Fatalf("active plugin identity did not start at %s", paths["1.0.4"])
+	}
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.5"),
+			},
+		},
+	})
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want old version to remain active while pinned version is missing")
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.4"], "1.0.4") {
+		t.Fatalf("active plugin identity changed before pinned version was available")
+	}
+	if loader.openCalls != 1 {
+		t.Fatalf("Open calls = %d, want 1 while reusing loaded plugin", loader.openCalls)
+	}
+	if plugin.registerCalls != 1 || plugin.reconfigureCalls != 1 {
+		t.Fatalf("calls = register %d reconfigure %d, want 1/1", plugin.registerCalls, plugin.reconfigureCalls)
+	}
+
+	paths["1.0.5"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "1.0.5")
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.5"),
+			},
+		},
+	})
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.5"], "1.0.5") {
+		t.Fatalf("active plugin identity did not switch after pinned version was available")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["1.0.4"], "1.0.4") {
+		t.Fatal("old plugin identity is still active after pinned version became available")
+	}
+	if loader.openCalls != 2 {
+		t.Fatalf("Open calls = %d, want 2 after loading pinned version", loader.openCalls)
+	}
+}
+
 func TestHostApplyConfigLogsLoadedWhenRegistrationInvalid(t *testing.T) {
 	var out bytes.Buffer
 	originalOut := log.StandardLogger().Out
