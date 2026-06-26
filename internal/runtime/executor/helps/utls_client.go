@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	cryptotls "crypto/tls"
 	"net"
 	"net/http"
 	"strings"
@@ -152,6 +153,31 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return f.fallback.RoundTrip(req)
 }
 
+// forceHTTP11Transport returns a clone of base that negotiates HTTP/1.1 only.
+// Round-trippers that are not *http.Transport (e.g. an injected context
+// RoundTripper or a uTLS round-tripper) are returned unchanged. Proxy and dial
+// settings on base are preserved; only ALPN/protocol negotiation is pinned.
+// The base is cloned, never mutated, so the shared http.DefaultTransport global
+// is left intact.
+func forceHTTP11Transport(base http.RoundTripper) http.RoundTripper {
+	tr, ok := base.(*http.Transport)
+	if !ok || tr == nil {
+		return base
+	}
+	clone := tr.Clone()
+	clone.ForceAttemptHTTP2 = false
+	// Wipe TLSNextProto to prevent an implicit HTTP/2 upgrade.
+	clone.TLSNextProto = make(map[string]func(authority string, c *cryptotls.Conn) http.RoundTripper)
+	if clone.TLSClientConfig == nil {
+		clone.TLSClientConfig = &cryptotls.Config{}
+	} else {
+		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
+	}
+	// Actively advertise only HTTP/1.1 in the ALPN handshake.
+	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	return clone
+}
+
 // NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
 // Use this for provider requests that need a Chrome-like TLS fingerprint.
 // Falls back to standard transport for non-HTTPS requests.
@@ -179,6 +205,16 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		utlsRT = ctxRoundTripper
 		standardTransport = ctxRoundTripper
 	}
+
+	// Force HTTP/1.1 on the fallback path (every non-fingerprinted host, e.g.
+	// reseller/aggregator upstreams). HTTP/2 lets a flaky upstream reset a
+	// stream mid-response with RST_STREAM(INTERNAL_ERROR), which leaks to the
+	// client as a raw "stream error ...; received from peer". Over HTTP/1.1 a
+	// mid-response drop is instead a clean EOF that ClaudeExecutor.ExecuteStream
+	// already terminates gracefully with a synthetic message_stop. The uTLS
+	// (Anthropic/ChatGPT) path is intentionally left on HTTP/2 to preserve its
+	// Chrome fingerprint.
+	standardTransport = forceHTTP11Transport(standardTransport)
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{
