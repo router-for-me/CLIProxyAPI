@@ -27,6 +27,7 @@ type RegisteredPluginInfo struct {
 	Priority      int
 	Metadata      pluginapi.Metadata
 	SupportsOAuth bool
+	OAuthProvider string
 	Menus         []RegisteredPluginMenu
 }
 
@@ -67,11 +68,19 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 	menusByPlugin := h.registeredPluginMenus()
 	out := make([]RegisteredPluginInfo, 0, len(records))
 	for _, record := range records {
+		authProvider := record.plugin.Capabilities.AuthProvider
+		oauthProvider := ""
+		if authProvider != nil && !h.isPluginFused(record.id) {
+			if identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider); okIdentifier {
+				oauthProvider = identifier
+			}
+		}
 		out = append(out, RegisteredPluginInfo{
 			ID:            record.id,
 			Priority:      record.priority,
 			Metadata:      clonePluginMetadata(record.meta),
-			SupportsOAuth: record.plugin.Capabilities.AuthProvider != nil,
+			SupportsOAuth: authProvider != nil,
+			OAuthProvider: oauthProvider,
 			Menus:         menusByPlugin[record.id],
 		})
 	}
