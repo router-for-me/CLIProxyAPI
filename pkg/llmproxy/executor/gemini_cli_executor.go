@@ -7,10 +7,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strings"
@@ -35,8 +36,8 @@ import (
 const (
 	codeAssistEndpoint      = "https://cloudcode-pa.googleapis.com"
 	codeAssistVersion       = "v1internal"
-	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOAuthClientSecret = "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"
+	geminiOAuthClientID     = envWithDefault("GEMINI_OAUTH_CLIENT_ID", "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com")
+	geminiOAuthClientSecret = envWithDefault("GEMINI_OAUTH_CLIENT_SECRET", "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")
 )
 
 var geminiOAuthScopes = []string{
@@ -382,7 +383,8 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				const maxRetries = 5
 				for attempt := 0; attempt < maxRetries; attempt++ {
 					backoff := time.Duration(1+attempt*2) * time.Second
-					if jitter := time.Duration(rand.Intn(500)) * time.Millisecond; jitter > 0 {
+					if n, err := rand.Int(rand.Reader, big.NewInt(500)); err == nil {
+						jitter := time.Duration(n.Int64()) * time.Millisecond
 						backoff += jitter
 					}
 					log.Warnf("gemini cli executor: attempt %d/%d got %d (high demand/transient), retrying in %v", attempt+1, maxRetries, httpResp.StatusCode, backoff)

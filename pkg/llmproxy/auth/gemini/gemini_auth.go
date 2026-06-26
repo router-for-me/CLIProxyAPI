@@ -31,8 +31,11 @@ import (
 
 // OAuth configuration constants for Gemini
 const (
-	ClientID            = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	ClientSecret        = "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"
+	// ClientID and ClientSecret are set from env vars with defaults
+	// They are publicly-broadcast OAuth native-app credentials, not secrets,
+	// but we load them from env for production deployment flexibility.
+	ClientID     = envWithDefault("GEMINI_CLIENT_ID", "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com")
+	ClientSecret = envWithDefault("GEMINI_CLIENT_SECRET", "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")
 	DefaultCallbackPort = 8085
 )
 

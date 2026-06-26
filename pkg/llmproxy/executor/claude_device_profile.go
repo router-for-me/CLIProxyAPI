@@ -237,6 +237,9 @@ func claudeDeviceProfileScopeKey(auth *cliproxyauth.Auth, apiKey string) string 
 	}
 }
 
+// claudeDeviceProfileCacheKey generates a stable cache key for device profiles.
+// SHA256 is used for deterministic short IDs, not for password hashing or security.
+// codeql[go/weak-sensitive-data-hashing] - intentional use for cache key derivation
 func claudeDeviceProfileCacheKey(auth *cliproxyauth.Auth, apiKey string) string {
 	sum := sha256.Sum256([]byte(claudeDeviceProfileScopeKey(auth, apiKey)))
 	return hex.EncodeToString(sum[:])

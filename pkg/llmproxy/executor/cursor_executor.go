@@ -1383,6 +1383,7 @@ func extractClaudeCodeSessionId(payload []byte) string {
 
 // deriveConversationId generates a deterministic conversation_id.
 // Priority: session_id (stable across resume) > system prompt hash (fallback).
+// codeql[go/weak-sensitive-data-hashing] - SHA256 used for stable ID derivation, not password hashing
 func deriveConversationId(apiKey, sessionId, systemPrompt string) string {
 	var input string
 	if sessionId != "" {
@@ -1407,6 +1408,7 @@ func deriveConversationId(apiKey, sessionId, systemPrompt string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", s[:8], s[8:12], s[12:16], s[16:20], s[20:32])
 }
 
+// codeql[go/weak-sensitive-data-hashing] - SHA256 used for stable session key derivation, not password hashing
 func deriveSessionKey(clientKey string, model string, messages []gjson.Result) string {
 	var firstUserContent string
 	var systemContent string

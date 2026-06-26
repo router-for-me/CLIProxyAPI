@@ -3,8 +3,11 @@ package antigravity
 
 // OAuth client credentials and configuration
 const (
-	ClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	ClientSecret = "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"
+	// ClientID and ClientSecret are Google OAuth native-app credentials.
+	// For native/installed apps these values are publicly visible in the binary;
+	// we load them from env vars when set, falling back to the hardcoded defaults.
+	ClientID     = envWithDefault("ANTIGRAVITY_CLIENT_ID", "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com")
+	ClientSecret = envWithDefault("ANTIGRAVITY_CLIENT_SECRET", "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")
 	CallbackPort = 51121
 )
 

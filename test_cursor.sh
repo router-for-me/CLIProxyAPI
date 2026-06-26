@@ -14,7 +14,7 @@ export GOROOT="/opt/homebrew/Cellar/go/1.26.1/libexec"
 
 PROJECT_DIR="/Volumes/Personal/cursor-cli-proxy/CLIProxyAPIPlus"
 BINARY="$PROJECT_DIR/cliproxy-test"
-API_KEY="quotio-local-D6ABC285-3085-44B4-B872-BD269888811F"
+API_KEY="${API_KEY:-quotio-local-D6ABC285-3085-44B4-B872-BD269888811F}"
 BASE_URL="http://127.0.0.1:8317"
 CONFIG="$PROJECT_DIR/config-cursor-test.yaml"
 PID_FILE="/tmp/cliproxy-test.pid"

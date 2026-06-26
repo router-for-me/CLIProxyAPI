@@ -108,6 +108,9 @@ func buildURL(endpoint, path string, queryParams map[string]string) string {
 
 // GenerateAccountKey derives a stable short hash from a seed string,
 // suitable for use as a per-account cache key.
+// GenerateAccountKey derives a stable short hash from a seed string,
+// suitable for use as a per-account cache key (not for password hashing).
+// codeql[go/weak-sensitive-data-hashing] - intentional use for stable cache key
 func GenerateAccountKey(seed string) string {
 	hash := sha256.Sum256([]byte(seed))
 	return hex.EncodeToString(hash[:8])
