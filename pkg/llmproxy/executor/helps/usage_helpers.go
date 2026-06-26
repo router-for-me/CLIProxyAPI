@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-========
 	"io"
 	"net/http"
 	"reflect"
@@ -17,7 +16,6 @@ import (
 	"github.com/gin-gonic/gin"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/usage"
-========
 	internallogging "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -474,7 +472,6 @@ func ParseOpenAIUsage(data []byte) usage.Detail {
 		return usage.Detail{}
 	}
 	return parseOpenAIUsageDetail(usageNode)
-========
 	return parseOpenAIStyleUsageNode(usageNode)
 }
 
@@ -619,7 +616,6 @@ func parseUsageNumber(raw string) int64 {
 		return int64(parsed)
 	}
 	return 0
-========
 	return parseOpenAIStyleUsageNode(usageNode), true
 }
 

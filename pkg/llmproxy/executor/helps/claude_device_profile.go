@@ -15,9 +15,6 @@ import (
 	"time"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
-========
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	homekv "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/home"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
