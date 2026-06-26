@@ -12,8 +12,14 @@ import (
 	"strings"
 	"time"
 
+<<<<<<< HEAD:pkg/llmproxy/auth/antigravity/auth.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+>>>>>>> upstream/main:internal/auth/antigravity/auth.go
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,15 +43,85 @@ type AntigravityAuth struct {
 
 // NewAntigravityAuth creates a new Antigravity auth service.
 func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *AntigravityAuth {
-	if httpClient != nil {
-		return &AntigravityAuth{httpClient: httpClient}
-	}
 	if cfg == nil {
 		cfg = &config.Config{}
+	}
+	if httpClient != nil {
+		return &AntigravityAuth{httpClient: httpClient}
 	}
 	return &AntigravityAuth{
 		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
 	}
+}
+
+func (o *AntigravityAuth) shortUserAgent() string {
+	return misc.AntigravityRequestUserAgent("")
+}
+
+func (o *AntigravityAuth) nodeUserAgent() string {
+	return misc.AntigravityLoadCodeAssistUserAgent("")
+}
+
+func antigravityLoadCodeAssistMetadata() map[string]string {
+	return map[string]string{
+		"ideType": "ANTIGRAVITY",
+	}
+}
+
+func antigravityControlPlaneMetadata(userAgent string) map[string]string {
+	return map[string]string{
+		"ide_type":    "ANTIGRAVITY",
+		"ide_version": misc.AntigravityVersionFromUserAgent(userAgent),
+		"ide_name":    "antigravity",
+	}
+}
+
+func extractCloudaicompanionProject(data map[string]any) string {
+	if data == nil {
+		return ""
+	}
+	for _, key := range []string{"cloudaicompanionProject", "projectId", "project"} {
+		switch value := data[key].(type) {
+		case string:
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		case map[string]any:
+			if id, ok := value["id"].(string); ok {
+				if trimmed := strings.TrimSpace(id); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func defaultAntigravityTierID(loadResp map[string]any) string {
+	if tiers, okTiers := loadResp["allowedTiers"].([]any); okTiers {
+		for _, rawTier := range tiers {
+			tier, okTier := rawTier.(map[string]any)
+			if !okTier {
+				continue
+			}
+			if isDefault, okDefault := tier["isDefault"].(bool); !okDefault || !isDefault {
+				continue
+			}
+			if id, okID := tier["id"].(string); okID {
+				if trimmed := strings.TrimSpace(id); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	if currentTier, okTier := loadResp["currentTier"].(map[string]any); okTier {
+		if id, okID := currentTier["id"].(string); okID {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return "free-tier"
 }
 
 // BuildAuthURL generates the OAuth authorization URL.
@@ -119,6 +195,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		return "", fmt.Errorf("antigravity userinfo: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", o.shortUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -154,12 +231,9 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
 func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
+	userAgent := o.shortUserAgent()
 	loadReqBody := map[string]any{
-		"metadata": map[string]string{
-			"ideType":    "ANTIGRAVITY",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		},
+		"metadata": antigravityLoadCodeAssistMetadata(),
 	}
 
 	rawBody, errMarshal := json.Marshal(loadReqBody)
@@ -173,10 +247,9 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", APIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", APIClient)
-	req.Header.Set("Client-Metadata", ClientMetadata)
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -202,39 +275,15 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		return "", fmt.Errorf("decode response: %w", errDecode)
 	}
 
-	// Extract projectID from response
-	projectID := ""
-	if id, ok := loadResp["cloudaicompanionProject"].(string); ok {
-		projectID = strings.TrimSpace(id)
-	}
-	if projectID == "" {
-		if projectMap, ok := loadResp["cloudaicompanionProject"].(map[string]any); ok {
-			if id, okID := projectMap["id"].(string); okID {
-				projectID = strings.TrimSpace(id)
-			}
-		}
-	}
+	projectID := extractCloudaicompanionProject(loadResp)
 
 	if projectID == "" {
-		tierID := "legacy-tier"
-		if tiers, okTiers := loadResp["allowedTiers"].([]any); okTiers {
-			for _, rawTier := range tiers {
-				tier, okTier := rawTier.(map[string]any)
-				if !okTier {
-					continue
-				}
-				if isDefault, okDefault := tier["isDefault"].(bool); okDefault && isDefault {
-					if id, okID := tier["id"].(string); okID && strings.TrimSpace(id) != "" {
-						tierID = strings.TrimSpace(id)
-						break
-					}
-				}
-			}
-		}
-
-		projectID, err = o.OnboardUser(ctx, accessToken, tierID)
+		projectID, err = o.OnboardUser(ctx, accessToken, defaultAntigravityTierID(loadResp))
 		if err != nil {
 			return "", err
+		}
+		if projectID == "" {
+			return "", fmt.Errorf("project id not found in loadCodeAssist or onboardUser response")
 		}
 		return projectID, nil
 	}
@@ -245,13 +294,10 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 // OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
+	userAgent := o.nodeUserAgent()
 	requestBody := map[string]any{
-		"tierId": tierID,
-		"metadata": map[string]string{
-			"ideType":    "ANTIGRAVITY",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		},
+		"tier_id":  tierID,
+		"metadata": antigravityControlPlaneMetadata(userAgent),
 	}
 
 	rawBody, errMarshal := json.Marshal(requestBody)
@@ -270,17 +316,17 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		}
 		reqCtx, cancel = context.WithTimeout(reqCtx, 30*time.Second)
 
-		endpointURL := fmt.Sprintf("%s/%s:onboardUser", APIEndpoint, APIVersion)
+		endpointURL := fmt.Sprintf("%s/%s:onboardUser", DailyAPIEndpoint, APIVersion)
 		req, errRequest := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
 		if errRequest != nil {
 			cancel()
 			return "", fmt.Errorf("create request: %w", errRequest)
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", APIUserAgent)
-		req.Header.Set("X-Goog-Api-Client", APIClient)
-		req.Header.Set("Client-Metadata", ClientMetadata)
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
 
 		resp, errDo := o.httpClient.Do(req)
 		if errDo != nil {
@@ -307,18 +353,11 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			if done, okDone := data["done"].(bool); okDone && done {
 				projectID := ""
 				if responseData, okResp := data["response"].(map[string]any); okResp {
-					switch projectValue := responseData["cloudaicompanionProject"].(type) {
-					case map[string]any:
-						if id, okID := projectValue["id"].(string); okID {
-							projectID = strings.TrimSpace(id)
-						}
-					case string:
-						projectID = strings.TrimSpace(projectValue)
-					}
+					projectID = extractCloudaicompanionProject(responseData)
 				}
 
 				if projectID != "" {
-					log.Infof("Successfully fetched project_id: %s", projectID)
+					log.Infof("Successfully fetched project_id: %s", util.HideAPIKey(projectID))
 					return projectID, nil
 				}
 
@@ -341,5 +380,5 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		return "", fmt.Errorf("http %d: %s", resp.StatusCode, responseErr)
 	}
 
-	return "", nil
+	return "", fmt.Errorf("onboard user did not complete after %d attempts", maxAttempts)
 }

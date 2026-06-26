@@ -1,5 +1,6 @@
 package auth
 
+<<<<<<< HEAD
 import (
 	"fmt"
 
@@ -27,6 +28,8 @@ func (e *ProjectSelectionError) ProjectsDisplay() []interfaces.GCPProjectProject
 	return e.Projects
 }
 
+=======
+>>>>>>> upstream/main
 // EmailRequiredError indicates that the calling context must provide an email or alias.
 type EmailRequiredError struct {
 	Prompt string

@@ -4,8 +4,13 @@ import (
 	"testing"
 	"time"
 
+<<<<<<< HEAD:pkg/llmproxy/watcher/synthesizer/config_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+>>>>>>> upstream/main:internal/watcher/synthesizer/config_test.go
 )
 
 func TestNewConfigSynthesizer(t *testing.T) {
@@ -68,8 +73,23 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 				if auths[0].Attributes["api_key"] != "test-key-123" {
 					t.Errorf("expected api_key test-key-123, got %s", auths[0].Attributes["api_key"])
 				}
+				if auths[0].Metadata != nil {
+					t.Errorf("expected metadata to be nil when disable_cooling not set, got %v", auths[0].Metadata)
+				}
 				if auths[0].Status != coreauth.StatusActive {
 					t.Errorf("expected status active, got %s", auths[0].Status)
+				}
+			},
+		},
+		{
+			name: "gemini key disable cooling",
+			geminiKeys: []config.GeminiKey{
+				{APIKey: "test-key-123", Prefix: "team-a", DisableCooling: true},
+			},
+			wantLen: 1,
+			validate: func(t *testing.T, auths []*coreauth.Auth) {
+				if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
+					t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
 				}
 			},
 		},
@@ -160,9 +180,11 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 		Config: &config.Config{
 			ClaudeKey: []config.ClaudeKey{
 				{
-					APIKey:  "sk-ant-api-xxx",
-					Prefix:  "main",
-					BaseURL: "https://api.anthropic.com",
+					APIKey:                  "sk-ant-api-xxx",
+					Prefix:                  "main",
+					BaseURL:                 "https://api.anthropic.com",
+					DisableCooling:          true,
+					RebuildMidSystemMessage: true,
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -196,6 +218,12 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")
+	}
+	if got := auths[0].Attributes["rebuild_mid_system_message"]; got != "true" {
+		t.Errorf("expected rebuild_mid_system_message=true, got %s", got)
+	}
+	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
+		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
 	}
 }
 
@@ -231,11 +259,12 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 		Config: &config.Config{
 			CodexKey: []config.CodexKey{
 				{
-					APIKey:     "codex-key-123",
-					Prefix:     "dev",
-					BaseURL:    "https://api.openai.com",
-					ProxyURL:   "http://proxy.local",
-					Websockets: true,
+					APIKey:         "codex-key-123",
+					Prefix:         "dev",
+					BaseURL:        "https://api.openai.com",
+					ProxyURL:       "http://proxy.local",
+					Websockets:     true,
+					DisableCooling: true,
 				},
 			},
 		},
@@ -262,6 +291,9 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 	if auths[0].Attributes["websockets"] != "true" {
 		t.Errorf("expected websockets=true, got %s", auths[0].Attributes["websockets"])
+	}
+	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
+		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
 	}
 }
 
@@ -301,8 +333,9 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 			name: "with APIKeyEntries",
 			compat: []config.OpenAICompatibility{
 				{
-					Name:    "CustomProvider",
-					BaseURL: "https://custom.api.com",
+					Name:           "CustomProvider",
+					BaseURL:        "https://custom.api.com",
+					DisableCooling: true,
 					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 						{APIKey: "key-1"},
 						{APIKey: "key-2"},
@@ -365,7 +398,51 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 			if len(auths) != tt.wantLen {
 				t.Fatalf("expected %d auths, got %d", tt.wantLen, len(auths))
 			}
+			if tt.name == "with APIKeyEntries" {
+				for i := range auths {
+					if v, ok := auths[i].Metadata["disable_cooling"].(bool); !ok || !v {
+						t.Fatalf("expected auth[%d].disable_cooling=true, got %v", i, auths[i].Metadata["disable_cooling"])
+					}
+				}
+			}
 		})
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "kimi",
+					BaseURL: "https://kimi-compatible.example.com/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "test-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "openai-compatible-kimi" {
+		t.Fatalf("provider = %q, want openai-compatible-kimi", auth.Provider)
+	}
+	if auth.Attributes["provider_key"] != "openai-compatible-kimi" {
+		t.Fatalf("provider_key = %q, want openai-compatible-kimi", auth.Attributes["provider_key"])
+	}
+	if auth.Attributes["compat_name"] != "kimi" {
+		t.Fatalf("compat_name = %q, want kimi", auth.Attributes["compat_name"])
 	}
 }
 
@@ -608,7 +685,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

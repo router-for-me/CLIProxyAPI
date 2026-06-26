@@ -14,7 +14,13 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/chat-completions/claude_openai_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+>>>>>>> upstream/main:internal/translator/claude/openai/chat-completions/claude_openai_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -212,6 +218,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							if toolCallID == "" {
 								toolCallID = genToolCallID()
 							}
+							toolCallID = util.SanitizeClaudeToolID(toolCallID)
 
 							function := toolCall.Get("function")
 							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
@@ -247,7 +254,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			case "tool":
 				// Handle tool result messages conversion
 				toolCallID := message.Get("tool_call_id").String()
+<<<<<<< HEAD:pkg/llmproxy/translator/claude/openai/chat-completions/claude_openai_request.go
 				content := message.Get("content").String()
+=======
+				toolCallID = util.SanitizeClaudeToolID(toolCallID)
+				toolContentResult := message.Get("content")
+>>>>>>> upstream/main:internal/translator/claude/openai/chat-completions/claude_openai_request.go
 
 				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
 				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)

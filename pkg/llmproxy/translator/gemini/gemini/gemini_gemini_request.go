@@ -7,8 +7,14 @@ import (
 	"fmt"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/translator/gemini/gemini/gemini_gemini_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+>>>>>>> upstream/main:internal/translator/gemini/gemini/gemini_gemini_request.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -79,19 +85,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		return true
 	})
 
-	gjson.GetBytes(out, "contents").ForEach(func(key, content gjson.Result) bool {
-		if content.Get("role").String() == "model" {
-			content.Get("parts").ForEach(func(partKey, part gjson.Result) bool {
-				if part.Get("functionCall").Exists() {
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
-				} else if part.Get("thoughtSignature").Exists() {
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
-				}
-				return true
-			})
-		}
-		return true
-	})
+	out = signature.SanitizeGeminiRequestThoughtSignatures(out, "contents")
 
 	if gjson.GetBytes(rawJSON, "generationConfig.responseSchema").Exists() {
 		strJson, _ := util.RenameKey(string(out), "generationConfig.responseSchema", "generationConfig.responseJsonSchema")
@@ -99,7 +93,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 	}
 
 	// Backfill empty functionResponse.name from the preceding functionCall.name.
-	// Amp may send function responses with empty names; the Gemini API rejects these.
+	// Some clients send function responses with empty names; the Gemini API rejects these.
 	out = backfillEmptyFunctionResponseNames(out)
 
 	out = common.AttachDefaultSafetySettings(out, "safetySettings")

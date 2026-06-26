@@ -1,10 +1,20 @@
 package responses
 
 import (
+<<<<<<< HEAD:pkg/llmproxy/translator/gemini/openai/responses/gemini_openai-responses_request.go
 	"strings"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+=======
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+>>>>>>> upstream/main:internal/translator/gemini/openai/responses/gemini_openai-responses_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -117,7 +127,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 			switch itemType {
 			case "message":
-				if strings.EqualFold(itemRole, "system") {
+				if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := []byte(`{"parts":[]}`)
 						if systemInstructionResult := gjson.GetBytes(out, "systemInstruction"); systemInstructionResult.Exists() {
@@ -368,7 +378,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				thoughtContent := []byte(`{"role":"model","parts":[]}`)
 				thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
 				thought, _ = sjson.SetBytes(thought, "text", item.Get("summary.0.text").String())
-				thought, _ = sjson.SetBytes(thought, "thoughtSignature", item.Get("encrypted_content").String())
+				thought, _ = sjson.SetBytes(thought, "thoughtSignature", openAIResponsesGeminiThoughtSignature(item.Get("encrypted_content").String()))
 
 				thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", thought)
 				out, _ = sjson.SetRawBytes(out, "contents.-1", thoughtContent)
@@ -379,6 +389,16 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		userContent := []byte(`{"role":"user","parts":[{"text":""}]}`)
 		userContent, _ = sjson.SetBytes(userContent, "parts.0.text", input.String())
 		out, _ = sjson.SetRawBytes(out, "contents.-1", userContent)
+	}
+
+	// Gemini/Vertex accepts assistant/model turns in history, but some model
+	// surfaces reject requests whose final turn is model-authored prefill.
+	contents := gjson.GetBytes(out, "contents")
+	if contents.Exists() && contents.IsArray() {
+		arr := contents.Array()
+		if len(arr) > 0 && arr[len(arr)-1].Get("role").String() == "model" {
+			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
+		}
 	}
 
 	// Convert tools to Gemini functionDeclarations format
@@ -395,9 +415,14 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
 				}
+<<<<<<< HEAD:pkg/llmproxy/translator/gemini/openai/responses/gemini_openai-responses_request.go
 				params := tool.Get("parameters")
 				if !params.Exists() {
 					params = tool.Get("parametersJsonSchema")
+=======
+				if params := tool.Get("parameters"); params.Exists() {
+					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(util.CleanJSONSchemaForGemini(params.Raw)))
+>>>>>>> upstream/main:internal/translator/gemini/openai/responses/gemini_openai-responses_request.go
 				}
 				strict := tool.Get("strict").Exists() && tool.Get("strict").Bool()
 				cleaned := common.NormalizeOpenAIFunctionSchemaForGemini(params, strict)
@@ -450,6 +475,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		out, _ = sjson.SetBytes(out, "generationConfig.stopSequences", sequences)
 	}
 
+	out = applyOpenAIResponsesTextFormatToGemini(out, root)
+
 	// Apply thinking configuration: convert OpenAI Responses API reasoning.effort to Gemini thinkingConfig.
 	// Inline translation-only mapping; capability checks happen later in ApplyThinking.
 	re := root.Get("reasoning.effort")
@@ -472,6 +499,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	return result
 }
 
+<<<<<<< HEAD:pkg/llmproxy/translator/gemini/openai/responses/gemini_openai-responses_request.go
 // containsLiteralControlChars reports whether s contains any ASCII control
 // character (0x00–0x1F) other than horizontal tab (0x09).  Literal newlines
 // and carriage returns inside a JSON value cause sjson.SetRaw to mis-parse
@@ -483,4 +511,43 @@ func containsLiteralControlChars(s string) bool {
 		}
 	}
 	return false
+=======
+func openAIResponsesGeminiThoughtSignature(rawSignature string) string {
+	return sigcompat.GeminiReplaySignatureOrBypass(rawSignature, sigcompat.SignatureBlockKindGeminiModelPart)
+}
+
+func applyOpenAIResponsesTextFormatToGemini(out []byte, root gjson.Result) []byte {
+	textFormat := root.Get("text.format")
+	if !textFormat.Exists() {
+		return out
+	}
+
+	formatType := strings.ToLower(strings.TrimSpace(textFormat.Get("type").String()))
+	switch formatType {
+	case "json_object":
+		out = ensureGeminiGenerationConfig(out)
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+	case "json_schema":
+		out = ensureGeminiGenerationConfig(out)
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+		out, _ = sjson.DeleteBytes(out, "generationConfig.responseSchema")
+
+		schema := textFormat.Get("schema")
+		if !schema.Exists() {
+			schema = textFormat.Get("json_schema.schema")
+		}
+		if schema.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generationConfig.responseJsonSchema", []byte(schema.Raw))
+		}
+	}
+
+	return out
+}
+
+func ensureGeminiGenerationConfig(out []byte) []byte {
+	if !gjson.GetBytes(out, "generationConfig").Exists() {
+		out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
+	}
+	return out
+>>>>>>> upstream/main:internal/translator/gemini/openai/responses/gemini_openai-responses_request.go
 }

@@ -9,9 +9,15 @@ import (
 	"reflect"
 	"time"
 
+<<<<<<< HEAD:pkg/llmproxy/watcher/config_reload.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher/diff"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
+>>>>>>> upstream/main:internal/watcher/config_reload.go
 	"gopkg.in/yaml.v3"
 
 	log "github.com/sirupsen/logrus"
@@ -38,6 +44,14 @@ func (w *Watcher) scheduleConfigReload() {
 		w.configReloadMu.Unlock()
 		w.reloadConfigIfChanged()
 	})
+}
+
+// ReloadConfigIfChanged runs the same config reload path used by filesystem events.
+func (w *Watcher) ReloadConfigIfChanged() {
+	if w == nil {
+		return
+	}
+	w.reloadConfigIfChanged()
 }
 
 func (w *Watcher) reloadConfigIfChanged() {

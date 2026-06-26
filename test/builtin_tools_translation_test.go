@@ -3,9 +3,15 @@ package test
 import (
 	"testing"
 
+<<<<<<< HEAD
 	_ "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator"
 
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
+=======
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+>>>>>>> upstream/main
 	"github.com/tidwall/gjson"
 )
 

@@ -7,8 +7,13 @@ package translator
 import (
 	"context"
 
+<<<<<<< HEAD:pkg/llmproxy/translator/translator/translator.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+>>>>>>> upstream/main:internal/translator/translator/translator.go
 )
 
 // registry holds the default translator registry instance.

@@ -3,7 +3,11 @@ package diff
 import (
 	"testing"
 
+<<<<<<< HEAD:pkg/llmproxy/auth/diff/model_hash_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+>>>>>>> upstream/main:internal/watcher/diff/model_hash_test.go
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -22,6 +26,17 @@ func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
 	changed := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-4"}, {Name: "gpt-4.1"}})
 	if hash1 == changed {
 		t.Fatal("hash should change when model list changes")
+	}
+}
+
+func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
+	textModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-image", Alias: "image"}})
+	imageModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-image", Alias: "image", Image: true}})
+	if textModel == "" || imageModel == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if textModel == imageModel {
+		t.Fatal("hash should change when image flag changes")
 	}
 }
 

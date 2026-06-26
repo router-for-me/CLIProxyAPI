@@ -4,10 +4,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/watcher/diff/model_hash.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+>>>>>>> upstream/main:internal/watcher/diff/model_hash.go
 )
 
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.
@@ -20,7 +25,7 @@ func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + fmt.Sprintf("image=%t", model.Image))
 		}
 	})
 	return hashJoined(keys)

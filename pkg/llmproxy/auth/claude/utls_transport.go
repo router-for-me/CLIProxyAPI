@@ -10,6 +10,11 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/proxyutil"
 	tls "github.com/refraction-networking/utls"
+<<<<<<< HEAD:pkg/llmproxy/auth/claude/utls_transport.go
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+>>>>>>> upstream/main:internal/auth/claude/utls_transport.go
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
@@ -34,7 +39,7 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	if cfg != nil {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
 		if errBuild != nil {
-			log.Errorf("failed to configure proxy dialer for %q: %v", cfg.ProxyURL, errBuild)
+			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}

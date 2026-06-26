@@ -1,11 +1,19 @@
 package responses
 
 import (
+<<<<<<< HEAD:pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request_test.go
+=======
+	"fmt"
+	"strconv"
+>>>>>>> upstream/main:internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
 	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+var benchmarkConvertSystemRoleOutput []byte
 
 // TestConvertSystemRoleToDeveloper_BasicConversion tests the basic system -> developer role conversion
 func TestConvertSystemRoleToDeveloper_BasicConversion(t *testing.T) {
@@ -539,7 +547,106 @@ func TestConvertOpenAIResponsesRequestToCodex_NormalizesToolsAndChoiceIndependen
 	}
 }
 
+<<<<<<< HEAD:pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request_test.go
 func longName(i int) string {
 	base := "proxy_mcp__very_long_prefix_segment_for_tool_normalization_"
 	return base + strings.Repeat("x", 80) + string(rune('a'+i))
+=======
+func BenchmarkConvertSystemRoleToDeveloperLargeInput(b *testing.B) {
+	cases := []struct {
+		name      string
+		inputJSON []byte
+	}{
+		{
+			name:      "200_input_1_system",
+			inputJSON: makeLargeResponsesInputForBenchmark(200, 200),
+		},
+		{
+			name:      "200_input_2_system",
+			inputJSON: makeLargeResponsesInputForBenchmark(200, 100),
+		},
+		{
+			name:      "2000_input_20_system",
+			inputJSON: makeLargeResponsesInputForBenchmark(2000, 100),
+		},
+	}
+	benchmarks := []struct {
+		name string
+		fn   func([]byte) []byte
+	}{
+		{
+			name: "previous_root_path_rewrite",
+			fn:   convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark,
+		},
+		{
+			name: "current_rebuilt_input_json_marshal",
+			fn:   convertSystemRoleToDeveloper,
+		},
+	}
+
+	for _, testCase := range cases {
+		for _, benchmark := range benchmarks {
+			b.Run(testCase.name+"/"+benchmark.name, func(b *testing.B) {
+				output := benchmark.fn(testCase.inputJSON)
+				if got := gjson.GetBytes(output, "input.0.role").String(); got != "developer" {
+					b.Fatalf("input.0.role = %q, want %q", got, "developer")
+				}
+				if got := gjson.GetBytes(output, "input.1.role").String(); got != "user" {
+					b.Fatalf("input.1.role = %q, want %q", got, "user")
+				}
+
+				b.ReportAllocs()
+				b.SetBytes(int64(len(testCase.inputJSON)))
+				b.ResetTimer()
+
+				var benchmarkOutput []byte
+				for i := 0; i < b.N; i++ {
+					benchmarkOutput = benchmark.fn(testCase.inputJSON)
+				}
+				benchmarkConvertSystemRoleOutput = benchmarkOutput
+			})
+		}
+	}
+}
+
+func makeLargeResponsesInputForBenchmark(inputCount int, systemEvery int) []byte {
+	var builder strings.Builder
+	builder.Grow(inputCount * 96)
+	builder.WriteString(`{"model":"gpt-5.2","input":[`)
+	for i := 0; i < inputCount; i++ {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		role := "user"
+		if i%systemEvery == 0 {
+			role = "system"
+		}
+		builder.WriteString(`{"type":"message","role":"`)
+		builder.WriteString(role)
+		builder.WriteString(`","content":[{"type":"input_text","text":"message `)
+		builder.WriteString(strconv.Itoa(i))
+		builder.WriteString(`"}]}`)
+	}
+	builder.WriteString(`]}`)
+	return []byte(builder.String())
+}
+
+func convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	inputArray := inputResult.Array()
+	result := rawJSON
+
+	for i := 0; i < len(inputArray); i++ {
+		rolePath := fmt.Sprintf("input.%d.role", i)
+		if gjson.GetBytes(result, rolePath).String() == "system" {
+			result, _ = sjson.SetBytes(result, rolePath, "developer")
+		}
+	}
+
+	return result
+>>>>>>> upstream/main:internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
 }

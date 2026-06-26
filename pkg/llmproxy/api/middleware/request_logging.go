@@ -5,16 +5,26 @@ package middleware
 
 import (
 	"bytes"
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/request_logging.go
 	"encoding/json"
+=======
+	"fmt"
+>>>>>>> upstream/main:internal/api/middleware/request_logging.go
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/request_logging.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
+=======
+	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+>>>>>>> upstream/main:internal/api/middleware/request_logging.go
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
@@ -58,6 +68,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
+		attachRequestLogSources(c, logger, loggerEnabled)
 
 		// Process the request
 		c.Next()
@@ -66,6 +77,35 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if err = wrapper.Finalize(c); err != nil {
 			log.Errorf("failed to finalize request logging: %v", err)
 		}
+	}
+}
+
+type fileBodySourceFactory interface {
+	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
+}
+
+func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool) {
+	if c == nil || !loggerEnabled {
+		return
+	}
+	factory, ok := logger.(fileBodySourceFactory)
+	if !ok || factory == nil {
+		return
+	}
+	if source, errSource := factory.NewFileBodySource("api-request"); errSource == nil {
+		c.Set(logging.APIRequestSourceContextKey, source)
+	}
+	if source, errSource := factory.NewFileBodySource("api-response"); errSource == nil {
+		c.Set(logging.APIResponseSourceContextKey, source)
+	}
+	if !isResponsesWebsocketUpgrade(c.Request) {
+		return
+	}
+	if source, errSource := factory.NewFileBodySource("websocket-timeline"); errSource == nil {
+		c.Set(logging.WebsocketTimelineSourceContextKey, source)
+	}
+	if source, errSource := factory.NewFileBodySource("api-websocket-timeline"); errSource == nil {
+		c.Set(logging.APIWebsocketTimelineSourceContextKey, source)
 	}
 }
 
@@ -134,7 +174,11 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 
 		// Restore the body for the actual request processing
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/request_logging.go
 		body = sanitizeLoggedPayloadBytes(bodyBytes)
+=======
+		body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
+>>>>>>> upstream/main:internal/api/middleware/request_logging.go
 	}
 
 	return &RequestInfo{
@@ -147,6 +191,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	}, nil
 }
 
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/request_logging.go
 func sanitizeRequestHeaders(headers http.Header) map[string][]string {
 	sanitized := make(map[string][]string, len(headers))
 	for key, values := range headers {
@@ -158,6 +203,58 @@ func sanitizeRequestHeaders(headers http.Header) map[string][]string {
 		sanitized[key] = values
 	}
 	return sanitized
+=======
+func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+
+	decoded, errDecode := decodeCapturedRequestBody(raw, encoding)
+	if errDecode != nil {
+		return raw
+	}
+	return decoded
+}
+
+func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
+	encoding = strings.TrimSpace(encoding)
+	if encoding == "" || strings.EqualFold(encoding, "identity") {
+		return raw, nil
+	}
+
+	parts := strings.Split(encoding, ",")
+	body := raw
+	for i := len(parts) - 1; i >= 0; i-- {
+		enc := strings.ToLower(strings.TrimSpace(parts[i]))
+		switch enc {
+		case "", "identity":
+			continue
+		case "zstd":
+			decoded, errDecode := decodeCapturedZstdRequestBody(body)
+			if errDecode != nil {
+				return nil, errDecode
+			}
+			body = decoded
+		default:
+			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
+		}
+	}
+	return body, nil
+}
+
+func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
+	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
+	if errNewReader != nil {
+		return nil, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
+	}
+	defer decoder.Close()
+
+	decoded, errRead := io.ReadAll(decoder)
+	if errRead != nil {
+		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
+	}
+	return decoded, nil
+>>>>>>> upstream/main:internal/api/middleware/request_logging.go
 }
 
 // shouldLogRequest determines whether the request should be logged.
@@ -166,10 +263,6 @@ func sanitizeRequestHeaders(headers http.Header) map[string][]string {
 func shouldLogRequest(path string) bool {
 	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
 		return false
-	}
-
-	if strings.HasPrefix(path, "/api") {
-		return strings.HasPrefix(path, "/api/provider")
 	}
 
 	return true

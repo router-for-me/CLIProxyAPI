@@ -9,7 +9,11 @@ import (
 	"sync"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+>>>>>>> upstream/main
 	log "github.com/sirupsen/logrus"
 )
 

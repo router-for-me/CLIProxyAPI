@@ -9,12 +9,15 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/auth_files_download_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+>>>>>>> upstream/main:internal/api/handlers/management/auth_files_download_test.go
 )
 
 func TestDownloadAuthFile_ReturnsFile(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	fileName := "download-user.json"
@@ -40,7 +43,6 @@ func TestDownloadAuthFile_ReturnsFile(t *testing.T) {
 
 func TestDownloadAuthFile_RejectsPathSeparators(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 

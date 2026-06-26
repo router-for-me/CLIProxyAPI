@@ -12,8 +12,13 @@ import (
 	"strconv"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/translator/codex/gemini/codex_gemini_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+>>>>>>> upstream/main:internal/translator/codex/gemini/codex_gemini_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -81,11 +86,33 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		return "call_" + b.String()
 	}
 
+	getGeminiCallID := func(value gjson.Result) string {
+		if callID := strings.TrimSpace(value.Get("id").String()); callID != "" {
+			return callID
+		}
+		return strings.TrimSpace(value.Get("call_id").String())
+	}
+
+	removePendingCallID := func(ids []string, callID string) []string {
+		if callID == "" {
+			return ids
+		}
+		for idx, pendingID := range ids {
+			if pendingID == callID {
+				return append(ids[:idx], ids[idx+1:]...)
+			}
+		}
+		return ids
+	}
+
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// System instruction -> as a user message with input_text parts
 	sysParts := root.Get("system_instruction.parts")
+	if !sysParts.Exists() {
+		sysParts = root.Get("systemInstruction.parts")
+	}
 	if sysParts.IsArray() {
 		msg := []byte(`{"type":"message","role":"developer","content":[]}`)
 		arr := sysParts.Array()
@@ -152,10 +179,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					if args := fc.Get("args"); args.Exists() {
 						fn, _ = sjson.SetBytes(fn, "arguments", args.Raw)
 					}
-					// generate a paired random call_id and enqueue it so the
-					// corresponding functionResponse can pop the earliest id
-					// to preserve ordering when multiple calls are present.
-					id := genCallID()
+					// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
+					id := getGeminiCallID(fc)
+					if id == "" {
+						id = genCallID()
+					}
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
 					pendingCallIDs = append(pendingCallIDs, id)
 					out, _ = sjson.SetRawBytes(out, "input.-1", fn)
@@ -175,7 +203,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					// attach the oldest queued call_id to pair the response
 					// with its call. If the queue is empty, generate a new id.
 					var id string
-					if len(pendingCallIDs) > 0 {
+					if customID := getGeminiCallID(fr); customID != "" {
+						id = customID
+						pendingCallIDs = removePendingCallID(pendingCallIDs, id)
+					} else if len(pendingCallIDs) > 0 {
 						id = pendingCallIDs[0]
 						// pop the first element
 						pendingCallIDs = pendingCallIDs[1:]
@@ -284,7 +315,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	util.Walk(toolsResult, "", "type", &pathsToLower)
 	for _, p := range pathsToLower {
 		fullPath := fmt.Sprintf("tools.%s", p)
-		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(gjson.GetBytes(out, fullPath).String()))
+		typeValue := gjson.GetBytes(out, fullPath)
+		if typeValue.Type != gjson.String {
+			continue
+		}
+		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(typeValue.String()))
 	}
 
 	return out

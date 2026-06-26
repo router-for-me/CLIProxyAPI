@@ -13,11 +13,19 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	log "github.com/sirupsen/logrus"
+>>>>>>> upstream/main:internal/api/middleware/response_writer.go
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
+const responseBodyOverrideContextKey = "RESPONSE_BODY_OVERRIDE"
+const websocketTimelineOverrideContextKey = "WEBSOCKET_TIMELINE_OVERRIDE"
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
@@ -281,7 +289,12 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+	websocketTimelineSource := w.extractWebsocketTimelineSource(c)
+	apiRequestSource := w.extractAPIRequestSource(c)
+	apiResponseSource := w.extractAPIResponseSource(c)
+	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
 	if !w.logger.IsEnabled() && !forceLog {
+		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
 	}
 
@@ -300,22 +313,63 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 
 		// Write API Request and Response to the streaming log before closing
 		apiRequest := w.extractAPIRequest(c)
-		if len(apiRequest) > 0 {
-			_ = w.streamWriter.WriteAPIRequest(apiRequest)
-		}
 		apiResponse := w.extractAPIResponse(c)
-		if len(apiResponse) > 0 {
-			_ = w.streamWriter.WriteAPIResponse(apiResponse)
+		if sourceWriter, ok := w.streamWriter.(interface {
+			WriteAPIRequestSource(*logging.FileBodySource) error
+			WriteAPIResponseSource(*logging.FileBodySource) error
+		}); ok {
+			if len(apiRequest) > 0 {
+				_ = w.streamWriter.WriteAPIRequest(apiRequest)
+			}
+			if apiRequestSource != nil && apiRequestSource.HasPayload() {
+				_ = sourceWriter.WriteAPIRequestSource(apiRequestSource)
+			}
+			if len(apiResponse) > 0 {
+				_ = w.streamWriter.WriteAPIResponse(apiResponse)
+			}
+			if apiResponseSource != nil && apiResponseSource.HasPayload() {
+				_ = sourceWriter.WriteAPIResponseSource(apiResponseSource)
+			}
+		} else {
+			var errMerge error
+			apiRequest, errMerge = mergeFileBodySource(apiRequest, apiRequestSource)
+			if errMerge != nil {
+				cleanupFileBodySources(websocketTimelineSource, apiResponseSource, apiWebsocketTimelineSource)
+				return errMerge
+			}
+			apiResponse, errMerge = mergeFileBodySource(apiResponse, apiResponseSource)
+			if errMerge != nil {
+				cleanupFileBodySources(websocketTimelineSource, apiWebsocketTimelineSource)
+				return errMerge
+			}
+			if len(apiRequest) > 0 {
+				_ = w.streamWriter.WriteAPIRequest(apiRequest)
+			}
+			if len(apiResponse) > 0 {
+				_ = w.streamWriter.WriteAPIResponse(apiResponse)
+			}
+		}
+		apiWebsocketTimeline := w.extractAPIWebsocketTimeline(c)
+		var errMerge error
+		apiWebsocketTimeline, errMerge = mergeFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
+		if errMerge != nil {
+			cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
+			return errMerge
+		}
+		if len(apiWebsocketTimeline) > 0 {
+			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
 		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
+			cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
 			return err
 		}
 		w.streamWriter = nil
+		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
 		return nil
 	}
 
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, w.extractAPIRequest(c), apiRequestSource, w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -355,6 +409,30 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	return redactLoggedBody(data)
 }
 
+func (w *ResponseWriterWrapper) extractAPIRequestSource(c *gin.Context) *logging.FileBodySource {
+	return extractFileBodySource(c, logging.APIRequestSourceContextKey)
+}
+
+func (w *ResponseWriterWrapper) extractAPIResponseSource(c *gin.Context) *logging.FileBodySource {
+	return extractFileBodySource(c, logging.APIResponseSourceContextKey)
+}
+
+func (w *ResponseWriterWrapper) extractAPIWebsocketTimeline(c *gin.Context) []byte {
+	apiTimeline, isExist := c.Get("API_WEBSOCKET_TIMELINE")
+	if !isExist {
+		return nil
+	}
+	data, ok := apiTimeline.([]byte)
+	if !ok || len(data) == 0 {
+		return nil
+	}
+	return bytes.Clone(data)
+}
+
+func (w *ResponseWriterWrapper) extractAPIWebsocketTimelineSource(c *gin.Context) *logging.FileBodySource {
+	return extractFileBodySource(c, logging.APIWebsocketTimelineSourceContextKey)
+}
+
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
 	ts, isExist := c.Get("API_RESPONSE_TIMESTAMP")
 	if !isExist {
@@ -367,6 +445,7 @@ func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time
 }
 
 func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 	if c != nil {
 		if bodyOverride, isExist := c.Get(requestBodyOverrideContextKey); isExist {
 			switch value := bodyOverride.(type) {
@@ -380,6 +459,10 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 				}
 			}
 		}
+=======
+	if body := extractBodyOverride(c, requestBodyOverrideContextKey); len(body) > 0 {
+		return body
+>>>>>>> upstream/main:internal/api/middleware/response_writer.go
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
 		return redactLoggedBody(w.requestInfo.Body)
@@ -387,8 +470,63 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 	return nil
 }
 
-func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
+func (w *ResponseWriterWrapper) extractResponseBody(c *gin.Context) []byte {
+	if body := extractBodyOverride(c, responseBodyOverrideContextKey); len(body) > 0 {
+		return body
+	}
+	if w.body == nil || w.body.Len() == 0 {
+		return nil
+	}
+	return bytes.Clone(w.body.Bytes())
+}
+
+func (w *ResponseWriterWrapper) extractWebsocketTimeline(c *gin.Context) []byte {
+	return extractBodyOverride(c, websocketTimelineOverrideContextKey)
+}
+
+func (w *ResponseWriterWrapper) extractWebsocketTimelineSource(c *gin.Context) *logging.FileBodySource {
+	return extractFileBodySource(c, logging.WebsocketTimelineSourceContextKey)
+}
+
+func extractFileBodySource(c *gin.Context, key string) *logging.FileBodySource {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(key)
+	if !exists {
+		return nil
+	}
+	source, ok := value.(*logging.FileBodySource)
+	if !ok || source == nil {
+		return nil
+	}
+	return source
+}
+
+func extractBodyOverride(c *gin.Context, key string) []byte {
+	if c == nil {
+		return nil
+	}
+	bodyOverride, isExist := c.Get(key)
+	if !isExist {
+		return nil
+	}
+	switch value := bodyOverride.(type) {
+	case []byte:
+		if len(value) > 0 {
+			return bytes.Clone(value)
+		}
+	case string:
+		if strings.TrimSpace(value) != "" {
+			return []byte(value)
+		}
+	}
+	return nil
+}
+
+func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body, websocketTimeline []byte, websocketTimelineSource *logging.FileBodySource, apiRequestBody []byte, apiRequestSource *logging.FileBodySource, apiResponseBody []byte, apiResponseSource *logging.FileBodySource, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *logging.FileBodySource, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
 	if w.requestInfo == nil {
+		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
 	}
 	safeURL := sanitizeForLogging(w.requestInfo.URL)
@@ -396,8 +534,92 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	safeRequestID := sanitizeForLogging(w.requestInfo.RequestID)
 	requestHeaders := sanitizeRequestHeaders(http.Header(w.requestInfo.Headers))
 
+	if loggerWithAllSources, ok := w.logger.(interface {
+		LogRequestWithOptionsAndAllSources(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, *logging.FileBodySource, []byte, *logging.FileBodySource, []byte, *logging.FileBodySource, []byte, *logging.FileBodySource, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
+	}); ok {
+		return loggerWithAllSources.LogRequestWithOptionsAndAllSources(
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			w.requestInfo.Headers,
+			requestBody,
+			statusCode,
+			headers,
+			body,
+			websocketTimeline,
+			websocketTimelineSource,
+			apiRequestBody,
+			apiRequestSource,
+			apiResponseBody,
+			apiResponseSource,
+			apiWebsocketTimeline,
+			apiWebsocketTimelineSource,
+			apiResponseErrors,
+			forceLog,
+			w.requestInfo.RequestID,
+			w.requestInfo.Timestamp,
+			apiResponseTimestamp,
+		)
+	}
+
+	if loggerWithSources, ok := w.logger.(interface {
+		LogRequestWithOptionsAndSources(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, *logging.FileBodySource, []byte, []byte, []byte, *logging.FileBodySource, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
+	}); ok {
+		var errMerge error
+		apiRequestBody, errMerge = mergeFileBodySource(apiRequestBody, apiRequestSource)
+		if errMerge != nil {
+			cleanupFileBodySources(websocketTimelineSource, apiResponseSource, apiWebsocketTimelineSource)
+			return errMerge
+		}
+		apiResponseBody, errMerge = mergeFileBodySource(apiResponseBody, apiResponseSource)
+		if errMerge != nil {
+			cleanupFileBodySources(websocketTimelineSource, apiWebsocketTimelineSource)
+			return errMerge
+		}
+		return loggerWithSources.LogRequestWithOptionsAndSources(
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			w.requestInfo.Headers,
+			requestBody,
+			statusCode,
+			headers,
+			body,
+			websocketTimeline,
+			websocketTimelineSource,
+			apiRequestBody,
+			apiResponseBody,
+			apiWebsocketTimeline,
+			apiWebsocketTimelineSource,
+			apiResponseErrors,
+			forceLog,
+			w.requestInfo.RequestID,
+			w.requestInfo.Timestamp,
+			apiResponseTimestamp,
+		)
+	}
+
+	var errMerge error
+	websocketTimeline, errMerge = mergeFileBodySource(websocketTimeline, websocketTimelineSource)
+	if errMerge != nil {
+		cleanupFileBodySources(apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
+		return errMerge
+	}
+	apiRequestBody, errMerge = mergeFileBodySource(apiRequestBody, apiRequestSource)
+	if errMerge != nil {
+		cleanupFileBodySources(apiResponseSource, apiWebsocketTimelineSource)
+		return errMerge
+	}
+	apiResponseBody, errMerge = mergeFileBodySource(apiResponseBody, apiResponseSource)
+	if errMerge != nil {
+		cleanupFileBodySources(apiWebsocketTimelineSource)
+		return errMerge
+	}
+	apiWebsocketTimeline, errMerge = mergeFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
+	if errMerge != nil {
+		return errMerge
+	}
+
 	if loggerWithOptions, ok := w.logger.(interface {
-		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
+		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
 	}); ok {
 		return loggerWithOptions.LogRequestWithOptions(
 			safeURL,
@@ -406,9 +628,17 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 			redactLoggedBody(requestBody),
 			statusCode,
 			headers,
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 			redactLoggedBody(body),
 			redactLoggedBody(apiRequestBody),
 			redactLoggedBody(apiResponseBody),
+=======
+			body,
+			websocketTimeline,
+			apiRequestBody,
+			apiResponseBody,
+			apiWebsocketTimeline,
+>>>>>>> upstream/main:internal/api/middleware/response_writer.go
 			apiResponseErrors,
 			forceLog,
 			safeRequestID,
@@ -424,9 +654,17 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		redactLoggedBody(requestBody),
 		statusCode,
 		headers,
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 		redactLoggedBody(body),
 		redactLoggedBody(apiRequestBody),
 		redactLoggedBody(apiResponseBody),
+=======
+		body,
+		websocketTimeline,
+		apiRequestBody,
+		apiResponseBody,
+		apiWebsocketTimeline,
+>>>>>>> upstream/main:internal/api/middleware/response_writer.go
 		apiResponseErrors,
 		safeRequestID,
 		w.requestInfo.Timestamp,
@@ -434,6 +672,7 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	)
 }
 
+<<<<<<< HEAD:pkg/llmproxy/api/middleware/response_writer.go
 func sanitizeForLogging(value string) string {
 	return html.EscapeString(strings.TrimSpace(value))
 }
@@ -444,4 +683,37 @@ func redactLoggedBody(body []byte) []byte {
 	}
 	sum := sha256.Sum256(body)
 	return []byte(fmt.Sprintf("[REDACTED] len=%d sha256=%x", len(body), sum[:8]))
+=======
+func mergeFileBodySource(payload []byte, source *logging.FileBodySource) ([]byte, error) {
+	if source == nil {
+		return payload, nil
+	}
+	defer cleanupFileBodySources(source)
+	if !source.HasPayload() {
+		return payload, nil
+	}
+	var buf bytes.Buffer
+	if len(payload) > 0 {
+		buf.Write(payload)
+		if !bytes.HasSuffix(payload, []byte("\n")) {
+			buf.WriteByte('\n')
+		}
+		buf.WriteByte('\n')
+	}
+	if errWrite := source.WriteTo(&buf); errWrite != nil {
+		return nil, errWrite
+	}
+	return buf.Bytes(), nil
+}
+
+func cleanupFileBodySources(sources ...*logging.FileBodySource) {
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		if errCleanup := source.Cleanup(); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up log part files")
+		}
+	}
+>>>>>>> upstream/main:internal/api/middleware/response_writer.go
 }

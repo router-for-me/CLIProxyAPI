@@ -1,13 +1,14 @@
 package diff
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
+<<<<<<< HEAD:pkg/llmproxy/watcher/diff/oauth_excluded.go
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+=======
+>>>>>>> upstream/main:internal/watcher/diff/oauth_excluded.go
 )
 
 type ExcludedModelsSummary struct {
@@ -85,34 +86,4 @@ func DiffOAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string
 	sort.Strings(changes)
 	sort.Strings(affected)
 	return changes, affected
-}
-
-type AmpModelMappingsSummary struct {
-	hash  string
-	count int
-}
-
-// SummarizeAmpModelMappings hashes Amp model mappings for change detection.
-func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappingsSummary {
-	if len(mappings) == 0 {
-		return AmpModelMappingsSummary{}
-	}
-	entries := make([]string, 0, len(mappings))
-	for _, mapping := range mappings {
-		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
-		if from == "" && to == "" {
-			continue
-		}
-		entries = append(entries, from+"->"+to)
-	}
-	if len(entries) == 0 {
-		return AmpModelMappingsSummary{}
-	}
-	sort.Strings(entries)
-	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
-	return AmpModelMappingsSummary{
-		hash:  hex.EncodeToString(sum[:]),
-		count: len(entries),
-	}
 }

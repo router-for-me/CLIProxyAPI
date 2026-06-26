@@ -5,9 +5,15 @@ import (
 	"strings"
 	"testing"
 
+<<<<<<< HEAD:pkg/llmproxy/watcher/synthesizer/helpers_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher/diff"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+>>>>>>> upstream/main:internal/watcher/synthesizer/helpers_test.go
 )
 
 func TestNewStableIDGenerator(t *testing.T) {

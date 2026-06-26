@@ -10,9 +10,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD:pkg/llmproxy/api/handlers/management/config_basic.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+>>>>>>> upstream/main:internal/api/handlers/management/config_basic.go
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )

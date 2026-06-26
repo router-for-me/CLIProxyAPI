@@ -6,7 +6,11 @@ import (
 	"sync"
 	"testing"
 
+<<<<<<< HEAD
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
+=======
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+>>>>>>> upstream/main
 )
 
 type replaceAwareExecutor struct {

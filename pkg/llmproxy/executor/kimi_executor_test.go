@@ -203,3 +203,70 @@ func TestNormalizeKimiToolMessageLinks_RepairsIDsAndReasoningTogether(t *testing
 		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "r1")
 	}
 }
+
+func TestNormalizeKimiToolMessageLinks_DropsEmptyAssistantWithoutToolLink(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"start"},
+			{"role":"assistant","content":""},
+			{"role":"assistant","content":"   "},
+			{"role":"assistant","content":"","tool_calls":null},
+			{"role":"assistant","content":[{"type":"text","text":"  "}]},
+			{"role":"assistant"},
+			{"role":"assistant","content":"keep"},
+			{"role":"user","content":"next"}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("messages length = %d, want 3, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := messages[0].Get("content").String(); got != "start" {
+		t.Fatalf("messages.0.content = %q, want %q", got, "start")
+	}
+	if got := messages[1].Get("content").String(); got != "keep" {
+		t.Fatalf("messages.1.content = %q, want %q", got, "keep")
+	}
+	if got := messages[2].Get("content").String(); got != "next" {
+		t.Fatalf("messages.2.content = %q, want %q", got, "next")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]},
+			{"role":"assistant","content":"","function_call":{"name":"legacy_call","arguments":"{}"}},
+			{"role":"assistant","content":"","reasoning_content":"thought"},
+			{"role":"assistant","content":[{"type":"text","text":" visible "}]}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 4 {
+		t.Fatalf("messages length = %d, want 4, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+	}
+	if !messages[0].Get("tool_calls").Exists() {
+		t.Fatalf("messages.0.tool_calls should exist")
+	}
+	if !messages[1].Get("function_call").Exists() {
+		t.Fatalf("messages.1.function_call should exist")
+	}
+	if got := messages[2].Get("reasoning_content").String(); got != "thought" {
+		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "thought")
+	}
+	if got := messages[3].Get("content.0.text").String(); got != " visible " {
+		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
+	}
+}

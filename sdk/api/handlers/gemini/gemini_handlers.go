@@ -13,10 +13,17 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/constant"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/handlers"
+=======
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+>>>>>>> upstream/main
 )
 
 // GeminiAPIHandler contains the handlers for Gemini API endpoints.

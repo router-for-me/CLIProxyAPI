@@ -6,7 +6,11 @@ import (
 	"strconv"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/auth/diff/openai_compat.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+>>>>>>> upstream/main:internal/watcher/diff/openai_compat.go
 )
 
 // DiffOpenAICompatibility produces human-readable change descriptions.
@@ -65,6 +69,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	oldModelCount := countOpenAIModels(oldEntry.Models)
 	newModelCount := countOpenAIModels(newEntry.Models)
 	details := make([]string, 0, 3)
+	if oldEntry.Disabled != newEntry.Disabled {
+		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
@@ -149,7 +156,7 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 		if name == "" && alias == "" {
 			continue
 		}
-		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias))
+		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias)+"|"+fmt.Sprintf("image=%t", model.Image))
 	}
 	if len(models) > 0 {
 		sort.Strings(models)

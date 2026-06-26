@@ -1,11 +1,17 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	log "github.com/sirupsen/logrus"
 )
 
 // SignatureEntry holds a cached thinking signature with timestamp
@@ -33,6 +39,17 @@ var signatureCache sync.Map
 
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
 var cacheCleanupOnce sync.Once
+
+type signatureKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSet(ctx context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error)
+	KVDel(ctx context.Context, keys ...string) (int64, error)
+	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
+}
+
+var currentSignatureKVClient = func() (signatureKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
 
 // groupCache is the inner map type
 type groupCache struct {
@@ -91,16 +108,37 @@ func purgeExpiredCaches() {
 		}
 		return true
 	})
+	purgeExpiredCodexReasoningReplayCache(now)
+	purgeExpiredXAIReasoningReplayCache(now)
+	purgeExpiredAntigravityReasoningReplayCache(now)
 }
 
 // CacheSignature stores a thinking signature for a given model group and text.
 // Used for Claude models that require signed thinking blocks in multi-turn conversations.
 func CacheSignature(modelName, text, signature string) {
+	CacheSignatureBestEffort(context.Background(), modelName, text, signature)
+}
+
+// CacheSignatureBestEffort stores a thinking signature for completed response paths.
+func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature string) bool {
 	if text == "" || signature == "" {
-		return
+		return false
 	}
 	if len(signature) < MinValidSignatureLen {
-		return
+		return false
+	}
+
+	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errClient)
+			return false
+		}
+		written, errSet := client.KVSet(ctx, signatureKVKey(modelName, text), []byte(signature), homekv.KVSetOptions{EX: SignatureCacheTTL})
+		if errSet != nil {
+			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errSet)
+			return false
+		}
+		return written
 	}
 
 	groupKey := GetModelGroup(modelName)
@@ -113,25 +151,57 @@ func CacheSignature(modelName, text, signature string) {
 		Signature: signature,
 		Timestamp: time.Now(),
 	}
+	return true
 }
 
 // GetCachedSignature retrieves a cached signature for a given model group and text.
 // Returns empty string if not found or expired.
 func GetCachedSignature(modelName, text string) string {
+	signature, errSignature := GetCachedSignatureRequired(context.Background(), modelName, text)
+	if errSignature != nil {
+		return ""
+	}
+	return signature
+}
+
+// GetCachedSignatureRequired retrieves a cached signature for request-time paths.
+func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (string, error) {
 	groupKey := GetModelGroup(modelName)
 
 	if text == "" {
 		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
+			return "skip_thought_signature_validator", nil
 		}
-		return ""
+		return "", nil
 	}
+
+	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
+		if errClient != nil {
+			return "", errClient
+		}
+		key := signatureKVKey(modelName, text)
+		raw, found, errGet := client.KVGet(ctx, key)
+		if errGet != nil {
+			return "", errGet
+		}
+		if !found {
+			if groupKey == "gemini" {
+				return "skip_thought_signature_validator", nil
+			}
+			return "", nil
+		}
+		if _, errExpire := client.KVExpire(ctx, key, SignatureCacheTTL); errExpire != nil {
+			return "", errExpire
+		}
+		return string(raw), nil
+	}
+
 	val, ok := signatureCache.Load(groupKey)
 	if !ok {
 		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
+			return "skip_thought_signature_validator", nil
 		}
-		return ""
+		return "", nil
 	}
 	sc := val.(*groupCache)
 
@@ -144,17 +214,17 @@ func GetCachedSignature(modelName, text string) string {
 	if !exists {
 		sc.mu.Unlock()
 		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
+			return "skip_thought_signature_validator", nil
 		}
-		return ""
+		return "", nil
 	}
 	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 		delete(sc.entries, textHash)
 		sc.mu.Unlock()
 		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
+			return "skip_thought_signature_validator", nil
 		}
-		return ""
+		return "", nil
 	}
 
 	// Refresh TTL on access (sliding expiration).
@@ -162,7 +232,7 @@ func GetCachedSignature(modelName, text string) string {
 	sc.entries[textHash] = entry
 	sc.mu.Unlock()
 
-	return entry.Signature
+	return entry.Signature, nil
 }
 
 // ClearSignatureCache clears signature cache for a specific model group or all groups.
@@ -176,6 +246,35 @@ func ClearSignatureCache(modelName string) {
 	}
 	groupKey := GetModelGroup(modelName)
 	signatureCache.Delete(groupKey)
+}
+
+// DeleteCachedSignatureRequired removes one exact cached signature.
+func DeleteCachedSignatureRequired(ctx context.Context, modelName, text string) error {
+	if text == "" {
+		return nil
+	}
+	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		_, errDel := client.KVDel(ctx, signatureKVKey(modelName, text))
+		return errDel
+	}
+	groupKey := GetModelGroup(modelName)
+	textHash := hashText(text)
+	val, ok := signatureCache.Load(groupKey)
+	if !ok {
+		return nil
+	}
+	sc := val.(*groupCache)
+	sc.mu.Lock()
+	delete(sc.entries, textHash)
+	isEmpty := len(sc.entries) == 0
+	sc.mu.Unlock()
+	if isEmpty {
+		signatureCache.Delete(groupKey)
+	}
+	return nil
 }
 
 // HasValidSignature checks if a signature is valid (non-empty and long enough)
@@ -192,4 +291,50 @@ func GetModelGroup(modelName string) string {
 		return "gemini"
 	}
 	return modelName
+}
+
+func signatureKVKey(modelName, text string) string {
+	return fmt.Sprintf("cpa:signature:%s:%s", GetModelGroup(modelName), homekv.HashKeyPart(text))
+}
+
+var signatureCacheEnabled atomic.Bool
+var signatureBypassStrictMode atomic.Bool
+
+func init() {
+	signatureCacheEnabled.Store(true)
+	signatureBypassStrictMode.Store(false)
+}
+
+// SetSignatureCacheEnabled switches Antigravity signature handling between cache mode and bypass mode.
+func SetSignatureCacheEnabled(enabled bool) {
+	previous := signatureCacheEnabled.Swap(enabled)
+	if previous == enabled {
+		return
+	}
+	if !enabled {
+		log.Info("antigravity signature cache DISABLED - bypass mode active, cached signatures will not be used for request translation")
+	}
+}
+
+// SignatureCacheEnabled returns whether signature cache validation is enabled.
+func SignatureCacheEnabled() bool {
+	return signatureCacheEnabled.Load()
+}
+
+// SetSignatureBypassStrictMode controls whether bypass mode uses strict protobuf-tree validation.
+func SetSignatureBypassStrictMode(strict bool) {
+	previous := signatureBypassStrictMode.Swap(strict)
+	if previous == strict {
+		return
+	}
+	if strict {
+		log.Debug("antigravity bypass signature validation: strict mode (protobuf tree)")
+	} else {
+		log.Debug("antigravity bypass signature validation: basic mode (R/E + 0x12)")
+	}
+}
+
+// SignatureBypassStrictMode returns whether bypass mode uses strict protobuf-tree validation.
+func SignatureBypassStrictMode() bool {
+	return signatureBypassStrictMode.Load()
 }

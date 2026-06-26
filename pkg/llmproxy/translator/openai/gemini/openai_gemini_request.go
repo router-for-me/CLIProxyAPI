@@ -11,7 +11,11 @@ import (
 	"math/big"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/translator/openai/gemini/openai_gemini_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+>>>>>>> upstream/main:internal/translator/openai/gemini/openai_gemini_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -113,6 +117,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process contents (Gemini messages) -> OpenAI messages
 	var toolCallIDs []string // Track tool call IDs for matching with tool results
+	toolCallConsumeIdx := 0
 
 	// System instruction -> OpenAI system message
 	// Gemini may provide `systemInstruction` or `system_instruction`; support both keys.
@@ -241,12 +246,9 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							}
 						}
 
-						// Try to match with previous tool call ID
-						_ = functionResponse.Get("name").String() // functionName not used for now
-						if len(toolCallIDs) > 0 {
-							// Use the last tool call ID (simple matching by function name)
-							// In a real implementation, you might want more sophisticated matching
-							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallIDs[len(toolCallIDs)-1])
+						if toolCallConsumeIdx < len(toolCallIDs) {
+							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallIDs[toolCallConsumeIdx])
+							toolCallConsumeIdx++
 						} else {
 							// Generate a tool call ID if none available
 							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", genToolCallID())

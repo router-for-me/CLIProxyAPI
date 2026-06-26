@@ -7,10 +7,29 @@ import (
 	"net/url"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/util/provider.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+>>>>>>> upstream/main:internal/util/provider.go
 	log "github.com/sirupsen/logrus"
 )
+
+const openAICompatibleProviderPrefix = "openai-compatible-"
+
+// OpenAICompatibleProviderKey returns the internal provider key for an OpenAI-compatible provider.
+func OpenAICompatibleProviderKey(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "openai-compatibility" || strings.HasPrefix(name, openAICompatibleProviderPrefix) {
+		if name == "" {
+			return "openai-compatibility"
+		}
+		return name
+	}
+	return openAICompatibleProviderPrefix + name
+}
 
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
@@ -21,7 +40,6 @@ import (
 //   - "gemini" for Google's Gemini family
 //   - "codex" for OpenAI GPT-compatible providers
 //   - "claude" for Anthropic models
-//   - "qwen" for Alibaba's Qwen models
 //   - "openai-compatibility" for external OpenAI-compatible providers
 //
 // Parameters:
@@ -143,6 +161,9 @@ func IsOpenAICompatibilityAlias(modelName string, cfg *config.Config) bool {
 	}
 
 	for _, compat := range cfg.OpenAICompatibility {
+		if compat.Disabled {
+			continue
+		}
 		for _, model := range compat.Models {
 			if strings.EqualFold(strings.TrimSpace(model.Alias), modelName) || strings.EqualFold(strings.TrimSpace(model.Name), modelName) {
 				return true
@@ -172,6 +193,9 @@ func GetOpenAICompatibilityConfig(alias string, cfg *config.Config) (*config.Ope
 	}
 
 	for _, compat := range cfg.OpenAICompatibility {
+		if compat.Disabled {
+			continue
+		}
 		for _, model := range compat.Models {
 			if strings.EqualFold(strings.TrimSpace(model.Alias), alias) || strings.EqualFold(strings.TrimSpace(model.Name), alias) {
 				return &compat, &model

@@ -1,10 +1,14 @@
 // Package thinking provides unified thinking configuration processing.
 //
 // This package offers a unified interface for parsing, validating, and applying
-// thinking configurations across various AI providers (Claude, Gemini, OpenAI, iFlow).
+// thinking configurations across various AI providers (Claude, Gemini, OpenAI, Codex, Antigravity, Kimi, xAI).
 package thinking
 
+<<<<<<< HEAD:pkg/llmproxy/thinking/types.go
 import "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+=======
+import "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+>>>>>>> upstream/main:internal/thinking/types.go
 
 // ThinkingMode represents the type of thinking configuration mode.
 type ThinkingMode int

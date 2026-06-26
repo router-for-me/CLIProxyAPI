@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
 	// legacy client removed
@@ -14,6 +15,15 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
+	// legacy client removed
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+>>>>>>> upstream/main
 	log "github.com/sirupsen/logrus"
 )
 

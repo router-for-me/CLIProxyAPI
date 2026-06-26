@@ -54,9 +54,14 @@ var locales = map[string]map[string]string{
 // ──────────────────────────────────────────
 // Tab names
 // ──────────────────────────────────────────
+<<<<<<< HEAD:pkg/llmproxy/tui/i18n.go
 var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
 var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
 var faTabNames = []string{"داشبورد", "پیکربندی", "فایل\u200cهای احراز هویت", "کلیدهای API", "OAuth", "کاربرد", "لاگ\u200cها"}
+=======
+var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "日志"}
+var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Logs"}
+>>>>>>> upstream/main:internal/tui/i18n.go
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {
@@ -140,7 +145,6 @@ var zhStrings = map[string]string{
 	"section_quota":     "配额超限处理",
 	"section_routing":   "路由",
 	"section_websocket": "WebSocket",
-	"section_ampcode":   "AMP Code",
 	"section_other":     "其他",
 
 	// ── Auth Files ──
@@ -210,6 +214,7 @@ var zhStrings = map[string]string{
 	"usage_output":        "输出",
 	"usage_cached":        "缓存",
 	"usage_reasoning":     "思考",
+	"usage_time":          "时间",
 
 	// ── Logs ──
 	"logs_title":       "📋 日志",
@@ -291,7 +296,6 @@ var enStrings = map[string]string{
 	"section_quota":     "Quota Exceeded Handling",
 	"section_routing":   "Routing",
 	"section_websocket": "WebSocket",
-	"section_ampcode":   "AMP Code",
 	"section_other":     "Other",
 
 	// ── Auth Files ──
@@ -361,6 +365,7 @@ var enStrings = map[string]string{
 	"usage_output":        "Output",
 	"usage_cached":        "Cached",
 	"usage_reasoning":     "Reasoning",
+	"usage_time":          "Time",
 
 	// ── Logs ──
 	"logs_title":       "📋 Logs",

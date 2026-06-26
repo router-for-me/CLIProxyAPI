@@ -5,7 +5,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+>>>>>>> upstream/main
 )
 
 type StreamForwardOptions struct {

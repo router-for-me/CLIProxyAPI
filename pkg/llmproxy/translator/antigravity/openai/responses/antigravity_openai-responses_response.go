@@ -3,7 +3,11 @@ package responses
 import (
 	"context"
 
+<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/openai/responses/antigravity_openai-responses_response.go
 	geminiopenai "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/openai/responses"
+=======
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
+>>>>>>> upstream/main:internal/translator/antigravity/openai/responses/antigravity_openai-responses_response.go
 	"github.com/tidwall/gjson"
 )
 

@@ -1,23 +1,29 @@
-// Package openai provides request translation functionality for OpenAI to Gemini CLI API compatibility.
-// It converts OpenAI Chat Completions requests into Gemini CLI compatible JSON using gjson/sjson only.
+// Package openai provides request translation functionality for OpenAI to Antigravity API compatibility.
+// It converts OpenAI Chat Completions requests into Antigravity compatible JSON using gjson/sjson only.
 package chat_completions
 
 import (
 	"fmt"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/translator/antigravity/openai/chat-completions/antigravity_openai_request.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+>>>>>>> upstream/main:internal/translator/antigravity/openai/chat-completions/antigravity_openai_request.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
+const antigravityFunctionThoughtSignature = "skip_thought_signature_validator"
 
 // ConvertOpenAIRequestToAntigravity converts an OpenAI Chat Completions request (raw JSON)
-// into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
+// into a complete Antigravity request JSON. All JSON construction uses sjson and lookups use gjson.
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -25,7 +31,7 @@ const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 //   - stream: A boolean indicating if the request is for a streaming response (unused in current implementation)
 //
 // Returns:
-//   - []byte: The transformed request data in Gemini CLI API format
+//   - []byte: The transformed request data in Antigravity API format
 func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 	// Base envelope (no default thinkingConfig)
@@ -39,7 +45,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRawBytes(out, "request.generationConfig", []byte(genConfig.Raw))
 	}
 
-	// Apply thinking configuration: convert OpenAI reasoning_effort to Gemini CLI thinkingConfig.
+	// Apply thinking configuration: convert OpenAI reasoning_effort to Antigravity thinkingConfig.
 	// Inline translation-only mapping; capability checks happen later in ApplyThinking.
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
 	if re.Exists() {
@@ -77,7 +83,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
-	// Map OpenAI modalities -> Gemini CLI request.generationConfig.responseModalities
+	// Map OpenAI modalities -> Antigravity request.generationConfig.responseModalities
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
 		var responseMods []string
@@ -199,8 +205,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							text := item.Get("text").String()
 							if strings.TrimSpace(text) != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
+								p++
 							}
-							p++
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
 							if len(imageURL) > 5 {
@@ -210,7 +216,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									data := pieces[1][7:]
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", mime)
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", antigravityFunctionThoughtSignature)
 									p++
 								}
 							}
@@ -273,8 +279,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							text := item.Get("text").String()
 							if strings.TrimSpace(text) != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
+								p++
 							}
-							p++
 						case "image_url":
 							// If the assistant returned an inline data URL, preserve it for history fidelity.
 							imageURL := item.Get("image_url.url").String()
@@ -285,7 +291,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									data := pieces[1][7:]
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mimeType", mime)
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", antigravityFunctionThoughtSignature)
 									p++
 								}
 							}
@@ -311,7 +317,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						} else {
 							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.args.params", []byte(fargs))
 						}
-						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
+						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", antigravityFunctionThoughtSignature)
 						p++
 						if fid != "" {
 							fIDs = append(fIDs, fid)

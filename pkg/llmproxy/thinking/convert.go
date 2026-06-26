@@ -3,7 +3,11 @@ package thinking
 import (
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/thinking/convert.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+>>>>>>> upstream/main:internal/thinking/convert.go
 )
 
 // levelToBudgetMap defines the standard Level → Budget mapping.
@@ -155,7 +159,7 @@ const (
 // It analyzes the model's ThinkingSupport configuration to classify the model:
 //   - CapabilityNone: modelInfo.Thinking is nil (model doesn't support thinking)
 //   - CapabilityBudgetOnly: Has Min/Max but no Levels (Claude, Gemini 2.5)
-//   - CapabilityLevelOnly: Has Levels but no Min/Max (OpenAI, iFlow)
+//   - CapabilityLevelOnly: Has Levels but no Min/Max (OpenAI, Codex, Kimi)
 //   - CapabilityHybrid: Has both Min/Max and Levels (Gemini 3)
 //
 // Note: Returns a special sentinel value when modelInfo itself is nil (unknown model).

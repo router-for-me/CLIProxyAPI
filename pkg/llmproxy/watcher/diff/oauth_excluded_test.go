@@ -3,7 +3,11 @@ package diff
 import (
 	"testing"
 
+<<<<<<< HEAD:pkg/llmproxy/watcher/diff/oauth_excluded_test.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+>>>>>>> upstream/main:internal/watcher/diff/oauth_excluded_test.go
 )
 
 func TestSummarizeExcludedModels_NormalizesAndDedupes(t *testing.T) {
@@ -36,26 +40,6 @@ func TestDiffOAuthExcludedModelChanges(t *testing.T) {
 
 	if len(affected) != 3 {
 		t.Fatalf("expected 3 affected providers, got %d", len(affected))
-	}
-}
-
-func TestSummarizeAmpModelMappings(t *testing.T) {
-	summary := SummarizeAmpModelMappings([]config.AmpModelMapping{
-		{From: "a", To: "A"},
-		{From: "b", To: "B"},
-		{From: " ", To: " "}, // ignored
-	})
-	if summary.count != 2 {
-		t.Fatalf("expected 2 entries, got %d", summary.count)
-	}
-	if summary.hash == "" {
-		t.Fatal("expected non-empty hash")
-	}
-	if empty := SummarizeAmpModelMappings(nil); empty.count != 0 || empty.hash != "" {
-		t.Fatalf("expected empty summary for nil input, got %+v", empty)
-	}
-	if blank := SummarizeAmpModelMappings([]config.AmpModelMapping{{From: " ", To: " "}}); blank.count != 0 || blank.hash != "" {
-		t.Fatalf("expected blank mappings ignored, got %+v", blank)
 	}
 }
 

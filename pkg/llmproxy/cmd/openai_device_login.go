@@ -6,9 +6,15 @@ import (
 	"fmt"
 	"os"
 
+<<<<<<< HEAD:pkg/llmproxy/cmd/openai_device_login.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+>>>>>>> upstream/main:internal/cmd/openai_device_login.go
 	log "github.com/sirupsen/logrus"
 )
 

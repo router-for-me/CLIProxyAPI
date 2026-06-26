@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"strings"
 
+<<<<<<< HEAD:pkg/llmproxy/auth/diff/auth_diff.go
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+=======
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+>>>>>>> upstream/main:internal/watcher/diff/auth_diff.go
 )
 
 // BuildAuthChangeDetails computes a redacted, human-readable list of auth field changes.

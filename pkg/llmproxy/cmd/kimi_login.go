@@ -4,8 +4,13 @@ import (
 	"context"
 	"fmt"
 
+<<<<<<< HEAD:pkg/llmproxy/cmd/kimi_login.go
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
+=======
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+>>>>>>> upstream/main:internal/cmd/kimi_login.go
 	log "github.com/sirupsen/logrus"
 )
 

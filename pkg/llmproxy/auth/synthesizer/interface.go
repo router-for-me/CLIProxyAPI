@@ -5,7 +5,11 @@
 package synthesizer
 
 import (
+<<<<<<< HEAD:pkg/llmproxy/auth/synthesizer/interface.go
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+=======
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+>>>>>>> upstream/main:internal/watcher/synthesizer/interface.go
 )
 
 // AuthSynthesizer defines the interface for generating Auth entries from various sources.
