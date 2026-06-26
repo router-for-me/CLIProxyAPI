@@ -16,7 +16,7 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginhost"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginstore"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 

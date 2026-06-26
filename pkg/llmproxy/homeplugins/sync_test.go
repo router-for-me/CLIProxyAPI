@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	sdkpluginstore "github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginstore"
 	"gopkg.in/yaml.v3"
 )
 

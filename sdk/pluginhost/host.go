@@ -6,8 +6,8 @@ import (
 	internalconfig "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	internalpluginhost "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginhost"
 	internalregistry "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
 

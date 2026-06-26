@@ -14,8 +14,8 @@ import (
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
+	sdkpluginstore "github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginstore"
 	"golang.org/x/sys/cpu"
 	"gopkg.in/yaml.v3"
 )

@@ -10,7 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	coreusage "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {

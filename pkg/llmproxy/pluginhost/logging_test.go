@@ -3,7 +3,7 @@ package pluginhost
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestPluginLogFieldsIncludesNameVersionAndPath(t *testing.T) {

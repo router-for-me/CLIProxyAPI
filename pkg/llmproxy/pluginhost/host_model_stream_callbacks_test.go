@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestHostModelExecuteStreamDetachesFromCallbackParentCancel(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginabi"
 )
 
 type staticEnvelopePluginClient struct {
