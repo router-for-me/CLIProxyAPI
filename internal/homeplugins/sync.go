@@ -254,42 +254,70 @@ func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (
 	if !validPluginFileID(id) {
 		return "", false, fmt.Errorf("invalid plugin id %q", id)
 	}
-	path, errPath := currentPluginFilePath(root, id)
-	if errPath != nil {
-		return "", false, errPath
+	paths, errPaths := pluginFilePaths(root, id)
+	if errPaths != nil {
+		return "", false, errPaths
 	}
-	if path == "" {
+	if len(paths) == 0 {
 		return "", false, nil
 	}
 	if pluginRuntime != nil && pluginRuntime.PluginBusy(id) {
 		if !pluginRuntime.UnloadPlugin(id) && pluginRuntime.PluginBusy(id) {
-			return path, false, sdkpluginstore.ErrLoadedPluginLocked
+			return paths[0], false, sdkpluginstore.ErrLoadedPluginLocked
 		}
 	}
-	if errRemove := os.Remove(path); errRemove != nil {
-		if errors.Is(errRemove, os.ErrNotExist) {
-			return path, false, nil
+	deleted := false
+	for _, path := range paths {
+		if errRemove := os.Remove(path); errRemove != nil {
+			if errors.Is(errRemove, os.ErrNotExist) {
+				continue
+			}
+			return paths[0], deleted, errRemove
 		}
-		return path, false, errRemove
+		deleted = true
 	}
-	return path, true, nil
+	return paths[0], deleted, nil
 }
 
 func currentPluginFilePath(root string, id string) (string, error) {
+	paths, errPaths := pluginFilePaths(root, id)
+	if errPaths != nil {
+		return "", errPaths
+	}
+	if len(paths) == 0 {
+		return "", nil
+	}
+	return paths[0], nil
+}
+
+func pluginFilePaths(root string, id string) ([]string, error) {
+	files, errFiles := pluginFileInfos(root, id)
+	if errFiles != nil {
+		return nil, errFiles
+	}
+	out := make([]string, 0, len(files))
+	for _, file := range files {
+		out = append(out, file.Path)
+	}
+	return out, nil
+}
+
+func pluginFileInfos(root string, id string) ([]pluginFileInfo, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		root = "plugins"
 	}
+	id = strings.TrimSpace(id)
 	platform := CurrentPlatform()
 	extension := pluginExtension(platform.GOOS)
-	var selected pluginFileInfo
+	candidates := make([]pluginFileInfo, 0)
 	for _, dir := range pluginCandidateDirs(root, platform.GOOS, platform.GOARCH, platform.Variant) {
 		entries, errReadDir := os.ReadDir(dir)
 		if errReadDir != nil {
 			if errors.Is(errReadDir, os.ErrNotExist) {
 				continue
 			}
-			return "", errReadDir
+			return nil, errReadDir
 		}
 		files := make([]string, 0, len(entries))
 		for _, entry := range entries {
@@ -306,12 +334,30 @@ func currentPluginFilePath(root string, id string) (string, error) {
 			if !okFile || file.ID != id {
 				continue
 			}
-			if pluginFilePreferred(file, selected) {
-				selected = file
-			}
+			candidates = append(candidates, file)
 		}
 	}
-	return selected.Path, nil
+	if len(candidates) <= 1 {
+		return candidates, nil
+	}
+	bestIndex := 0
+	for index := 1; index < len(candidates); index++ {
+		if pluginFilePreferred(candidates[index], candidates[bestIndex]) {
+			bestIndex = index
+		}
+	}
+	if bestIndex == 0 {
+		return candidates, nil
+	}
+	out := make([]pluginFileInfo, 0, len(candidates))
+	out = append(out, candidates[bestIndex])
+	for index, candidate := range candidates {
+		if index == bestIndex {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out, nil
 }
 
 type pluginFileInfo struct {
