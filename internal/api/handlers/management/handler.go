@@ -320,17 +320,20 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	envSecret := h.envSecret
 
 	now := time.Now()
+	banned := false
+	banMessage := ""
 	h.attemptsMu.Lock()
 	ai := h.failedAttempts[clientIP]
 	if ai != nil && !ai.blockedUntil.IsZero() {
 		if now.Before(ai.blockedUntil) {
 			remaining := ai.blockedUntil.Sub(now).Round(time.Second)
-			h.attemptsMu.Unlock()
-			return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+			banned = true
+			banMessage = fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+		} else {
+			// Ban expired, reset state
+			ai.blockedUntil = time.Time{}
+			ai.count = 0
 		}
-		// Ban expired, reset state
-		ai.blockedUntil = time.Time{}
-		ai.count = 0
 	}
 	h.attemptsMu.Unlock()
 
@@ -368,32 +371,34 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	if provided == "" {
-		fail()
 		return false, http.StatusUnauthorized, "missing management key"
 	}
 
-	if localClient {
-		if lp := h.localPassword; lp != "" {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-				reset()
-				return true, 0, ""
+	isValid := func() bool {
+		if localClient {
+			if lp := h.localPassword; lp != "" {
+				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+					return true
+				}
 			}
 		}
+		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
+			return true
+		}
+		return secretHash != "" && bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) == nil
 	}
 
-	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
+	if isValid() {
 		reset()
 		return true, 0, ""
 	}
 
-	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-		fail()
-		return false, http.StatusUnauthorized, "invalid management key"
+	if banned {
+		return false, http.StatusForbidden, banMessage
 	}
 
-	reset()
-
-	return true, 0, ""
+	fail()
+	return false, http.StatusUnauthorized, "invalid management key"
 }
 
 // persist saves the current in-memory config to disk.
