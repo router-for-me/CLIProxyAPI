@@ -401,6 +401,21 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
+	if codexRequestIsCompaction(ctx) {
+		log.Debugf("codex websockets: routing compaction request over HTTP to avoid WS message size limit (auth ID: %s, model: %s)", auth.ID, req.Model)
+		// The WebSocket request body carries a top-level "type":"response.create"
+		// field (WS v2 semantics). The HTTP /responses endpoint rejects it with
+		// `Unsupported parameter: type`, so strip it before delegating to HTTP.
+		if stripped, errDelete := sjson.DeleteBytes(req.Payload, "type"); errDelete == nil {
+			req.Payload = stripped
+		}
+		if len(opts.OriginalRequest) > 0 {
+			if stripped, errDelete := sjson.DeleteBytes(opts.OriginalRequest, "type"); errDelete == nil {
+				opts.OriginalRequest = stripped
+			}
+		}
+		return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
@@ -696,6 +711,26 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
+}
+
+// codexRequestIsCompaction reports whether the incoming request is a codex
+// compaction turn. Such turns carry the full transcript and must not be sent as a
+// single WebSocket message, which upstream rejects with close 1009 (message too
+// big); they are routed over HTTP instead. Detection uses the X-Codex-Turn-Metadata
+// request header (request_kind == "compaction").
+func codexRequestIsCompaction(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return false
+	}
+	raw := strings.TrimSpace(ginCtx.Request.Header.Get("X-Codex-Turn-Metadata"))
+	if raw == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(gjson.Get(raw, "request_kind").String()), "compaction")
 }
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {

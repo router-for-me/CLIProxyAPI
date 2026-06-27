@@ -20,6 +20,41 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestCodexRequestIsCompaction(t *testing.T) {
+	const manualMeta = `{"installation_id":"xx","turn_id":"t1","request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested"}}`
+	const autoMeta = `{"installation_id":"xx","turn_id":"t2","request_kind":"compaction","compaction":{"trigger":"auto","reason":"context_limit"}}`
+	const normalMeta = `{"installation_id":"xx","turn_id":"t3","request_kind":"turn"}`
+
+	ctxWithHeader := func(value string, set bool) context.Context {
+		req := httptest.NewRequest(http.MethodGet, "/responses", nil)
+		if set {
+			req.Header.Set("X-Codex-Turn-Metadata", value)
+		}
+		return context.WithValue(context.Background(), "gin", &gin.Context{Request: req})
+	}
+
+	cases := []struct {
+		name string
+		ctx  context.Context
+		want bool
+	}{
+		{name: "manual compaction", ctx: ctxWithHeader(manualMeta, true), want: true},
+		{name: "auto compaction", ctx: ctxWithHeader(autoMeta, true), want: true},
+		{name: "normal turn", ctx: ctxWithHeader(normalMeta, true), want: false},
+		{name: "missing header", ctx: ctxWithHeader("", false), want: false},
+		{name: "empty header", ctx: ctxWithHeader("", true), want: false},
+		{name: "no gin context", ctx: context.Background(), want: false},
+		{name: "nil context", ctx: nil, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexRequestIsCompaction(tc.ctx); got != tc.want {
+				t.Fatalf("codexRequestIsCompaction = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
