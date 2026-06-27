@@ -259,6 +259,15 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 
 	requestPrepareLocks sync.Map
+
+	// providerLimiter holds per-provider buffered channel semaphores for
+	// inflight request limiting. Lazily populated under providerLimiterMu.
+	providerLimiterMu         sync.Mutex
+	providerLimiter           map[string]chan struct{}
+	providerBackpressureCount atomic.Uint64
+	providerQueueWaitNS       atomic.Uint64
+	conductorPermitAttempts  atomic.Uint64  // counts acquire ATTEMPTS (incl. backpressure rejects), not only successful permits
+	conductorPermitLatency    atomic.Uint64
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -278,6 +287,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeRuntimeAuths: make(map[string]map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
+		providerLimiter: make(map[string]chan struct{}),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -2465,6 +2475,109 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	return out
 }
 
+// acquireProviderPermit reserves an inflight slot for the given provider key,
+// blocking up to MaxQueueWaitMS when the per-provider semaphore is full.
+// It returns a release function the caller MUST invoke and nil on success, or
+// (nil, err) when the queue wait times out or ctx is cancelled. The returned
+// release function is idempotent: safe to call multiple times; drains the slot
+// exactly once. When MaxInflightPerProvider <= 0 the limiter is disabled and a
+// no-op release is returned immediately. The mutex is released before the
+// blocking select to avoid head-of-line blocking across providers.
+func (m *Manager) acquireProviderPermit(ctx context.Context, provider string) (func(), error) {
+	if m == nil {
+		return func() {}, nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return func() {}, nil
+	}
+	pr := cfg.ProviderResilience
+	if pr.MaxInflightPerProvider <= 0 {
+		return func() {}, nil // disabled
+	}
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	if provider == "" {
+		return func() {}, nil
+	}
+
+	// Phase 1: get/create limiter channel under brief mutex.
+	m.providerLimiterMu.Lock()
+	limiter := m.providerLimiter[provider]
+	if limiter == nil || cap(limiter) != pr.MaxInflightPerProvider {
+		limiter = make(chan struct{}, pr.MaxInflightPerProvider)
+		m.providerLimiter[provider] = limiter
+	}
+	m.providerLimiterMu.Unlock() // unlock BEFORE blocking select (head-of-line fix)
+
+	// Phase 2: fast path — non-blocking try.
+	select {
+	case limiter <- struct{}{}:
+		return releaseFunc(limiter), nil
+	default:
+	}
+
+	// Phase 3: slow path — blocking wait with bounded deadline.
+	var waitCtx context.Context
+	var cancel context.CancelFunc
+	if pr.MaxQueueWaitMS > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, time.Duration(pr.MaxQueueWaitMS)*time.Millisecond)
+	} else {
+		waitCtx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
+	waitStart := time.Now()
+	select {
+	case limiter <- struct{}{}:
+		m.providerQueueWaitNS.Add(uint64(time.Since(waitStart).Nanoseconds()))
+		return releaseFunc(limiter), nil
+	case <-waitCtx.Done():
+		m.providerQueueWaitNS.Add(uint64(time.Since(waitStart).Nanoseconds()))
+		if ctx.Err() != nil {
+			return nil, ctx.Err() // client cancelled / shutdown — NOT backpressure
+		}
+		m.providerBackpressureCount.Add(1)
+		return nil, &Error{
+			Code:       "provider_backpressure",
+			Message:    "provider inflight queue wait timed out",
+			Retryable:  true,
+			HTTPStatus: http.StatusServiceUnavailable,
+		}
+	}
+}
+
+// releaseFunc returns an idempotent release function for a limiter slot.
+// The returned function drains the slot EXACTLY ONCE per acquire, no matter
+// how many times it is called. Without the sync.Once guard, a second call
+// after the slot was already released (and refilled by a different acquirer)
+// would steal that acquirer's token via the non-blocking receive, silently
+// under-counting inflight and exceeding MaxInflightPerProvider.
+func releaseFunc(limiter chan struct{}) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			select {
+			case <-limiter:
+			default:
+			}
+		})
+	}
+}
+
+// ResilienceMetricsSnapshot returns cumulative counters for the provider
+// inflight limiter and conductor permit accounting. Nil when manager is nil.
+func (m *Manager) ResilienceMetricsSnapshot() map[string]uint64 {
+	if m == nil {
+		return nil
+	}
+	return map[string]uint64{
+		"cliproxy_provider_backpressure_reject_total": m.providerBackpressureCount.Load(),
+		"cliproxy_provider_queue_wait_ns_sum":          m.providerQueueWaitNS.Load(),
+		"cliproxy_conductor_permit_attempts_total":              m.conductorPermitAttempts.Load(),
+		"cliproxy_conductor_permit_ns_sum":             m.conductorPermitLatency.Load(),
+	}
+}
+
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -2530,7 +2643,33 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq.Model = upstreamModel
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			permitStartedAt := time.Now()
+			releaseProviderPermit, errPermit := m.acquireProviderPermit(execCtx, provider)
+			m.conductorPermitAttempts.Add(1)
+			m.conductorPermitLatency.Add(uint64(time.Since(permitStartedAt).Nanoseconds()))
+			if errPermit != nil {
+				lastErr = errPermit
+				continue
+			}
+			resp, errExec := func() (cliproxyexecutor.Response, error) {
+				// Scope the permit release to this single iteration so a panic
+				// inside executor.Execute releases the slot and re-panics for
+				// gin/net-http recover. Manual release on the normal path below
+				// preserves the continue-based failover (defer is iteration-scoped
+				// via this closure, NOT function-scoped, so it does not leak
+				// across loop iterations).
+				var r cliproxyexecutor.Response
+				var e error
+				defer func() {
+					if rec := recover(); rec != nil {
+						releaseProviderPermit()
+						panic(rec)
+					}
+				}()
+				r, e = executor.Execute(execCtx, auth, execReq, execOpts)
+				return r, e
+			}()
+			releaseProviderPermit()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2632,7 +2771,30 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq.Model = upstreamModel
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			permitStartedAt := time.Now()
+			releaseProviderPermit, errPermit := m.acquireProviderPermit(execCtx, provider)
+			m.conductorPermitAttempts.Add(1)
+			m.conductorPermitLatency.Add(uint64(time.Since(permitStartedAt).Nanoseconds()))
+			if errPermit != nil {
+				lastErr = errPermit
+				continue
+			}
+			resp, errExec := func() (cliproxyexecutor.Response, error) {
+				// Iteration-scoped panic guard: release the permit on panic then
+				// re-panic so the framework recover still handles it. See the
+				// matching guard in executeMixedOnce for the full rationale.
+				var r cliproxyexecutor.Response
+				var e error
+				defer func() {
+					if rec := recover(); rec != nil {
+						releaseProviderPermit()
+						panic(rec)
+					}
+				}()
+				r, e = executor.CountTokens(execCtx, auth, execReq, execOpts)
+				return r, e
+			}()
+			releaseProviderPermit()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2726,8 +2888,34 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled, aliasResult)
+		permitStartedAt := time.Now()
+		releaseProviderPermit, errPermit := m.acquireProviderPermit(execCtx, provider)
+		m.conductorPermitAttempts.Add(1)
+		m.conductorPermitLatency.Add(uint64(time.Since(permitStartedAt).Nanoseconds()))
+		if errPermit != nil {
+			lastErr = errPermit
+			continue
+		}
+		streamResult, errStream := func() (*cliproxyexecutor.StreamResult, error) {
+			// Iteration-scoped panic guard for the stream executor. On panic we
+			// release the permit and re-panic so the framework recover handles
+			// it. On a normal (non-panic) return the permit is NOT released here:
+			// the error path below releases manually, and the success path
+			// transfers ownership to the wrapper goroutine. This avoids both
+			// leaks (panic) and double-release (normal path).
+			var r *cliproxyexecutor.StreamResult
+			var e error
+			defer func() {
+				if rec := recover(); rec != nil {
+					releaseProviderPermit()
+					panic(rec)
+				}
+			}()
+			r, e = m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled, aliasResult)
+			return r, e
+		}()
 		if errStream != nil {
+			releaseProviderPermit()
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
@@ -2740,6 +2928,45 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			continue
 		}
+		// The permit must live for the whole stream consumption. Wrap the chunk
+		// channel so the permit is released when the stream completes, the client
+		// disconnects (ctx cancel), or the upstream closes the channel. The wrapper
+		// goroutine's lifetime == stream lifetime, so defer is safe here.
+		// ponytail: the handler bootstrap-retry (handlers.go ~1309-1319) reassigns
+		// chunks without cancelling execCtx, so this wrapper goroutine + permit
+		// persist until request-end. This is a bounded hold during recovery,
+		// acceptable: the request ctx bounds the lifetime and the permit is
+		// released when the wrapper exits.
+		originalChunks := streamResult.Chunks
+		wrapped := make(chan cliproxyexecutor.StreamChunk, cap(originalChunks))
+		go func() {
+			defer releaseProviderPermit()
+			defer close(wrapped)
+			for {
+				select {
+				case chunk, ok := <-originalChunks:
+					if !ok {
+						return
+					}
+					select {
+					case wrapped <- chunk:
+					case <-execCtx.Done():
+						// Drain remaining chunks to unblock the upstream producer.
+						// Without this drain the producer goroutine blocks forever
+						// sending the next chunk to originalChunks, leaking it.
+						for range originalChunks {
+						}
+						return
+					}
+				case <-execCtx.Done():
+					// Drain remaining chunks to unblock the upstream producer.
+					for range originalChunks {
+					}
+					return
+				}
+			}
+		}()
+		streamResult.Chunks = wrapped
 		return streamResult, nil
 	}
 }
@@ -5142,7 +5369,32 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			// Acquire a per-provider permit so the antigravity credits fallback
+			// path is also bounded by the inflight limiter. defer is safe here:
+			// this is a per-iteration body (no failover continue that would
+			// skip a function-scoped defer).
+			permitStartedAt := time.Now()
+			releasePermit, errPermit := m.acquireProviderPermit(creditsCtx, c.provider)
+			m.conductorPermitAttempts.Add(1)
+			m.conductorPermitLatency.Add(uint64(time.Since(permitStartedAt).Nanoseconds()))
+			if errPermit != nil {
+				result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: false, Error: &Error{Message: errPermit.Error()}}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errPermit); ok && se != nil {
+					result.Error.HTTPStatus = se.StatusCode()
+				}
+				m.MarkResult(creditsCtx, result)
+				continue
+			}
+			resp, errExec := func() (cliproxyexecutor.Response, error) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						releasePermit()
+						panic(rec)
+					}
+				}()
+				return c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			}()
+			releasePermit()
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				result.Error = &Error{Message: errExec.Error()}
@@ -5189,10 +5441,62 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, pooled, aliasResult)
-		if errStream != nil {
+		permitStartedAt := time.Now()
+		releasePermit, errPermit := m.acquireProviderPermit(creditsCtx, c.provider)
+		m.conductorPermitAttempts.Add(1)
+		m.conductorPermitLatency.Add(uint64(time.Since(permitStartedAt).Nanoseconds()))
+		if errPermit != nil {
 			continue
 		}
+		result, errStream := func() (*cliproxyexecutor.StreamResult, error) {
+			// Iteration-scoped panic guard: release the permit on panic then
+			// re-panic. On normal return the permit is NOT released here — the
+			// error path below releases manually, and the success path transfers
+			// ownership to the wrapper goroutine (mirroring executeStreamMixedOnce).
+			var r *cliproxyexecutor.StreamResult
+			var e error
+			defer func() {
+				if rec := recover(); rec != nil {
+					releasePermit()
+					panic(rec)
+				}
+			}()
+			r, e = m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, pooled, aliasResult)
+			return r, e
+		}()
+		if errStream != nil {
+			releasePermit()
+			continue
+		}
+		// Transfer permit ownership to a wrapper goroutine that releases when
+		// the stream completes, the client disconnects, or the upstream closes.
+		originalChunks := result.Chunks
+		wrapped := make(chan cliproxyexecutor.StreamChunk, cap(originalChunks))
+		go func() {
+			defer releasePermit()
+			defer close(wrapped)
+			for {
+				select {
+				case chunk, ok := <-originalChunks:
+					if !ok {
+						return
+					}
+					select {
+					case wrapped <- chunk:
+					case <-creditsCtx.Done():
+						// Drain remaining chunks to unblock the upstream producer.
+						for range originalChunks {
+						}
+						return
+					}
+				case <-creditsCtx.Done():
+					for range originalChunks {
+					}
+					return
+				}
+			}
+		}()
+		result.Chunks = wrapped
 		return result, true, nil
 	}
 	return nil, false, nil
