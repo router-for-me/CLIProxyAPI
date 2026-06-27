@@ -1567,16 +1567,16 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 		var selected *Auth
 		var errPick error
 		if providerKey == "mixed" {
-			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+			selected, _, errPick = m.schedulerPickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+				selected, _, errPick = m.schedulerPickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
 			}
 		} else {
-			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+			selected, errPick = m.schedulerPickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+				selected, errPick = m.schedulerPickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 			}
 		}
 		if errPick != nil {
@@ -1666,6 +1666,121 @@ func (m *Manager) clientKeyRegistryModelKeysForRoute(ctx context.Context, routeM
 	}
 	keys = append(keys, canonicalModelKey(routeModel))
 	return keys
+}
+
+// routeModelKeysForAuthSelection returns model shard keys to try when selecting auth for a client route model.
+// Per-client aliases may use ids that are not registered on auths; fall back to supplier/global registry ids.
+func (m *Manager) routeModelKeysForAuthSelection(ctx context.Context, routeModel string) []string {
+	routeModel = strings.TrimSpace(routeModel)
+	if routeModel == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	add := func(key string) {
+		key = canonicalModelKey(key)
+		if key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	add(routeModel)
+	for _, alt := range m.clientKeyRegistryModelKeysForRoute(ctx, routeModel) {
+		add(alt)
+	}
+	return out
+}
+
+func (m *Manager) schedulerPickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, errPick := m.scheduler.pickSingle(ctx, provider, key, opts, tried)
+		if errPick == nil && picked != nil {
+			return picked, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) schedulerPickSingleWithStrategy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategy)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, errPick := m.scheduler.pickSingleWithStrategy(ctx, provider, key, opts, tried, strategy)
+		if errPick == nil && picked != nil {
+			return picked, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) schedulerPickMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickMixed(ctx, providers, model, opts, tried)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, providerKey, errPick := m.scheduler.pickMixed(ctx, providers, key, opts, tried)
+		if errPick == nil && picked != nil {
+			return picked, providerKey, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, "", lastErr
+	}
+	return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) schedulerPickMixedWithStrategy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, string, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, providers, key, opts, tried, strategy)
+		if errPick == nil && picked != nil {
+			return picked, providerKey, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, "", lastErr
+	}
+	return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
 func (m *Manager) authSupportsRouteModel(ctx context.Context, registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -4453,10 +4568,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		selected, errPick := m.schedulerPickSingle(ctx, provider, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+			selected, errPick = m.schedulerPickSingle(ctx, provider, model, opts, tried)
 		}
 		if errPick != nil {
 			return nil, nil, errPick
@@ -4641,10 +4756,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		selected, providerKey, errPick := m.schedulerPickMixed(ctx, eligibleProviders, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+			selected, providerKey, errPick = m.schedulerPickMixed(ctx, eligibleProviders, model, opts, tried)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick
