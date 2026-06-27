@@ -21,16 +21,16 @@ import (
 )
 
 const (
-	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.63 (external, cli)"
-	defaultClaudeFingerprintPackageVersion = "0.74.0"
-	defaultClaudeFingerprintRuntimeVersion = "v24.3.0"
-	defaultClaudeFingerprintOS             = "MacOS"
-	defaultClaudeFingerprintArch           = "arm64"
-	claudeOAuthStableUserAgent             = "claude-cli/2.1.195.d80 (external, cli)"
+	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.195 (external, cli)"
+	defaultClaudeFingerprintPackageVersion = "0.94.0"
+	defaultClaudeFingerprintRuntimeVersion = "v26.3.0"
+	defaultClaudeFingerprintOS             = "Linux"
+	defaultClaudeFingerprintArch           = "x64"
+	claudeOAuthStableUserAgent             = "claude-cli/2.1.195 (external, cli)"
 	claudeOAuthStablePackageVersion        = "0.94.0"
-	claudeOAuthStableRuntimeVersion        = "v24.3.0"
-	claudeOAuthStableOS                    = "MacOS"
-	claudeOAuthStableArch                  = "arm64"
+	claudeOAuthStableRuntimeVersion        = "v26.3.0"
+	claudeOAuthStableOS                    = "Linux"
+	claudeOAuthStableArch                  = "x64"
 	claudeDeviceProfileTTL                 = 7 * 24 * time.Hour
 	claudeDeviceProfileLockTTL             = 5 * time.Second
 	claudeDeviceProfileCleanupPeriod       = time.Hour
