@@ -1697,6 +1697,45 @@ func (m *Manager) routeModelKeysForAuthSelection(ctx context.Context, routeModel
 	for _, alt := range m.clientKeyRegistryModelKeysForRoute(ctx, routeModel) {
 		add(alt)
 	}
+	if cfg := m.RuntimeConfig(); cfg != nil {
+		for _, alt := range supplierRegistryKeysForUpstreamModel(cfg, routeModel) {
+			add(alt)
+		}
+	}
+	return out
+}
+
+func supplierRegistryKeysForUpstreamModel(cfg *internalconfig.Config, upstreamName string) []string {
+	upstreamName = strings.TrimSpace(upstreamName)
+	if upstreamName == "" || cfg == nil {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for i := range cfg.OpenAICompatibility {
+		if cfg.OpenAICompatibility[i].Disabled {
+			continue
+		}
+		for _, model := range cfg.OpenAICompatibility[i].Models {
+			name := strings.TrimSpace(model.Name)
+			if name == "" || !strings.EqualFold(name, upstreamName) {
+				continue
+			}
+			alias := strings.TrimSpace(model.Alias)
+			if alias == "" {
+				alias = name
+			}
+			key := canonicalModelKey(alias)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, key)
+		}
+	}
 	return out
 }
 
@@ -1805,6 +1844,13 @@ func (m *Manager) authSupportsRouteModel(ctx context.Context, registryRef *regis
 		}
 		if registryRef.ClientSupportsModel(auth.ID, alt) {
 			return true
+		}
+	}
+	if cfg := m.RuntimeConfig(); cfg != nil {
+		for _, alt := range supplierRegistryKeysForUpstreamModel(cfg, routeModel) {
+			if alt != "" && alt != routeKey && registryRef.ClientSupportsModel(auth.ID, alt) {
+				return true
+			}
 		}
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
