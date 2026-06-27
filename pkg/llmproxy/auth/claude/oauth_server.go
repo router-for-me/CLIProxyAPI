@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,14 @@ type OAuthServer struct {
 	mu sync.Mutex
 	// running indicates whether the server is currently running
 	running bool
+}
+
+func isValidURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 // OAuthResult contains the result of the OAuth callback.

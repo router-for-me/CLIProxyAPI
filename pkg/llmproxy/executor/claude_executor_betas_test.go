@@ -1,47 +1,10 @@
 package executor
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
-
-// extractAndRemoveBetas extracts beta flags from request body and returns them
-// along with the body with betas removed. Supports both array and string formats.
-func extractAndRemoveBetas(body []byte) ([]string, []byte) {
-	betasResult := gjson.GetBytes(body, "betas")
-	if !betasResult.Exists() {
-		return nil, body
-	}
-
-	var betas []string
-	raw := betasResult.String()
-
-	if betasResult.IsArray() {
-		for _, v := range betasResult.Array() {
-			if v.Type != gjson.String {
-				continue
-			}
-			if s := strings.TrimSpace(v.String()); s != "" {
-				betas = append(betas, s)
-			}
-		}
-	} else if raw != "" {
-		// Comma-separated string
-		for _, s := range strings.Split(raw, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				betas = append(betas, s)
-			}
-		}
-	}
-
-	// Remove betas from body - convert to map and back
-	bodyStr := string(body)
-	bodyStr = strings.ReplaceAll(bodyStr, `"betas":`+raw, "")
-	bodyStr = strings.ReplaceAll(bodyStr, `"betas":`+betasResult.Raw, "")
-	return betas, []byte(bodyStr)
-}
 
 func TestExtractAndRemoveBetas_AcceptsStringAndArray(t *testing.T) {
 	betas, body := extractAndRemoveBetas([]byte(`{"betas":["b1"," b2 "],"model":"claude-3-5-sonnet","messages":[]}`))

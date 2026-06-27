@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/usage"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -91,7 +92,7 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"latest-version": version})
 }
 
-func WriteConfig(path string, data []byte) error {
+var WriteConfig = func(path string, data []byte) error {
 	data = config.NormalizeCommentIndentation(data)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -191,6 +192,24 @@ func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
+}
+
+func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	c.JSON(http.StatusOK, usage.GetRequestStatistics().Snapshot())
+}
+
+func (h *Handler) ExportUsageStatistics(c *gin.Context) {
+	c.JSON(http.StatusOK, usage.GetRequestStatistics().Snapshot())
+}
+
+func (h *Handler) ImportUsageStatistics(c *gin.Context) {
+	var snapshot usage.StatisticsSnapshot
+	if err := c.ShouldBindJSON(&snapshot); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_usage_snapshot", "message": err.Error()})
+		return
+	}
+	result := usage.GetRequestStatistics().MergeSnapshot(snapshot)
+	c.JSON(http.StatusOK, result)
 }
 
 // UsageStatisticsEnabled

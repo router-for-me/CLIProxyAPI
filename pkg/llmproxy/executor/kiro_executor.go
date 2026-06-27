@@ -75,6 +75,24 @@ var retryableHTTPStatusCodes = map[int]bool{
 	504: true, // Gateway Timeout - upstream server timeout
 }
 
+var endpointAliases = map[string]string{
+	"codewhisperer": "codewhisperer",
+	"ide":           "codewhisperer",
+	"amazonq":       "amazonq",
+	"q":             "amazonq",
+	"cli":           "amazonq",
+}
+
+func getAuthValue(auth *cliproxyauth.Auth, key string) string {
+	if auth == nil {
+		return ""
+	}
+	if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return strings.TrimSpace(auth.Attributes[key])
+}
+
 // Real-time usage estimation configuration
 // These control how often usage updates are sent during streaming
 var (

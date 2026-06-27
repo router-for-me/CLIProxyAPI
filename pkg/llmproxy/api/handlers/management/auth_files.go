@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -135,6 +136,10 @@ func isWebUIRequest(c *gin.Context) bool {
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
+	if _, err := validateCallbackForwarderTarget(targetBase); err != nil {
+		return nil, err
+	}
+
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
 	if prev != nil {
@@ -192,6 +197,28 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+func validateCallbackForwarderTarget(target string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil {
+		return nil, fmt.Errorf("invalid callback forwarder target: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("callback forwarder target must use http or https")
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("callback forwarder target host is required")
+	}
+	if host == "localhost" {
+		return parsed, nil
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return parsed, nil
+	}
+	return nil, fmt.Errorf("callback forwarder target must be loopback or localhost")
 }
 
 func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {

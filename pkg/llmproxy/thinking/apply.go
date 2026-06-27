@@ -646,3 +646,21 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 
 	return ThinkingConfig{}
 }
+
+func extractIFlowConfig(body []byte) ThinkingConfig {
+	effort := gjson.GetBytes(body, "reasoning.effort")
+	if !effort.Exists() {
+		effort = gjson.GetBytes(body, "reasoning\\.effort")
+	}
+	if !effort.Exists() {
+		return ThinkingConfig{}
+	}
+	value := strings.TrimSpace(effort.String())
+	if value == "" {
+		return ThinkingConfig{}
+	}
+	if value == "none" {
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
+	return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+}

@@ -3,6 +3,7 @@ package executor
 import (
 	"testing"
 
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/tidwall/gjson"
 )
 

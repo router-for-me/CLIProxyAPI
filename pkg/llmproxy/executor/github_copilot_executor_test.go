@@ -9,6 +9,14 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func joinByteChunks(chunks [][]byte) string {
+	parts := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		parts[i] = string(chunk)
+	}
+	return strings.Join(parts, "")
+}
+
 func TestGitHubCopilotNormalizeModel_StripsSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -289,18 +297,18 @@ func TestTranslateGitHubCopilotResponses_Parity_TextAndToolAcrossStreamModes(t *
 	nonStream := []byte(`{"id":"resp_3","model":"gpt-5-codex","output":[{"type":"message","content":[{"type":"output_text","text":"hello parity"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"sum","arguments":"{\"a\":1}"}],"usage":{"input_tokens":5,"output_tokens":7}}`)
 	out := translateGitHubCopilotResponsesNonStreamToClaude(nonStream)
 
-	if gjson.Get(out, "content.0.type").String() != "text" || gjson.Get(out, "content.0.text").String() != "hello parity" {
+	if gjson.GetBytes(out, "content.0.type").String() != "text" || gjson.GetBytes(out, "content.0.text").String() != "hello parity" {
 		t.Fatalf("non-stream text mapping mismatch: %s", out)
 	}
-	if gjson.Get(out, "content.1.type").String() != "tool_use" || gjson.Get(out, "content.1.name").String() != "sum" {
+	if gjson.GetBytes(out, "content.1.type").String() != "tool_use" || gjson.GetBytes(out, "content.1.name").String() != "sum" {
 		t.Fatalf("non-stream tool mapping mismatch: %s", out)
 	}
 
 	var param any
 	_ = translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.created","response":{"id":"resp_3","model":"gpt-5-codex"}}`), &param)
-	textDelta := strings.Join(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_text.delta","delta":"hello parity"}`), &param), "")
-	toolAdded := strings.Join(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"sum","id":"fc_1"},"output_index":1}`), &param), "")
-	toolDone := strings.Join(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":1,"arguments":"{\"a\":1}"}`), &param), "")
+	textDelta := joinByteChunks(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_text.delta","delta":"hello parity"}`), &param))
+	toolAdded := joinByteChunks(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"sum","id":"fc_1"},"output_index":1}`), &param))
+	toolDone := joinByteChunks(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":1,"arguments":"{\"a\":1}"}`), &param))
 
 	if !strings.Contains(textDelta, `"type":"text_delta"`) || !strings.Contains(textDelta, "hello parity") {
 		t.Fatalf("stream text mapping mismatch: %s", textDelta)

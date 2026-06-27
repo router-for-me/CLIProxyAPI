@@ -40,6 +40,17 @@ type thinkingTestCase struct {
 	expectErr       bool
 }
 
+func getTestModels() []*registry.ModelInfo {
+	return []*registry.ModelInfo{
+		{ID: "level-model"},
+		{ID: "budget-model"},
+		{ID: "dynamic-model"},
+		{ID: "zero-model"},
+		{ID: "gpt-5-codex"},
+		{ID: "gpt-5.2-codex"},
+	}
+}
+
 // TestThinkingE2EMatrix_Suffix tests the thinking configuration transformation using model name suffix.
 // Data flow: Input JSON → TranslateRequest → ApplyThinking → Validate Output
 // No helper functions are used; all test data is inline.
@@ -1223,6 +1234,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectErr:   false,
 		},
 	}
+	runThinkingTests(t, cases)
 }
 
 // runThinkingTests runs thinking test cases using the real data flow path.

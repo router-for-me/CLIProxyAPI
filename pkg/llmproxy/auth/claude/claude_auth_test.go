@@ -22,7 +22,7 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 func TestGenerateAuthURL(t *testing.T) {
-	auth := NewClaudeAuth(nil, nil)
+	auth := NewClaudeAuth(nil)
 	pkce := &PKCECodes{CodeChallenge: "challenge"}
 	url, state, err := auth.GenerateAuthURL("test-state", pkce)
 	if err != nil {
@@ -56,7 +56,8 @@ func TestExchangeCodeForTokens(t *testing.T) {
 		},
 	}
 
-	auth := NewClaudeAuth(nil, client)
+	auth := NewClaudeAuth(nil)
+	auth.httpClient = client
 	pkce := &PKCECodes{CodeVerifier: "verifier"}
 	resp, err := auth.ExchangeCodeForTokens(context.Background(), "code", "state", pkce)
 	if err != nil {
@@ -90,7 +91,8 @@ func TestRefreshTokens(t *testing.T) {
 		},
 	}
 
-	auth := NewClaudeAuth(nil, client)
+	auth := NewClaudeAuth(nil)
+	auth.httpClient = client
 	resp, err := auth.RefreshTokens(context.Background(), "old-refresh")
 	if err != nil {
 		t.Fatalf("RefreshTokens failed: %v", err)

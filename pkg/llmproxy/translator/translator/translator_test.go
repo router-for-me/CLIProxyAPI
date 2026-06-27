@@ -47,13 +47,13 @@ func TestRegister(t *testing.T) {
 		calls++
 		return append(append([]byte(`{"wrapped":`), rawJSON...), '}')
 	}, interfaces.TranslateResponse{
-		Stream: func(_ context.Context, model string, _, _, rawJSON []byte, _ *any) []string {
+		Stream: func(_ context.Context, model string, _, _, rawJSON []byte, _ *any) [][]byte {
 			calls++
-			return []string{string(rawJSON) + "::" + model}
+			return [][]byte{[]byte(string(rawJSON) + "::" + model)}
 		},
-		NonStream: func(_ context.Context, model string, _, _, rawJSON []byte, _ *any) string {
+		NonStream: func(_ context.Context, model string, _, _, rawJSON []byte, _ *any) []byte {
 			calls++
-			return string(rawJSON) + "::" + model
+			return []byte(string(rawJSON) + "::" + model)
 		},
 	})
 
@@ -74,20 +74,20 @@ func TestResponseNonStream(t *testing.T) {
 	to := "unit_to_nonstream"
 
 	Register(from, to, nil, interfaces.TranslateResponse{
-		NonStream: func(_ context.Context, model string, _, _, rawJSON []byte, _ *any) string {
-			return string(rawJSON) + "::" + model + "::nonstream"
+		NonStream: func(_ context.Context, model string, _, _, rawJSON []byte, _ *any) []byte {
+			return []byte(string(rawJSON) + "::" + model + "::nonstream")
 		},
 	})
 
 	got := ResponseNonStream(to, from, context.Background(), "model-1", nil, nil, []byte("payload"), nil)
-	if got != `payload::model-1::nonstream` {
+	if string(got) != `payload::model-1::nonstream` {
 		t.Fatalf("got %q, want %q", got, `payload::model-1::nonstream`)
 	}
 }
 
 func TestResponseNonStreamFallback(t *testing.T) {
 	got := ResponseNonStream("missing_from", "missing_to", context.Background(), "model-2", nil, nil, []byte("payload"), nil)
-	if got != "payload" {
+	if string(got) != "payload" {
 		t.Fatalf("got %q, want raw payload", got)
 	}
 }

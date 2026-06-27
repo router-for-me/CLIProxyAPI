@@ -1200,6 +1200,9 @@ func gitLabResolvedModel(auth *cliproxyauth.Auth, requested string) string {
 		return requested
 	}
 	if auth != nil && auth.Metadata != nil {
+		if name := strings.TrimSpace(gitLabMetadataString(auth.Metadata, "model_name")); name != "" {
+			return name
+		}
 		for _, model := range gitlab.ExtractDiscoveredModels(auth.Metadata) {
 			if name := strings.TrimSpace(model.ModelName); name != "" {
 				return name
@@ -1362,6 +1365,16 @@ func GitLabModelsFromAuth(auth *cliproxyauth.Auth) []*registry.ModelInfo {
 	}
 	if auth == nil {
 		return models
+	}
+	if metadata := auth.Metadata; metadata != nil {
+		if name, _ := metadata["model_name"].(string); strings.TrimSpace(name) != "" {
+			provider, _ := metadata["model_provider"].(string)
+			displayName := "GitLab Duo"
+			if strings.TrimSpace(provider) != "" {
+				displayName = fmt.Sprintf("GitLab Duo (%s)", strings.TrimSpace(provider))
+			}
+			addModel(name, displayName, strings.TrimSpace(provider))
+		}
 	}
 	for _, model := range gitlab.ExtractDiscoveredModels(auth.Metadata) {
 		name := strings.TrimSpace(model.ModelName)

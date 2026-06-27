@@ -137,3 +137,26 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 func claudeUserIDKVKey(apiKey string) string {
 	return "cpa:claude:user-id:" + homekv.HashKeyPart(apiKey)
 }
+
+func ResetUserIDCacheForTest() {
+	userIDCacheMu.Lock()
+	userIDCache = make(map[string]userIDCacheEntry)
+	userIDCacheMu.Unlock()
+}
+
+func SetUserIDCacheEntryForTest(apiKey, value string, expire time.Time) {
+	userIDCacheMu.Lock()
+	userIDCache[userIDCacheKey(apiKey)] = userIDCacheEntry{value: value, expire: expire}
+	userIDCacheMu.Unlock()
+}
+
+func UserIDCacheEntryExpireForTest(apiKey string) (time.Time, bool) {
+	userIDCacheMu.RLock()
+	entry, ok := userIDCache[userIDCacheKey(apiKey)]
+	userIDCacheMu.RUnlock()
+	return entry.expire, ok
+}
+
+func UserIDCacheKeyForTest(apiKey string) string {
+	return userIDCacheKey(apiKey)
+}

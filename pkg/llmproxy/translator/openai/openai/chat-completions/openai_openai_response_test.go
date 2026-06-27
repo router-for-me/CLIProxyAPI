@@ -9,7 +9,7 @@ func TestConvertOpenAIResponseToOpenAI(t *testing.T) {
 	ctx := context.Background()
 	rawJSON := []byte(`data: {"id": "123"}`)
 	got := ConvertOpenAIResponseToOpenAI(ctx, "model", nil, nil, rawJSON, nil)
-	if len(got) != 1 || got[0] != `{"id": "123"}` {
+	if len(got) != 1 || string(got[0]) != `{"id": "123"}` {
 		t.Errorf("expected {\"id\": \"123\"}, got %v", got)
 	}
 
@@ -24,7 +24,7 @@ func TestConvertOpenAIResponseToOpenAINonStream(t *testing.T) {
 	ctx := context.Background()
 	rawJSON := []byte(`{"id": "123"}`)
 	got := ConvertOpenAIResponseToOpenAINonStream(ctx, "model", nil, nil, rawJSON, nil)
-	if got != `{"id": "123"}` {
+	if string(got) != `{"id": "123"}` {
 		t.Errorf("expected {\"id\": \"123\"}, got %s", got)
 	}
 }

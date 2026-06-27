@@ -44,6 +44,22 @@ type resolvedRemoteBranch struct {
 	hash plumbing.Hash
 }
 
+func openOrInitRepositoryAfterEmptyClone(repoDir string) (*git.Repository, error) {
+	if repo, err := git.PlainOpen(repoDir); err == nil {
+		return repo, nil
+	}
+	gitDir := filepath.Join(repoDir, ".git")
+	if _, err := os.Stat(gitDir); err == nil {
+		backup := filepath.Join(repoDir, fmt.Sprintf(".git.bootstrap-backup-%d", time.Now().UnixNano()))
+		if errRename := os.Rename(gitDir, backup); errRename != nil {
+			return nil, fmt.Errorf("archive existing git dir: %w", errRename)
+		}
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("stat git dir: %w", err)
+	}
+	return git.PlainInit(repoDir, false)
+}
+
 // NewGitTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
 // When branch is non-empty, clone/pull/push operations target that branch instead of the remote default.

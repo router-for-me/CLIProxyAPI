@@ -1,6 +1,10 @@
 package openai
 
-import "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+import (
+	"strings"
+
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+)
 
 const (
 	openAIChatEndpoint      = "/chat/completions"
@@ -34,4 +38,8 @@ func endpointListContains(items []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func shouldForceNonStreamingChatBridge(modelName string) bool {
+	return strings.Contains(strings.ToLower(modelName), "minimax")
 }

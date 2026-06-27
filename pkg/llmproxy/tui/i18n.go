@@ -1,7 +1,7 @@
 package tui
 
 // i18n provides a simple internationalization system for the TUI.
-// Supported locales: "zh" (Chinese, default), "en" (English).
+// Supported locales: "zh" (Chinese), "en" (English), "fa" (Persian).
 
 var currentLocale = "en"
 
@@ -17,12 +17,15 @@ func CurrentLocale() string {
 	return currentLocale
 }
 
-// ToggleLocale switches between zh and en.
+// ToggleLocale cycles through all supported locales.
 func ToggleLocale() {
-	if currentLocale == "zh" {
-		currentLocale = "en"
-	} else {
+	switch currentLocale {
+	case "en":
 		currentLocale = "zh"
+	case "zh":
+		currentLocale = "fa"
+	default:
+		currentLocale = "en"
 	}
 }
 
@@ -45,6 +48,7 @@ func T(key string) string {
 var locales = map[string]map[string]string{
 	"zh": zhStrings,
 	"en": enStrings,
+	"fa": faStrings,
 }
 
 // ──────────────────────────────────────────
@@ -52,14 +56,20 @@ var locales = map[string]map[string]string{
 // ──────────────────────────────────────────
 var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "日志"}
 var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Logs"}
+var faTabNames = []string{"داشبورد", "پیکربندی", "فایل های احراز", "کلیدهای API", "OAuth", "لاگ ها"}
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {
 	if currentLocale == "zh" {
 		return zhTabNames
 	}
+	if currentLocale == "fa" {
+		return faTabNames
+	}
 	return enTabNames
 }
+
+var faStrings = enStrings
 
 var zhStrings = map[string]string{
 	// ── Common ──

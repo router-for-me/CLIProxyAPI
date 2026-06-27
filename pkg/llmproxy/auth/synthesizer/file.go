@@ -239,6 +239,15 @@ func compactPluginAuths(auths []*coreauth.Auth) []*coreauth.Auth {
 	return out
 }
 
+func buildGeminiVirtualID(baseID, projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "project"
+	}
+	projectID = strings.NewReplacer("/", "_", "\\", "_", " ", "_").Replace(projectID)
+	return baseID + "::" + projectID
+}
+
 // extractOAuthModelAliasesFromMetadata reads per-account model aliases from OAuth JSON metadata.
 // Supports both "model_aliases" and "model-aliases" keys.
 func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAuthModelAlias {

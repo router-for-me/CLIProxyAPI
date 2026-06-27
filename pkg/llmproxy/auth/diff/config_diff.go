@@ -359,6 +359,23 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	return changes
 }
 
+func equalStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, item := range a {
+		counts[item]++
+	}
+	for _, item := range b {
+		counts[item]--
+		if counts[item] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
 	if len(a) != len(b) {
 		return false

@@ -36,7 +36,7 @@ func TestGitTokenStoreSaveRejectsPathOutsideAuthDir(t *testing.T) {
 	t.Parallel()
 
 	baseDir := filepath.Join(t.TempDir(), "repo", "auths")
-	store := NewGitTokenStore("", "", "")
+	store := NewGitTokenStore("", "", "", "")
 	store.SetBaseDir(baseDir)
 	outside := filepath.Join(t.TempDir(), "outside.json")
 	auth := &cliproxyauth.Auth{

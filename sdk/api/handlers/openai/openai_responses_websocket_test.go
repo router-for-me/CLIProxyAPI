@@ -16,10 +16,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/requestlogging"
+	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -1490,7 +1491,7 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	timelineCh := make(chan string, 1)
 	router := gin.New()
 	router.GET("/v1/responses/ws", func(c *gin.Context) {
-		source, errSource := requestlogging.NewFileBodySourceInDir(logsDir, "websocket-timeline-test")
+		source, errSource := requestlogging.NewFileBodySource(logsDir, "websocket-timeline-test")
 		if errSource != nil {
 			timelineCh <- ""
 			return
@@ -1509,7 +1510,7 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 				_ = source.Cleanup()
 			}
 		}
-		if value, exists := c.Get(requestlogging.APIWebsocketTimelineSourceContextKey); exists {
+		if value, exists := c.Get(requestlogging.APIWebsocketSourceContextKey); exists {
 			if source, ok := value.(*requestlogging.FileBodySource); ok {
 				_ = source.Cleanup()
 			}

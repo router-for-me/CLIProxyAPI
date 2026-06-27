@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
+	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 )
 

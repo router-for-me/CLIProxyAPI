@@ -73,6 +73,33 @@ func GetProviderName(modelName string) []string {
 	return providers
 }
 
+// ResolveProviderPinnedModel parses provider/model names and validates the provider.
+func ResolveProviderPinnedModel(modelName string) (string, string, bool) {
+	provider, model, ok := strings.Cut(strings.TrimSpace(modelName), "/")
+	if !ok || strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		return "", "", false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.TrimSpace(model)
+	switch provider {
+	case "anthropic", "claude":
+		return "claude", model, true
+	case "openai", "codex":
+		return "codex", model, true
+	case "github-copilot", "copilot":
+		return "github-copilot", model, true
+	case "gemini", "google":
+		return "gemini", model, true
+	case "gitlab-duo", "gitlab":
+		return "gitlab-duo", model, true
+	default:
+		if strings.HasPrefix(provider, openAICompatibleProviderPrefix) {
+			return provider, model, true
+		}
+		return "", "", false
+	}
+}
+
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
 // It uses an empty handler type to get any available model from the registry.
 //

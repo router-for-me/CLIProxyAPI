@@ -11,9 +11,9 @@ import (
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	_ "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 

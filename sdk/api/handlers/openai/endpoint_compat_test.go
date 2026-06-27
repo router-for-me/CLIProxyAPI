@@ -4,7 +4,6 @@ import (
 	"sort"
 	"testing"
 
-	. "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/constant"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 )
 
@@ -17,7 +16,7 @@ func TestResolveEndpointOverride_IflowSupportsChatOnlyForResponses(t *testing.T)
 		registry.GetGlobalRegistry().UnregisterClient("endpoint-compat-iflow-chat-only")
 	})
 
-	overrideEndpoint, ok := resolveEndpointOverride("minimax-m2.5-chat-only-test", "/responses", OpenaiResponse)
+	overrideEndpoint, ok := resolveEndpointOverride("minimax-m2.5-chat-only-test", "/responses")
 	if !ok {
 		t.Fatal("expected endpoint override for /responses on chat-only model")
 	}
@@ -35,7 +34,7 @@ func TestResolveEndpointOverride_IflowSupportsBothEndpointsNoOverride(t *testing
 		registry.GetGlobalRegistry().UnregisterClient("endpoint-compat-iflow-both")
 	})
 
-	overrideEndpoint, ok := resolveEndpointOverride("minimax-m2.5-both-endpoints-test", "/responses", OpenaiResponse)
+	overrideEndpoint, ok := resolveEndpointOverride("minimax-m2.5-both-endpoints-test", "/responses")
 	if ok {
 		t.Fatalf("expected no endpoint override when /responses already supported, got %q", overrideEndpoint)
 	}
@@ -50,7 +49,7 @@ func TestResolveEndpointOverride_RespectsHandlerEndpointDirectionality(t *testin
 		registry.GetGlobalRegistry().UnregisterClient("endpoint-compat-iflow-directionality")
 	})
 
-	overrideEndpoint, ok := resolveEndpointOverride("minimax-m2.5-directionality-test", "/chat/completions", OpenAI)
+	_, ok := resolveEndpointOverride("minimax-m2.5-directionality-test", "/chat/completions")
 	if ok {
 		t.Fatalf("expected no override for /chat/completions when provider supports chat")
 	}
@@ -72,7 +71,7 @@ func TestEndpointCompatProviderCandidatesAreSortedByPrecedence(t *testing.T) {
 		t.Fatalf("expected single iflow registration, got %v", reg)
 	}
 
-	overrideEndpoint, ok := resolveEndpointOverride(modelID, "/responses", OpenaiResponse)
+	overrideEndpoint, ok := resolveEndpointOverride(modelID, "/responses")
 	if !ok || overrideEndpoint != "/chat/completions" {
 		t.Fatalf("provider-agnostic model lookup should still resolve override: ok=%v endpoint=%q", ok, overrideEndpoint)
 	}

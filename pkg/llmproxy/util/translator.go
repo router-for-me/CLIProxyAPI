@@ -6,6 +6,7 @@ package util
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -325,4 +326,37 @@ func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName strin
 		return original
 	}
 	return sanitizedName
+}
+
+// DeleteKeysByName removes every occurrence of the supplied JSON object key names.
+func DeleteKeysByName(jsonStr string, keyNames ...string) string {
+	if len(keyNames) == 0 || !gjson.Valid(jsonStr) {
+		return jsonStr
+	}
+
+	var paths []string
+	root := gjson.Parse(jsonStr)
+	for _, key := range keyNames {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		Walk(root, "", key, &paths)
+	}
+	if len(paths) == 0 {
+		return jsonStr
+	}
+
+	sort.Slice(paths, func(i, j int) bool {
+		return strings.Count(paths[i], ".") > strings.Count(paths[j], ".")
+	})
+
+	out := jsonStr
+	for _, path := range paths {
+		next, err := sjson.Delete(out, path)
+		if err != nil {
+			return jsonStr
+		}
+		out = next
+	}
+	return out
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -1361,6 +1362,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				if len(chunk.Payload) > 0 {
 					sentPayload = true
 					streamHeadersCommitted = true
+					payload := cloneBytes(chunk.Payload)
 					if okSendData := sendData(payload); !okSendData {
 						return
 					}
@@ -1442,6 +1444,12 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
 	}
+	if len(providers) == 0 {
+		providers = registry.GetGlobalRegistry().GetModelProviders(baseModel)
+	}
+	if len(providers) == 0 && baseModel != resolvedModelName {
+		providers = registry.GetGlobalRegistry().GetModelProviders(resolvedModelName)
+	}
 
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
@@ -1450,6 +1458,10 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func (h *BaseAPIHandler) getRequestDetails(modelName string) ([]string, string, *interfaces.ErrorMessage) {
+	return h.providersForExecution(modelName, modelName, false, modelRouteDecision{})
 }
 
 func validateSSEDataJSON(payload []byte) error {

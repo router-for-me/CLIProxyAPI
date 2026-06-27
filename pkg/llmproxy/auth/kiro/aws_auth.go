@@ -35,6 +35,7 @@ const (
 // and communicating with the CodeWhisperer API.
 type KiroAuth struct {
 	httpClient *http.Client
+	endpoint   string
 }
 
 // NewKiroAuth creates a new Kiro authentication service.
@@ -123,6 +124,9 @@ func (k *KiroAuth) makeRequest(ctx context.Context, path string, tokenData *Kiro
 	// Get endpoint from profileArn (defaults to us-east-1 if empty)
 	profileArn := queryParams["profileArn"]
 	endpoint := GetKiroAPIEndpointFromProfileArn(profileArn)
+	if k.endpoint != "" {
+		endpoint = k.endpoint
+	}
 	url := buildURL(endpoint, path, queryParams)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

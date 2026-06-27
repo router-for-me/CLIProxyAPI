@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -164,27 +163,6 @@ func (e cursorStatusErr) RetryAfter() *time.Duration { return nil } // no retry-
 func classifyCursorError(err error) error {
 	if err == nil {
 		return nil
-	}
-
-	// Layer 1: structured ConnectError from ParseConnectEndStream
-	var ce *cursorproto.ConnectError
-	if errors.As(err, &ce) {
-		log.Infof("cursor: Connect error code=%q message=%q", ce.Code, ce.Message)
-		switch ce.Code {
-		case "resource_exhausted":
-			return cursorStatusErr{code: 429, msg: err.Error()}
-		case "unauthenticated":
-			return cursorStatusErr{code: 401, msg: err.Error()}
-		case "permission_denied":
-			return cursorStatusErr{code: 403, msg: err.Error()}
-		case "unavailable":
-			return cursorStatusErr{code: 503, msg: err.Error()}
-		case "internal":
-			return cursorStatusErr{code: 500, msg: err.Error()}
-		default:
-			// Unknown Connect code — log for observation, treat as 502
-			return cursorStatusErr{code: 502, msg: err.Error()}
-		}
 	}
 
 	// Layer 2: fuzzy match for H2 errors and unstructured messages
@@ -967,7 +945,7 @@ func processH2SessionFrames(
 						if toolCallId == "" {
 							toolCallId = uuid.New().String()
 						}
-						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
+						log.Debugf("cursor: received mcpArgs from server: execMsgId=%s execId=%q toolName=%s toolCallId=%s",
 							msg.ExecMsgId, msg.ExecId, msg.McpToolName, toolCallId)
 						pending := pendingMcpExec{
 							ExecMsgId:  msg.ExecMsgId,

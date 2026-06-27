@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
-	"time"
 
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -96,44 +94,6 @@ func TestGenerateStableSessionID_FallsBackToContentRawForNonTextUserMessage(t *t
 	}
 	if first == "" {
 		t.Fatal("expected non-empty fallback session id")
-	}
-}
-
-func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any {
-	t.Helper()
-
-	request, ok := body["request"].(map[string]any)
-	if !ok {
-		t.Fatalf("request missing or invalid type")
-	}
-
-	contents, ok := request["contents"].([]any)
-	if !ok || len(contents) == 0 {
-		t.Fatalf("contents missing or empty")
-	}
-	content, ok := contents[0].(map[string]any)
-	if !ok {
-		t.Fatalf("content missing or invalid type")
-	}
-	if got, ok := content["x-debug"].(string); !ok || got != "keep-me" {
-		t.Fatalf("x-debug should be preserved when no tool schema exists, got=%v", content["x-debug"])
-	}
-
-	nonSchema, ok := request["nonSchema"].(map[string]any)
-	if !ok {
-		t.Fatalf("nonSchema missing or invalid type")
-	}
-	if _, ok := nonSchema["nullable"]; !ok {
-		t.Fatalf("nullable should be preserved outside schema cleanup path")
-	}
-	if got, ok := nonSchema["x-extra"].(string); !ok || got != "keep-me" {
-		t.Fatalf("x-extra should be preserved outside schema cleanup path, got=%v", nonSchema["x-extra"])
-	}
-
-	if generationConfig, ok := request["generationConfig"].(map[string]any); ok {
-		if _, ok := generationConfig["maxOutputTokens"]; ok {
-			t.Fatalf("maxOutputTokens should still be removed for non-Claude requests")
-		}
 	}
 }
 
@@ -346,26 +306,6 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	}
 	if _, ok := mode["deprecated"]; ok {
 		t.Fatalf("deprecated should be removed from nested schema")
-	}
-}
-
-func assertNoSchemaKeywords(t *testing.T, value any) {
-	t.Helper()
-
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, nested := range typed {
-			switch key {
-			case "$ref", "$defs":
-				t.Fatalf("schema keyword %q should be removed for Antigravity request", key)
-			default:
-				assertNoSchemaKeywords(t, nested)
-			}
-		}
-	case []any:
-		for _, nested := range typed {
-			assertNoSchemaKeywords(t, nested)
-		}
 	}
 }
 

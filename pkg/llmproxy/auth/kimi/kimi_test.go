@@ -42,7 +42,8 @@ func TestRequestDeviceCode(t *testing.T) {
 		},
 	}
 
-	dfc := NewDeviceFlowClientWithDeviceID(nil, "test-device", client)
+	dfc := NewDeviceFlowClientWithDeviceID(nil, "test-device")
+	dfc.httpClient = client
 	resp, err := dfc.RequestDeviceCode(context.Background())
 	if err != nil {
 		t.Fatalf("RequestDeviceCode failed: %v", err)

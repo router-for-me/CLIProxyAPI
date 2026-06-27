@@ -26,6 +26,7 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/managementasset"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/safemode"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/store"
 	_ "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/tui"
@@ -42,6 +43,16 @@ var (
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""
 )
+
+func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
+	if cfg == nil || commandMode || cloudConfigMissing || homeMode {
+		return false
+	}
+	if tuiMode && !standalone {
+		return false
+	}
+	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+}
 
 // init initializes the shared logger setup.
 func init() {

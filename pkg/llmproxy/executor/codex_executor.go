@@ -1119,6 +1119,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					cacheCodexReasoningReplayFromCompleted(replayScope, data)
 					translatedLine = append([]byte("data: "), data...)
 				}
+				if eventType := strings.TrimSpace(gjson.GetBytes(data, "type").String()); eventType != "" && !bytes.Contains(translatedLine, []byte("\nevent:")) && !bytes.HasPrefix(bytes.TrimSpace(translatedLine), []byte("event:")) {
+					translatedLine = append(append([]byte("event: "+eventType+"\n"), translatedLine...), '\n')
+				}
 			}
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)

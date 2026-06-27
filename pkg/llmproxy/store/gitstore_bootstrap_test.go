@@ -62,7 +62,7 @@ func TestEnsureRepositoryBootstrapsEmptyRemoteClone(t *testing.T) {
 	}
 
 	repoRoot := filepath.Join(t.TempDir(), "local-repo")
-	store := NewGitTokenStore(remoteDir, "", "")
+	store := NewGitTokenStore(remoteDir, "", "", "")
 	store.SetBaseDir(filepath.Join(repoRoot, "auths"))
 
 	if err := store.EnsureRepository(); err != nil {

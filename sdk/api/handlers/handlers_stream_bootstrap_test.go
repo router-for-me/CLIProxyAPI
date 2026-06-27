@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"

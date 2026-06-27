@@ -15,7 +15,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/usage"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -46,11 +45,6 @@ func TestHandler_Setters(t *testing.T) {
 	}
 
 	h.SetAuthManager(nil)
-	stats := &usage.RequestStatistics{}
-	h.SetUsageStatistics(stats)
-	if h.usageStats != stats {
-		t.Errorf("SetUsageStatistics failed")
-	}
 
 	h.SetLocalPassword("pass")
 	if h.localPassword != "pass" {
@@ -199,8 +193,7 @@ func TestUpdateFields(t *testing.T) {
 
 func TestGetUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	stats := usage.GetRequestStatistics()
-	h := &Handler{usageStats: stats}
+	h := &Handler{}
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -304,11 +297,11 @@ func TestPutConfigYAMLReadOnlyWriteAppliesRuntimeConfig(t *testing.T) {
 		t.Fatalf("write initial config: %v", err)
 	}
 
-	origWriteConfigFile := writeConfigFile
-	writeConfigFile = func(path string, data []byte) error {
+	origWriteConfigFile := WriteConfig
+	WriteConfig = func(path string, data []byte) error {
 		return &os.PathError{Op: "open", Path: path, Err: syscall.EROFS}
 	}
-	t.Cleanup(func() { writeConfigFile = origWriteConfigFile })
+	t.Cleanup(func() { WriteConfig = origWriteConfigFile })
 
 	h := &Handler{configFilePath: tmpFile, cfg: &config.Config{}}
 
