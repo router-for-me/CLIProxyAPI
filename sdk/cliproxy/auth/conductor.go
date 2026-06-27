@@ -244,6 +244,9 @@ type Manager struct {
 	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
 	apiKeyModelAlias atomic.Value
 
+	// clientAPIKeyModelAlias maps client api-key (lower) -> alias(lower) -> upstream entry.
+	clientAPIKeyModelAlias atomic.Value
+
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
 
@@ -282,6 +285,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.clientAPIKeyModelAlias.Store(clientAPIKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
@@ -508,6 +512,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	m.SetClientAPIKeyModelAliases(cfg.ClientAPIKeys)
 	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
 	if !cfg.Home.Enabled {
 		m.clearHomeRuntimeAuths()
@@ -1202,15 +1207,15 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
-func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
-	candidates, pooled, aliasResult := m.executionModelCandidatesWithAlias(auth, routeModel)
+func (m *Manager) preparedExecutionModelsWithAlias(ctx context.Context, auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
+	candidates, pooled, aliasResult := m.executionModelCandidatesWithAlias(ctx, auth, routeModel)
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult
 }
 
-func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
+func (m *Manager) executionModelCandidatesWithAlias(ctx context.Context, auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
-	aliasResult := m.resolveExecutionAliasResultForRequested(auth, requestedModel)
-	upstreamModel := executionAliasPoolModel(auth, requestedModel, aliasResult)
+	aliasResult := m.resolveExecutionAliasResultForRequestedWithClient(ctx, auth, requestedModel)
+	upstreamModel := m.executionAliasPoolModel(ctx, auth, requestedModel, aliasResult)
 
 	var candidates []string
 	if auth != nil && auth.Attributes != nil {
@@ -1250,14 +1255,19 @@ func (m *Manager) resolveExecutionAliasResultForRequested(auth *Auth, requestedM
 	return m.applyOAuthModelAliasWithResult(auth, requestedModel)
 }
 
-func executionAliasPoolModel(auth *Auth, requestedModel string, aliasResult OAuthModelAliasResult) string {
+func (m *Manager) executionAliasPoolModel(ctx context.Context, auth *Auth, requestedModel string, aliasResult OAuthModelAliasResult) string {
+	if m != nil && ClientAPIKeyPrincipalFromContext(ctx) != "" {
+		if upstream := strings.TrimSpace(aliasResult.UpstreamModel); upstream != "" && !strings.EqualFold(upstream, requestedModel) {
+			return upstream
+		}
+	}
 	if auth != nil && auth.AuthKind() == AuthKindAPIKey {
 		if strings.TrimSpace(requestedModel) != "" {
 			return requestedModel
 		}
 	}
-	if strings.TrimSpace(aliasResult.UpstreamModel) != "" {
-		return aliasResult.UpstreamModel
+	if upstream := strings.TrimSpace(aliasResult.UpstreamModel); upstream != "" {
+		return upstream
 	}
 	return requestedModel
 }
@@ -1562,16 +1572,16 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 		var selected *Auth
 		var errPick error
 		if providerKey == "mixed" {
-			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+			selected, _, errPick = m.schedulerPickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+				selected, _, errPick = m.schedulerPickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
 			}
 		} else {
-			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+			selected, errPick = m.schedulerPickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 			if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 				m.syncScheduler()
-				selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
+				selected, errPick = m.schedulerPickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 			}
 		}
 		if errPick != nil {
@@ -1626,7 +1636,198 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
 }
 
-func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
+func (m *Manager) clientKeyRegistryModelKeysForRoute(ctx context.Context, routeModel string) []string {
+	if m == nil {
+		return nil
+	}
+	clientKey := ClientAPIKeyPrincipalFromContext(ctx)
+	if clientKey == "" {
+		return nil
+	}
+	result := m.resolveClientAPIKeyModelAliasWithResult(clientKey, routeModel)
+	upstream := strings.TrimSpace(result.UpstreamModel)
+	if upstream == "" || strings.EqualFold(upstream, routeModel) {
+		return nil
+	}
+	keys := []string{canonicalModelKey(upstream)}
+	cfg := m.RuntimeConfig()
+	if cfg != nil {
+		for i := range cfg.OpenAICompatibility {
+			if cfg.OpenAICompatibility[i].Disabled {
+				continue
+			}
+			for _, model := range cfg.OpenAICompatibility[i].Models {
+				name := strings.TrimSpace(model.Name)
+				alias := strings.TrimSpace(model.Alias)
+				if alias == "" {
+					alias = name
+				}
+				if name != "" && strings.EqualFold(name, upstream) && alias != "" {
+					keys = append(keys, canonicalModelKey(alias))
+					break
+				}
+			}
+		}
+	}
+	keys = append(keys, canonicalModelKey(routeModel))
+	return keys
+}
+
+// routeModelKeysForAuthSelection returns model shard keys to try when selecting auth for a client route model.
+// Per-client aliases may use ids that are not registered on auths; fall back to supplier/global registry ids.
+func (m *Manager) routeModelKeysForAuthSelection(ctx context.Context, routeModel string) []string {
+	routeModel = strings.TrimSpace(routeModel)
+	if routeModel == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	add := func(key string) {
+		key = canonicalModelKey(key)
+		if key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	add(routeModel)
+	for _, alt := range m.clientKeyRegistryModelKeysForRoute(ctx, routeModel) {
+		add(alt)
+	}
+	if cfg := m.RuntimeConfig(); cfg != nil {
+		for _, alt := range supplierRegistryKeysForUpstreamModel(cfg, routeModel) {
+			add(alt)
+		}
+	}
+	return out
+}
+
+func supplierRegistryKeysForUpstreamModel(cfg *internalconfig.Config, upstreamName string) []string {
+	upstreamName = strings.TrimSpace(upstreamName)
+	if upstreamName == "" || cfg == nil {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for i := range cfg.OpenAICompatibility {
+		if cfg.OpenAICompatibility[i].Disabled {
+			continue
+		}
+		for _, model := range cfg.OpenAICompatibility[i].Models {
+			name := strings.TrimSpace(model.Name)
+			if name == "" || !strings.EqualFold(name, upstreamName) {
+				continue
+			}
+			alias := strings.TrimSpace(model.Alias)
+			if alias == "" {
+				alias = name
+			}
+			key := canonicalModelKey(alias)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func (m *Manager) schedulerPickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, errPick := m.scheduler.pickSingle(ctx, provider, key, opts, tried)
+		if errPick == nil && picked != nil {
+			return picked, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) schedulerPickSingleWithStrategy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategy)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, errPick := m.scheduler.pickSingleWithStrategy(ctx, provider, key, opts, tried, strategy)
+		if errPick == nil && picked != nil {
+			return picked, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) schedulerPickMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickMixed(ctx, providers, model, opts, tried)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, providerKey, errPick := m.scheduler.pickMixed(ctx, providers, key, opts, tried)
+		if errPick == nil && picked != nil {
+			return picked, providerKey, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, "", lastErr
+	}
+	return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) schedulerPickMixedWithStrategy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, string, error) {
+	if m == nil || m.scheduler == nil {
+		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	keys := m.routeModelKeysForAuthSelection(ctx, model)
+	if len(keys) == 0 {
+		return m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
+	}
+	var lastErr error
+	for _, key := range keys {
+		picked, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, providers, key, opts, tried, strategy)
+		if errPick == nil && picked != nil {
+			return picked, providerKey, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, "", lastErr
+	}
+	return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) authSupportsRouteModel(ctx context.Context, registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
 	if registryRef == nil || auth == nil {
 		return true
 	}
@@ -1636,6 +1837,21 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	}
 	if registryRef.ClientSupportsModel(auth.ID, routeKey) {
 		return true
+	}
+	for _, alt := range m.clientKeyRegistryModelKeysForRoute(ctx, routeModel) {
+		if alt == "" || alt == routeKey {
+			continue
+		}
+		if registryRef.ClientSupportsModel(auth.ID, alt) {
+			return true
+		}
+	}
+	if cfg := m.RuntimeConfig(); cfg != nil {
+		for _, alt := range supplierRegistryKeysForUpstreamModel(cfg, routeModel) {
+			if alt != "" && alt != routeKey && registryRef.ClientSupportsModel(auth.ID, alt) {
+				return true
+			}
+		}
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
 	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
@@ -2507,7 +2723,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(ctx, auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -2609,7 +2825,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(ctx, auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -2709,7 +2925,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(ctx, auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -4330,7 +4546,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsRouteModel(ctx, registryRef, candidate, model) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -4403,10 +4619,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		selected, errPick := m.schedulerPickSingle(ctx, provider, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+			selected, errPick = m.schedulerPickSingle(ctx, provider, model, opts, tried)
 		}
 		if errPick != nil {
 			return nil, nil, errPick
@@ -4490,7 +4706,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsRouteModel(ctx, registryRef, candidate, model) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -4591,10 +4807,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		selected, providerKey, errPick := m.schedulerPickMixed(ctx, eligibleProviders, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+			selected, providerKey, errPick = m.schedulerPickMixed(ctx, eligibleProviders, model, opts, tried)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick
@@ -5134,7 +5350,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(creditsCtx, c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}
@@ -5185,7 +5401,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
-		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(creditsCtx, c.auth, routeModel)
 		if len(models) == 0 {
 			continue
 		}

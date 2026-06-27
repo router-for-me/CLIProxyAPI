@@ -1407,7 +1407,7 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	cfg.APIKeys = nil
+	cfg.ClientAPIKeys = nil
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false
@@ -2631,6 +2631,11 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 	add(perAuthAliases)
 	add(globalAliases)
 	return out
+}
+
+// ApplyOAuthModelAliasEntries rewrites model listings using the same rules as global OAuth aliases.
+func ApplyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*ModelInfo) []*ModelInfo {
+	return applyOAuthModelAliasEntries(aliases, models)
 }
 
 func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*ModelInfo) []*ModelInfo {
