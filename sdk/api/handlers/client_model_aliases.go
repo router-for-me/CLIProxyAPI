@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelalias"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -17,7 +18,13 @@ func ApplyClientAPIKeyModelAliases(h *BaseAPIHandler, c *gin.Context, models []m
 	if clientKey == "" {
 		return models
 	}
-	return modelalias.ApplyClientAPIKeyModelAliasesToOpenAIMaps(h.Cfg.ClientAPIKeys, clientKey, models)
+	var compat []internalconfig.OpenAICompatibility
+	if h.AuthManager != nil {
+		if cfg := h.AuthManager.RuntimeConfig(); cfg != nil {
+			compat = cfg.OpenAICompatibility
+		}
+	}
+	return modelalias.ApplyClientAPIKeyModelAliasesToOpenAIMaps(h.Cfg.ClientAPIKeys, clientKey, models, compat)
 }
 
 func clientAPIKeyFromGin(c *gin.Context) string {

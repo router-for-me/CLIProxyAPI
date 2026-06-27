@@ -7,7 +7,7 @@ import (
 )
 
 // ApplyClientAPIKeyModelAliasesToOpenAIMaps rewrites OpenAI-style model maps for a client API key.
-func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, clientKey string, models []map[string]any) []map[string]any {
+func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, clientKey string, models []map[string]any, compat []config.OpenAICompatibility) []map[string]any {
 	aliases := keys.ModelAliasesFor(clientKey)
 	if len(aliases) == 0 || len(models) == 0 {
 		return models
@@ -30,6 +30,24 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 		return models
 	}
 
+	compatBridge := make(map[string]string)
+	for i := range compat {
+		if compat[i].Disabled {
+			continue
+		}
+		for _, model := range compat[i].Models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" {
+				continue
+			}
+			if alias == "" {
+				alias = name
+			}
+			compatBridge[strings.ToLower(alias)] = strings.ToLower(name)
+		}
+	}
+
 	out := make([]map[string]any, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
@@ -41,13 +59,18 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 		if id == "" {
 			continue
 		}
-		key := strings.ToLower(id)
-		entries := forward[key]
+		entries := forward[strings.ToLower(id)]
 		if len(entries) == 0 {
-			if _, exists := seen[key]; exists {
+			if upstream, ok := compatBridge[strings.ToLower(id)]; ok {
+				entries = forward[upstream]
+			}
+		}
+		if len(entries) == 0 {
+			idKey := strings.ToLower(id)
+			if _, exists := seen[idKey]; exists {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[idKey] = struct{}{}
 			out = append(out, model)
 			continue
 		}
@@ -60,8 +83,9 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 			}
 		}
 		if keepOriginal {
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
+			idKey := strings.ToLower(id)
+			if _, exists := seen[idKey]; !exists {
+				seen[idKey] = struct{}{}
 				out = append(out, model)
 			}
 		}
@@ -87,10 +111,11 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 		}
 
 		if !keepOriginal && !addedAlias {
-			if _, exists := seen[key]; exists {
+			idKey := strings.ToLower(id)
+			if _, exists := seen[idKey]; exists {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[idKey] = struct{}{}
 			out = append(out, model)
 		}
 	}

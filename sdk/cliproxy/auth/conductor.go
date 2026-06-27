@@ -1631,7 +1631,44 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	return m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
 }
 
-func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
+func (m *Manager) clientKeyRegistryModelKeysForRoute(ctx context.Context, routeModel string) []string {
+	if m == nil {
+		return nil
+	}
+	clientKey := ClientAPIKeyPrincipalFromContext(ctx)
+	if clientKey == "" {
+		return nil
+	}
+	result := m.resolveClientAPIKeyModelAliasWithResult(clientKey, routeModel)
+	upstream := strings.TrimSpace(result.UpstreamModel)
+	if upstream == "" || strings.EqualFold(upstream, routeModel) {
+		return nil
+	}
+	keys := []string{canonicalModelKey(upstream)}
+	cfg := m.RuntimeConfig()
+	if cfg != nil {
+		for i := range cfg.OpenAICompatibility {
+			if cfg.OpenAICompatibility[i].Disabled {
+				continue
+			}
+			for _, model := range cfg.OpenAICompatibility[i].Models {
+				name := strings.TrimSpace(model.Name)
+				alias := strings.TrimSpace(model.Alias)
+				if alias == "" {
+					alias = name
+				}
+				if name != "" && strings.EqualFold(name, upstream) && alias != "" {
+					keys = append(keys, canonicalModelKey(alias))
+					break
+				}
+			}
+		}
+	}
+	keys = append(keys, canonicalModelKey(routeModel))
+	return keys
+}
+
+func (m *Manager) authSupportsRouteModel(ctx context.Context, registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
 	if registryRef == nil || auth == nil {
 		return true
 	}
@@ -1641,6 +1678,14 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	}
 	if registryRef.ClientSupportsModel(auth.ID, routeKey) {
 		return true
+	}
+	for _, alt := range m.clientKeyRegistryModelKeysForRoute(ctx, routeModel) {
+		if alt == "" || alt == routeKey {
+			continue
+		}
+		if registryRef.ClientSupportsModel(auth.ID, alt) {
+			return true
+		}
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
 	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
@@ -4335,7 +4380,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsRouteModel(ctx, registryRef, candidate, model) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -4495,7 +4540,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsRouteModel(ctx, registryRef, candidate, model) {
 			continue
 		}
 		candidates = append(candidates, candidate)
