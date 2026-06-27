@@ -149,6 +149,20 @@ func (m *Manager) applyClientAPIKeyModelAlias(clientKey, requestedModel string) 
 	return result.UpstreamModel
 }
 
+// ApplyClientAPIKeyModelAlias resolves the upstream model name for a client API key alias.
+func (m *Manager) ApplyClientAPIKeyModelAlias(clientKey, requestedModel string) string {
+	return m.applyClientAPIKeyModelAlias(clientKey, requestedModel)
+}
+
+// RuntimeConfig returns the latest application config snapshot used by the auth manager.
+func (m *Manager) RuntimeConfig() *internalconfig.Config {
+	if m == nil {
+		return nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	return cfg
+}
+
 func (m *Manager) resolveExecutionAliasResultForRequestedWithClient(ctx interface {
 	Value(any) any
 }, auth *Auth, requestedModel string) OAuthModelAliasResult {
