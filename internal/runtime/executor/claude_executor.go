@@ -284,6 +284,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
+	if _, ok := helps.ClaudeOAuthProfileDeviceProfile(auth, e.cfg); oauthToken && ok {
+		bodyForUpstream = normalizeClaudeOAuthStableBillingHeader(bodyForUpstream)
+		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
@@ -476,6 +480,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
+		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+	}
+	if _, ok := helps.ClaudeOAuthProfileDeviceProfile(auth, e.cfg); oauthToken && ok {
+		bodyForUpstream = normalizeClaudeOAuthStableBillingHeader(bodyForUpstream)
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
@@ -730,6 +738,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
+	if _, ok := helps.ClaudeOAuthProfileDeviceProfile(auth, e.cfg); isClaudeOAuthToken(apiKey) && ok {
+		body = normalizeClaudeOAuthStableBillingHeader(body)
+	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

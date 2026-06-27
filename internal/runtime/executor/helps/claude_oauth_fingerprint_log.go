@@ -126,7 +126,6 @@ func formatClaudeOAuthFingerprintLine(direction string, inboundHeaders, outbound
 		parts = append(parts, claudeOAuthIdentityLogParts(claudeOAuthInboundLogIdentity(gateResult))...)
 	} else {
 		parts = append(parts, claudeOAuthIdentityLogParts(claudeOAuthLogIdentityFromBody(body))...)
-		parts = append(parts, claudeOAuthInboundMismatchLogParts(gateResult, body)...)
 	}
 	if direction == "out" && outboundHeaders != nil {
 		parts = append(parts, claudeOAuthOutboundHeaderLogParts(outboundHeaders)...)
@@ -199,29 +198,6 @@ func claudeOAuthIdentityLogParts(identity claudeOAuthLogIdentity) []string {
 	}
 }
 
-func claudeOAuthInboundMismatchLogParts(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) []string {
-	inbound := claudeOAuthInboundLogIdentity(gateResult)
-	if inbound.Format == "" {
-		return nil
-	}
-	outbound := claudeOAuthLogIdentityFromBody(outboundBody)
-	if !claudeOAuthLogIdentityMismatch(inbound, outbound) {
-		return nil
-	}
-	if inbound.Format == "legacy" {
-		return []string{
-			"warn=identity_mismatch",
-			"in_user=" + truncateClaudeOAuthLogToken(inbound.UserHash),
-			"in_account=" + truncateClaudeOAuthLogToken(inbound.AccountID),
-		}
-	}
-	return []string{
-		"warn=identity_mismatch",
-		"in_device=" + truncateClaudeOAuthLogToken(inbound.DeviceID),
-		"in_account=" + truncateClaudeOAuthLogToken(inbound.AccountID),
-	}
-}
-
 type claudeOAuthLogIdentity struct {
 	Format    string
 	DeviceID  string
@@ -249,20 +225,6 @@ func claudeOAuthLogIdentityFromBody(body []byte) claudeOAuthLogIdentity {
 		AccountID: inbound.AccountUUID,
 		UserHash:  inbound.UserHash,
 	}
-}
-
-func claudeOAuthLogIdentityMismatch(inbound, outbound claudeOAuthLogIdentity) bool {
-	if inbound.Format == "legacy" {
-		if outbound.Format != "legacy" {
-			return true
-		}
-		return inbound.UserHash != "" && outbound.UserHash != "" && !strings.EqualFold(inbound.UserHash, outbound.UserHash) ||
-			inbound.AccountID != "" && outbound.AccountID != "" && inbound.AccountID != outbound.AccountID
-	}
-	if inbound.DeviceID != "" && outbound.DeviceID != "" && inbound.DeviceID != outbound.DeviceID {
-		return true
-	}
-	return inbound.AccountID != "" && outbound.AccountID != "" && inbound.AccountID != outbound.AccountID
 }
 
 func claudeOAuthBillingLogParts(body []byte) []string {

@@ -587,7 +587,7 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 	}
 }
 
-func TestFormatClaudeOAuthFingerprintLine_IncludesInboundIdentityOnMismatch(t *testing.T) {
+func TestFormatClaudeOAuthFingerprintLine_OutboundOmitsInboundMismatch(t *testing.T) {
 	inboundDevice := strings.Repeat("a", 64)
 	outboundDevice := strings.Repeat("b", 64)
 	body := jsonUserPayload(outboundDevice, "outbound-account", "session-1")
@@ -610,11 +610,8 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesInboundIdentityOnMismatch(t *t
 	if !strings.Contains(line, "device=bbbbbbbb") || !strings.Contains(line, "account=outbound") {
 		t.Fatalf("line missing outbound identity: %s", line)
 	}
-	if !strings.Contains(line, "warn=identity_mismatch") {
-		t.Fatalf("line missing identity mismatch warning: %s", line)
-	}
-	if !strings.Contains(line, "in_device=aaaaaaaa") || !strings.Contains(line, "in_account=inbound-") {
-		t.Fatalf("line missing inbound identity: %s", line)
+	if strings.Contains(line, "warn=identity_mismatch") || strings.Contains(line, "in_device=") || strings.Contains(line, "in_account=") {
+		t.Fatalf("outbound line should omit inbound mismatch fields: %s", line)
 	}
 }
 
