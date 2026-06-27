@@ -43,6 +43,9 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 	if r == nil || len(headers) == 0 {
 		return
 	}
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
 	for k, v := range headers {
 		if k == "" || v == "" {
 			continue
@@ -55,6 +58,11 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 		if http.CanonicalHeaderKey(k) == "Host" {
 			r.Host = v
 		}
-		r.Header.Set(k, v)
+		// Use direct map assignment to preserve the user-supplied header
+		// casing. net/http's Header.Set canonicalizes keys via
+		// textproto.CanonicalMIMEHeaderKey, which mutates headers like
+		// "x-api-key" into "X-Api-Key" and breaks providers that require
+		// an exact-case match.
+		r.Header[k] = []string{v}
 	}
 }
