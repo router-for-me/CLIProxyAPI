@@ -295,7 +295,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel); errHeaders != nil {
 		return resp, errHeaders
 	}
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
@@ -493,7 +493,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, baseModel); errHeaders != nil {
 		return nil, errHeaders
 	}
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
@@ -747,7 +747,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, body, baseModel, fpResult)
@@ -1083,7 +1083,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) error {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, baseModel string) error {
 	if r == nil {
 		return nil
 	}
@@ -1138,6 +1138,10 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	if useOAuthProfileDeviceProfile {
 		baseBetas = claudeOAuthStableBetas
+		if !strings.Contains(baseModel, "claude-opus") {
+			baseBetas = strings.ReplaceAll(baseBetas, ",context-1m-2025-08-07", "")
+			baseBetas = strings.ReplaceAll(baseBetas, ",mid-conversation-system-2026-04-07", "")
+		}
 	}
 
 	// Merge extra betas from request body and request flags.
