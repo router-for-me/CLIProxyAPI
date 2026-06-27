@@ -61,6 +61,7 @@ type claudeOAuthAccountRegistry struct {
 type ClaudeOAuthFingerprintGateResult struct {
 	RequestID        string
 	SessionID        string
+	AffinitySessionID string
 	Slot             int
 	Violation        string
 	OverrideApplied  bool
@@ -204,27 +205,52 @@ func ClaudeOAuthFingerprintGateResultFromContext(ctx context.Context) *ClaudeOAu
 	return result
 }
 
+func ClaudeOAuthOutboundSessionIDFromContext(ctx context.Context) (string, bool) {
+	result := ClaudeOAuthFingerprintGateResultFromContext(ctx)
+	if result == nil {
+		return "", false
+	}
+	sessionID := strings.TrimSpace(result.SessionID)
+	if sessionID == "" {
+		return "", false
+	}
+	return sessionID, true
+}
+
 // ClaudeOAuthFingerprintGate resolves, registers, and normalizes OAuth outbound identity.
 func ClaudeOAuthFingerprintGate(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, inboundHeaders http.Header, body []byte, model string) ([]byte, *ClaudeOAuthFingerprintGateResult, error) {
+	return ClaudeOAuthFingerprintGateWithSessionPayload(ctx, cfg, auth, inboundHeaders, body, body, model)
+}
+
+// ClaudeOAuthFingerprintGateWithSessionPayload resolves, registers, and normalizes OAuth outbound identity.
+// sessionPayload is the request view used for session-affinity selection. The
+// outbound body remains separate so Claude OAuth identity/header normalization
+// does not leak affinity key prefixes such as "claude:" or "msg:" upstream.
+func ClaudeOAuthFingerprintGateWithSessionPayload(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, inboundHeaders http.Header, sessionPayload, body []byte, model string) ([]byte, *ClaudeOAuthFingerprintGateResult, error) {
 	if cfg == nil || !cfg.ClaudeOAuthFingerprint.Enabled {
 		return body, nil, nil
 	}
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return body, nil, nil
 	}
+	if len(sessionPayload) == 0 {
+		sessionPayload = body
+	}
 
 	headerSession := extractClaudeOAuthSessionFromHeader(inboundHeaders)
 	bodySession := extractClaudeOAuthSessionFromBody(body)
 	inboundIdentity := extractClaudeOAuthIdentityFromBody(body)
+	affinitySession := cliproxyauth.ExtractSessionID(inboundHeaders, sessionPayload, nil)
 
 	result := &ClaudeOAuthFingerprintGateResult{
-		RequestID:       shortClaudeOAuthRequestID(ctx),
-		HeaderSessionID: headerSession,
-		BodySessionID:   bodySession,
-		InboundDeviceID: inboundIdentity.DeviceID,
-		InboundAccountID: inboundIdentity.AccountUUID,
-		InboundUserHash:  inboundIdentity.UserHash,
-		InboundFormat:    inboundIdentity.Format,
+		RequestID:          shortClaudeOAuthRequestID(ctx),
+		HeaderSessionID:    headerSession,
+		BodySessionID:      bodySession,
+		AffinitySessionID:  affinitySession,
+		InboundDeviceID:    inboundIdentity.DeviceID,
+		InboundAccountID:   inboundIdentity.AccountUUID,
+		InboundUserHash:    inboundIdentity.UserHash,
+		InboundFormat:      inboundIdentity.Format,
 	}
 	if headerSession != "" && bodySession != "" && headerSession != bodySession {
 		result.SessionMismatch = true
@@ -256,7 +282,11 @@ func ClaudeOAuthFingerprintGate(ctx context.Context, cfg *config.Config, auth *c
 	} else if registry.account.Format == "" {
 		registry.account = firstClaudeOAuthAccountIdentity(authID, inboundIdentity)
 	}
-	slot, sessionViolation := registerClaudeOAuthSessionLocked(registry, sessionID, now, ttl, claudeOAuthFingerprintMaxSessions(cfg))
+	var slot int
+	var sessionViolation string
+	if affinitySession != "" {
+		slot, sessionViolation = registerClaudeOAuthSessionLocked(registry, affinitySession, now, ttl, claudeOAuthFingerprintMaxSessions(cfg))
+	}
 	account := registry.account
 	fillClaudeOAuthGateResultIdentity(result, account)
 	result.Slot = slot
@@ -347,24 +377,6 @@ func resolveClaudeOAuthCanonicalSessionID(headerSession, bodySession string) str
 		return bodySession
 	}
 	return headerSession
-}
-
-// SyncClaudeOAuthSessionHeaderToBody makes the outbound session header match
-// the body session used by the fingerprint gate. It only rewrites when the
-// body provided a session, preserving legacy header behavior otherwise.
-func SyncClaudeOAuthSessionHeaderToBody(headers http.Header, result *ClaudeOAuthFingerprintGateResult) bool {
-	if headers == nil || result == nil {
-		return false
-	}
-	bodySession := strings.TrimSpace(result.BodySessionID)
-	if bodySession == "" {
-		return false
-	}
-	if strings.TrimSpace(headers.Get(ClaudeCodeSessionHeader)) == bodySession {
-		return false
-	}
-	headers.Set(ClaudeCodeSessionHeader, bodySession)
-	return true
 }
 
 type claudeOAuthInboundIdentity struct {

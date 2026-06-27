@@ -333,6 +333,48 @@ func TestClaudeOAuthFingerprintGate_SameSessionDifferentModel(t *testing.T) {
 	}
 }
 
+func TestClaudeOAuthFingerprintGate_SessionLimitUsesAffinityExtractor(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig()
+	cfg.ClaudeOAuthFingerprint.MaxSessions = 1
+	auth := testClaudeOAuthAuth("auth-affinity")
+	headers := http.Header{}
+	headers.Set("X-Session-ID", "sticky-session")
+	sessionPayload := []byte(`{"messages":[{"role":"user","content":"original request"}]}`)
+
+	body1 := jsonUserPayload("device-a", "account-a", "body-session-1")
+	_, res1, err1 := ClaudeOAuthFingerprintGateWithSessionPayload(context.Background(), cfg, auth, headers, sessionPayload, body1, "claude-sonnet-4-5")
+	if err1 != nil {
+		t.Fatalf("first gate error = %v", err1)
+	}
+	if res1 == nil || res1.AffinitySessionID != "header:sticky-session" {
+		t.Fatalf("affinity session = %#v, want header:sticky-session", res1)
+	}
+	if res1.SessionID != "body-session-1" {
+		t.Fatalf("outbound session = %q, want body-session-1", res1.SessionID)
+	}
+
+	body2 := jsonUserPayload("device-a", "account-a", "body-session-2")
+	_, res2, err2 := ClaudeOAuthFingerprintGateWithSessionPayload(context.Background(), cfg, auth, headers, sessionPayload, body2, "claude-sonnet-4-5")
+	if err2 != nil {
+		t.Fatalf("same affinity session should reuse slot: %v", err2)
+	}
+	if res2 == nil || res2.Slot != 1 {
+		t.Fatalf("same affinity slot = %#v, want slot 1", res2)
+	}
+
+	otherHeaders := http.Header{}
+	otherHeaders.Set("X-Session-ID", "other-session")
+	body3 := jsonUserPayload("device-a", "account-a", "body-session-3")
+	_, res3, err3 := ClaudeOAuthFingerprintGateWithSessionPayload(context.Background(), cfg, auth, otherHeaders, sessionPayload, body3, "claude-sonnet-4-5")
+	if err3 == nil {
+		t.Fatal("expected different affinity session to hit max session limit")
+	}
+	if res3 == nil || res3.Violation != claudeOAuthViolationSessionLimit {
+		t.Fatalf("violation = %#v, want %q", res3, claudeOAuthViolationSessionLimit)
+	}
+}
+
 func TestClaudeOAuthFingerprintGate_IdentityMismatchDoesNotViolate(t *testing.T) {
 	ResetClaudeOAuthFingerprintRegistry()
 	cfg := testClaudeOAuthFingerprintConfig()
@@ -398,33 +440,33 @@ func TestClaudeOAuthFingerprintGate_SessionHeaderMismatchFlag(t *testing.T) {
 	}
 }
 
-func TestSyncClaudeOAuthSessionHeaderToBody_RewritesMismatch(t *testing.T) {
-	headers := http.Header{}
-	headers.Set(ClaudeCodeSessionHeader, "header-session-id")
-	result := &ClaudeOAuthFingerprintGateResult{
-		BodySessionID: "body-session-id",
-	}
+func TestClaudeOAuthOutboundSessionIDFromContext_UsesGateSession(t *testing.T) {
+	ctx := ContextWithClaudeOAuthFingerprint(context.Background(), &ClaudeOAuthFingerprintGateResult{
+		HeaderSessionID: "header-session-id",
+		BodySessionID:   "body-session-id",
+		SessionID:        "body-session-id",
+	})
 
-	if !SyncClaudeOAuthSessionHeaderToBody(headers, result) {
-		t.Fatal("expected header rewrite")
+	got, ok := ClaudeOAuthOutboundSessionIDFromContext(ctx)
+	if !ok {
+		t.Fatal("expected outbound session")
 	}
-	if got := headers.Get(ClaudeCodeSessionHeader); got != "body-session-id" {
-		t.Fatalf("%s = %q, want body-session-id", ClaudeCodeSessionHeader, got)
+	if got != "body-session-id" {
+		t.Fatalf("session = %q, want body-session-id", got)
 	}
 }
 
-func TestSyncClaudeOAuthSessionHeaderToBody_PreservesWhenBodySessionMissing(t *testing.T) {
-	headers := http.Header{}
-	headers.Set(ClaudeCodeSessionHeader, "header-session-id")
-	result := &ClaudeOAuthFingerprintGateResult{
+func TestClaudeOAuthOutboundSessionIDFromContext_UsesGeneratedGateSession(t *testing.T) {
+	ctx := ContextWithClaudeOAuthFingerprint(context.Background(), &ClaudeOAuthFingerprintGateResult{
 		SessionID: "generated-session-id",
-	}
+	})
 
-	if SyncClaudeOAuthSessionHeaderToBody(headers, result) {
-		t.Fatal("did not expect header rewrite without body session")
+	got, ok := ClaudeOAuthOutboundSessionIDFromContext(ctx)
+	if !ok {
+		t.Fatal("expected outbound session")
 	}
-	if got := headers.Get(ClaudeCodeSessionHeader); got != "header-session-id" {
-		t.Fatalf("%s = %q, want header-session-id", ClaudeCodeSessionHeader, got)
+	if got != "generated-session-id" {
+		t.Fatalf("session = %q, want generated-session-id", got)
 	}
 }
 

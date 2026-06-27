@@ -9,11 +9,11 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-func (e *ClaudeExecutor) applyClaudeOAuthFingerprintGate(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, inboundHeaders http.Header, body []byte, baseModel string) ([]byte, *helps.ClaudeOAuthFingerprintGateResult, context.Context, error) {
+func (e *ClaudeExecutor) applyClaudeOAuthFingerprintGate(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, inboundHeaders http.Header, sessionPayload, body []byte, baseModel string) ([]byte, *helps.ClaudeOAuthFingerprintGateResult, context.Context, error) {
 	if !helps.ClaudeOAuthFingerprintEnabled(e.cfg, apiKey) {
 		return body, nil, ctx, nil
 	}
-	out, result, err := helps.ClaudeOAuthFingerprintGate(ctx, e.cfg, auth, inboundHeaders, body, baseModel)
+	out, result, err := helps.ClaudeOAuthFingerprintGateWithSessionPayload(ctx, e.cfg, auth, inboundHeaders, sessionPayload, body, baseModel)
 	if result != nil {
 		ctx = helps.ContextWithClaudeOAuthFingerprint(ctx, result)
 	}

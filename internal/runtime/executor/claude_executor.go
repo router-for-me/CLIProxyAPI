@@ -240,7 +240,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = e.applyClaudeOAuthStableFingerprintBody(auth, apiKey, body)
 
 	var fpResult *helps.ClaudeOAuthFingerprintGateResult
-	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
+	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, opts.OriginalRequest, body, baseModel)
 	if err != nil {
 		return resp, err
 	}
@@ -294,7 +294,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return resp, errHeaders
 	}
-	helps.SyncClaudeOAuthSessionHeaderToBody(httpReq.Header, fpResult)
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -439,7 +438,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = e.applyClaudeOAuthStableFingerprintBody(auth, apiKey, body)
 
 	var fpResult *helps.ClaudeOAuthFingerprintGateResult
-	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
+	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, opts.OriginalRequest, body, baseModel)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +488,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
 		return nil, errHeaders
 	}
-	helps.SyncClaudeOAuthSessionHeaderToBody(httpReq.Header, fpResult)
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -716,7 +714,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body = e.applyClaudeOAuthStableFingerprintBody(auth, apiKey, body)
 
 	var fpResult *helps.ClaudeOAuthFingerprintGateResult
-	body, fpResult, ctx, err := e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
+	body, fpResult, ctx, err := e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, opts.OriginalRequest, body, baseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -741,7 +739,6 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
-	helps.SyncClaudeOAuthSessionHeaderToBody(httpReq.Header, fpResult)
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, body, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -1163,11 +1160,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
-	sessionID, errSessionID := helps.CachedSessionIDRequired(r.Context(), apiKey)
-	if errSessionID != nil {
-		return errSessionID
+	if sessionID, ok := helps.ClaudeOAuthOutboundSessionIDFromContext(r.Context()); ok {
+		r.Header.Set("X-Claude-Code-Session-Id", sessionID)
+	} else {
+		sessionID, errSessionID := helps.CachedSessionIDRequired(r.Context(), apiKey)
+		if errSessionID != nil {
+			return errSessionID
+		}
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", sessionID)
 	}
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", sessionID)
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	if isAnthropicBase {
 		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
