@@ -40,8 +40,15 @@ func TestEnsureMetadataProfileGeneratesDeviceAndUsesAccountUUID(t *testing.T) {
 	if profile.AccountUUID != "account-uuid" {
 		t.Fatalf("account_uuid = %q, want account-uuid", profile.AccountUUID)
 	}
-	if profile.Header.UserAgent == "" || profile.Header.PackageVersion == "" {
-		t.Fatalf("missing header profile: %#v", profile.Header)
+	raw, errMarshal := json.Marshal(metadata[ProfileMetadataKey])
+	if errMarshal != nil {
+		t.Fatalf("marshal profile: %v", errMarshal)
+	}
+	if strings.Contains(string(raw), `"header"`) {
+		t.Fatalf("generated profile should not include header: %s", raw)
+	}
+	if strings.Contains(string(raw), `"version"`) || strings.Contains(string(raw), `"created_at"`) {
+		t.Fatalf("generated profile should only include device/account: %s", raw)
 	}
 }
 

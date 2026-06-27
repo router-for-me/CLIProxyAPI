@@ -240,13 +240,18 @@ func ClaudeOAuthFingerprintGate(ctx context.Context, cfg *config.Config, auth *c
 	registry := registryForAuth(authID)
 	overrideDevice := claudeoauth.OverrideDevice(cfg)
 	profileIdentity, hasProfileIdentity := claudeOAuthAccountIdentityFromProfile(auth)
-	useProfileOverride := overrideDevice && hasProfileIdentity
+	if overrideDevice && !hasProfileIdentity {
+		result.Violation = "missing_profile"
+		fillClaudeOAuthGateResultIdentity(result, claudeOAuthAccountIdentity{})
+		MaybeLogClaudeOAuthFingerprintInbound(cfg, auth, inboundHeaders, body, model, result)
+		return body, result, fmt.Errorf("claude oauth fingerprint: missing complete auth profile")
+	}
 	ttl := claudeOAuthFingerprintSessionTTL(cfg)
 	now := time.Now()
 
 	claudeOAuthRegistryMu.Lock()
 	purgeExpiredSessionsLocked(registry, now)
-	if useProfileOverride {
+	if overrideDevice {
 		registry.account = profileIdentity
 	} else if registry.account.Format == "" {
 		registry.account = firstClaudeOAuthAccountIdentity(authID, inboundIdentity)
@@ -265,7 +270,7 @@ func ClaudeOAuthFingerprintGate(ctx context.Context, cfg *config.Config, auth *c
 		return body, result, claudeOAuthFingerprintErrorFor(result.Violation)
 	}
 
-	if !useProfileOverride {
+	if !overrideDevice {
 		return body, result, nil
 	}
 

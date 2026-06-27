@@ -67,11 +67,8 @@ func TestBuildAuthFileEntryExposesClaudeOAuthProfile(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	profile := claudeoauth.Profile{
-		Version:     claudeoauth.ProfileVersion,
-		CreatedAt:   "2026-06-26T00:00:00Z",
 		DeviceID:    strings.Repeat("a", 64),
 		AccountUUID: "account-uuid",
-		Header:      claudeoauth.DefaultHeaderProfile(&config.Config{}),
 	}
 	h := &Handler{}
 	entry := h.buildAuthFileEntry(&coreauth.Auth{
@@ -95,5 +92,8 @@ func TestBuildAuthFileEntryExposesClaudeOAuthProfile(t *testing.T) {
 	}
 	if rawSummary["device_id"] != profile.DeviceID {
 		t.Fatalf("device_id = %v, want %s", rawSummary["device_id"], profile.DeviceID)
+	}
+	if _, ok := rawSummary["header"]; ok {
+		t.Fatalf("summary should not expose generated header profile: %#v", rawSummary["header"])
 	}
 }

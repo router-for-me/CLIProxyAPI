@@ -119,12 +119,12 @@ func formatClaudeOAuthFingerprintLine(direction string, inboundHeaders, outbound
 		time.Now().Format("01-02 15:04:05"),
 		"dir=" + direction,
 		"req=" + truncateClaudeOAuthLogToken(gateResult.RequestID),
-		"session=" + truncateClaudeOAuthLogToken(gateResult.SessionID),
+		"session=" + truncateClaudeOAuthLogToken(claudeOAuthLogSession(direction, inboundHeaders, outboundHeaders, body)),
 	}
 	if direction == "in" {
-		parts = append(parts, claudeOAuthInboundIdentityLogParts(gateResult)...)
+		parts = append(parts, claudeOAuthIdentityLogParts(claudeOAuthInboundLogIdentity(gateResult))...)
 	} else {
-		parts = append(parts, claudeOAuthIdentityLogParts(gateResult, body)...)
+		parts = append(parts, claudeOAuthIdentityLogParts(claudeOAuthLogIdentityFromBody(body))...)
 		parts = append(parts, claudeOAuthInboundMismatchLogParts(gateResult, body)...)
 	}
 	if direction == "out" && outboundHeaders != nil {
@@ -168,8 +168,17 @@ func claudeOAuthOutboundHeaderLogParts(headers http.Header) []string {
 	}
 }
 
-func claudeOAuthIdentityLogParts(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) []string {
-	identity := claudeOAuthOutboundLogIdentity(gateResult, outboundBody)
+func claudeOAuthLogSession(direction string, inboundHeaders, outboundHeaders http.Header, body []byte) string {
+	headerSession := ""
+	if direction == "in" {
+		headerSession = extractClaudeOAuthSessionFromHeader(inboundHeaders)
+	} else {
+		headerSession = extractClaudeOAuthSessionFromHeader(outboundHeaders)
+	}
+	return resolveClaudeOAuthCanonicalSessionID(headerSession, extractClaudeOAuthSessionFromBody(body))
+}
+
+func claudeOAuthIdentityLogParts(identity claudeOAuthLogIdentity) []string {
 	if identity.Format == "legacy" {
 		return []string{
 			"user=" + truncateClaudeOAuthLogToken(identity.UserHash),
@@ -182,30 +191,12 @@ func claudeOAuthIdentityLogParts(gateResult *ClaudeOAuthFingerprintGateResult, o
 	}
 }
 
-func claudeOAuthInboundIdentityLogParts(gateResult *ClaudeOAuthFingerprintGateResult) []string {
-	if gateResult.InboundFormat == "legacy" {
-		return []string{
-			"user=" + truncateClaudeOAuthLogToken(gateResult.InboundUserHash),
-			"account=" + truncateClaudeOAuthLogToken(gateResult.InboundAccountID),
-		}
-	}
-	return []string{
-		"device=" + truncateClaudeOAuthLogToken(gateResult.InboundDeviceID),
-		"account=" + truncateClaudeOAuthLogToken(gateResult.InboundAccountID),
-	}
-}
-
 func claudeOAuthInboundMismatchLogParts(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) []string {
-	inbound := claudeOAuthLogIdentity{
-		Format:    gateResult.InboundFormat,
-		DeviceID:  gateResult.InboundDeviceID,
-		AccountID: gateResult.InboundAccountID,
-		UserHash:  gateResult.InboundUserHash,
-	}
+	inbound := claudeOAuthInboundLogIdentity(gateResult)
 	if inbound.Format == "" {
 		return nil
 	}
-	outbound := claudeOAuthOutboundLogIdentity(gateResult, outboundBody)
+	outbound := claudeOAuthLogIdentityFromBody(outboundBody)
 	if !claudeOAuthLogIdentityMismatch(inbound, outbound) {
 		return nil
 	}
@@ -230,26 +221,26 @@ type claudeOAuthLogIdentity struct {
 	UserHash  string
 }
 
-func claudeOAuthOutboundLogIdentity(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) claudeOAuthLogIdentity {
-	identity := claudeOAuthLogIdentity{
-		Format:    gateResult.Format,
-		DeviceID:  gateResult.DeviceID,
-		AccountID: gateResult.AccountID,
-		UserHash:  gateResult.UserHash,
+func claudeOAuthInboundLogIdentity(gateResult *ClaudeOAuthFingerprintGateResult) claudeOAuthLogIdentity {
+	if gateResult == nil {
+		return claudeOAuthLogIdentity{}
 	}
-	if len(outboundBody) > 0 {
-		userID := gjson.GetBytes(outboundBody, "metadata.user_id").String()
-		if strings.HasPrefix(userID, "{") {
-			identity.Format = "json"
-			if v := strings.TrimSpace(gjson.Get(userID, "device_id").String()); v != "" {
-				identity.DeviceID = v
-			}
-			if v := strings.TrimSpace(gjson.Get(userID, "account_uuid").String()); v != "" {
-				identity.AccountID = v
-			}
-		}
+	return claudeOAuthLogIdentity{
+		Format:    gateResult.InboundFormat,
+		DeviceID:  gateResult.InboundDeviceID,
+		AccountID: gateResult.InboundAccountID,
+		UserHash:  gateResult.InboundUserHash,
 	}
-	return identity
+}
+
+func claudeOAuthLogIdentityFromBody(body []byte) claudeOAuthLogIdentity {
+	inbound := extractClaudeOAuthIdentityFromBody(body)
+	return claudeOAuthLogIdentity{
+		Format:    inbound.Format,
+		DeviceID:  inbound.DeviceID,
+		AccountID: inbound.AccountUUID,
+		UserHash:  inbound.UserHash,
+	}
 }
 
 func claudeOAuthLogIdentityMismatch(inbound, outbound claudeOAuthLogIdentity) bool {

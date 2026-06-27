@@ -123,6 +123,11 @@ func TestApplyClaudeHeaders_ClaudeOAuthOverrideUsesPersistedProfile(t *testing.T
 		},
 		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
 			StabilizeDeviceProfile: &stabilize,
+			UserAgent:              "claude-cli/9.9.9 (external, cli)",
+			PackageVersion:         "9.9.9",
+			RuntimeVersion:         "v99.9.9",
+			OS:                     "Linux",
+			Arch:                   "x64",
 		},
 	}
 	auth := &cliproxyauth.Auth{
@@ -132,17 +137,8 @@ func TestApplyClaudeHeaders_ClaudeOAuthOverrideUsesPersistedProfile(t *testing.T
 			"access_token": "sk-ant-oat-test",
 			"email":        "user@example.com",
 			claudeoauth.ProfileMetadataKey: claudeoauth.Profile{
-				Version:     claudeoauth.ProfileVersion,
-				CreatedAt:   "2026-06-26T00:00:00Z",
 				DeviceID:    strings.Repeat("a", 64),
 				AccountUUID: "account-uuid",
-				Header: claudeoauth.HeaderProfile{
-					UserAgent:      "claude-cli/2.1.63 (external, cli)",
-					PackageVersion: "0.74.0",
-					RuntimeVersion: "v24.3.0",
-					OS:             "Linux",
-					Arch:           "x64",
-				},
 			},
 		},
 	}
@@ -159,7 +155,10 @@ func TestApplyClaudeHeaders_ClaudeOAuthOverrideUsesPersistedProfile(t *testing.T
 		t.Fatalf("applyClaudeHeaders() error = %v", err)
 	}
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.63 (external, cli)", "0.74.0", "v24.3.0", "Linux", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.186 (external, cli)", "0.94.0", "v24.3.0", "MacOS", "arm64")
+	if got := req.Header.Get("Anthropic-Beta"); got != claudeOAuthStableBetas {
+		t.Fatalf("Anthropic-Beta = %q, want %q", got, claudeOAuthStableBetas)
+	}
 }
 
 func TestClaudeExecutorPrepareRequestAuthAddsMissingOAuthProfile(t *testing.T) {
@@ -2654,10 +2653,20 @@ func TestClaudeExecutor_ClaudeOAuthStableFingerprintPinsBillingHeader(t *testing
 			OverrideDevice: true,
 		},
 	})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "sk-ant-oat-test",
-		"base_url": server.URL,
-	}}
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":   "sk-ant-oat-test",
+			"base_url":  server.URL,
+			"auth_kind": cliproxyauth.AuthKindOAuth,
+		},
+		Metadata: map[string]any{
+			claudeoauth.ProfileMetadataKey: claudeoauth.Profile{
+				DeviceID:    strings.Repeat("a", 64),
+				AccountUUID: "account-uuid",
+			},
+		},
+	}
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{

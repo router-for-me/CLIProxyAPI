@@ -7,39 +7,18 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-const (
-	ProfileMetadataKey = "claude_oauth_profile"
-	ProfileVersion     = 1
-
-	defaultUserAgent      = "claude-cli/2.1.186 (external, cli)"
-	defaultPackageVersion = "0.94.0"
-	defaultRuntimeVersion = "v24.3.0"
-	defaultOS             = "MacOS"
-	defaultArch           = "arm64"
-)
+const ProfileMetadataKey = "claude_oauth_profile"
 
 var deviceIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-type HeaderProfile struct {
-	UserAgent      string `json:"user_agent"`
-	PackageVersion string `json:"package_version"`
-	RuntimeVersion string `json:"runtime_version"`
-	OS             string `json:"os"`
-	Arch           string `json:"arch"`
-}
-
 type Profile struct {
-	Version     int           `json:"version"`
-	CreatedAt   string        `json:"created_at"`
-	DeviceID    string        `json:"device_id"`
-	AccountUUID string        `json:"account_uuid"`
-	Header      HeaderProfile `json:"header"`
+	DeviceID    string `json:"device_id"`
+	AccountUUID string `json:"account_uuid"`
 }
 
 func Enabled(cfg *config.Config) bool {
@@ -173,14 +152,6 @@ func ProfileFromMetadata(metadata map[string]any) (Profile, bool) {
 func NormalizeProfile(profile Profile, cfg *config.Config, accountUUID string) (Profile, bool, error) {
 	original, _ := json.Marshal(profile)
 	changed := false
-	if profile.Version == 0 {
-		profile.Version = ProfileVersion
-		changed = true
-	}
-	if strings.TrimSpace(profile.CreatedAt) == "" {
-		profile.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-		changed = true
-	}
 	if !ValidDeviceID(profile.DeviceID) {
 		deviceID, err := GenerateDeviceID()
 		if err != nil {
@@ -191,11 +162,6 @@ func NormalizeProfile(profile Profile, cfg *config.Config, accountUUID string) (
 	}
 	if strings.TrimSpace(profile.AccountUUID) == "" && strings.TrimSpace(accountUUID) != "" {
 		profile.AccountUUID = strings.TrimSpace(accountUUID)
-		changed = true
-	}
-	header := normalizeHeaderProfile(profile.Header, DefaultHeaderProfile(cfg))
-	if header != profile.Header {
-		profile.Header = header
 		changed = true
 	}
 	normalized, _ := json.Marshal(profile)
@@ -211,11 +177,8 @@ func GenerateProfile(cfg *config.Config, accountUUID string) (Profile, error) {
 		return Profile{}, err
 	}
 	return Profile{
-		Version:     ProfileVersion,
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 		DeviceID:    deviceID,
 		AccountUUID: strings.TrimSpace(accountUUID),
-		Header:      DefaultHeaderProfile(cfg),
 	}, nil
 }
 
@@ -231,33 +194,10 @@ func ValidDeviceID(deviceID string) bool {
 	return deviceIDPattern.MatchString(strings.TrimSpace(deviceID))
 }
 
-func DefaultHeaderProfile(cfg *config.Config) HeaderProfile {
-	hdrDefault := func(cfgVal, fallback string) string {
-		if strings.TrimSpace(cfgVal) != "" {
-			return strings.TrimSpace(cfgVal)
-		}
-		return fallback
-	}
-	var hd config.ClaudeHeaderDefaults
-	if cfg != nil {
-		hd = cfg.ClaudeHeaderDefaults
-	}
-	return HeaderProfile{
-		UserAgent:      hdrDefault(hd.UserAgent, defaultUserAgent),
-		PackageVersion: hdrDefault(hd.PackageVersion, defaultPackageVersion),
-		RuntimeVersion: hdrDefault(hd.RuntimeVersion, defaultRuntimeVersion),
-		OS:             hdrDefault(hd.OS, defaultOS),
-		Arch:           hdrDefault(hd.Arch, defaultArch),
-	}
-}
-
 func Summary(profile Profile) map[string]any {
 	return map[string]any{
-		"version":      profile.Version,
-		"created_at":   profile.CreatedAt,
 		"device_id":    profile.DeviceID,
 		"account_uuid": profile.AccountUUID,
-		"header":       profile.Header,
 	}
 }
 
@@ -269,25 +209,6 @@ func MetadataString(metadata map[string]any, key string) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
-}
-
-func normalizeHeaderProfile(header, fallback HeaderProfile) HeaderProfile {
-	if strings.TrimSpace(header.UserAgent) == "" {
-		header.UserAgent = fallback.UserAgent
-	}
-	if strings.TrimSpace(header.PackageVersion) == "" {
-		header.PackageVersion = fallback.PackageVersion
-	}
-	if strings.TrimSpace(header.RuntimeVersion) == "" {
-		header.RuntimeVersion = fallback.RuntimeVersion
-	}
-	if strings.TrimSpace(header.OS) == "" {
-		header.OS = fallback.OS
-	}
-	if strings.TrimSpace(header.Arch) == "" {
-		header.Arch = fallback.Arch
-	}
-	return header
 }
 
 func isClaudeOAuthMetadata(metadata map[string]any) bool {

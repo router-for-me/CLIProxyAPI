@@ -26,6 +26,11 @@ const (
 	defaultClaudeFingerprintRuntimeVersion = "v24.3.0"
 	defaultClaudeFingerprintOS             = "MacOS"
 	defaultClaudeFingerprintArch           = "arm64"
+	claudeOAuthStableUserAgent             = "claude-cli/2.1.186 (external, cli)"
+	claudeOAuthStablePackageVersion        = "0.94.0"
+	claudeOAuthStableRuntimeVersion        = "v24.3.0"
+	claudeOAuthStableOS                    = "MacOS"
+	claudeOAuthStableArch                  = "arm64"
 	claudeDeviceProfileTTL                 = 7 * 24 * time.Hour
 	claudeDeviceProfileLockTTL             = 5 * time.Second
 	claudeDeviceProfileCleanupPeriod       = time.Hour
@@ -538,6 +543,21 @@ func DefaultClaudeVersion(cfg *config.Config) string {
 	return "2.1.63"
 }
 
+func stableClaudeOAuthDeviceProfile() ClaudeDeviceProfile {
+	profile := ClaudeDeviceProfile{
+		UserAgent:      claudeOAuthStableUserAgent,
+		PackageVersion: claudeOAuthStablePackageVersion,
+		RuntimeVersion: claudeOAuthStableRuntimeVersion,
+		OS:             claudeOAuthStableOS,
+		Arch:           claudeOAuthStableArch,
+	}
+	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
+		profile.version = version
+		profile.hasVersion = true
+	}
+	return profile
+}
+
 func ClaudeOAuthProfileDeviceProfile(auth *cliproxyauth.Auth, cfg *config.Config) (ClaudeDeviceProfile, bool) {
 	if !claudeoauth.OverrideDevice(cfg) || !claudeoauth.IsClaudeOAuthAuth(auth) {
 		return ClaudeDeviceProfile{}, false
@@ -549,34 +569,7 @@ func ClaudeOAuthProfileDeviceProfile(auth *cliproxyauth.Auth, cfg *config.Config
 	if !claudeoauth.ValidDeviceID(profile.DeviceID) || strings.TrimSpace(profile.AccountUUID) == "" {
 		return ClaudeDeviceProfile{}, false
 	}
-	deviceProfile := ClaudeDeviceProfile{
-		UserAgent:      strings.TrimSpace(profile.Header.UserAgent),
-		PackageVersion: strings.TrimSpace(profile.Header.PackageVersion),
-		RuntimeVersion: strings.TrimSpace(profile.Header.RuntimeVersion),
-		OS:             strings.TrimSpace(profile.Header.OS),
-		Arch:           strings.TrimSpace(profile.Header.Arch),
-	}
-	baseline := defaultClaudeDeviceProfile(cfg)
-	if deviceProfile.UserAgent == "" {
-		deviceProfile.UserAgent = baseline.UserAgent
-	}
-	if deviceProfile.PackageVersion == "" {
-		deviceProfile.PackageVersion = baseline.PackageVersion
-	}
-	if deviceProfile.RuntimeVersion == "" {
-		deviceProfile.RuntimeVersion = baseline.RuntimeVersion
-	}
-	if deviceProfile.OS == "" {
-		deviceProfile.OS = baseline.OS
-	}
-	if deviceProfile.Arch == "" {
-		deviceProfile.Arch = baseline.Arch
-	}
-	if version, ok := parseClaudeCLIVersion(deviceProfile.UserAgent); ok {
-		deviceProfile.version = version
-		deviceProfile.hasVersion = true
-	}
-	return deviceProfile, true
+	return stableClaudeOAuthDeviceProfile(), true
 }
 
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {

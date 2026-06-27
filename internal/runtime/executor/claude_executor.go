@@ -237,6 +237,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	body = e.applyClaudeOAuthStableFingerprintBody(auth, apiKey, body)
 
 	var fpResult *helps.ClaudeOAuthFingerprintGateResult
 	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
@@ -434,6 +435,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	body = e.applyClaudeOAuthStableFingerprintBody(auth, apiKey, body)
 
 	var fpResult *helps.ClaudeOAuthFingerprintGateResult
 	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
@@ -709,6 +711,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	body = e.applyClaudeOAuthStableFingerprintBody(auth, apiKey, body)
 
 	var fpResult *helps.ClaudeOAuthFingerprintGateResult
 	body, fpResult, ctx, err := e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
@@ -1121,6 +1124,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	if !strings.Contains(baseBetas, "interleaved-thinking") {
 		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
+	if useOAuthProfileDeviceProfile {
+		baseBetas = claudeOAuthStableBetas
 	}
 
 	// Merge extra betas from request body and request flags.
@@ -1857,6 +1863,7 @@ const fingerprintSalt = "59cf53e54c78"
 const (
 	claudeOAuthStableBillingVersion    = "2.1.186"
 	claudeOAuthStableBillingEntrypoint = "cli"
+	claudeOAuthStableBetas             = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thin"
 )
 
 // computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.

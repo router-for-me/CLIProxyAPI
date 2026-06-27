@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -20,4 +21,11 @@ func (e *ClaudeExecutor) applyClaudeOAuthFingerprintGate(ctx context.Context, au
 		return out, result, ctx, statusErr{code: helps.ClaudeOAuthFingerprintHTTPStatus(err), msg: err.Error()}
 	}
 	return out, result, ctx, nil
+}
+
+func (e *ClaudeExecutor) applyClaudeOAuthStableFingerprintBody(auth *cliproxyauth.Auth, apiKey string, body []byte) []byte {
+	if !helps.ClaudeOAuthFingerprintEnabled(e.cfg, apiKey) || !claudeoauth.OverrideDevice(e.cfg) || !claudeoauth.IsClaudeOAuthAuth(auth) {
+		return body
+	}
+	return normalizeClaudeOAuthStableBillingHeader(body)
 }

@@ -98,11 +98,8 @@ func TestClaudeOAuthFingerprintGate_OverrideDeviceFalsePreservesBody(t *testing.
 	cfg.ClaudeOAuthFingerprint.OverrideDevice = false
 	auth := testClaudeOAuthAuth("auth-preserve")
 	auth.Metadata[claudeoauth.ProfileMetadataKey] = claudeoauth.Profile{
-		Version:     claudeoauth.ProfileVersion,
-		CreatedAt:   "2026-06-26T00:00:00Z",
 		DeviceID:    strings.Repeat("a", 64),
 		AccountUUID: "profile-account",
-		Header:      claudeoauth.DefaultHeaderProfile(cfg),
 	}
 	body := jsonUserPayload(strings.Repeat("b", 64), "inbound-account", "session-1")
 
@@ -126,11 +123,8 @@ func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueUsesProfile(t *testing.T) 
 	auth := testClaudeOAuthAuth("auth-profile")
 	auth.Metadata["access_token"] = "sk-ant-oat-test"
 	auth.Metadata[claudeoauth.ProfileMetadataKey] = claudeoauth.Profile{
-		Version:     claudeoauth.ProfileVersion,
-		CreatedAt:   "2026-06-26T00:00:00Z",
 		DeviceID:    profileDevice,
 		AccountUUID: "profile-account",
-		Header:      claudeoauth.DefaultHeaderProfile(cfg),
 	}
 	body := jsonUserPayload(strings.Repeat("d", 64), "profile-account", "session-1")
 
@@ -159,11 +153,8 @@ func TestClaudeOAuthFingerprintGate_OverrideDeviceTruePreservesLegacyUserIDSessi
 	auth := testClaudeOAuthAuth("auth-profile-legacy")
 	auth.Metadata["access_token"] = "sk-ant-oat-test"
 	auth.Metadata[claudeoauth.ProfileMetadataKey] = claudeoauth.Profile{
-		Version:     claudeoauth.ProfileVersion,
-		CreatedAt:   "2026-06-26T00:00:00Z",
 		DeviceID:    profileDevice,
 		AccountUUID: profileAccount,
-		Header:      claudeoauth.DefaultHeaderProfile(cfg),
 	}
 	inboundUserID := "user_" + strings.Repeat("d", 64) + "_account_11111111-1111-1111-1111-111111111111_session_" + sessionID
 	body := []byte(`{"metadata":{"user_id":"` + inboundUserID + `"},"messages":[{"role":"user","content":"hi"}]}`)
@@ -181,29 +172,26 @@ func TestClaudeOAuthFingerprintGate_OverrideDeviceTruePreservesLegacyUserIDSessi
 	}
 }
 
-func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueSkipsIncompleteProfile(t *testing.T) {
+func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueRejectsIncompleteProfile(t *testing.T) {
 	ResetClaudeOAuthFingerprintRegistry()
 	cfg := testClaudeOAuthFingerprintConfig()
 	cfg.ClaudeOAuthFingerprint.OverrideDevice = true
 	auth := testClaudeOAuthAuth("auth-incomplete-profile")
 	auth.Metadata["access_token"] = "sk-ant-oat-test"
 	auth.Metadata[claudeoauth.ProfileMetadataKey] = claudeoauth.Profile{
-		Version:   claudeoauth.ProfileVersion,
-		CreatedAt: "2026-06-26T00:00:00Z",
-		DeviceID:  strings.Repeat("c", 64),
-		Header:    claudeoauth.DefaultHeaderProfile(cfg),
+		DeviceID: strings.Repeat("c", 64),
 	}
 	body := jsonUserPayload(strings.Repeat("d", 64), "inbound-account", "session-1")
 
 	out, res, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "m")
-	if err != nil {
-		t.Fatalf("gate error = %v", err)
+	if err == nil {
+		t.Fatal("expected incomplete profile error")
 	}
 	if string(out) != string(body) {
 		t.Fatalf("incomplete profile should not rewrite body\nout=%s\nin=%s", out, body)
 	}
-	if res == nil || res.Violation != "" {
-		t.Fatalf("incomplete profile should still allow request, got %#v", res)
+	if res == nil || res.Violation != "missing_profile" {
+		t.Fatalf("violation = %#v, want missing_profile", res)
 	}
 }
 
@@ -445,6 +433,33 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesInboundIdentityOnMismatch(t *t
 	}
 	if !strings.Contains(line, "in_device=aaaaaaaa") || !strings.Contains(line, "in_account=inbound-") {
 		t.Fatalf("line missing inbound identity: %s", line)
+	}
+}
+
+func TestFormatClaudeOAuthFingerprintLine_OutboundUsesActualBodyIdentity(t *testing.T) {
+	deviceID := strings.Repeat("a", 64)
+	body := jsonUserPayload(deviceID, "", "session-1")
+	result := &ClaudeOAuthFingerprintGateResult{
+		RequestID:        "req33333",
+		SessionID:        "session-1",
+		Slot:             1,
+		DeviceID:         deviceID,
+		AccountID:        "derived-account",
+		Format:           "json",
+		InboundDeviceID:  deviceID,
+		InboundAccountID: "",
+		InboundFormat:    "json",
+	}
+
+	line := formatClaudeOAuthFingerprintLine("out", nil, nil, body, "", result)
+	if !strings.Contains(line, "device=aaaaaaaa") {
+		t.Fatalf("line missing outbound device: %s", line)
+	}
+	if !strings.Contains(line, "account=-") {
+		t.Fatalf("outbound line should use actual empty body account, got: %s", line)
+	}
+	if strings.Contains(line, "account=derived") {
+		t.Fatalf("outbound line should not use derived gate account: %s", line)
 	}
 }
 
