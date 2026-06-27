@@ -1215,7 +1215,7 @@ func (m *Manager) preparedExecutionModelsWithAlias(ctx context.Context, auth *Au
 func (m *Manager) executionModelCandidatesWithAlias(ctx context.Context, auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult) {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequestedWithClient(ctx, auth, requestedModel)
-	upstreamModel := executionAliasPoolModel(auth, requestedModel, aliasResult)
+	upstreamModel := m.executionAliasPoolModel(ctx, auth, requestedModel, aliasResult)
 
 	var candidates []string
 	if auth != nil && auth.Attributes != nil {
@@ -1255,14 +1255,19 @@ func (m *Manager) resolveExecutionAliasResultForRequested(auth *Auth, requestedM
 	return m.applyOAuthModelAliasWithResult(auth, requestedModel)
 }
 
-func executionAliasPoolModel(auth *Auth, requestedModel string, aliasResult OAuthModelAliasResult) string {
+func (m *Manager) executionAliasPoolModel(ctx context.Context, auth *Auth, requestedModel string, aliasResult OAuthModelAliasResult) string {
+	if m != nil && ClientAPIKeyPrincipalFromContext(ctx) != "" {
+		if upstream := strings.TrimSpace(aliasResult.UpstreamModel); upstream != "" && !strings.EqualFold(upstream, requestedModel) {
+			return upstream
+		}
+	}
 	if auth != nil && auth.AuthKind() == AuthKindAPIKey {
 		if strings.TrimSpace(requestedModel) != "" {
 			return requestedModel
 		}
 	}
-	if strings.TrimSpace(aliasResult.UpstreamModel) != "" {
-		return aliasResult.UpstreamModel
+	if upstream := strings.TrimSpace(aliasResult.UpstreamModel); upstream != "" {
+		return upstream
 	}
 	return requestedModel
 }
