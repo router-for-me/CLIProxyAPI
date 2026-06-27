@@ -14,17 +14,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 const (
-	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.63 (external, cli)"
-	defaultClaudeFingerprintPackageVersion = "0.74.0"
-	defaultClaudeFingerprintRuntimeVersion = "v24.3.0"
-	defaultClaudeFingerprintOS             = "MacOS"
-	defaultClaudeFingerprintArch           = "arm64"
+	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.195 (external, cli)"
+	defaultClaudeFingerprintPackageVersion = "0.94.0"
+	defaultClaudeFingerprintRuntimeVersion = "v26.3.0"
+	defaultClaudeFingerprintOS             = "Linux"
+	defaultClaudeFingerprintArch           = "x64"
+	claudeOAuthStableUserAgent             = "claude-cli/2.1.195 (external, cli)"
+	claudeOAuthStablePackageVersion        = "0.94.0"
+	claudeOAuthStableRuntimeVersion        = "v26.3.0"
+	claudeOAuthStableOS                    = "Linux"
+	claudeOAuthStableArch                  = "x64"
 	claudeDeviceProfileTTL                 = 7 * 24 * time.Hour
 	claudeDeviceProfileLockTTL             = 5 * time.Second
 	claudeDeviceProfileCleanupPeriod       = time.Hour
@@ -535,6 +541,35 @@ func DefaultClaudeVersion(cfg *config.Config) string {
 		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
 	}
 	return "2.1.63"
+}
+
+func stableClaudeOAuthDeviceProfile() ClaudeDeviceProfile {
+	profile := ClaudeDeviceProfile{
+		UserAgent:      claudeOAuthStableUserAgent,
+		PackageVersion: claudeOAuthStablePackageVersion,
+		RuntimeVersion: claudeOAuthStableRuntimeVersion,
+		OS:             claudeOAuthStableOS,
+		Arch:           claudeOAuthStableArch,
+	}
+	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
+		profile.version = version
+		profile.hasVersion = true
+	}
+	return profile
+}
+
+func ClaudeOAuthProfileDeviceProfile(auth *cliproxyauth.Auth, cfg *config.Config) (ClaudeDeviceProfile, bool) {
+	if !claudeoauth.OverrideDevice(cfg) || !claudeoauth.IsClaudeOAuthAuth(auth) {
+		return ClaudeDeviceProfile{}, false
+	}
+	profile, ok := claudeoauth.ProfileFromAuth(auth)
+	if !ok {
+		return ClaudeDeviceProfile{}, false
+	}
+	if !claudeoauth.ValidDeviceID(profile.DeviceID) {
+		return ClaudeDeviceProfile{}, false
+	}
+	return stableClaudeOAuthDeviceProfile(), true
 }
 
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {

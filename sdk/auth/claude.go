@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	// legacy client removed
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -201,8 +202,9 @@ waitForCallback:
 	}
 
 	fileName := fmt.Sprintf("claude-%s.json", tokenStorage.Email)
-	metadata := map[string]any{
-		"email": tokenStorage.Email,
+	metadata, err := claudeoauth.AuthMetadata(cfg, tokenStorage.Email, tokenStorage.AccountUUID)
+	if err != nil {
+		return nil, err
 	}
 
 	fmt.Println("Claude authentication successful")

@@ -135,6 +135,9 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// ClaudeOAuthFingerprint configures outbound identity pinning and session limits for Claude OAuth traffic.
+	ClaudeOAuthFingerprint ClaudeOAuthFingerprintConfig `yaml:"claude-oauth-fingerprint" json:"claude-oauth-fingerprint"`
+
 	// DisableClaudeCloakMode globally disables Claude request cloaking when true.
 	// Cloaking disguises requests as the official Claude Code CLI and replaces the
 	// system prompt. When true, every Claude credential defaults to no cloaking
@@ -261,6 +264,17 @@ type ClaudeHeaderDefaults struct {
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+}
+
+// ClaudeOAuthFingerprintConfig configures Claude OAuth session limiting and device overrides.
+type ClaudeOAuthFingerprintConfig struct {
+	Enabled                bool   `yaml:"enabled" json:"enabled"`
+	OverrideDevice         bool   `yaml:"override_device" json:"override_device"`
+	GenerateMissingProfile bool   `yaml:"generate_missing_profile" json:"generate_missing_profile"`
+	MaxSessions            int    `yaml:"max-sessions" json:"max-sessions"`
+	SessionTTL             string `yaml:"session-ttl" json:"session-ttl"`
+	LogFingerprint         bool   `yaml:"log-fingerprint" json:"log-fingerprint"`
+	LogDir                 string `yaml:"fingerprint-log-dir" json:"fingerprint-log-dir"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -788,6 +802,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
 
+	// Sanitize Claude OAuth fingerprint defaults.
+	cfg.SanitizeClaudeOAuthFingerprint()
+
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
@@ -909,6 +926,21 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+}
+
+// SanitizeClaudeOAuthFingerprint normalizes Claude OAuth fingerprint settings.
+func (cfg *Config) SanitizeClaudeOAuthFingerprint() {
+	if cfg == nil {
+		return
+	}
+	if cfg.ClaudeOAuthFingerprint.MaxSessions <= 0 {
+		cfg.ClaudeOAuthFingerprint.MaxSessions = 4
+	}
+	cfg.ClaudeOAuthFingerprint.SessionTTL = strings.TrimSpace(cfg.ClaudeOAuthFingerprint.SessionTTL)
+	if cfg.ClaudeOAuthFingerprint.SessionTTL == "" {
+		cfg.ClaudeOAuthFingerprint.SessionTTL = "1h"
+	}
+	cfg.ClaudeOAuthFingerprint.LogDir = strings.TrimSpace(cfg.ClaudeOAuthFingerprint.LogDir)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

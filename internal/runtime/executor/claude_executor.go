@@ -236,6 +236,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	fingerprint := e.newClaudeOAuthFingerprintRequest(auth, apiKey, opts.Headers, opts.OriginalRequest, baseModel)
+	body, ctx, err = fingerprint.begin(ctx, body)
+	if err != nil {
+		return resp, err
+	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -271,6 +276,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
+	bodyForUpstream = fingerprint.finalizeBody(bodyForUpstream)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -283,9 +289,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel); errHeaders != nil {
 		return resp, errHeaders
 	}
+	fingerprint.logOutbound(httpReq.Header, bodyForUpstream)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -426,6 +433,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	fingerprint := e.newClaudeOAuthFingerprintRequest(auth, apiKey, opts.Headers, opts.OriginalRequest, baseModel)
+	body, ctx, err = fingerprint.begin(ctx, body)
+	if err != nil {
+		return nil, err
+	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -458,6 +470,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
+	bodyForUpstream = fingerprint.finalizeBody(bodyForUpstream)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
@@ -469,9 +482,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, baseModel); errHeaders != nil {
 		return nil, errHeaders
 	}
+	fingerprint.logOutbound(httpReq.Header, bodyForUpstream)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -694,6 +708,11 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	fingerprint := e.newClaudeOAuthFingerprintRequest(auth, apiKey, opts.Headers, opts.OriginalRequest, baseModel)
+	body, ctx, err := fingerprint.begin(ctx, body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -706,15 +725,17 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
+	body = fingerprint.finalizeBody(body)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
+	fingerprint.logOutbound(httpReq.Header, body)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -822,6 +843,9 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	auth.Metadata["type"] = "claude"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
+	if errProfile := e.updateClaudeOAuthRefreshMetadata(auth, td.AccountUUID); errProfile != nil {
+		return nil, errProfile
+	}
 	return auth, nil
 }
 
@@ -1013,9 +1037,13 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) error {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, baseModels ...string) error {
 	if r == nil {
 		return nil
+	}
+	baseModel := ""
+	if len(baseModels) > 0 {
+		baseModel = baseModels[0]
 	}
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
@@ -1043,9 +1071,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
-	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
+	oauthProfileDeviceProfile, useOAuthProfileDeviceProfile := helps.ClaudeOAuthProfileDeviceProfile(auth, cfg)
+	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg) && !useOAuthProfileDeviceProfile
 	var deviceProfile helps.ClaudeDeviceProfile
-	if stabilizeDeviceProfile {
+	if useOAuthProfileDeviceProfile {
+		deviceProfile = oauthProfileDeviceProfile
+	} else if stabilizeDeviceProfile {
 		var errDeviceProfile error
 		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, ginHeaders, cfg)
 		if errDeviceProfile != nil {
@@ -1062,6 +1093,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	if !strings.Contains(baseBetas, "interleaved-thinking") {
 		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
+	if useOAuthProfileDeviceProfile {
+		baseBetas = claudeOAuthStableBetasForModel(baseModel)
 	}
 
 	// Merge extra betas from request body and request flags.
@@ -1095,11 +1129,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
-	sessionID, errSessionID := helps.CachedSessionIDRequired(r.Context(), apiKey)
-	if errSessionID != nil {
-		return errSessionID
+	if sessionID, ok := helps.ClaudeOAuthOutboundSessionIDFromContext(r.Context()); ok {
+		r.Header.Set("X-Claude-Code-Session-Id", sessionID)
+	} else {
+		sessionID, errSessionID := helps.CachedSessionIDRequired(r.Context(), apiKey)
+		if errSessionID != nil {
+			return errSessionID
+		}
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", sessionID)
 	}
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", sessionID)
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	if isAnthropicBase {
 		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
@@ -1118,7 +1156,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official
 	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
-	if stabilizeDeviceProfile {
+	if useOAuthProfileDeviceProfile || stabilizeDeviceProfile {
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
@@ -2059,8 +2097,13 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
+		var useOAuthProfileFingerprint bool
+		billingVersion, entrypoint, useOAuthProfileFingerprint = claudeOAuthFingerprintBillingDefaults(cfg, auth, oauthToken, billingVersion, entrypoint)
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		if useOAuthProfileFingerprint {
+			payload = normalizeClaudeOAuthStableBillingHeader(payload)
+		}
 	}
 
 	// Inject fake user ID

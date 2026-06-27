@@ -15,6 +15,8 @@ type ClaudeTokenData struct {
 	AccessToken string `json:"access_token"`
 	// RefreshToken is used to obtain new access tokens
 	RefreshToken string `json:"refresh_token"`
+	// AccountUUID is the Anthropic account UUID returned by OAuth.
+	AccountUUID string `json:"account_uuid,omitempty"`
 	// Email is the Anthropic account email
 	Email string `json:"email"`
 	// Expire is the timestamp of the token expire
