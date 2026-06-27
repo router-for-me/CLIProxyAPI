@@ -13,8 +13,9 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 		return models
 	}
 	type aliasEntry struct {
-		alias string
-		fork  bool
+		upstream string
+		alias    string
+		fork     bool
 	}
 	forward := make(map[string][]aliasEntry, len(aliases))
 	for _, entry := range aliases {
@@ -24,12 +25,13 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 			continue
 		}
 		key := strings.ToLower(name)
-		forward[key] = append(forward[key], aliasEntry{alias: alias, fork: entry.Fork})
+		forward[key] = append(forward[key], aliasEntry{upstream: name, alias: alias, fork: entry.Fork})
 	}
 	if len(forward) == 0 {
 		return models
 	}
 
+	// Supplier list ids are often global compat aliases; map them back to upstream names for per-key rules.
 	compatBridge := make(map[string]string)
 	for i := range compat {
 		if compat[i].Disabled {
@@ -48,6 +50,38 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 		}
 	}
 
+	matchEntries := func(listID string) []aliasEntry {
+		listID = strings.TrimSpace(listID)
+		if listID == "" {
+			return nil
+		}
+		if entries := forward[strings.ToLower(listID)]; len(entries) > 0 {
+			return entries
+		}
+		if upstreamKey, ok := compatBridge[strings.ToLower(listID)]; ok {
+			return forward[upstreamKey]
+		}
+		return nil
+	}
+
+	appendClone := func(out *[]map[string]any, seen map[string]struct{}, base map[string]any, newID string) {
+		newID = strings.TrimSpace(newID)
+		if newID == "" {
+			return
+		}
+		key := strings.ToLower(newID)
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		clone := make(map[string]any, len(base))
+		for k, v := range base {
+			clone[k] = v
+		}
+		clone["id"] = newID
+		*out = append(*out, clone)
+	}
+
 	out := make([]map[string]any, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
@@ -59,12 +93,7 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 		if id == "" {
 			continue
 		}
-		entries := forward[strings.ToLower(id)]
-		if len(entries) == 0 {
-			if upstream, ok := compatBridge[strings.ToLower(id)]; ok {
-				entries = forward[upstream]
-			}
-		}
+		entries := matchEntries(id)
 		if len(entries) == 0 {
 			idKey := strings.ToLower(id)
 			if _, exists := seen[idKey]; exists {
@@ -75,48 +104,11 @@ func ApplyClientAPIKeyModelAliasesToOpenAIMaps(keys config.ClientAPIKeys, client
 			continue
 		}
 
-		keepOriginal := false
 		for _, entry := range entries {
 			if entry.fork {
-				keepOriginal = true
-				break
+				appendClone(&out, seen, model, entry.upstream)
 			}
-		}
-		if keepOriginal {
-			idKey := strings.ToLower(id)
-			if _, exists := seen[idKey]; !exists {
-				seen[idKey] = struct{}{}
-				out = append(out, model)
-			}
-		}
-
-		addedAlias := false
-		for _, entry := range entries {
-			mappedID := strings.TrimSpace(entry.alias)
-			if mappedID == "" || strings.EqualFold(mappedID, id) {
-				continue
-			}
-			aliasKey := strings.ToLower(mappedID)
-			if _, exists := seen[aliasKey]; exists {
-				continue
-			}
-			seen[aliasKey] = struct{}{}
-			clone := make(map[string]any, len(model))
-			for k, v := range model {
-				clone[k] = v
-			}
-			clone["id"] = mappedID
-			out = append(out, clone)
-			addedAlias = true
-		}
-
-		if !keepOriginal && !addedAlias {
-			idKey := strings.ToLower(id)
-			if _, exists := seen[idKey]; exists {
-				continue
-			}
-			seen[idKey] = struct{}{}
-			out = append(out, model)
+			appendClone(&out, seen, model, entry.alias)
 		}
 	}
 	if len(out) == 0 {
