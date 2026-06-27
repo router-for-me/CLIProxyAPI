@@ -120,6 +120,7 @@ func formatClaudeOAuthFingerprintLine(direction string, inboundHeaders, outbound
 		"dir=" + direction,
 		"req=" + truncateClaudeOAuthLogToken(gateResult.RequestID),
 		"session=" + truncateClaudeOAuthLogToken(claudeOAuthLogSession(direction, inboundHeaders, outboundHeaders, body)),
+		"header_session=" + truncateClaudeOAuthLogToken(claudeOAuthHeaderSession(direction, inboundHeaders, outboundHeaders)),
 	}
 	if direction == "in" {
 		parts = append(parts, claudeOAuthIdentityLogParts(claudeOAuthInboundLogIdentity(gateResult))...)
@@ -176,6 +177,13 @@ func claudeOAuthLogSession(direction string, inboundHeaders, outboundHeaders htt
 		headerSession = extractClaudeOAuthSessionFromHeader(outboundHeaders)
 	}
 	return resolveClaudeOAuthCanonicalSessionID(headerSession, extractClaudeOAuthSessionFromBody(body))
+}
+
+func claudeOAuthHeaderSession(direction string, inboundHeaders, outboundHeaders http.Header) string {
+	if direction == "in" {
+		return extractClaudeOAuthSessionFromHeader(inboundHeaders)
+	}
+	return extractClaudeOAuthSessionFromHeader(outboundHeaders)
 }
 
 func claudeOAuthIdentityLogParts(identity claudeOAuthLogIdentity) []string {

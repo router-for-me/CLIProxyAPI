@@ -294,6 +294,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return resp, errHeaders
 	}
+	helps.SyncClaudeOAuthSessionHeaderToBody(httpReq.Header, fpResult)
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -488,6 +489,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
 		return nil, errHeaders
 	}
+	helps.SyncClaudeOAuthSessionHeaderToBody(httpReq.Header, fpResult)
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, bodyForUpstream, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -739,6 +741,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
+	helps.SyncClaudeOAuthSessionHeaderToBody(httpReq.Header, fpResult)
 	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, body, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

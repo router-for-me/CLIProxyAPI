@@ -143,6 +143,34 @@ func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueUsesProfile(t *testing.T) 
 	}
 }
 
+func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueAllowsEmptyProfileAccount(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig()
+	cfg.ClaudeOAuthFingerprint.OverrideDevice = true
+	profileDevice := strings.Repeat("c", 64)
+	auth := testClaudeOAuthAuth("auth-profile-empty-account")
+	auth.Metadata["access_token"] = "sk-ant-oat-test"
+	auth.Metadata[claudeoauth.ProfileMetadataKey] = claudeoauth.Profile{
+		DeviceID: profileDevice,
+	}
+	body := jsonUserPayload(strings.Repeat("d", 64), "inbound-account", "session-1")
+
+	out, res, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "m")
+	if err != nil {
+		t.Fatalf("gate error = %v", err)
+	}
+	outUserID := gjson.GetBytes(out, "metadata.user_id").String()
+	if got := gjson.Get(outUserID, "device_id").String(); got != profileDevice {
+		t.Fatalf("outbound device_id = %q, want %q", got, profileDevice)
+	}
+	if got := gjson.Get(outUserID, "account_uuid").String(); got != "" {
+		t.Fatalf("outbound account_uuid = %q, want empty", got)
+	}
+	if res == nil || res.Violation != "" {
+		t.Fatalf("empty profile account should be accepted, got %#v", res)
+	}
+}
+
 func TestClaudeOAuthFingerprintGate_OverrideDeviceTruePreservesLegacyUserIDSession(t *testing.T) {
 	ResetClaudeOAuthFingerprintRegistry()
 	cfg := testClaudeOAuthFingerprintConfig()
@@ -172,14 +200,47 @@ func TestClaudeOAuthFingerprintGate_OverrideDeviceTruePreservesLegacyUserIDSessi
 	}
 }
 
-func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueRejectsIncompleteProfile(t *testing.T) {
+func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueConvertsLegacyWhenProfileAccountEmpty(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig()
+	cfg.ClaudeOAuthFingerprint.OverrideDevice = true
+	profileDevice := strings.Repeat("e", 64)
+	sessionID := "22222222-2222-2222-2222-222222222222"
+	auth := testClaudeOAuthAuth("auth-profile-legacy-empty-account")
+	auth.Metadata["access_token"] = "sk-ant-oat-test"
+	auth.Metadata[claudeoauth.ProfileMetadataKey] = claudeoauth.Profile{
+		DeviceID: profileDevice,
+	}
+	inboundUserID := "user_" + strings.Repeat("d", 64) + "_account_11111111-1111-1111-1111-111111111111_session_" + sessionID
+	body := []byte(`{"metadata":{"user_id":"` + inboundUserID + `"},"messages":[{"role":"user","content":"hi"}]}`)
+
+	out, res, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "m")
+	if err != nil {
+		t.Fatalf("gate error = %v", err)
+	}
+	outUserID := gjson.GetBytes(out, "metadata.user_id").String()
+	if got := gjson.Get(outUserID, "device_id").String(); got != profileDevice {
+		t.Fatalf("outbound device_id = %q, want %q", got, profileDevice)
+	}
+	if got := gjson.Get(outUserID, "account_uuid").String(); got != "" {
+		t.Fatalf("outbound account_uuid = %q, want empty", got)
+	}
+	if got := gjson.Get(outUserID, "session_id").String(); got != sessionID {
+		t.Fatalf("outbound session_id = %q, want %q", got, sessionID)
+	}
+	if res == nil || res.Violation != "" {
+		t.Fatalf("empty profile account should be accepted, got %#v", res)
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueRejectsMissingProfileDevice(t *testing.T) {
 	ResetClaudeOAuthFingerprintRegistry()
 	cfg := testClaudeOAuthFingerprintConfig()
 	cfg.ClaudeOAuthFingerprint.OverrideDevice = true
 	auth := testClaudeOAuthAuth("auth-incomplete-profile")
 	auth.Metadata["access_token"] = "sk-ant-oat-test"
 	auth.Metadata[claudeoauth.ProfileMetadataKey] = claudeoauth.Profile{
-		DeviceID: strings.Repeat("c", 64),
+		AccountUUID: "profile-account",
 	}
 	body := jsonUserPayload(strings.Repeat("d", 64), "inbound-account", "session-1")
 
@@ -337,6 +398,36 @@ func TestClaudeOAuthFingerprintGate_SessionHeaderMismatchFlag(t *testing.T) {
 	}
 }
 
+func TestSyncClaudeOAuthSessionHeaderToBody_RewritesMismatch(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(ClaudeCodeSessionHeader, "header-session-id")
+	result := &ClaudeOAuthFingerprintGateResult{
+		BodySessionID: "body-session-id",
+	}
+
+	if !SyncClaudeOAuthSessionHeaderToBody(headers, result) {
+		t.Fatal("expected header rewrite")
+	}
+	if got := headers.Get(ClaudeCodeSessionHeader); got != "body-session-id" {
+		t.Fatalf("%s = %q, want body-session-id", ClaudeCodeSessionHeader, got)
+	}
+}
+
+func TestSyncClaudeOAuthSessionHeaderToBody_PreservesWhenBodySessionMissing(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(ClaudeCodeSessionHeader, "header-session-id")
+	result := &ClaudeOAuthFingerprintGateResult{
+		SessionID: "generated-session-id",
+	}
+
+	if SyncClaudeOAuthSessionHeaderToBody(headers, result) {
+		t.Fatal("did not expect header rewrite without body session")
+	}
+	if got := headers.Get(ClaudeCodeSessionHeader); got != "header-session-id" {
+		t.Fatalf("%s = %q, want header-session-id", ClaudeCodeSessionHeader, got)
+	}
+}
+
 func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("User-Agent", "claude-cli/2.1.63 (external, cli)")
@@ -345,6 +436,7 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 	headers.Set("X-Stainless-Os", "MacOS")
 	headers.Set("X-Stainless-Arch", "arm64")
 	headers.Set("X-Stainless-Runtime-Version", "v24.3.0")
+	headers.Set(ClaudeCodeSessionHeader, "body-session-id")
 	body := jsonUserPayload("device-a", "account-a", "body-session-id")
 	result := &ClaudeOAuthFingerprintGateResult{
 		RequestID:       "req12345",
@@ -361,6 +453,9 @@ func TestFormatClaudeOAuthFingerprintLine_IncludesWarn(t *testing.T) {
 	line := formatClaudeOAuthFingerprintLine("out", nil, headers, body, "claude-sonnet-4-5", result)
 	if !strings.Contains(line, "dir=out") || !strings.Contains(line, "req=req12345") {
 		t.Fatalf("line missing outbound dir/req: %s", line)
+	}
+	if !strings.Contains(line, "header_session=body-ses") {
+		t.Fatalf("line missing header session: %s", line)
 	}
 	if strings.Contains(line, "acct=") {
 		t.Fatalf("line should not include acct: %s", line)

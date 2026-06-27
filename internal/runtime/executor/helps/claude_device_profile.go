@@ -566,7 +566,7 @@ func ClaudeOAuthProfileDeviceProfile(auth *cliproxyauth.Auth, cfg *config.Config
 	if !ok {
 		return ClaudeDeviceProfile{}, false
 	}
-	if !claudeoauth.ValidDeviceID(profile.DeviceID) || strings.TrimSpace(profile.AccountUUID) == "" {
+	if !claudeoauth.ValidDeviceID(profile.DeviceID) {
 		return ClaudeDeviceProfile{}, false
 	}
 	return stableClaudeOAuthDeviceProfile(), true

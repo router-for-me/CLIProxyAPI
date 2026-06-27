@@ -318,7 +318,7 @@ func fillClaudeOAuthGateResultIdentity(result *ClaudeOAuthFingerprintGateResult,
 
 func claudeOAuthAccountIdentityFromProfile(auth *cliproxyauth.Auth) (claudeOAuthAccountIdentity, bool) {
 	profile, ok := claudeoauth.ProfileFromAuth(auth)
-	if !ok || !claudeoauth.ValidDeviceID(profile.DeviceID) || strings.TrimSpace(profile.AccountUUID) == "" {
+	if !ok || !claudeoauth.ValidDeviceID(profile.DeviceID) {
 		return claudeOAuthAccountIdentity{}, false
 	}
 	return claudeOAuthAccountIdentity{
@@ -347,6 +347,24 @@ func resolveClaudeOAuthCanonicalSessionID(headerSession, bodySession string) str
 		return bodySession
 	}
 	return headerSession
+}
+
+// SyncClaudeOAuthSessionHeaderToBody makes the outbound session header match
+// the body session used by the fingerprint gate. It only rewrites when the
+// body provided a session, preserving legacy header behavior otherwise.
+func SyncClaudeOAuthSessionHeaderToBody(headers http.Header, result *ClaudeOAuthFingerprintGateResult) bool {
+	if headers == nil || result == nil {
+		return false
+	}
+	bodySession := strings.TrimSpace(result.BodySessionID)
+	if bodySession == "" {
+		return false
+	}
+	if strings.TrimSpace(headers.Get(ClaudeCodeSessionHeader)) == bodySession {
+		return false
+	}
+	headers.Set(ClaudeCodeSessionHeader, bodySession)
+	return true
 }
 
 type claudeOAuthInboundIdentity struct {
@@ -490,8 +508,24 @@ func setClaudeOAuthOutboundUserID(body []byte, account claudeOAuthAccountIdentit
 			userHash = strings.TrimSpace(account.UserHash)
 		}
 		accountUUID := strings.TrimSpace(account.AccountUUID)
-		if userHash == "" || accountUUID == "" {
+		if userHash == "" {
 			return body, false, fmt.Errorf("missing account identity")
+		}
+		if accountUUID == "" {
+			outUserID, errSetDevice := sjson.Set("{}", "device_id", userHash)
+			if errSetDevice != nil {
+				return body, false, errSetDevice
+			}
+			outUserID, errSetAccount := sjson.Set(outUserID, "account_uuid", "")
+			if errSetAccount != nil {
+				return body, false, errSetAccount
+			}
+			outUserID, errSetSession := sjson.Set(outUserID, "session_id", matches[3])
+			if errSetSession != nil {
+				return body, false, errSetSession
+			}
+			out, errSet := sjson.SetBytes(body, "metadata.user_id", outUserID)
+			return out, true, errSet
 		}
 		outUserID := "user_" + userHash + "_account_" + accountUUID + "_session_" + matches[3]
 		out, errSet := sjson.SetBytes(body, "metadata.user_id", outUserID)
@@ -500,7 +534,7 @@ func setClaudeOAuthOutboundUserID(body []byte, account claudeOAuthAccountIdentit
 	if !strings.HasPrefix(userID, "{") {
 		return body, false, nil
 	}
-	if strings.TrimSpace(account.DeviceID) == "" || strings.TrimSpace(account.AccountUUID) == "" {
+	if strings.TrimSpace(account.DeviceID) == "" {
 		return body, false, fmt.Errorf("missing account identity")
 	}
 	outUserID, errSetDevice := sjson.Set(userID, "device_id", strings.TrimSpace(account.DeviceID))
