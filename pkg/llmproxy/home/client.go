@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
 )
 

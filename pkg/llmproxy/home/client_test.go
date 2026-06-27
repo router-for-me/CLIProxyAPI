@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {

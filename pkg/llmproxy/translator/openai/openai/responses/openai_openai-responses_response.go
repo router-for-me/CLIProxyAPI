@@ -66,8 +66,8 @@ type oaiToResponsesState struct {
 	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
 	MsgItemDone     map[int]bool // whether message done events were emitted
 	// function item done state
-	FuncArgsDone map[int]bool
-	FuncItemDone map[int]bool
+	FuncArgsDone map[string]bool
+	FuncItemDone map[string]bool
 	// Accumulated annotations per output index
 	Annotations map[int][]interface{}
 	// usage aggregation
@@ -253,7 +253,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 		}
 		completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", total)
 	}
-	return emitRespEvent("response.completed", completed)
+	return completed
 }
 
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
@@ -331,6 +331,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 
 	nextSeq := func() int { st.Seq++; return st.Seq }
+	allocOutputIndex := func() int { st.NextOutputIx++; return st.NextOutputIx - 1 }
+	toolStateKey := func(msgIdx, toolIdx int) string { return fmt.Sprintf("%d_%d", msgIdx, toolIdx) }
 	var out []string
 
 	if !st.Started {
@@ -787,25 +789,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					}
 				}
 				if len(st.FuncArgsBuf) > 0 {
-					idxs := make([]int, 0, len(st.FuncArgsBuf))
-					for i := range st.FuncArgsBuf {
-						idxs = append(idxs, i)
-					}
-					// small-N sort without extra imports
-					for i := 0; i < len(idxs); i++ {
-						for j := i + 1; j < len(idxs); j++ {
-							if idxs[j] < idxs[i] {
-								idxs[i], idxs[j] = idxs[j], idxs[i]
-							}
-						}
-					}
-					for _, i := range idxs {
+					for key := range st.FuncArgsBuf {
 						args := ""
-						if b := st.FuncArgsBuf[i]; b != nil {
+						if b := st.FuncArgsBuf[key]; b != nil {
 							args = b.String()
 						}
-						callID := st.FuncCallIDs[i]
-						name := st.FuncNames[i]
+						callID := st.FuncCallIDs[key]
+						name := st.FuncNames[key]
 						item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 						item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 						item, _ = sjson.SetBytes(item, "arguments", args)

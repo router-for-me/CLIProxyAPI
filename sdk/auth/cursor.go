@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	cursorauth "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/cursor"
+	cursorauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/cursor"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"

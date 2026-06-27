@@ -15,7 +15,7 @@ func main() {
 
 	// Original code below requires protoc-generated proto package:
 	/*
-	resultBytes := cursorproto.EncodeExecMcpResult(1, "", `{"test": "data"}`, false)
-	...
+		resultBytes := cursorproto.EncodeExecMcpResult(1, "", `{"test": "data"}`, false)
+		...
 	*/
 }

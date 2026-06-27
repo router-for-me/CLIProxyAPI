@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v6"
-	gitclient "github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	gitclient "github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	githttp "github.com/go-git/go-git/v6/plumbing/transport/http"

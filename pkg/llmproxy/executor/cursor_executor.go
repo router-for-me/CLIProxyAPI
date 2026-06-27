@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cursorauth "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/cursor"
-	cursorproto "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/cursor/proto"
+	cursorauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/cursor"
+	cursorproto "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/cursor/proto"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"

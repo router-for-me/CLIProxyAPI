@@ -171,7 +171,6 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
-}
 
 	// IncognitoBrowser enables opening OAuth URLs in incognito/private browsing mode.
 	// This is useful when you want to login with a different account without logging out
@@ -213,19 +212,19 @@ func (c *Config) IsResponsesCompactEnabled() bool {
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
 // when the client does not send them. Update these when Claude Code releases a new version.
 type ClaudeHeaderDefaults struct {
-	UserAgent               string  `yaml:"user-agent" json:"user-agent"`
-	PackageVersion          string  `yaml:"package-version" json:"package-version"`
-	RuntimeVersion          string  `yaml:"runtime-version" json:"runtime-version"`
-	Timeout                 string  `yaml:"timeout" json:"timeout"`
-	OS                      string  `yaml:"os" json:"os"`
-	Arch                    string  `yaml:"arch" json:"arch"`
-	StabilizeDeviceProfile  *bool   `yaml:"stabilize-device-profile" json:"stabilize-device-profile"`
+	UserAgent              string `yaml:"user-agent" json:"user-agent"`
+	PackageVersion         string `yaml:"package-version" json:"package-version"`
+	RuntimeVersion         string `yaml:"runtime-version" json:"runtime-version"`
+	Timeout                string `yaml:"timeout" json:"timeout"`
+	OS                     string `yaml:"os" json:"os"`
+	Arch                   string `yaml:"arch" json:"arch"`
+	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile" json:"stabilize-device-profile"`
 }
 
 // CodexHeaderDefaults configures default header values for Codex WebSocket connections.
 type CodexHeaderDefaults struct {
-	UserAgent     string `yaml:"user-agent" json:"user-agent"`
-	BetaFeatures  string `yaml:"beta-features" json:"beta-features"`
+	UserAgent    string `yaml:"user-agent" json:"user-agent"`
+	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
 // CodexConfig configures provider-wide Codex request behavior.
@@ -305,9 +304,11 @@ type RoutingConfig struct {
 // When Fork is true, the alias is added as an additional model in listings while
 // keeping the original model ID available.
 type OAuthModelAlias struct {
-	Name  string `yaml:"name" json:"name"`
-	Alias string `yaml:"alias" json:"alias"`
-	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+	Name         string `yaml:"name" json:"name"`
+	Alias        string `yaml:"alias" json:"alias"`
+	Fork         bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+	ForceMapping bool   `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+}
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
 // When Amp requests a model that isn't available locally, this mapping
@@ -372,6 +373,22 @@ type AmpUpstreamAPIKeyEntry struct {
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
+// PluginsConfig configures dynamic plugin discovery and per-plugin settings.
+type PluginsConfig struct {
+	Enabled      bool                            `yaml:"enabled" json:"enabled"`
+	Dir          string                          `yaml:"dir,omitempty" json:"dir,omitempty"`
+	StoreSources []string                        `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
+	Config       map[string]PluginInstanceConfig `yaml:"config,omitempty" json:"config,omitempty"`
+	Configs      map[string]PluginInstanceConfig `yaml:"configs,omitempty" json:"configs,omitempty"`
+}
+
+// PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
+type PluginInstanceConfig struct {
+	Enabled  *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Priority int   `yaml:"priority,omitempty" json:"priority,omitempty"`
+}
+
+// PayloadConfig defines default and override rules for provider payload parameters.
 type PayloadConfig struct {
 	// Default defines rules that only set parameters when they are missing in the payload.
 	Default []PayloadRule `yaml:"default" json:"default"`
@@ -789,6 +806,9 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// ForceMapping rewrites upstream response model fields back to Alias.
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
 
 func (m OpenAICompatibilityModel) GetName() string       { return m.Name }
@@ -1329,6 +1349,30 @@ func (cfg *Config) SanitizeCodexKeys() {
 		out = append(out, e)
 	}
 	cfg.CodexKey = out
+}
+
+// SanitizeCodexHeaderDefaults normalizes Codex header defaults if present.
+func (cfg *Config) SanitizeCodexHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	// Trim whitespace from Codex header defaults
+	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
+	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+// SanitizeClaudeHeaderDefaults normalizes Claude header defaults if present.
+func (cfg *Config) SanitizeClaudeHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	// Trim whitespace from Claude header defaults
+	cfg.ClaudeHeaderDefaults.UserAgent = strings.TrimSpace(cfg.ClaudeHeaderDefaults.UserAgent)
+	cfg.ClaudeHeaderDefaults.PackageVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion)
+	cfg.ClaudeHeaderDefaults.RuntimeVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion)
+	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
+	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.

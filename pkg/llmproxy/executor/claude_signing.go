@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	xxHash64 "github.com/pierrec/xxHash/xxHash64"
+	"github.com/cespare/xxhash/v2"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
@@ -31,7 +31,9 @@ func signAnthropicMessagesBody(body []byte) []byte {
 		return body
 	}
 
-	cch := fmt.Sprintf("%05x", xxHash64.Checksum(unsignedBody, claudeCCHSeed)&0xFFFFF)
+	h := xxhash.New64WithSeed(claudeCCHSeed)
+	h.Write(unsignedBody)
+	cch := fmt.Sprintf("%05x", h.Sum64()&0xFFFFF)
 	signedBillingHeader := claudeBillingHeaderCCHPattern.ReplaceAllString(unsignedBillingHeader, "cch="+cch+";")
 	signedBody, err := sjson.SetBytes(unsignedBody, "system.0.text", signedBillingHeader)
 	if err != nil {

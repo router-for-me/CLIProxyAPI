@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 

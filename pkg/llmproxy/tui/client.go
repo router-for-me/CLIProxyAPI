@@ -393,3 +393,8 @@ func (c *Client) DeleteField(path string) error {
 	_, _, err := c.doRequest("DELETE", "/v0/management/"+path, nil)
 	return err
 }
+
+// GetUsage fetches usage statistics.
+func (c *Client) GetUsage() (map[string]any, error) {
+	return c.getJSON("/v0/management/usage")
+}

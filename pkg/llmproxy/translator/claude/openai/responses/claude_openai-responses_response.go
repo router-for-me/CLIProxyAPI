@@ -322,19 +322,18 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
 				}
 			}
-		} else if dt == "signature_delta" {
+		case "signature_delta":
 			if st.ReasoningActive {
 				if signature := d.Get("signature"); signature.Exists() && signature.String() != "" {
 					st.ReasoningSignature = signature.String()
 				}
 			}
 			return [][]byte{}
-		} else if dt == "citations_delta" {
+		case "citations_delta":
 			if citation := d.Get("citation"); citation.Exists() {
 				st.appendMessageAnnotation(citation.Value())
 			}
 			return [][]byte{}
-		}
 	case "content_block_stop":
 		idx := int(root.Get("index").Int())
 		if st.InTextBlock {

@@ -1,10 +1,10 @@
 package helps
 
 import (
-	"crypto/hmac"
-	"crypto/sha512"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"strings"

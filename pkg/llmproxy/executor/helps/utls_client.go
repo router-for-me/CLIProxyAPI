@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/proxyutil"
+	tls "github.com/refraction-networking/utls"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"

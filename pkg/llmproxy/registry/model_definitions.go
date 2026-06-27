@@ -21,6 +21,7 @@ type staticModelsJSON struct {
 	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	XAI         []*ModelInfo `json:"xai"`
 }
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
