@@ -154,16 +154,21 @@ func formatClaudeOAuthFingerprintLine(direction string, inboundHeaders, outbound
 }
 
 func claudeOAuthOutboundHeaderLogParts(headers http.Header) []string {
-	// Log only headers that vary per client/version or are not fully pinned by
-	// claude-header-defaults + stabilize-device-profile. Constants such as
-	// X-App, Anthropic-Version, X-Stainless-Runtime/Lang/Retry-Count, and Timeout
-	// are omitted.
 	return []string{
 		"ua=" + truncateClaudeOAuthLogValue(headers.Get("User-Agent"), 40),
 		"pkg=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Package-Version"), 16),
+		"srt=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Runtime"), 16),
+		"slang=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Lang"), 16),
 		"rtver=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Runtime-Version"), 16),
 		"os=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Os"), 16),
 		"arch=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Arch"), 16),
+		"retry=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Retry-Count"), 8),
+		"timeout=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Timeout"), 16),
+		"app=" + truncateClaudeOAuthLogValue(headers.Get("X-App"), 16),
+		"anthver=" + truncateClaudeOAuthLogValue(headers.Get("Anthropic-Version"), 16),
+		"direct=" + truncateClaudeOAuthLogValue(headers.Get("Anthropic-Dangerous-Direct-Browser-Access"), 8),
+		"accept=" + truncateClaudeOAuthLogValue(escapeClaudeOAuthLogValue(headers.Get("Accept")), 32),
+		"enc=" + truncateClaudeOAuthLogValue(escapeClaudeOAuthLogValue(headers.Get("Accept-Encoding")), 64),
 		"beta=" + truncateClaudeOAuthLogValue(headers.Get("Anthropic-Beta"), 512),
 	}
 }
@@ -229,17 +234,19 @@ func claudeOAuthLogIdentityFromBody(body []byte) claudeOAuthLogIdentity {
 
 func claudeOAuthBillingLogParts(body []byte) []string {
 	billing := claudeOAuthBillingFromBody(body)
-	if billing.Version == "" && billing.Entrypoint == "" && billing.CCH == "" {
+	if billing.Raw == "" && billing.Version == "" && billing.Entrypoint == "" && billing.CCH == "" {
 		return nil
 	}
 	return []string{
 		"ccver=" + truncateClaudeOAuthLogValue(billing.Version, 24),
 		"entry=" + truncateClaudeOAuthLogValue(billing.Entrypoint, 16),
 		"cch=" + truncateClaudeOAuthLogValue(billing.CCH, 8),
+		"billing=" + truncateClaudeOAuthLogValue(escapeClaudeOAuthLogValue(billing.Raw), 512),
 	}
 }
 
 type claudeOAuthBillingLog struct {
+	Raw        string
 	Version    string
 	Entrypoint string
 	CCH        string
@@ -259,6 +266,7 @@ func claudeOAuthBillingFromBody(body []byte) claudeOAuthBillingLog {
 		if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
 			return true
 		}
+		billing.Raw = compactClaudeOAuthBillingHeader(text)
 		for _, segment := range strings.Split(strings.TrimPrefix(text, "x-anthropic-billing-header:"), ";") {
 			segment = strings.TrimSpace(segment)
 			switch {
@@ -273,6 +281,29 @@ func claudeOAuthBillingFromBody(body []byte) claudeOAuthBillingLog {
 		return false
 	})
 	return billing
+}
+
+func compactClaudeOAuthBillingHeader(text string) string {
+	text = strings.TrimPrefix(text, "x-anthropic-billing-header:")
+	segments := strings.Split(text, ";")
+	out := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment != "" {
+			out = append(out, segment)
+		}
+	}
+	return strings.Join(out, ";")
+}
+
+func escapeClaudeOAuthLogValue(value string) string {
+	replacer := strings.NewReplacer(
+		" ", "%20",
+		"\t", "%09",
+		"\n", "%0a",
+		"\r", "%0d",
+	)
+	return replacer.Replace(value)
 }
 
 func truncateClaudeOAuthLogToken(value string) string {

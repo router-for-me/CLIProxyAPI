@@ -740,6 +740,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
 	if _, ok := helps.ClaudeOAuthProfileDeviceProfile(auth, e.cfg); isClaudeOAuthToken(apiKey) && ok {
 		body = normalizeClaudeOAuthStableBillingHeader(body)
+		body = signAnthropicMessagesBody(body)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -1137,11 +1138,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		baseBetas += ",interleaved-thinking-2025-05-14"
 	}
 	if useOAuthProfileDeviceProfile {
-		baseBetas = claudeOAuthStableBetas
-		if !strings.Contains(baseModel, "claude-opus") {
-			baseBetas = strings.ReplaceAll(baseBetas, ",context-1m-2025-08-07", "")
-			baseBetas = strings.ReplaceAll(baseBetas, ",mid-conversation-system-2026-04-07", "")
-		}
+		baseBetas = claudeOAuthStableBetasForModel(baseModel)
 	}
 
 	// Merge extra betas from request body and request flags.
@@ -1885,6 +1882,22 @@ const (
 	claudeOAuthStableBetas             = "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,oauth-2025-04-20"
 )
 
+func claudeOAuthStableBetasForModel(model string) string {
+	if claudeOAuthModelUsesOpusBetas(model) {
+		return claudeOAuthStableBetas
+	}
+	betas := strings.ReplaceAll(claudeOAuthStableBetas, ",context-1m-2025-08-07", "")
+	return strings.ReplaceAll(betas, ",mid-conversation-system-2026-04-07", "")
+}
+
+func claudeOAuthModelUsesOpusBetas(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return false
+	}
+	return strings.Contains(model, "claude-opus-") || strings.HasPrefix(model, "opus-")
+}
+
 // computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.
 // Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3]
 func computeFingerprint(messageText, version string) string {
@@ -1931,16 +1944,6 @@ func normalizeClaudeOAuthStableBillingHeader(payload []byte) []byte {
 	if !system.IsArray() {
 		return payload
 	}
-	messageText := ""
-	system.ForEach(func(_, part gjson.Result) bool {
-		text := part.Get("text").String()
-		if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header:") {
-			return true
-		}
-		messageText = text
-		return false
-	})
-	buildHash := computeFingerprint(messageText, claudeOAuthStableBillingVersion)
 	out := payload
 	updatedAny := false
 	system.ForEach(func(key, part gjson.Result) bool {
@@ -1948,7 +1951,7 @@ func normalizeClaudeOAuthStableBillingHeader(payload []byte) []byte {
 		if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
 			return true
 		}
-		updatedHeader, updated := normalizeClaudeOAuthStableBillingHeaderText(billingHeader, buildHash)
+		updatedHeader, updated := normalizeClaudeOAuthStableBillingHeaderText(billingHeader)
 		if !updated {
 			return true
 		}
@@ -1966,18 +1969,23 @@ func normalizeClaudeOAuthStableBillingHeader(payload []byte) []byte {
 	return out
 }
 
-func normalizeClaudeOAuthStableBillingHeaderText(billingHeader, buildHash string) (string, bool) {
+func normalizeClaudeOAuthStableBillingHeaderText(billingHeader string) (string, bool) {
 	updatedAny := false
 	segments := strings.Split(billingHeader, ";")
 	for i, segment := range segments {
 		trimmed := strings.TrimSpace(segment)
 		switch {
 		case strings.HasPrefix(trimmed, "cc_version="):
-			segments[i] = strings.Replace(segment, trimmed, "cc_version="+claudeOAuthStableBillingVersion+"."+buildHash, 1)
-			updatedAny = true
+			if replacement, ok := normalizeClaudeOAuthStableBillingVersionValue(strings.TrimPrefix(trimmed, "cc_version=")); ok {
+				segments[i] = strings.Replace(segment, trimmed, "cc_version="+replacement, 1)
+				updatedAny = true
+			}
 		case strings.HasPrefix(trimmed, "x-anthropic-billing-header: cc_version="):
-			segments[i] = strings.Replace(segment, trimmed, "x-anthropic-billing-header: cc_version="+claudeOAuthStableBillingVersion+"."+buildHash, 1)
-			updatedAny = true
+			value := strings.TrimPrefix(trimmed, "x-anthropic-billing-header: cc_version=")
+			if replacement, ok := normalizeClaudeOAuthStableBillingVersionValue(value); ok {
+				segments[i] = strings.Replace(segment, trimmed, "x-anthropic-billing-header: cc_version="+replacement, 1)
+				updatedAny = true
+			}
 		case strings.HasPrefix(trimmed, "cc_entrypoint="):
 			segments[i] = strings.Replace(segment, trimmed, "cc_entrypoint="+claudeOAuthStableBillingEntrypoint, 1)
 			updatedAny = true
@@ -1987,6 +1995,15 @@ func normalizeClaudeOAuthStableBillingHeaderText(billingHeader, buildHash string
 		return billingHeader, false
 	}
 	return strings.Join(segments, ";"), true
+}
+
+func normalizeClaudeOAuthStableBillingVersionValue(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	lastDot := strings.LastIndex(value, ".")
+	if lastDot < 0 || lastDot == len(value)-1 {
+		return "", false
+	}
+	return claudeOAuthStableBillingVersion + value[lastDot:], true
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
