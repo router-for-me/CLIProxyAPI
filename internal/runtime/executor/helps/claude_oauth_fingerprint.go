@@ -256,28 +256,26 @@ func ClaudeOAuthFingerprintGateWithSessionPayload(ctx context.Context, cfg *conf
 		result.SessionMismatch = true
 	}
 
-	sessionID := resolveClaudeOAuthCanonicalSessionID(headerSession, bodySession)
-	if sessionID == "" {
-		sessionID = uuid.New().String()
-	}
-	result.SessionID = sessionID
+	result.SessionID = resolveClaudeOAuthCanonicalSessionID(headerSession, bodySession)
 
 	authID := strings.TrimSpace(auth.ID)
 	registry := registryForAuth(authID)
 	overrideDevice := claudeoauth.OverrideDevice(cfg)
 	profileIdentity, hasProfileIdentity := claudeOAuthAccountIdentityFromProfile(auth)
-	if overrideDevice && !hasProfileIdentity {
+	hasProfileMetadata := claudeOAuthHasProfileMetadata(auth)
+	if overrideDevice && hasProfileMetadata && !hasProfileIdentity {
 		result.Violation = "missing_profile"
 		fillClaudeOAuthGateResultIdentity(result, claudeOAuthAccountIdentity{})
 		MaybeLogClaudeOAuthFingerprintInbound(cfg, auth, inboundHeaders, body, model, result)
 		return body, result, fmt.Errorf("claude oauth fingerprint: missing complete auth profile")
 	}
+	applyOverrideDevice := overrideDevice && hasProfileIdentity
 	ttl := claudeOAuthFingerprintSessionTTL(cfg)
 	now := time.Now()
 
 	claudeOAuthRegistryMu.Lock()
 	purgeExpiredSessionsLocked(registry, now)
-	if overrideDevice {
+	if applyOverrideDevice {
 		registry.account = profileIdentity
 	} else if registry.account.Format == "" {
 		registry.account = firstClaudeOAuthAccountIdentity(authID, inboundIdentity)
@@ -300,7 +298,7 @@ func ClaudeOAuthFingerprintGateWithSessionPayload(ctx context.Context, cfg *conf
 		return body, result, claudeOAuthFingerprintErrorFor(result.Violation)
 	}
 
-	if !overrideDevice {
+	if !applyOverrideDevice {
 		return body, result, nil
 	}
 
@@ -356,6 +354,14 @@ func claudeOAuthAccountIdentityFromProfile(auth *cliproxyauth.Auth) (claudeOAuth
 		DeviceID:    strings.TrimSpace(profile.DeviceID),
 		AccountUUID: strings.TrimSpace(profile.AccountUUID),
 	}, true
+}
+
+func claudeOAuthHasProfileMetadata(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	raw, ok := auth.Metadata[claudeoauth.ProfileMetadataKey]
+	return ok && raw != nil
 }
 
 func extractClaudeOAuthSessionFromHeader(headers http.Header) string {

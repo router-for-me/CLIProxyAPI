@@ -143,6 +143,26 @@ func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueUsesProfile(t *testing.T) 
 	}
 }
 
+func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueMissingProfileSkipsRewrite(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig()
+	cfg.ClaudeOAuthFingerprint.OverrideDevice = true
+	auth := testClaudeOAuthAuth("auth-profile-missing")
+	auth.Metadata["access_token"] = "sk-ant-oat-test"
+	body := jsonUserPayload(strings.Repeat("d", 64), "inbound-account", "session-1")
+
+	out, res, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "m")
+	if err != nil {
+		t.Fatalf("missing profile should not block request: %v", err)
+	}
+	if string(out) != string(body) {
+		t.Fatalf("missing profile should skip rewrite\nout=%s\nin=%s", out, body)
+	}
+	if res == nil || res.Violation != "" {
+		t.Fatalf("missing profile should not violate, got %#v", res)
+	}
+}
+
 func TestClaudeOAuthFingerprintGate_OverrideDeviceTrueAllowsEmptyProfileAccount(t *testing.T) {
 	ResetClaudeOAuthFingerprintRegistry()
 	cfg := testClaudeOAuthFingerprintConfig()
@@ -437,6 +457,31 @@ func TestClaudeOAuthFingerprintGate_SessionHeaderMismatchFlag(t *testing.T) {
 	}
 	if res.SessionID != "body-session-id" {
 		t.Fatalf("session = %q, want body-session-id", res.SessionID)
+	}
+}
+
+func TestClaudeOAuthFingerprintGate_NoOriginalSessionDoesNotSetOutboundSession(t *testing.T) {
+	ResetClaudeOAuthFingerprintRegistry()
+	cfg := testClaudeOAuthFingerprintConfig()
+	auth := testClaudeOAuthAuth("auth-no-session")
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, res, err := ClaudeOAuthFingerprintGate(context.Background(), cfg, auth, nil, body, "m")
+	if err != nil {
+		t.Fatalf("gate error = %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected gate result")
+	}
+	if res.SessionID != "" {
+		t.Fatalf("generated outbound session = %q, want empty", res.SessionID)
+	}
+	ctx := ContextWithClaudeOAuthFingerprint(context.Background(), res)
+	if got, ok := ClaudeOAuthOutboundSessionIDFromContext(ctx); ok {
+		t.Fatalf("outbound session override = %q, want none", got)
+	}
+	if res.AffinitySessionID == "" {
+		t.Fatal("expected affinity session for session limit accounting")
 	}
 }
 

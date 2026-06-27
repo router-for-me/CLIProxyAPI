@@ -2175,13 +2175,14 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
-		if oauthToken && claudeoauth.OverrideDevice(cfg) {
+		_, useOAuthProfileFingerprint := helps.ClaudeOAuthProfileDeviceProfile(auth, cfg)
+		if oauthToken && useOAuthProfileFingerprint {
 			billingVersion = claudeOAuthStableBillingVersion
 			entrypoint = claudeOAuthStableBillingEntrypoint
 		}
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
-		if oauthToken && claudeoauth.OverrideDevice(cfg) {
+		if oauthToken && useOAuthProfileFingerprint {
 			payload = normalizeClaudeOAuthStableBillingHeader(payload)
 		}
 	}
