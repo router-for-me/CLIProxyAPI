@@ -164,7 +164,7 @@ func claudeOAuthOutboundHeaderLogParts(headers http.Header) []string {
 		"rtver=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Runtime-Version"), 16),
 		"os=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Os"), 16),
 		"arch=" + truncateClaudeOAuthLogValue(headers.Get("X-Stainless-Arch"), 16),
-		"beta=" + truncateClaudeOAuthLogValue(headers.Get("Anthropic-Beta"), 64),
+		"beta=" + truncateClaudeOAuthLogValue(headers.Get("Anthropic-Beta"), 512),
 	}
 }
 

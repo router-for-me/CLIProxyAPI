@@ -1878,7 +1878,7 @@ const fingerprintSalt = "59cf53e54c78"
 const (
 	claudeOAuthStableBillingVersion    = "2.1.186"
 	claudeOAuthStableBillingEntrypoint = "cli"
-	claudeOAuthStableBetas             = "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-"
+	claudeOAuthStableBetas             = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12"
 )
 
 // computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.
@@ -1970,6 +1970,9 @@ func normalizeClaudeOAuthStableBillingHeaderText(billingHeader, buildHash string
 		switch {
 		case strings.HasPrefix(trimmed, "cc_version="):
 			segments[i] = strings.Replace(segment, trimmed, "cc_version="+claudeOAuthStableBillingVersion+"."+buildHash, 1)
+			updatedAny = true
+		case strings.HasPrefix(trimmed, "x-anthropic-billing-header: cc_version="):
+			segments[i] = strings.Replace(segment, trimmed, "x-anthropic-billing-header: cc_version="+claudeOAuthStableBillingVersion+"."+buildHash, 1)
 			updatedAny = true
 		case strings.HasPrefix(trimmed, "cc_entrypoint="):
 			segments[i] = strings.Replace(segment, trimmed, "cc_entrypoint="+claudeOAuthStableBillingEntrypoint, 1)
