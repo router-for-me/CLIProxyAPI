@@ -36,7 +36,7 @@ func compileClientAPIKeyModelAliasTable(entries internalconfig.ClientAPIKeys) cl
 			}
 		}
 		if len(rev) > 0 {
-			out[strings.ToLower(key)] = rev
+			out[key] = rev
 		}
 	}
 	if len(out) == 0 {
@@ -93,7 +93,7 @@ func (m *Manager) resolveClientAPIKeyModelAliasWithResult(clientKey, requestedMo
 	if len(table) == 0 {
 		return OAuthModelAliasResult{}
 	}
-	rev := table[strings.ToLower(clientKey)]
+	rev := table[clientKey]
 	if len(rev) == 0 {
 		return OAuthModelAliasResult{}
 	}
