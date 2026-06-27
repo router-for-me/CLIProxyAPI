@@ -24,6 +24,9 @@ import (
 
 const (
 	claudeOAuthViolationSessionLimit      = "session_limit"
+	claudeOAuthViolationMissingBilling    = "missing_billing"
+	claudeOAuthViolationInvalidCCVersion  = "invalid_cc_version"
+	claudeOAuthViolationMissingSession    = "missing_session"
 	claudeOAuthHTTPStatusTooManySessions  = 529
 	claudeOAuthSessionLimitErrorBody      = `{"type":"error","error":{"type":"too_many_sessions","message":"too many sessions"}}`
 	claudeOAuthFingerprintCleanupInterval = 15 * time.Minute
@@ -31,6 +34,7 @@ const (
 
 var (
 	claudeOAuthLegacyUserIDPattern = regexp.MustCompile(`^user_([a-fA-F0-9]{64})_account_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_session_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
+	claudeOAuthCCVersionPattern    = regexp.MustCompile(`^\d+\.\d+\.\d+\.[0-9a-fA-F]{3}$`)
 
 	claudeOAuthRegistryMu          sync.Mutex
 	claudeOAuthRegistries          = make(map[string]*claudeOAuthAccountRegistry)
@@ -99,7 +103,11 @@ func (e *ClaudeOAuthFingerprintError) HTTPStatus() int {
 	if e == nil {
 		return http.StatusTooManyRequests
 	}
-	if e.Code == claudeOAuthViolationSessionLimit {
+	switch e.Code {
+	case claudeOAuthViolationSessionLimit,
+		claudeOAuthViolationMissingBilling,
+		claudeOAuthViolationInvalidCCVersion,
+		claudeOAuthViolationMissingSession:
 		return claudeOAuthHTTPStatusTooManySessions
 	}
 	return http.StatusTooManyRequests
@@ -259,6 +267,14 @@ func ClaudeOAuthFingerprintGateWithSessionPayload(ctx context.Context, cfg *conf
 	result.SessionID = resolveClaudeOAuthCanonicalSessionID(headerSession, bodySession)
 
 	authID := strings.TrimSpace(auth.ID)
+	if violation := validateClaudeOAuthInboundFingerprint(body, result.SessionID); violation != "" {
+		result.Violation = violation
+		fillClaudeOAuthGateResultIdentity(result, claudeOAuthAccountIdentity{})
+		MaybeLogClaudeOAuthFingerprintInbound(cfg, auth, inboundHeaders, body, model, result)
+		logClaudeOAuthViolation(authID, result, cfg)
+		return body, result, claudeOAuthFingerprintErrorFor(violation)
+	}
+
 	registry := registryForAuth(authID)
 	overrideDevice := claudeoauth.OverrideDevice(cfg)
 	profileIdentity, hasProfileIdentity := claudeOAuthAccountIdentityFromProfile(auth)
@@ -383,6 +399,45 @@ func resolveClaudeOAuthCanonicalSessionID(headerSession, bodySession string) str
 		return bodySession
 	}
 	return headerSession
+}
+
+func validateClaudeOAuthInboundFingerprint(body []byte, sessionID string) string {
+	ccVersion, ok := extractClaudeOAuthBillingCCVersion(body)
+	if !ok {
+		return claudeOAuthViolationMissingBilling
+	}
+	if !claudeOAuthCCVersionPattern.MatchString(strings.TrimSpace(ccVersion)) {
+		return claudeOAuthViolationInvalidCCVersion
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return claudeOAuthViolationMissingSession
+	}
+	return ""
+}
+
+func extractClaudeOAuthBillingCCVersion(body []byte) (string, bool) {
+	system := gjson.GetBytes(body, "system")
+	if !system.IsArray() {
+		return "", false
+	}
+	var version string
+	found := false
+	system.ForEach(func(_, part gjson.Result) bool {
+		text := part.Get("text").String()
+		if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
+			return true
+		}
+		found = true
+		for _, segment := range strings.Split(strings.TrimPrefix(text, "x-anthropic-billing-header:"), ";") {
+			segment = strings.TrimSpace(segment)
+			if strings.HasPrefix(segment, "cc_version=") {
+				version = strings.TrimSpace(strings.TrimPrefix(segment, "cc_version="))
+				return false
+			}
+		}
+		return false
+	})
+	return version, found
 }
 
 type claudeOAuthInboundIdentity struct {
