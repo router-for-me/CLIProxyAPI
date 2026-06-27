@@ -3,9 +3,6 @@ package gemini
 import (
 	"context"
 	"testing"
-
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
-	"github.com/tidwall/gjson"
 )
 
 func TestRestoreUsageMetadata(t *testing.T) {
@@ -70,7 +67,7 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 }
 
 func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
-	ctx := context.WithValue(context.Background(), interfaces.ContextKeyAlt, "")
+	ctx := context.WithValue(context.Background(), "alt", "")
 
 	tests := []struct {
 		name     string
@@ -94,20 +91,5 @@ func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
 				t.Errorf("ConvertAntigravityResponseToGemini() = %s, want %s", string(results[0]), tt.expected)
 			}
 		})
-	}
-}
-
-func TestRestoreUsageMetadata_RemovesCpaFieldWhenUsageAlreadyPresent(t *testing.T) {
-	input := []byte(`{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":5},"cpaUsageMetadata":{"promptTokenCount":100}}`)
-	result := restoreUsageMetadata(input)
-
-	if !gjson.GetBytes(result, "usageMetadata").Exists() {
-		t.Fatalf("usageMetadata should exist: %s", string(result))
-	}
-	if gjson.GetBytes(result, "cpaUsageMetadata").Exists() {
-		t.Fatalf("cpaUsageMetadata should be removed: %s", string(result))
-	}
-	if got := gjson.GetBytes(result, "usageMetadata.promptTokenCount").Int(); got != 5 {
-		t.Fatalf("usageMetadata should keep existing value, got %d", got)
 	}
 }

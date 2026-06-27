@@ -1,6 +1,8 @@
 package responses
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -268,6 +270,52 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesWebSearchPreview(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4-mini",
+		"input": "find latest OpenAI model news",
+		"tools": [
+			{"type": "web_search_preview_2025_03_11"}
+		],
+		"tool_choice": {
+			"type": "allowed_tools",
+			"tools": [
+				{"type": "web_search_preview"},
+				{"type": "web_search_preview_2025_03_11"}
+			]
+		}
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4-mini", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q, want %q: %s", got, "allowed_tools", string(output))
+	}
+	if got := gjson.GetBytes(output, "tool_choice.tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.tools.0.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+	if got := gjson.GetBytes(output, "tool_choice.tools.1.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.tools.1.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesTopLevelToolChoicePreviewAlias(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4-mini",
+		"input": "find latest OpenAI model news",
+		"tool_choice": {"type": "web_search_preview_2025_03_11"}
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4-mini", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+}
+
 func TestUserFieldDeletion(t *testing.T) {
 	inputJSON := []byte(`{  
 		"model": "gpt-5.2",  
@@ -285,264 +333,138 @@ func TestUserFieldDeletion(t *testing.T) {
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToCodex_RemovesItemReferenceInputItems(t *testing.T) {
+func TestContextManagementCompactionCompatibility(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",
-		"input": [
-			{"type": "item_reference", "id": "msg_123"},
-			{"type": "message", "role": "user", "content": "hello"},
-			{"type": "item_reference", "id": "msg_456"}
-		]
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
-	outputStr := string(output)
-
-	input := gjson.Get(outputStr, "input")
-	if !input.IsArray() {
-		t.Fatalf("expected input to be an array")
-	}
-	if got := len(input.Array()); got != 1 {
-		t.Fatalf("expected 1 input item after filtering item_reference, got %d", got)
-	}
-	if itemType := gjson.Get(outputStr, "input.0.type").String(); itemType != "message" {
-		t.Fatalf("expected remaining input[0].type message, got %s", itemType)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_RemovesNestedItemReferenceContentParts(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5.2",
-		"input": [
+		"context_management": [
 			{
-				"type": "message",
-				"role": "user",
-				"content": [
-					{"type": "input_text", "text": "hello"},
-					{"type": "item_reference", "id": "msg_123"},
-					{"type": "input_text", "text": "world"}
-				]
-			}
-		]
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
-	outputStr := string(output)
-
-	content := gjson.Get(outputStr, "input.0.content")
-	if !content.IsArray() {
-		t.Fatalf("expected message content array")
-	}
-	if got := len(content.Array()); got != 2 {
-		t.Fatalf("expected 2 content parts after filtering item_reference, got %d", got)
-	}
-	if got := gjson.Get(outputStr, "input.0.content.0.type").String(); got != "input_text" {
-		t.Fatalf("expected input.0.content.0.type=input_text, got %s", got)
-	}
-	if got := gjson.Get(outputStr, "input.0.content.1.type").String(); got != "input_text" {
-		t.Fatalf("expected input.0.content.1.type=input_text, got %s", got)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_DeletesMaxTokensField(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5.2",
-		"max_tokens": 128,
-		"input": [{"type":"message","role":"user","content":"hello"}]
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
-	if got := gjson.GetBytes(output, "max_tokens"); got.Exists() {
-		t.Fatalf("expected max_tokens to be removed, got %s", got.Raw)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_UsesVariantAsReasoningEffortFallback(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5.2",
-		"variant": "high",
-		"input": [
-			{"type": "message", "role": "user", "content": "hello"}
-		]
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
-	outputStr := string(output)
-
-	if got := gjson.Get(outputStr, "reasoning.effort").String(); got != "high" {
-		t.Fatalf("expected reasoning.effort=high fallback, got %s", got)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_CPB0228_InputStringNormalizedToInputList(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5-codex",
-		"input": "Summarize this request",
-		"stream": false
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
-	outputStr := string(output)
-
-	input := gjson.Get(outputStr, "input")
-	if !input.IsArray() {
-		t.Fatalf("expected input to be normalized to an array, got %s", input.Type.String())
-	}
-	if got := len(input.Array()); got != 1 {
-		t.Fatalf("expected one normalized input message, got %d", got)
-	}
-	if got := gjson.Get(outputStr, "input.0.type").String(); got != "message" {
-		t.Fatalf("expected input.0.type=message, got %q", got)
-	}
-	if got := gjson.Get(outputStr, "input.0.role").String(); got != "user" {
-		t.Fatalf("expected input.0.role=user, got %q", got)
-	}
-	if got := gjson.Get(outputStr, "input.0.content.0.type").String(); got != "input_text" {
-		t.Fatalf("expected input.0.content.0.type=input_text, got %q", got)
-	}
-	if got := gjson.Get(outputStr, "input.0.content.0.text").String(); got != "Summarize this request" {
-		t.Fatalf("expected input text preserved, got %q", got)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_CPB0228_PreservesCompactionFieldsWithStringInput(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5-codex",
-		"input": "continue",
-		"previous_response_id": "resp_prev_1",
-		"prompt_cache_key": "cache_abc",
-		"safety_identifier": "safe_123"
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
-	outputStr := string(output)
-
-	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_prev_1" {
-		t.Fatalf("expected previous_response_id to be preserved, got %q", got)
-	}
-	if got := gjson.Get(outputStr, "prompt_cache_key").String(); got != "cache_abc" {
-		t.Fatalf("expected prompt_cache_key to be preserved, got %q", got)
-	}
-	if got := gjson.Get(outputStr, "safety_identifier").String(); got != "safe_123" {
-		t.Fatalf("expected safety_identifier to be preserved, got %q", got)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_CPB0225_ConversationIDAliasMapsToPreviousResponseID(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5-codex",
-		"input": "continue",
-		"conversation_id": "resp_alias_1"
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
-	outputStr := string(output)
-
-	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_alias_1" {
-		t.Fatalf("expected conversation_id alias to map to previous_response_id, got %q", got)
-	}
-	if gjson.Get(outputStr, "conversation_id").Exists() {
-		t.Fatalf("expected conversation_id alias to be removed after normalization")
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_CPB0225_PrefersPreviousResponseIDOverAlias(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5-codex",
-		"input": "continue",
-		"previous_response_id": "resp_primary",
-		"conversation_id": "resp_alias"
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
-	outputStr := string(output)
-
-	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_primary" {
-		t.Fatalf("expected previous_response_id to win over conversation_id alias, got %q", got)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_UsesReasoningEffortOverVariant(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5.2",
-		"reasoning": {"effort": "low"},
-		"variant": "high",
-		"input": [
-			{"type": "message", "role": "user", "content": "hello"}
-		]
-	}`)
-
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
-	outputStr := string(output)
-
-	if got := gjson.Get(outputStr, "reasoning.effort").String(); got != "low" {
-		t.Fatalf("expected reasoning.effort to prefer explicit reasoning.effort low, got %s", got)
-	}
-}
-
-func TestConvertOpenAIResponsesRequestToCodex_NormalizesToolChoiceFunctionProxyPrefix(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "gpt-5.2",
-		"tools": [
-			{
-				"type": "function",
-				"function": {"name": "send_email", "description": "send email", "parameters": {}}
+				"type": "compaction",
+				"compact_threshold": 12000
 			}
 		],
-		"tool_choice": {
-			"type": "function",
-			"function": {"name": "proxy_send_email"}
-		},
-		"input": [{"type":"message","role":"user","content":"send email"}]
+		"input": [{"role":"user","content":"hello"}]
 	}`)
 
 	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
-	if gjson.Get(outputStr, "tool_choice.function.name").String() != "send_email" {
-		t.Fatalf("expected tool_choice.function.name to normalize to send_email, got %q", gjson.Get(outputStr, "tool_choice.function.name").String())
+	if gjson.Get(outputStr, "context_management").Exists() {
+		t.Fatalf("context_management should be removed for Codex compatibility")
 	}
-	if gjson.Get(outputStr, "tools.0.function.name").String() != "send_email" {
-		t.Fatalf("expected tools.0.function.name to normalize to send_email, got %q", gjson.Get(outputStr, "tools.0.function.name").String())
+	if gjson.Get(outputStr, "truncation").Exists() {
+		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToCodex_NormalizesToolsAndChoiceIndependently(t *testing.T) {
+func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",
-		"tools": [
-			{
-				"type": "function",
-				"function": {"name": "` + longName(0) + `", "description": "x", "parameters": {}}
-			},
-			{
-				"type": "function",
-				"function": {"name": "` + longName(1) + `", "description": "y", "parameters": {}}
-			}
-		],
-		"tool_choice": {
-			"type": "function",
-			"function": {"name": "proxy_` + longName(1) + `"}
-		},
-		"input": [{"type":"message","role":"user","content":"run"}]
+		"truncation": "disabled",
+		"input": [{"role":"user","content":"hello"}]
 	}`)
 
 	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
-	t1 := gjson.Get(outputStr, "tools.0.function.name").String()
-	t2 := gjson.Get(outputStr, "tools.1.function.name").String()
-	tc := gjson.Get(outputStr, "tool_choice.function.name").String()
-
-	if t1 == "" || t2 == "" || tc == "" {
-		t.Fatalf("expected normalized names, got tool1=%q tool2=%q tool_choice=%q", t1, t2, tc)
-	}
-	if len(t1) > 64 || len(t2) > 64 || len(tc) > 64 {
-		t.Fatalf("expected all normalized names <=64, got len(tool1)=%d len(tool2)=%d len(tool_choice)=%d", len(t1), len(t2), len(tc))
+	if gjson.Get(outputStr, "truncation").Exists() {
+		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
 }
 
-func longName(i int) string {
-	base := "proxy_mcp__very_long_prefix_segment_for_tool_normalization_"
-	return base + strings.Repeat("x", 80) + string(rune('a'+i))
+func BenchmarkConvertSystemRoleToDeveloperLargeInput(b *testing.B) {
+	cases := []struct {
+		name      string
+		inputJSON []byte
+	}{
+		{
+			name:      "200_input_1_system",
+			inputJSON: makeLargeResponsesInputForBenchmark(200, 200),
+		},
+		{
+			name:      "200_input_2_system",
+			inputJSON: makeLargeResponsesInputForBenchmark(200, 100),
+		},
+		{
+			name:      "2000_input_20_system",
+			inputJSON: makeLargeResponsesInputForBenchmark(2000, 100),
+		},
+	}
+	benchmarks := []struct {
+		name string
+		fn   func([]byte) []byte
+	}{
+		{
+			name: "previous_root_path_rewrite",
+			fn:   convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark,
+		},
+		{
+			name: "current_rebuilt_input_json_marshal",
+			fn:   convertSystemRoleToDeveloper,
+		},
+	}
+
+	for _, testCase := range cases {
+		for _, benchmark := range benchmarks {
+			b.Run(testCase.name+"/"+benchmark.name, func(b *testing.B) {
+				output := benchmark.fn(testCase.inputJSON)
+				if got := gjson.GetBytes(output, "input.0.role").String(); got != "developer" {
+					b.Fatalf("input.0.role = %q, want %q", got, "developer")
+				}
+				if got := gjson.GetBytes(output, "input.1.role").String(); got != "user" {
+					b.Fatalf("input.1.role = %q, want %q", got, "user")
+				}
+
+				b.ReportAllocs()
+				b.SetBytes(int64(len(testCase.inputJSON)))
+				b.ResetTimer()
+
+				var benchmarkOutput []byte
+				for i := 0; i < b.N; i++ {
+					benchmarkOutput = benchmark.fn(testCase.inputJSON)
+				}
+				benchmarkConvertSystemRoleOutput = benchmarkOutput
+			})
+		}
+	}
+}
+
+func makeLargeResponsesInputForBenchmark(inputCount int, systemEvery int) []byte {
+	var builder strings.Builder
+	builder.Grow(inputCount * 96)
+	builder.WriteString(`{"model":"gpt-5.2","input":[`)
+	for i := 0; i < inputCount; i++ {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		role := "user"
+		if i%systemEvery == 0 {
+			role = "system"
+		}
+		builder.WriteString(`{"type":"message","role":"`)
+		builder.WriteString(role)
+		builder.WriteString(`","content":[{"type":"input_text","text":"message `)
+		builder.WriteString(strconv.Itoa(i))
+		builder.WriteString(`"}]}`)
+	}
+	builder.WriteString(`]}`)
+	return []byte(builder.String())
+}
+
+func convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	inputArray := inputResult.Array()
+	result := rawJSON
+
+	for i := 0; i < len(inputArray); i++ {
+		rolePath := fmt.Sprintf("input.%d.role", i)
+		if gjson.GetBytes(result, rolePath).String() == "system" {
+			result, _ = sjson.SetBytes(result, rolePath, "developer")
+		}
+	}
+
+	return result
 }

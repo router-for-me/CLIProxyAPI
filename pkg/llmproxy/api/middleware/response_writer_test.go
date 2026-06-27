@@ -1,9 +1,8 @@
 package middleware
 
 import (
-	"net/http"
+	"bytes"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -12,155 +11,192 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
 )
 
-type mockLogger struct {
-	enabled              bool
-	logged               bool
-	responseHeaders      map[string][]string
-	apiResponseTimestamp time.Time
+func TestExtractRequestBodyPrefersOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{
+		requestInfo: &RequestInfo{Body: []byte("original-body")},
+	}
+
+	body := wrapper.extractRequestBody(c)
+	if string(body) != "original-body" {
+		t.Fatalf("request body = %q, want %q", string(body), "original-body")
+	}
+
+	c.Set(requestBodyOverrideContextKey, []byte("override-body"))
+	body = wrapper.extractRequestBody(c)
+	if string(body) != "override-body" {
+		t.Fatalf("request body = %q, want %q", string(body), "override-body")
+	}
 }
 
-func (m *mockLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	m.logged = true
-	m.responseHeaders = responseHeaders
-	m.apiResponseTimestamp = apiResponseTimestamp
+func TestExtractRequestBodySupportsStringOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{body: &bytes.Buffer{}}
+	c.Set(requestBodyOverrideContextKey, "override-as-string")
+
+	body := wrapper.extractRequestBody(c)
+	if string(body) != "override-as-string" {
+		t.Fatalf("request body = %q, want %q", string(body), "override-as-string")
+	}
+}
+
+func TestExtractResponseBodyPrefersOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{body: &bytes.Buffer{}}
+	wrapper.body.WriteString("original-response")
+
+	body := wrapper.extractResponseBody(c)
+	if string(body) != "original-response" {
+		t.Fatalf("response body = %q, want %q", string(body), "original-response")
+	}
+
+	c.Set(responseBodyOverrideContextKey, []byte("override-response"))
+	body = wrapper.extractResponseBody(c)
+	if string(body) != "override-response" {
+		t.Fatalf("response body = %q, want %q", string(body), "override-response")
+	}
+
+	body[0] = 'X'
+	if got := wrapper.extractResponseBody(c); string(got) != "override-response" {
+		t.Fatalf("response override should be cloned, got %q", string(got))
+	}
+}
+
+func TestExtractResponseBodySupportsStringOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{}
+	c.Set(responseBodyOverrideContextKey, "override-response-as-string")
+
+	body := wrapper.extractResponseBody(c)
+	if string(body) != "override-response-as-string" {
+		t.Fatalf("response body = %q, want %q", string(body), "override-response-as-string")
+	}
+}
+
+func TestExtractBodyOverrideClonesBytes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	override := []byte("body-override")
+	c.Set(requestBodyOverrideContextKey, override)
+
+	body := extractBodyOverride(c, requestBodyOverrideContextKey)
+	if !bytes.Equal(body, override) {
+		t.Fatalf("body override = %q, want %q", string(body), string(override))
+	}
+
+	body[0] = 'X'
+	if !bytes.Equal(override, []byte("body-override")) {
+		t.Fatalf("override mutated: %q", string(override))
+	}
+}
+
+func TestExtractWebsocketTimelineUsesOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	wrapper := &ResponseWriterWrapper{}
+	if got := wrapper.extractWebsocketTimeline(c); got != nil {
+		t.Fatalf("expected nil websocket timeline, got %q", string(got))
+	}
+
+	c.Set(websocketTimelineOverrideContextKey, []byte("timeline"))
+	body := wrapper.extractWebsocketTimeline(c)
+	if string(body) != "timeline" {
+		t.Fatalf("websocket timeline = %q, want %q", string(body), "timeline")
+	}
+}
+
+func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	streamWriter := &testStreamingLogWriter{}
+	wrapper := &ResponseWriterWrapper{
+		ResponseWriter: c.Writer,
+		logger:         &testRequestLogger{enabled: true},
+		requestInfo: &RequestInfo{
+			URL:       "/v1/responses",
+			Method:    "POST",
+			Headers:   map[string][]string{"Content-Type": {"application/json"}},
+			RequestID: "req-1",
+			Timestamp: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
+		},
+		isStreaming:  true,
+		streamWriter: streamWriter,
+	}
+
+	c.Set("API_WEBSOCKET_TIMELINE", []byte("Timestamp: 2026-04-01T12:00:00Z\nEvent: api.websocket.request\n{}"))
+
+	if err := wrapper.Finalize(c); err != nil {
+		t.Fatalf("Finalize error: %v", err)
+	}
+	if string(streamWriter.apiWebsocketTimeline) != "Timestamp: 2026-04-01T12:00:00Z\nEvent: api.websocket.request\n{}" {
+		t.Fatalf("stream writer websocket timeline = %q", string(streamWriter.apiWebsocketTimeline))
+	}
+	if !streamWriter.closed {
+		t.Fatal("expected stream writer to be closed")
+	}
+}
+
+type testRequestLogger struct {
+	enabled bool
+}
+
+func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
 	return nil
 }
 
-func (m *mockLogger) IsEnabled() bool {
-	return m.enabled
+func (l *testRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	return &testStreamingLogWriter{}, nil
 }
 
-func (m *mockLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
-	return &logging.NoOpStreamingLogWriter{}, nil
+func (l *testRequestLogger) IsEnabled() bool {
+	return l.enabled
 }
 
-func TestResponseWriterWrapper_Basic(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	gw := gin.CreateTestContextOnly(w, gin.Default())
-
-	logger := &mockLogger{enabled: true}
-	reqInfo := &RequestInfo{
-		URL:    "/test",
-		Method: "GET",
-		Body:   []byte("req body"),
-	}
-
-	wrapper := NewResponseWriterWrapper(gw.Writer, logger, reqInfo)
-
-	// Test Write
-	n, err := wrapper.Write([]byte("hello"))
-	if err != nil || n != 5 {
-		t.Errorf("Write failed: n=%d, err=%v", n, err)
-	}
-
-	// Test WriteHeader
-	wrapper.WriteHeader(http.StatusAccepted)
-	if wrapper.statusCode != http.StatusAccepted {
-		t.Errorf("expected status 202, got %d", wrapper.statusCode)
-	}
-
-	// Test Finalize
-	err = wrapper.Finalize(gw)
-	if err != nil {
-		t.Errorf("Finalize failed: %v", err)
-	}
+type testStreamingLogWriter struct {
+	apiWebsocketTimeline []byte
+	closed               bool
 }
 
-func TestResponseWriterWrapper_DetectStreaming(t *testing.T) {
-	wrapper := &ResponseWriterWrapper{
-		requestInfo: &RequestInfo{
-			Body: []byte(`{"stream": true}`),
-		},
-	}
+func (w *testStreamingLogWriter) WriteChunkAsync([]byte) {}
 
-	if !wrapper.detectStreaming("text/event-stream") {
-		t.Error("expected true for text/event-stream")
-	}
-
-	if wrapper.detectStreaming("application/json") {
-		t.Error("expected false for application/json even with stream:true in body (per logic)")
-	}
-
-	wrapper.requestInfo.Body = []byte(`{}`)
-	if wrapper.detectStreaming("") {
-		t.Error("expected false for empty content type and no stream hint")
-	}
+func (w *testStreamingLogWriter) WriteStatus(int, map[string][]string) error {
+	return nil
 }
 
-func TestResponseWriterWrapper_ForwardsResponseHeaders(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	gw := gin.CreateTestContextOnly(w, gin.Default())
-
-	logger := &mockLogger{enabled: true}
-	reqInfo := &RequestInfo{
-		URL:    "/test",
-		Method: "GET",
-		Body:   []byte("req body"),
-	}
-
-	wrapper := NewResponseWriterWrapper(gw.Writer, logger, reqInfo)
-	wrapper.Header().Set("Set-Cookie", "session=abc")
-	wrapper.Header().Set("Authorization", "Bearer secret")
-	wrapper.Header().Set("X-API-Key", "abc123")
-
-	wrapper.WriteHeader(http.StatusCreated)
-	if _, err := wrapper.Write([]byte("ok")); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-	if err := wrapper.Finalize(gw); err != nil {
-		t.Fatalf("Finalize failed: %v", err)
-	}
-	if !logger.logged {
-		t.Fatalf("expected logger to be called")
-	}
-	if got := logger.responseHeaders["Authorization"]; len(got) != 1 || got[0] != "Bearer secret" {
-		t.Fatalf("Authorization should be forwarded, got %#v", got)
-	}
-	if got := logger.responseHeaders["Set-Cookie"]; len(got) != 1 || got[0] != "session=abc" {
-		t.Fatalf("Set-Cookie should be forwarded, got %#v", got)
-	}
-
-	var xAPIKey []string
-	for key, value := range logger.responseHeaders {
-		if strings.EqualFold(key, "X-API-Key") {
-			xAPIKey = value
-			break
-		}
-	}
-	if len(xAPIKey) != 1 || xAPIKey[0] != "abc123" {
-		t.Fatalf("X-API-Key should be forwarded, got %#v", xAPIKey)
-	}
+func (w *testStreamingLogWriter) WriteAPIRequest([]byte) error {
+	return nil
 }
 
-func TestResponseWriterWrapper_ForwardsAPIResponseTimestamp(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	gw := gin.CreateTestContextOnly(w, gin.Default())
-	expected := time.Date(2026, time.February, 23, 14, 0, 0, 0, time.UTC)
+func (w *testStreamingLogWriter) WriteAPIResponse([]byte) error {
+	return nil
+}
 
-	logger := &mockLogger{enabled: true}
-	reqInfo := &RequestInfo{
-		URL:    "/test",
-		Method: "GET",
-		Body:   []byte("req body"),
-	}
+func (w *testStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error {
+	w.apiWebsocketTimeline = bytes.Clone(apiWebsocketTimeline)
+	return nil
+}
 
-	wrapper := NewResponseWriterWrapper(gw.Writer, logger, reqInfo)
-	wrapper.WriteHeader(http.StatusAccepted)
-	gw.Set("API_RESPONSE_TIMESTAMP", expected)
+func (w *testStreamingLogWriter) SetFirstChunkTimestamp(time.Time) {}
 
-	if err := wrapper.Finalize(gw); err != nil {
-		t.Fatalf("Finalize failed: %v", err)
-	}
-	if !logger.logged {
-		t.Fatalf("expected logger to be called")
-	}
-	if logger.apiResponseTimestamp.IsZero() {
-		t.Fatalf("expected API response timestamp to be forwarded")
-	}
-	if !logger.apiResponseTimestamp.Equal(expected) {
-		t.Fatalf("expected %v, got %v", expected, logger.apiResponseTimestamp)
-	}
+func (w *testStreamingLogWriter) Close() error {
+	w.closed = true
+	return nil
 }

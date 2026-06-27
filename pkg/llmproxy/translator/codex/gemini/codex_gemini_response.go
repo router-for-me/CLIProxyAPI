@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -168,25 +168,54 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		}
 	}
 
-	switch typeStr {
-	case "response.created": // Handle response creation - set model and response ID
+	if typeStr == "response.created" { // Handle response creation - set model and response ID
 		template, _ = sjson.SetBytes(template, "modelVersion", rootResult.Get("response.model").String())
 		template, _ = sjson.SetBytes(template, "responseId", rootResult.Get("response.id").String())
-		(*param).(*ConvertCodexResponseToGeminiParams).ResponseID = rootResult.Get("response.id").String()
-	case "response.reasoning_summary_text.delta": // Handle reasoning/thinking content delta
+		params.ResponseID = rootResult.Get("response.id").String()
+	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
 		part := []byte(`{"thought":true,"text":""}`)
 		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
-	case "response.output_text.delta": // Handle regular text content delta
+	} else if typeStr == "response.output_text.delta" { // Handle regular text content delta
+		params.HasOutputTextDelta = true
 		part := []byte(`{"text":""}`)
 		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
-	case "response.completed": // Handle response completion with usage metadata
+	} else if typeStr == "response.output_item.done" { // Fallback: emit final message text when no delta chunks were received
+		itemResult := rootResult.Get("item")
+		if itemResult.Get("type").String() != "message" || params.HasOutputTextDelta {
+			return [][]byte{}
+		}
+		contentResult := itemResult.Get("content")
+		if !contentResult.Exists() || !contentResult.IsArray() {
+			return [][]byte{}
+		}
+		wroteText := false
+		contentResult.ForEach(func(_, partResult gjson.Result) bool {
+			if partResult.Get("type").String() != "output_text" {
+				return true
+			}
+			text := partResult.Get("text").String()
+			if text == "" {
+				return true
+			}
+			part := []byte(`{"text":""}`)
+			part, _ = sjson.SetBytes(part, "text", text)
+			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+			wroteText = true
+			return true
+		})
+		if wroteText {
+			params.HasOutputTextDelta = true
+			return [][]byte{template}
+		}
+		return [][]byte{}
+	} else if typeStr == "response.completed" { // Handle response completion with usage metadata
 		template, _ = sjson.SetBytes(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
 		template, _ = sjson.SetBytes(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
 		totalTokens := rootResult.Get("response.usage.input_tokens").Int() + rootResult.Get("response.usage.output_tokens").Int()
 		template, _ = sjson.SetBytes(template, "usageMetadata.totalTokenCount", totalTokens)
-	default:
+	} else {
 		return [][]byte{}
 	}
 

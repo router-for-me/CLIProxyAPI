@@ -9,7 +9,6 @@ import (
 	configaccess "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/access/config_access"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	sdkaccess "github.com/kooshapari/CLIProxyAPI/v7/sdk/access"
-	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -86,9 +85,7 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 	}
 
 	existing := manager.Providers()
-	configaccess.Register(&sdkconfig.SDKConfig{
-		APIKeys: append([]string(nil), newCfg.APIKeys...),
-	})
+	configaccess.Register(&newCfg.SDKConfig)
 	providers, added, updated, removed, err := ReconcileProviders(oldCfg, newCfg, existing)
 	if err != nil {
 		log.Errorf("failed to reconcile request auth providers: %v", err)

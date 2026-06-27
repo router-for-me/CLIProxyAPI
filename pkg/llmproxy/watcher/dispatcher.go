@@ -130,17 +130,9 @@ func (w *Watcher) refreshAuthState(force bool) {
 	w.clientsMutex.RUnlock()
 	auths := snapshotCoreAuthsFunc(cfg, authDir, parser)
 	w.clientsMutex.Lock()
-	// Deduplicate by ID: build a set of existing IDs from SnapshotCoreAuths
-	existingIDs := make(map[string]bool, len(auths))
-	for _, a := range auths {
-		if a != nil && a.ID != "" {
-			existingIDs[a.ID] = true
-		}
-	}
-	// Only add runtime auths that don't already exist in SnapshotCoreAuths
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
-			if a != nil && a.ID != "" && !existingIDs[a.ID] {
+			if a != nil {
 				auths = append(auths, a.Clone())
 			}
 		}

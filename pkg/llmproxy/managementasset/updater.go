@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/httpfetch"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -121,7 +123,7 @@ func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
 func newHTTPClient(proxyURL string) *http.Client {
 	client := &http.Client{Timeout: 15 * time.Second}
 
-	sdkCfg := &config.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
+	sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
 	util.SetProxy(sdkCfg, client)
 
 	return client

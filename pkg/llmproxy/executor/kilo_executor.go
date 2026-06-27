@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
@@ -74,7 +75,7 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	accessToken, orgID := kiloCredentials(auth)
 	if accessToken == "" {
@@ -147,8 +148,8 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.publish(ctx, parseOpenAIUsage(body))
-	reporter.ensurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	reporter.EnsurePublished(ctx)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
@@ -161,7 +162,7 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	accessToken, orgID := kiloCredentials(auth)
 	if accessToken == "" {
@@ -233,8 +234,8 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	var param any
 	processor := func(ctx context.Context, line []byte) ([]string, error) {
 		appendAPIResponseChunk(ctx, e.cfg, line)
-		if detail, ok := parseOpenAIStreamUsage(line); ok {
-			reporter.publish(ctx, detail)
+		if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+			reporter.Publish(ctx, detail)
 		}
 		chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
 		result := make([]string, len(chunks))
@@ -246,7 +247,7 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	result := ProcessSSEStreamWithFilter(ctx, httpResp, processor, func(ctx context.Context, err error) {
 		recordAPIResponseError(ctx, e.cfg, err)
-		reporter.publishFailure(ctx)
+		reporter.PublishFailure(ctx)
 	}, true) // requireDataPrefix=true
 
 	// Wrap the original channel to ensure usage is published after stream completes
@@ -256,7 +257,7 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		for chunk := range result.Chunks {
 			wrappedOut <- chunk
 		}
-		reporter.ensurePublished(ctx)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{

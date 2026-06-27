@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
@@ -356,6 +357,32 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 
 	return changes
+}
+
+func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.TrimSpace(a[i].UpstreamAPIKey) != strings.TrimSpace(b[i].UpstreamAPIKey) {
+			return false
+		}
+		if !reflect.DeepEqual(normalizeStringList(a[i].APIKeys), normalizeStringList(b[i].APIKeys)) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeStringList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func trimStrings(in []string) []string {

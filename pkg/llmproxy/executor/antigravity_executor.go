@@ -19,16 +19,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
+	homekv "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/home"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
+	antigravityclaude "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/antigravity/claude"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util/urlguard"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
@@ -41,19 +47,30 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-const (
-	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.googleapis.com"
-	antigravitySandboxBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
-	antigravityCountTokensPath     = "/v1internal:countTokens"
-	antigravityStreamPath          = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath        = "/v1internal:generateContent"
-	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
-	antigravityClientID            = envWithDefault("ANTIGRAVITY_CLIENT_ID", "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com")
-	antigravityClientSecret        = envWithDefault("ANTIGRAVITY_CLIENT_SECRET", "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")
-	defaultAntigravityAgent        = "antigravity/1.19.6 darwin/arm64"
-	antigravityAuthType            = "antigravity"
-	refreshSkew                    = 3000 * time.Second
+func envWithDefault(key string, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+var (
+	antigravityBaseURLDaily                = "https://daily-cloudcode-pa.googleapis.com"
+	antigravitySandboxBaseURLDaily         = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd                 = "https://cloudcode-pa.googleapis.com"
+	antigravityCountTokensPath             = "/v1internal:countTokens"
+	antigravityStreamPath                  = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath                = "/v1internal:generateContent"
+	antigravityModelsPath                  = "/v1internal:fetchAvailableModels"
+	antigravityClientID                    = envWithDefault("ANTIGRAVITY_CLIENT_ID", "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com")
+	antigravityClientSecret                = envWithDefault("ANTIGRAVITY_CLIENT_SECRET", "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")
+	defaultAntigravityAgent                = "antigravity/1.19.6 darwin/arm64"
+	antigravityAuthType                    = "antigravity"
+	refreshSkew                            = 3000 * time.Second
+	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
+	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
+	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
+	antigravityInstantRetryThreshold       = 3 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -598,7 +615,7 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 }
 
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
-	err := statusErr{code: statusCode, msg: string(body)}
+	err := statusErr{code: statusCode, msg: antigravityErrorMessage(statusCode, body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
@@ -1018,7 +1035,7 @@ attemptLoop:
 					}
 					if attempt+1 < attempts {
 						delay := antigravityNoCapacityRetryDelay(attempt)
-						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", util.RedactAPIKey(baseModel), delay, attempt+1, attempts)
+						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", util.HideAPIKey(baseModel), delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
@@ -1659,7 +1676,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("antigravity")
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -1679,10 +1696,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if strings.TrimSpace(token) == "" {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
-
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("antigravity")
-	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
 
 	// Prepare payload once (doesn't depend on baseURL)
 	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
@@ -2167,20 +2180,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if refreshToken == "" {
 		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing refresh token"}
 	}
-
-	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", refreshToken)
-
-	guardedTokenURL, gerr := urlguard.ValidateOutboundURL("https://oauth2.googleapis.com/token")
-	if gerr != nil {
-		return auth, gerr
-	}
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedTokenURL, strings.NewReader(form.Encode()))
-	if errReq != nil {
-		return auth, errReq
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
 
@@ -2190,37 +2191,10 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if errRefresh != nil {
 		return auth, errRefresh
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity executor: close response body error: %v", errClose)
-		}
-	}()
-
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		return auth, errRead
+	tokenResp, ok := result.(*antigravityTokenRefreshData)
+	if !ok || tokenResp == nil {
+		return auth, fmt.Errorf("antigravity token refresh failed: invalid single-flight result")
 	}
-
-	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return auth, sErr
-	}
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-		TokenType    string `json:"token_type"`
-	}
-	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
-		return auth, errUnmarshal
-	}
-
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -2499,9 +2473,37 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 
-	if useAntigravitySchema {
-		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
-		payloadStr = util.DeleteKeysByName(payloadStr, "$ref", "$defs")
+	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	var (
+		bodyReader io.Reader
+		payloadLog []byte
+	)
+	if antigravityRequestNeedsSchemaSanitization(payload) {
+		payloadStr := string(payload)
+		paths := make([]string, 0)
+		util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
+		for _, p := range paths {
+			payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+		}
+
+		if useAntigravitySchema {
+			payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+		} else {
+			payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+		}
+
+		if strings.Contains(modelName, "claude") {
+			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+			payloadStr = string(updated)
+		} else {
+			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
+		}
+
+		payloadStrBytes := applyAntigravityNativeSignatureReplayIfNeeded(modelName, []byte(payloadStr))
+		bodyReader = bytes.NewReader(payloadStrBytes)
+		if e.cfg != nil && e.cfg.RequestLog {
+			payloadLog = append([]byte(nil), payloadStrBytes...)
+		}
 	} else {
 		if strings.Contains(modelName, "claude") {
 			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
@@ -2529,18 +2531,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	// 	}
 	// }
 
-	if strings.Contains(modelName, "claude") {
-		updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		payloadStr = string(updated)
-	} else {
-		payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
-	}
-
-	guardedReqURL, gerr := urlguard.ValidateOutboundURL(requestURL.String())
-	if gerr != nil {
-		return nil, gerr
-	}
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedReqURL, strings.NewReader(payloadStr))
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
 		return nil, errReq
 	}
@@ -2737,13 +2728,6 @@ func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
 		return 1
 	}
 	return attempts
-}
-
-func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
-	return statusErr{
-		code: statusCode,
-		msg:  antigravityErrorMessage(statusCode, body),
-	}
 }
 
 func antigravityErrorMessage(statusCode int, body []byte) string {

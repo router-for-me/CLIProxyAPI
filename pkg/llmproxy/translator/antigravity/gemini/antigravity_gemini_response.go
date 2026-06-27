@@ -9,8 +9,7 @@ import (
 	"bytes"
 	"context"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -36,7 +35,7 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	if alt, ok := ctx.Value(interfaces.ContextKeyAlt).(string); ok {
+	if alt, ok := ctx.Value("alt").(string); ok {
 		var chunk []byte
 		if alt == "" {
 			responseResult := gjson.GetBytes(rawJSON, "response")
@@ -94,16 +93,8 @@ func GeminiTokenCount(ctx context.Context, count int64) []byte {
 // When returning standard Gemini API format, we must restore the original name.
 func restoreUsageMetadata(chunk []byte) []byte {
 	if cpaUsage := gjson.GetBytes(chunk, "cpaUsageMetadata"); cpaUsage.Exists() {
-		if !gjson.GetBytes(chunk, "usageMetadata").Exists() {
-			chunk, _ = sjson.SetRawBytes(chunk, "usageMetadata", []byte(cpaUsage.Raw))
-		}
+		chunk, _ = sjson.SetRawBytes(chunk, "usageMetadata", []byte(cpaUsage.Raw))
 		chunk, _ = sjson.DeleteBytes(chunk, "cpaUsageMetadata")
-	}
-	if cpaUsage := gjson.GetBytes(chunk, "response.cpaUsageMetadata"); cpaUsage.Exists() {
-		if !gjson.GetBytes(chunk, "response.usageMetadata").Exists() {
-			chunk, _ = sjson.SetRawBytes(chunk, "response.usageMetadata", []byte(cpaUsage.Raw))
-		}
-		chunk, _ = sjson.DeleteBytes(chunk, "response.cpaUsageMetadata")
 	}
 	return chunk
 }

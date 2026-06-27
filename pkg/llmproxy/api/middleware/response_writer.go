@@ -5,9 +5,6 @@ package middleware
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"fmt"
-	"html"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
+	log "github.com/sirupsen/logrus"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -158,17 +156,17 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	w.captureCurrentHeaders()
 
 	// Detect streaming based on Content-Type
-	contentType := w.Header().Get("Content-Type")
+	contentType := w.ResponseWriter.Header().Get("Content-Type")
 	w.isStreaming = w.detectStreaming(contentType)
 
 	// If streaming, initialize streaming log writer
 	if w.isStreaming && w.logger.IsEnabled() {
 		streamWriter, err := w.logger.LogStreamingRequest(
-			sanitizeForLogging(w.requestInfo.URL),
-			sanitizeForLogging(w.requestInfo.Method),
+			w.requestInfo.URL,
+			w.requestInfo.Method,
 			w.requestInfo.Headers,
 			w.requestInfo.Body,
-			sanitizeForLogging(w.requestInfo.RequestID),
+			w.requestInfo.RequestID,
 		)
 		if err == nil {
 			w.streamWriter = streamWriter
@@ -205,7 +203,7 @@ func (w *ResponseWriterWrapper) captureCurrentHeaders() {
 	}
 
 	// Capture all current headers from the underlying ResponseWriter
-	for key, values := range w.Header() {
+	for key, values := range w.ResponseWriter.Header() {
 		// Make a copy of the values slice to avoid reference issues
 		headerValues := make([]string, len(values))
 		copy(headerValues, values)
@@ -388,7 +386,7 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return redactLoggedBody(data)
+	return data
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -400,7 +398,7 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return redactLoggedBody(data)
+	return data
 }
 
 func (w *ResponseWriterWrapper) extractAPIRequestSource(c *gin.Context) *logging.FileBodySource {
@@ -439,22 +437,11 @@ func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time
 }
 
 func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
-	if c != nil {
-		if bodyOverride, isExist := c.Get(requestBodyOverrideContextKey); isExist {
-			switch value := bodyOverride.(type) {
-			case []byte:
-				if len(value) > 0 {
-					return redactLoggedBody(bytes.Clone(value))
-				}
-			case string:
-				if strings.TrimSpace(value) != "" {
-					return redactLoggedBody([]byte(value))
-				}
-			}
-		}
+	if body := extractBodyOverride(c, requestBodyOverrideContextKey); len(body) > 0 {
+		return body
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return redactLoggedBody(w.requestInfo.Body)
+		return w.requestInfo.Body
 	}
 	return nil
 }
@@ -518,10 +505,6 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil
 	}
-	safeURL := sanitizeForLogging(w.requestInfo.URL)
-	safeMethod := sanitizeForLogging(w.requestInfo.Method)
-	safeRequestID := sanitizeForLogging(w.requestInfo.RequestID)
-	requestHeaders := sanitizeRequestHeaders(http.Header(w.requestInfo.Headers))
 
 	if loggerWithAllSources, ok := w.logger.(interface {
 		LogRequestWithOptionsAndAllSources(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, *logging.FileBodySource, []byte, *logging.FileBodySource, []byte, *logging.FileBodySource, []byte, *logging.FileBodySource, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
@@ -611,48 +594,73 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
 	}); ok {
 		return loggerWithOptions.LogRequestWithOptions(
-			safeURL,
-			safeMethod,
-			requestHeaders,
-			redactLoggedBody(requestBody),
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			w.requestInfo.Headers,
+			requestBody,
 			statusCode,
 			headers,
-			redactLoggedBody(body),
-			redactLoggedBody(apiRequestBody),
-			redactLoggedBody(apiResponseBody),
+			body,
+			websocketTimeline,
+			apiRequestBody,
+			apiResponseBody,
+			apiWebsocketTimeline,
 			apiResponseErrors,
 			forceLog,
-			safeRequestID,
+			w.requestInfo.RequestID,
 			w.requestInfo.Timestamp,
 			apiResponseTimestamp,
 		)
 	}
 
 	return w.logger.LogRequest(
-		safeURL,
-		safeMethod,
-		requestHeaders,
-		redactLoggedBody(requestBody),
+		w.requestInfo.URL,
+		w.requestInfo.Method,
+		w.requestInfo.Headers,
+		requestBody,
 		statusCode,
 		headers,
-		redactLoggedBody(body),
-		redactLoggedBody(apiRequestBody),
-		redactLoggedBody(apiResponseBody),
+		body,
+		websocketTimeline,
+		apiRequestBody,
+		apiResponseBody,
+		apiWebsocketTimeline,
 		apiResponseErrors,
-		safeRequestID,
+		w.requestInfo.RequestID,
 		w.requestInfo.Timestamp,
 		apiResponseTimestamp,
 	)
 }
 
-func sanitizeForLogging(value string) string {
-	return html.EscapeString(strings.TrimSpace(value))
+func mergeFileBodySource(payload []byte, source *logging.FileBodySource) ([]byte, error) {
+	if source == nil {
+		return payload, nil
+	}
+	defer cleanupFileBodySources(source)
+	if !source.HasPayload() {
+		return payload, nil
+	}
+	var buf bytes.Buffer
+	if len(payload) > 0 {
+		buf.Write(payload)
+		if !bytes.HasSuffix(payload, []byte("\n")) {
+			buf.WriteByte('\n')
+		}
+		buf.WriteByte('\n')
+	}
+	if errWrite := source.WriteTo(&buf); errWrite != nil {
+		return nil, errWrite
+	}
+	return buf.Bytes(), nil
 }
 
-func redactLoggedBody(body []byte) []byte {
-	if len(body) == 0 {
-		return nil
+func cleanupFileBodySources(sources ...*logging.FileBodySource) {
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		if errCleanup := source.Cleanup(); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up log part files")
+		}
 	}
-	sum := sha256.Sum256(body)
-	return []byte(fmt.Sprintf("[REDACTED] len=%d sha256=%x", len(body), sum[:8]))
 }

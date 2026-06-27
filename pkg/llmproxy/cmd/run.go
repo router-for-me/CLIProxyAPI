@@ -10,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	internalapi "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginhost"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/safemode"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -31,7 +33,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 // StartServiceWithPluginHost builds and runs the proxy service with a shared plugin host.
 func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) {
 	builder := cliproxy.NewBuilder().
-		WithConfig(castToSDKConfig(cfg)).
+		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
 	if host != nil {
@@ -45,7 +47,7 @@ func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPass
 	if localPassword != "" {
 		var keepAliveCancel context.CancelFunc
 		runCtx, keepAliveCancel = context.WithCancel(ctxSignal)
-		builder = builder.WithServerOptions(internalapi.WithKeepAliveEndpoint(10*time.Second, func() {
+		builder = builder.WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, func() {
 			log.Warn("keep-alive endpoint idle for 10s, shutting down")
 			keepAliveCancel()
 		}))
@@ -84,7 +86,7 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 // StartServiceBackgroundWithPluginHost starts the proxy service with a shared plugin host.
 func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) (cancel func(), done <-chan struct{}) {
 	builder := cliproxy.NewBuilder().
-		WithConfig(castToSDKConfig(cfg)).
+		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
 	if host != nil {

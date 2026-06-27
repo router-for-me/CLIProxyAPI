@@ -17,7 +17,6 @@ type ModelRegistry interface {
 	ClientSupportsModel(clientID, modelID string) bool
 	GetAvailableModels(handlerType string) []map[string]any
 	GetAvailableModelsByProvider(provider string) []*ModelInfo
-	GetModelsForClient(clientID string) []*ModelInfo
 }
 
 // GlobalModelRegistry returns the shared registry instance.

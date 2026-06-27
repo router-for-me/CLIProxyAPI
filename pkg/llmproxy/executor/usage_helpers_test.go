@@ -8,7 +8,7 @@ import (
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
-	detail := parseOpenAIUsage(data)
+	detail := helps.ParseOpenAIUsage(data)
 	if detail.InputTokens != 1 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 1)
 	}
@@ -28,7 +28,7 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
-	detail := parseOpenAIUsage(data)
+	detail := helps.ParseOpenAIUsage(data)
 	if detail.InputTokens != 10 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
 	}
@@ -48,7 +48,7 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 
 func TestParseOpenAIUsage_WithAlternateFieldsAndStringValues(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":"10","output_tokens":"20","prompt_tokens": "11","completion_tokens": "12","prompt_tokens_details":{"cached_tokens":"7"},"output_tokens_details":{"reasoning_tokens":"9"}}}`)
-	detail := parseOpenAIUsage(data)
+	detail := helps.ParseOpenAIUsage(data)
 	if detail.InputTokens != 11 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
 	}
@@ -68,7 +68,7 @@ func TestParseOpenAIUsage_WithAlternateFieldsAndStringValues(t *testing.T) {
 
 func TestParseOpenAIStreamUsage_WithAlternateFieldsAndStringValues(t *testing.T) {
 	line := []byte(`{"usage":{"prompt_tokens":"3","completion_tokens":"4","prompt_tokens_details":{"cached_tokens":1},"completion_tokens_details":{"reasoning_tokens":"2"}}}`)
-	detail, ok := parseOpenAIStreamUsage(line)
+	detail, ok := helps.ParseOpenAIStreamUsage(line)
 	if !ok {
 		t.Fatal("expected stream usage")
 	}
@@ -91,7 +91,7 @@ func TestParseOpenAIStreamUsage_WithAlternateFieldsAndStringValues(t *testing.T)
 
 func TestParseOpenAIResponsesUsageDetail_WithAlternateFields(t *testing.T) {
 	node := gjson.Parse(`{"input_tokens":"14","completion_tokens":"16","cached_tokens":"1","output_tokens_details":{"reasoning_tokens":"3"}}`)
-	detail := parseOpenAIResponsesUsageDetail(node)
+	detail := helps.ParseOpenAIResponsesUsageDetail(node)
 	if detail.InputTokens != 14 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 14)
 	}

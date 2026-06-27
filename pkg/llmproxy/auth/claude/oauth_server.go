@@ -7,10 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -244,11 +242,6 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 		platformURL = "https://console.anthropic.com/"
 	}
 
-	// Validate platformURL to prevent XSS - only allow http/https URLs
-	if !isValidURL(platformURL) {
-		platformURL = "https://console.anthropic.com/"
-	}
-
 	// Generate success page HTML with dynamic content
 	successHTML := s.generateSuccessHTML(setupRequired, platformURL)
 
@@ -256,22 +249,6 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Errorf("Failed to write success page: %v", err)
 	}
-}
-
-// isValidURL checks if the URL is a valid http/https URL to prevent XSS
-func isValidURL(urlStr string) bool {
-	urlStr = strings.TrimSpace(urlStr)
-	if urlStr == "" {
-		return false
-	}
-	parsed, err := url.Parse(urlStr)
-	if err != nil {
-		return false
-	}
-	if parsed.Host == "" {
-		return false
-	}
-	return parsed.Scheme == "https" || parsed.Scheme == "http"
 }
 
 // generateSuccessHTML creates the HTML content for the success page.
@@ -285,21 +262,20 @@ func isValidURL(urlStr string) bool {
 // Returns:
 //   - string: The HTML content for the success page
 func (s *OAuthServer) generateSuccessHTML(setupRequired bool, platformURL string) string {
-	pageHTML := LoginSuccessHtml
-	escapedPlatformURL := html.EscapeString(platformURL)
+	html := LoginSuccessHtml
 
 	// Replace platform URL placeholder
-	pageHTML = strings.ReplaceAll(pageHTML, "{{PLATFORM_URL}}", escapedPlatformURL)
+	html = strings.Replace(html, "{{PLATFORM_URL}}", platformURL, -1)
 
 	// Add setup notice if required
 	if setupRequired {
-		setupNotice := strings.ReplaceAll(SetupNoticeHtml, "{{PLATFORM_URL}}", escapedPlatformURL)
-		pageHTML = strings.Replace(pageHTML, "{{SETUP_NOTICE}}", setupNotice, 1)
+		setupNotice := strings.Replace(SetupNoticeHtml, "{{PLATFORM_URL}}", platformURL, -1)
+		html = strings.Replace(html, "{{SETUP_NOTICE}}", setupNotice, 1)
 	} else {
-		pageHTML = strings.Replace(pageHTML, "{{SETUP_NOTICE}}", "", 1)
+		html = strings.Replace(html, "{{SETUP_NOTICE}}", "", 1)
 	}
 
-	return pageHTML
+	return html
 }
 
 // sendResult sends the OAuth result to the waiting channel.

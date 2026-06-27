@@ -49,6 +49,19 @@ func (h *OpenAIAPIHandler) HandlerType() string {
 	return constant.OpenAI
 }
 
+func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
+	NewOpenAIImagesAPIHandler(h.BaseAPIHandler).ImageGenerations(c)
+}
+
+func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
+	c.JSON(http.StatusNotImplemented, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{
+			Message: "image edits are not implemented",
+			Type:    "not_implemented_error",
+		},
+	})
+}
+
 // Models returns the OpenAI-compatible model metadata supported by this handler.
 func (h *OpenAIAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry

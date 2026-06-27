@@ -7,57 +7,110 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestConvertClaudeResponseToOpenAI(t *testing.T) {
+func TestConvertClaudeResponseToOpenAI_StreamUsageIncludesCachedTokens(t *testing.T) {
 	ctx := context.Background()
-	model := "gpt-4o"
 	var param any
 
-	// Message start
-	raw := []byte(`data: {"type": "message_start", "message": {"id": "msg_123", "role": "assistant", "model": "claude-3"}}`)
-	got := ConvertClaudeResponseToOpenAI(ctx, model, nil, nil, raw, &param)
-	if len(got) != 1 {
-		t.Errorf("expected 1 chunk, got %d", len(got))
-	}
-	res := gjson.ParseBytes(got[0])
-	if res.Get("id").String() != "msg_123" || res.Get("choices.0.delta.role").String() != "assistant" {
-		t.Errorf("unexpected message_start output: %s", got[0])
-	}
-
-	// Content delta
-	raw = []byte(`data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello"}}`)
-	got = ConvertClaudeResponseToOpenAI(ctx, model, nil, nil, raw, &param)
-	if len(got) != 1 {
-		t.Errorf("expected 1 chunk, got %d", len(got))
-	}
-	res = gjson.ParseBytes(got[0])
-	if res.Get("choices.0.delta.content").String() != "hello" {
-		t.Errorf("unexpected content_block_delta output: %s", got[0])
+	out := ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-opus-4-6",
+		nil,
+		nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":13,"output_tokens":4,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}`),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	// Message delta (usage)
-	raw = []byte(`data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 10, "output_tokens": 5}}`)
-	got = ConvertClaudeResponseToOpenAI(ctx, model, nil, nil, raw, &param)
-	if len(got) != 1 {
-		t.Errorf("expected 1 chunk, got %d", len(got))
+	if gotPromptTokens := gjson.GetBytes(out[0], "usage.prompt_tokens").Int(); gotPromptTokens != 22044 {
+		t.Fatalf("expected prompt_tokens %d, got %d", 22044, gotPromptTokens)
 	}
-	res = gjson.ParseBytes(got[0])
-	if res.Get("usage.total_tokens").Int() != 15 {
-		t.Errorf("unexpected usage output: %s", got[0])
+	if gotCompletionTokens := gjson.GetBytes(out[0], "usage.completion_tokens").Int(); gotCompletionTokens != 4 {
+		t.Fatalf("expected completion_tokens %d, got %d", 4, gotCompletionTokens)
+	}
+	if gotTotalTokens := gjson.GetBytes(out[0], "usage.total_tokens").Int(); gotTotalTokens != 22048 {
+		t.Fatalf("expected total_tokens %d, got %d", 22048, gotTotalTokens)
+	}
+	if gotCachedTokens := gjson.GetBytes(out[0], "usage.prompt_tokens_details.cached_tokens").Int(); gotCachedTokens != 22000 {
+		t.Fatalf("expected cached_tokens %d, got %d", 22000, gotCachedTokens)
 	}
 }
 
-func TestConvertClaudeResponseToOpenAINonStream(t *testing.T) {
-	raw := []byte(`data: {"type": "message_start", "message": {"id": "msg_123", "model": "claude-3"}}
-data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello "}}
-data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "world"}}
-data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 10, "output_tokens": 5}}`)
+func TestConvertClaudeResponseToOpenAI_StreamUsageMergesMessageStartUsage(t *testing.T) {
+	ctx := context.Background()
+	var param any
 
-	got := ConvertClaudeResponseToOpenAINonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
-	res := gjson.ParseBytes(got)
-	if res.Get("choices.0.message.content").String() != "hello world" {
-		t.Errorf("unexpected content: %s", got)
+	ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-opus-4-6",
+		nil,
+		nil,
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}}`),
+		&param,
+	)
+	out := ConvertClaudeResponseToOpenAI(
+		ctx,
+		"claude-opus-4-6",
+		nil,
+		nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
-	if res.Get("usage.total_tokens").Int() != 15 {
-		t.Errorf("unexpected usage: %s", got)
+
+	if gotPromptTokens := gjson.GetBytes(out[0], "usage.prompt_tokens").Int(); gotPromptTokens != 22044 {
+		t.Fatalf("expected prompt_tokens %d, got %d", 22044, gotPromptTokens)
+	}
+	if gotCompletionTokens := gjson.GetBytes(out[0], "usage.completion_tokens").Int(); gotCompletionTokens != 4 {
+		t.Fatalf("expected completion_tokens %d, got %d", 4, gotCompletionTokens)
+	}
+	if gotTotalTokens := gjson.GetBytes(out[0], "usage.total_tokens").Int(); gotTotalTokens != 22048 {
+		t.Fatalf("expected total_tokens %d, got %d", 22048, gotTotalTokens)
+	}
+	if gotCachedTokens := gjson.GetBytes(out[0], "usage.prompt_tokens_details.cached_tokens").Int(); gotCachedTokens != 22000 {
+		t.Fatalf("expected cached_tokens %d, got %d", 22000, gotCachedTokens)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAINonStream_UsageIncludesCachedTokens(t *testing.T) {
+	rawJSON := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-4-6\"}}\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\n")
+
+	out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "", nil, nil, rawJSON, nil)
+
+	if gotPromptTokens := gjson.GetBytes(out, "usage.prompt_tokens").Int(); gotPromptTokens != 22044 {
+		t.Fatalf("expected prompt_tokens %d, got %d", 22044, gotPromptTokens)
+	}
+	if gotCompletionTokens := gjson.GetBytes(out, "usage.completion_tokens").Int(); gotCompletionTokens != 4 {
+		t.Fatalf("expected completion_tokens %d, got %d", 4, gotCompletionTokens)
+	}
+	if gotTotalTokens := gjson.GetBytes(out, "usage.total_tokens").Int(); gotTotalTokens != 22048 {
+		t.Fatalf("expected total_tokens %d, got %d", 22048, gotTotalTokens)
+	}
+	if gotCachedTokens := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); gotCachedTokens != 22000 {
+		t.Fatalf("expected cached_tokens %d, got %d", 22000, gotCachedTokens)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAINonStream_UsageMergesMessageStartUsage(t *testing.T) {
+	rawJSON := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":13,\"output_tokens\":1,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}}\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n")
+
+	out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "", nil, nil, rawJSON, nil)
+
+	if gotPromptTokens := gjson.GetBytes(out, "usage.prompt_tokens").Int(); gotPromptTokens != 22044 {
+		t.Fatalf("expected prompt_tokens %d, got %d", 22044, gotPromptTokens)
+	}
+	if gotCompletionTokens := gjson.GetBytes(out, "usage.completion_tokens").Int(); gotCompletionTokens != 4 {
+		t.Fatalf("expected completion_tokens %d, got %d", 4, gotCompletionTokens)
+	}
+	if gotTotalTokens := gjson.GetBytes(out, "usage.total_tokens").Int(); gotTotalTokens != 22048 {
+		t.Fatalf("expected total_tokens %d, got %d", 22048, gotTotalTokens)
+	}
+	if gotCachedTokens := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); gotCachedTokens != 22000 {
+		t.Fatalf("expected cached_tokens %d, got %d", 22000, gotCachedTokens)
 	}
 }

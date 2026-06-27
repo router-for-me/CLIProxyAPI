@@ -53,18 +53,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
 	// }
 
-	// Map reasoning effort; support flat legacy field and variant fallback.
+	// Map reasoning effort
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
-	} else if v := gjson.GetBytes(rawJSON, `reasoning\.effort`); v.Exists() {
-		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
-	} else if v := gjson.GetBytes(rawJSON, "variant"); v.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(v.String()))
-		if effort == "" {
-			out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
-		} else {
-			out, _ = sjson.SetBytes(out, "reasoning.effort", effort)
-		}
 	} else {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
@@ -189,7 +180,33 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 							}
 						case "file":
-							// Files are not specified in examples; skip for now
+							if role == "user" {
+								fileData := it.Get("file.file_data").String()
+								filename := it.Get("file.filename").String()
+								if fileData != "" {
+									part := []byte(`{}`)
+									part, _ = sjson.SetBytes(part, "type", "input_file")
+									part, _ = sjson.SetBytes(part, "file_data", fileData)
+									if filename != "" {
+										part, _ = sjson.SetBytes(part, "filename", filename)
+									}
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+								}
+							}
+						case "input_audio":
+							if role == "user" {
+								audioData := it.Get("input_audio.data").String()
+								audioFormat := it.Get("input_audio.format").String()
+								if audioData != "" {
+									part := []byte(`{}`)
+									part, _ = sjson.SetBytes(part, "type", "input_audio")
+									part, _ = sjson.SetBytes(part, "data", audioData)
+									if audioFormat != "" {
+										part, _ = sjson.SetBytes(part, "format", audioFormat)
+									}
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+								}
+							}
 						}
 					}
 				}
@@ -214,7 +231,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
 								funcCall, _ = sjson.SetBytes(funcCall, "call_id", tc.Get("id").String())
 								{
-									name := normalizeToolNameAgainstMap(tc.Get("function.name").String(), originalToolNameMap)
+									name := tc.Get("function.name").String()
 									if short, ok := originalToolNameMap[name]; ok {
 										name = short
 									} else {
@@ -298,7 +315,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				fn := t.Get("function")
 				if fn.Exists() {
 					if v := fn.Get("name"); v.Exists() {
-						name := normalizeToolNameAgainstMap(v.String(), originalToolNameMap)
+						name := v.String()
 						if short, ok := originalToolNameMap[name]; ok {
 							name = short
 						} else {
@@ -331,7 +348,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		case tc.IsObject():
 			tcType := tc.Get("type").String()
 			if tcType == "function" {
-				name := normalizeToolNameAgainstMap(tc.Get("function.name").String(), originalToolNameMap)
+				name := tc.Get("function.name").String()
 				if name != "" {
 					if short, ok := originalToolNameMap[name]; ok {
 						name = short
@@ -517,23 +534,4 @@ func buildShortNameMap(names []string) map[string]string {
 		m[n] = uniq
 	}
 	return m
-}
-
-func normalizeToolNameAgainstMap(name string, m map[string]string) string {
-	if name == "" {
-		return name
-	}
-	if _, ok := m[name]; ok {
-		return name
-	}
-
-	const proxyPrefix = "proxy_"
-	if strings.HasPrefix(name, proxyPrefix) {
-		trimmed := strings.TrimPrefix(name, proxyPrefix)
-		if _, ok := m[trimmed]; ok {
-			return trimmed
-		}
-	}
-
-	return name
 }

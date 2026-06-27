@@ -15,6 +15,7 @@ import (
 	"time"
 
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // PluginAuthParser parses auth JSON owned by plugin providers.

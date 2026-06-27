@@ -44,14 +44,6 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 		}
 	case "codex", "xai":
 		paths = []string{"reasoning.effort"}
-	case "iflow":
-		paths = []string{
-			"chat_template_kwargs",
-			"reasoning_split",
-			"reasoning_effort",
-			"reasoning",
-			"variant",
-		}
 	default:
 		return body
 	}

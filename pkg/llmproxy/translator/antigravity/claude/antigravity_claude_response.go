@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 
@@ -243,9 +243,12 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 						// Transition from another state to thinking
 						// First, close any existing content block
 						if params.ResponseType != 0 {
-							output = append(output, "event: content_block_stop\n"...)
-							output = append(output, fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)...)
-							output = append(output, "\n\n\n"...)
+							if params.ResponseType == 2 {
+								// output = output + "event: content_block_delta\n"
+								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
+								// output = output + "\n\n\n"
+							}
+							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 							params.ResponseIndex++
 						}
 
@@ -272,9 +275,12 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 							// Transition from another state to text content
 							// First, close any existing content block
 							if params.ResponseType != 0 {
-								output = append(output, "event: content_block_stop\n"...)
-								output = append(output, fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)...)
-								output = append(output, "\n\n\n"...)
+								if params.ResponseType == 2 {
+									// output = output + "event: content_block_delta\n"
+									// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
+									// output = output + "\n\n\n"
+								}
+								appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 								params.ResponseIndex++
 							}
 							if partTextResult.String() != "" {
@@ -304,7 +310,9 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 				// Special handling for thinking state transition
 				if params.ResponseType == 2 {
-					params.ResponseType = 0
+					// output = output + "event: content_block_delta\n"
+					// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
+					// output = output + "\n\n\n"
 				}
 
 				// Close any other existing content block

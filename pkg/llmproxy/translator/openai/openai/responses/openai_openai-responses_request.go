@@ -17,7 +17,7 @@ import (
 // 3. Input array to messages array transformation
 // 4. Tool definitions and tool choice conversion
 // 5. Function calls and function results handling
-// 6. Generation parameters mapping (max_completion_tokens, reasoning, etc.)
+// 6. Generation parameters mapping (max_tokens, reasoning, etc.)
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -41,7 +41,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Map generation parameters from responses format to chat completions format
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
-		out, _ = sjson.SetBytes(out, "max_completion_tokens", maxTokens.Int())
+		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
 
 	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
@@ -275,13 +275,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var chatCompletionsTools []interface{}
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
-			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Pass through built-in tools (e.g. web_search_preview) as-is
-				chatCompletionsTools = append(chatCompletionsTools, tool.Value())
-				return true
+			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
+				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 			}
 			return true
 		})
@@ -291,34 +286,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 	}
 
-	// Map reasoning controls.
-	//
-	// Priority:
-	// 1. reasoning.effort object field
-	// 2. flat legacy field "reasoning.effort"
-	// 3. variant
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
-		if effort != "" {
-			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
-		}
-	} else if reasoningEffort := root.Get(`reasoning\.effort`); reasoningEffort.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
-		if effort != "" {
-			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
-		}
-	} else if variant := root.Get("variant"); variant.Exists() && variant.Type == gjson.String {
-		effort := strings.ToLower(strings.TrimSpace(variant.String()))
-		if effort != "" {
-			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
-		}
-	} else if reasoningEffort := root.Get(`reasoning\.effort`); reasoningEffort.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
-		if effort != "" {
-			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
-		}
-	} else if variant := root.Get("variant"); variant.Exists() && variant.Type == gjson.String {
-		effort := strings.ToLower(strings.TrimSpace(variant.String()))
 		if effort != "" {
 			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
@@ -326,12 +295,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		switch toolChoice.Type {
-		case gjson.JSON:
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
-		default:
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
-		}
+		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 	}
 
 	return out

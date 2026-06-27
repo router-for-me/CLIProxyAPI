@@ -1,8 +1,11 @@
 package responses
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 
+	sigcompat "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/tidwall/gjson"
@@ -12,7 +15,7 @@ import (
 const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := []byte(common.SanitizeOpenAIInputForGemini(string(inputRawJSON)))
+	rawJSON := inputRawJSON
 
 	// Note: modelName and stream parameters are part of the fixed method signature
 	_ = modelName // Unused but required by interface
@@ -201,11 +204,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						switch contentType {
 						case "input_text", "output_text":
 							if text := contentItem.Get("text"); text.Exists() {
-								textValue := text.String()
-								if strings.TrimSpace(textValue) != "" {
-									partJSON = []byte(`{"text":""}`)
-									partJSON, _ = sjson.SetBytes(partJSON, "text", textValue)
-								}
+								partJSON = []byte(`{"text":""}`)
+								partJSON, _ = sjson.SetBytes(partJSON, "text", text.String())
 							}
 						case "input_image":
 							imageURL := contentItem.Get("image_url").String()
@@ -276,10 +276,6 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 					flush()
 				} else if contentArray.Type == gjson.String {
-					contentText := contentArray.String()
-					if strings.TrimSpace(contentText) == "" {
-						continue
-					}
 					effRole := "user"
 					if itemRole != "" {
 						switch strings.ToLower(itemRole) {
@@ -292,7 +288,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 					one := []byte(`{"role":"","parts":[{"text":""}]}`)
 					one, _ = sjson.SetBytes(one, "role", effRole)
-					one, _ = sjson.SetBytes(one, "parts.0.text", contentText)
+					one, _ = sjson.SetBytes(one, "parts.0.text", contentArray.String())
 					out, _ = sjson.SetRawBytes(out, "contents.-1", one)
 				}
 
@@ -345,17 +341,10 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.name", functionName)
 				functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.id", callID)
 
-				// Set the function output into the response.
-				// When the output is valid JSON without literal control characters
-				// (newlines, carriage returns inside string values) we embed it as a
-				// raw JSON value so the model sees structured data.  Otherwise we
-				// fall back to sjson.Set which safely escapes the value as a string.
-				// This prevents sjson.SetRaw from corrupting the JSON tree when the
-				// raw value contains literal newlines (common with double-encoded
-				// function outputs whose inner escape sequences were decoded by .Str).
+				// Set the raw JSON output directly (preserves string encoding)
 				if outputRaw != "" && outputRaw != "null" {
 					output := gjson.Parse(outputRaw)
-					if output.Type == gjson.JSON && !containsLiteralControlChars(output.Raw) {
+					if output.Type == gjson.JSON && json.Valid([]byte(output.Raw)) {
 						functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.response.result", []byte(output.Raw))
 					} else {
 						functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", outputRaw)
@@ -405,13 +394,9 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
 				}
-				params := tool.Get("parameters")
-				if !params.Exists() {
-					params = tool.Get("parametersJsonSchema")
+				if params := tool.Get("parameters"); params.Exists() {
+					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(util.CleanJSONSchemaForGemini(params.Raw)))
 				}
-				strict := tool.Get("strict").Exists() && tool.Get("strict").Bool()
-				cleaned := common.NormalizeOpenAIFunctionSchemaForGemini(params, strict)
-				funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(cleaned))
 
 				geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
 			}
@@ -484,15 +469,41 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	return result
 }
 
-// containsLiteralControlChars reports whether s contains any ASCII control
-// character (0x00–0x1F) other than horizontal tab (0x09).  Literal newlines
-// and carriage returns inside a JSON value cause sjson.SetRaw to mis-parse
-// string boundaries and corrupt the surrounding JSON tree.
-func containsLiteralControlChars(s string) bool {
-	for _, c := range s {
-		if c < 0x20 && c != '\t' {
-			return true
+func openAIResponsesGeminiThoughtSignature(rawSignature string) string {
+	return sigcompat.GeminiReplaySignatureOrBypass(rawSignature, sigcompat.SignatureBlockKindGeminiModelPart)
+}
+
+func applyOpenAIResponsesTextFormatToGemini(out []byte, root gjson.Result) []byte {
+	textFormat := root.Get("text.format")
+	if !textFormat.Exists() {
+		return out
+	}
+
+	formatType := strings.ToLower(strings.TrimSpace(textFormat.Get("type").String()))
+	switch formatType {
+	case "json_object":
+		out = ensureGeminiGenerationConfig(out)
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+	case "json_schema":
+		out = ensureGeminiGenerationConfig(out)
+		out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+		out, _ = sjson.DeleteBytes(out, "generationConfig.responseSchema")
+
+		schema := textFormat.Get("schema")
+		if !schema.Exists() {
+			schema = textFormat.Get("json_schema.schema")
+		}
+		if schema.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generationConfig.responseJsonSchema", []byte(schema.Raw))
 		}
 	}
-	return false
+
+	return out
+}
+
+func ensureGeminiGenerationConfig(out []byte) []byte {
+	if !gjson.GetBytes(out, "generationConfig").Exists() {
+		out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
+	}
+	return out
 }

@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
@@ -24,7 +23,7 @@ import (
 // OAuth configuration constants for Claude/Anthropic
 const (
 	AuthURL     = "https://claude.ai/oauth/authorize"
-	TokenURL    = "https://console.anthropic.com/v1/oauth/token"
+	TokenURL    = "https://api.anthropic.com/v1/oauth/token"
 	ClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	RedirectURI = "http://localhost:54545/callback"
 
@@ -145,17 +144,30 @@ type ClaudeAuth struct {
 //
 // Parameters:
 //   - cfg: The application configuration containing proxy settings
-//   - httpClient: Optional custom HTTP client for testing
 //
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
-func NewClaudeAuth(cfg *config.Config, httpClient *http.Client) *ClaudeAuth {
-	if httpClient != nil {
-		return &ClaudeAuth{httpClient: httpClient}
+func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+	return NewClaudeAuthWithProxyURL(cfg, "")
+}
+
+// NewClaudeAuthWithProxyURL creates a new Anthropic authentication service with a proxy override.
+// proxyURL takes precedence over cfg.ProxyURL when non-empty.
+func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth {
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	var sdkCfg *config.SDKConfig
+	if cfg != nil {
+		sdkCfgCopy := cfg.SDKConfig
+		if effectiveProxyURL == "" {
+			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
+		}
+		sdkCfgCopy.ProxyURL = effectiveProxyURL
+		sdkCfg = &sdkCfgCopy
+	} else if effectiveProxyURL != "" {
+		sdkCfgCopy := config.SDKConfig{ProxyURL: effectiveProxyURL}
+		sdkCfg = &sdkCfgCopy
 	}
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
+
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
 	return &ClaudeAuth{
@@ -424,13 +436,11 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 //   - *ClaudeTokenStorage: A new token storage instance
 func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenStorage {
 	storage := &ClaudeTokenStorage{
-		BaseTokenStorage: base.BaseTokenStorage{
-			AccessToken:  bundle.TokenData.AccessToken,
-			RefreshToken: bundle.TokenData.RefreshToken,
-			Email:        bundle.TokenData.Email,
-		},
-		LastRefresh: bundle.LastRefresh,
-		Expire:      bundle.TokenData.Expire,
+		AccessToken:  bundle.TokenData.AccessToken,
+		RefreshToken: bundle.TokenData.RefreshToken,
+		LastRefresh:  bundle.LastRefresh,
+		Email:        bundle.TokenData.Email,
+		Expire:       bundle.TokenData.Expire,
 	}
 
 	return storage

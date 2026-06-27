@@ -7,6 +7,9 @@ const (
 	// Gemini represents the Google Gemini provider identifier.
 	Gemini = "gemini"
 
+	// GeminiCLI represents the Gemini CLI provider identifier.
+	GeminiCLI = "gemini-cli"
+
 	// Codex represents the OpenAI Codex provider identifier.
 	Codex = "codex"
 
@@ -21,10 +24,4 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
-
-	// Kiro represents the AWS CodeWhisperer (Kiro) provider identifier.
-	Kiro = "kiro"
-
-	// Kilo represents the Kilo AI provider identifier.
-	Kilo = "kilo"
 )

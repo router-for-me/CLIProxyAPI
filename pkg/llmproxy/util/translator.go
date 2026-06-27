@@ -6,9 +6,9 @@ package util
 import (
 	"bytes"
 	"fmt"
-	"sort"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -222,60 +222,6 @@ func FixJSON(input string) string {
 	return out.String()
 }
 
-// DeleteKeysByName removes all keys matching the provided names from any depth in the JSON document.
-//
-// Parameters:
-//   - jsonStr: source JSON string
-//   - keys: key names to remove, e.g. "$ref", "$defs"
-//
-// Returns:
-//   - string: JSON with matching keys removed
-func DeleteKeysByName(jsonStr string, keys ...string) string {
-	if strings.TrimSpace(jsonStr) == "" || len(keys) == 0 {
-		return jsonStr
-	}
-
-	filtered := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		filtered[key] = struct{}{}
-	}
-
-	paths := make([]string, 0)
-	for key := range filtered {
-		utilPaths := make([]string, 0)
-		Walk(gjson.Parse(jsonStr), "", key, &utilPaths)
-		paths = append(paths, utilPaths...)
-	}
-
-	seen := make(map[string]struct{}, len(paths))
-	unique := make([]string, 0, len(paths))
-	for _, path := range paths {
-		if _, ok := seen[path]; ok {
-			continue
-		}
-		seen[path] = struct{}{}
-		unique = append(unique, path)
-	}
-
-	sortByPathDepthDesc(unique)
-	for _, path := range unique {
-		jsonStr, _ = sjson.Delete(jsonStr, path)
-	}
-	return jsonStr
-}
-
-func sortByPathDepthDesc(paths []string) {
-	sort.Slice(paths, func(i, j int) bool {
-		depthI := strings.Count(paths[i], ".")
-		depthJ := strings.Count(paths[j], ".")
-		if depthI != depthJ {
-			return depthI > depthJ
-		}
-		return len(paths[i]) > len(paths[j])
-	})
-}
-
-// CanonicalToolName normalizes a tool name for case-insensitive matching.
 func CanonicalToolName(name string) string {
 	canonical := strings.TrimSpace(name)
 	canonical = strings.TrimLeft(canonical, "_")
@@ -299,6 +245,9 @@ func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
+			name = strings.TrimSpace(tool.Get("function.name").String())
+		}
+		if name == "" {
 			return true
 		}
 		key := CanonicalToolName(name)
@@ -317,7 +266,6 @@ func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
 	return out
 }
 
-// MapToolName returns the original (case-preserved) tool name for a canonical key.
 func MapToolName(toolNameMap map[string]string, name string) string {
 	if name == "" || toolNameMap == nil {
 		return name
@@ -326,4 +274,55 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 		return mapped
 	}
 	return name
+}
+
+// SanitizedToolNameMap builds a sanitized-name → original-name map from Claude request tools.
+// It is used to restore exact tool names for clients (e.g. Claude Code) after the proxy
+// sanitizes tool names for Gemini/Vertex API compatibility via SanitizeFunctionName.
+// Only entries where sanitization actually changes the name are included.
+func SanitizedToolNameMap(rawJSON []byte) map[string]string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return nil
+	}
+
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return nil
+	}
+
+	out := make(map[string]string)
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			return true
+		}
+		sanitized := SanitizeFunctionName(name)
+		if sanitized == name {
+			return true
+		}
+		if _, exists := out[sanitized]; !exists {
+			out[sanitized] = name
+		} else {
+			log.Warnf("sanitized tool name collision: %q and %q both map to %q, keeping first", out[sanitized], name, sanitized)
+		}
+		return true
+	})
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// RestoreSanitizedToolName looks up a sanitized function name in the provided map
+// and returns the original client-facing name. If no mapping exists, it returns
+// the sanitized name unchanged.
+func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName string) string {
+	if sanitizedName == "" || toolNameMap == nil {
+		return sanitizedName
+	}
+	if original, ok := toolNameMap[sanitizedName]; ok {
+		return original
+	}
+	return sanitizedName
 }

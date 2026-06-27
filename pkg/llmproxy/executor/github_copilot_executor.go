@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	copilotauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/copilot"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -110,7 +111,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
@@ -200,12 +201,12 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
-	detail := parseOpenAIUsage(data)
+	detail := helps.ParseOpenAIUsage(data)
 	if useResponses && detail.TotalTokens == 0 {
-		detail = parseOpenAIResponsesUsage(data)
+		detail = helps.ParseOpenAIResponsesUsage(data)
 	}
 	if detail.TotalTokens > 0 {
-		reporter.publish(ctx, detail)
+		reporter.Publish(ctx, detail)
 	}
 
 	var param any
@@ -216,7 +217,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 		converted = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
 	}
 	resp = cliproxyexecutor.Response{Payload: converted}
-	reporter.ensurePublished(ctx)
+	reporter.EnsurePublished(ctx)
 	return resp, nil
 }
 
@@ -228,7 +229,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
@@ -334,11 +335,11 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				if bytes.Equal(data, []byte("[DONE]")) {
 					continue
 				}
-				if detail, ok := parseOpenAIStreamUsage(line); ok {
-					reporter.publish(ctx, detail)
+				if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+					reporter.Publish(ctx, detail)
 				} else if useResponses {
-					if detail, ok := parseOpenAIResponsesStreamUsage(line); ok {
-						reporter.publish(ctx, detail)
+					if detail, ok := helps.ParseOpenAIResponsesStreamUsage(line); ok {
+						reporter.Publish(ctx, detail)
 					}
 				}
 			}
@@ -356,10 +357,10 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		} else {
-			reporter.ensurePublished(ctx)
+			reporter.EnsurePublished(ctx)
 		}
 	}()
 

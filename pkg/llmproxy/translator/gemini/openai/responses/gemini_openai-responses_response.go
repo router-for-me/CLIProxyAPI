@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,11 +37,12 @@ type geminiToResponsesState struct {
 	ReasoningClosed bool
 
 	// function call aggregation (keyed by output_index)
-	NextIndex   int
-	FuncArgsBuf map[int]*strings.Builder
-	FuncNames   map[int]string
-	FuncCallIDs map[int]string
-	FuncDone    map[int]bool
+	NextIndex        int
+	FuncArgsBuf      map[int]*strings.Builder
+	FuncNames        map[int]string
+	FuncCallIDs      map[int]string
+	FuncDone         map[int]bool
+	SanitizedNameMap map[string]string
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -81,18 +84,19 @@ func unwrapGeminiResponseRoot(root gjson.Result) gjson.Result {
 	return root
 }
 
-func emitEvent(event string, payload []byte) string {
-	return fmt.Sprintf("event: %s\ndata: %s", event, payload)
+func emitEvent(event string, payload []byte) []byte {
+	return translatorcommon.SSEEventData(event, payload)
 }
 
 // ConvertGeminiResponseToOpenAIResponses converts Gemini SSE chunks into OpenAI Responses SSE events.
-func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &geminiToResponsesState{
-			FuncArgsBuf: make(map[int]*strings.Builder),
-			FuncNames:   make(map[int]string),
-			FuncCallIDs: make(map[int]string),
-			FuncDone:    make(map[int]bool),
+			FuncArgsBuf:      make(map[int]*strings.Builder),
+			FuncNames:        make(map[int]string),
+			FuncCallIDs:      make(map[int]string),
+			FuncDone:         make(map[int]bool),
+			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -108,6 +112,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	if st.FuncDone == nil {
 		st.FuncDone = make(map[int]bool)
 	}
+	if st.SanitizedNameMap == nil {
+		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
@@ -115,16 +122,16 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 	rawJSON = bytes.TrimSpace(rawJSON)
 	if len(rawJSON) == 0 || bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		return [][]byte{}
 	}
 
 	root := gjson.ParseBytes(rawJSON)
 	if !root.Exists() {
-		return []string{}
+		return [][]byte{}
 	}
 	root = unwrapGeminiResponseRoot(root)
 
-	var out []string
+	var out [][]byte
 	nextSeq := func() int { st.Seq++; return st.Seq }
 
 	// Helper to finalize reasoning summary events in correct order.
@@ -305,7 +312,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				// Responses streaming requires message done events before the next output_item.added.
 				finalizeReasoning()
 				finalizeMessage()
-				name := fc.Get("name").String()
+				name := util.RestoreSanitizedToolName(st.SanitizedNameMap, fc.Get("name").String())
 				idx := st.NextIndex
 				st.NextIndex++
 				// Ensure buffers
@@ -531,8 +538,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		// usage mapping
 		if um := root.Get("usageMetadata"); um.Exists() {
-			// input tokens = prompt + thoughts
-			input := um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
+			// input tokens = prompt only (thoughts go to output)
+			input := um.Get("promptTokenCount").Int()
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", input)
 			// cached token details: align with OpenAI "cached_tokens" semantics.
 			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
@@ -564,6 +571,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
+	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -693,7 +701,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				return true
 			}
 			if fc := p.Get("functionCall"); fc.Exists() {
-				name := fc.Get("name").String()
+				name := util.RestoreSanitizedToolName(sanitizedNameMap, fc.Get("name").String())
 				args := fc.Get("args")
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
 				itemJSON := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
@@ -721,7 +729,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		if reasoningText.Len() > 0 {
 			summaryJSON := []byte(`{"type":"summary_text","text":""}`)
 			summaryJSON, _ = sjson.SetBytes(summaryJSON, "text", reasoningText.String())
-			itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary", []byte("[]"))
+			itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary", []byte(`[]`))
 			itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary.-1", summaryJSON)
 		}
 		appendOutput(itemJSON)
@@ -737,8 +745,8 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// usage mapping
 	if um := root.Get("usageMetadata"); um.Exists() {
-		// input tokens = prompt + thoughts
-		input := um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
+		// input tokens = prompt only (thoughts go to output)
+		input := um.Get("promptTokenCount").Int()
 		resp, _ = sjson.SetBytes(resp, "usage.input_tokens", input)
 		// cached token details: align with OpenAI "cached_tokens" semantics.
 		resp, _ = sjson.SetBytes(resp, "usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())

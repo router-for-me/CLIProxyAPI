@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	iflowauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/iflow"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -153,7 +154,7 @@ func (e *IFlowExecutor) execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), iflowauth.DefaultAPIBaseURL, baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -215,9 +216,9 @@ func (e *IFlowExecutor) execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publish(ctx, parseOpenAIUsage(data))
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	// Ensure usage is recorded even if upstream omits usage metadata.
-	reporter.ensurePublished(ctx)
+	reporter.EnsurePublished(ctx)
 
 	if providerErr := detectIFlowProviderError(data); providerErr != nil {
 		recordAPIResponseError(ctx, e.cfg, providerErr)
@@ -256,7 +257,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), iflowauth.DefaultAPIBaseURL, baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -320,8 +321,8 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	var param any
 	processor := func(ctx context.Context, line []byte) ([]string, error) {
 		appendAPIResponseChunk(ctx, e.cfg, line)
-		if detail, ok := parseOpenAIStreamUsage(line); ok {
-			reporter.publish(ctx, detail)
+		if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+			reporter.Publish(ctx, detail)
 		}
 		chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 		result := make([]string, len(chunks))
@@ -333,7 +334,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	result := ProcessSSEStream(ctx, httpResp, processor, func(ctx context.Context, err error) {
 		recordAPIResponseError(ctx, e.cfg, err)
-		reporter.publishFailure(ctx)
+		reporter.PublishFailure(ctx)
 	})
 
 	// Wrap the original channel to ensure usage is published after stream completes
@@ -344,7 +345,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			wrappedOut <- chunk
 		}
 		// Guarantee a usage record exists even if the stream never emitted usage data.
-		reporter.ensurePublished(ctx)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: wrappedOut}, nil

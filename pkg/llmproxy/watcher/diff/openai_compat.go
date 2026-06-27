@@ -66,6 +66,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	oldModelCount := countOpenAIModels(oldEntry.Models)
 	newModelCount := countOpenAIModels(newEntry.Models)
 	details := make([]string, 0, 3)
+	if oldEntry.Disabled != newEntry.Disabled {
+		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
@@ -150,7 +153,7 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 		if name == "" && alias == "" {
 			continue
 		}
-		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias))
+		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias)+"|"+fmt.Sprintf("image=%t", model.Image))
 	}
 	if len(models) > 0 {
 		sort.Strings(models)
@@ -178,10 +181,6 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	// SHA-256 fingerprint for structural change detection (not password hashing).
-	// Build a sanitized fingerprint string that contains no secret material —
-	// API keys are excluded above and only their count is included.
-	fingerprint := strings.Join(parts, "|")
-	sum := sha256.Sum256([]byte(fingerprint))
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:])
 }

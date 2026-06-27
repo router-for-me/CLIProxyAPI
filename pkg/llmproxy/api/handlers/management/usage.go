@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/usage"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/redisqueue"
 )
 
 type usageQueueRecord []byte

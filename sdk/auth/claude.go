@@ -76,7 +76,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		}
 	}()
 
-	authSvc := claude.NewClaudeAuth(cfg, nil)
+	authSvc := claude.NewClaudeAuth(cfg)
 
 	authURL, returnedState, err := authSvc.GenerateAuthURL(state, pkceCodes)
 	if err != nil {

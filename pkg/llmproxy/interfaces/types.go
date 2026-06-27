@@ -13,3 +13,12 @@ type TranslateResponseFunc = sdktranslator.ResponseStreamTransform
 type TranslateResponseNonStreamFunc = sdktranslator.ResponseNonStreamTransform
 
 type TranslateResponse = sdktranslator.ResponseTransform
+
+type GCPProject struct {
+	Projects []GCPProjectProjects `json:"projects"`
+}
+
+type GCPProjectProjects struct {
+	ProjectID string `json:"projectId"`
+	Name      string `json:"name"`
+}

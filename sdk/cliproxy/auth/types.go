@@ -291,9 +291,6 @@ func stableAuthIndex(seed string) string {
 	if seed == "" {
 		return ""
 	}
-	// Note: SHA256 is used here to create a stable identifier, not for password hashing.
-	// The seed is typically a filename or non-sensitive identifier.
-	// codeql[go/weak-sensitive-data-hashing] - intentional use for stable ID generation
 	sum := sha256.Sum256([]byte(seed))
 	return hex.EncodeToString(sum[:8])
 }
@@ -572,48 +569,10 @@ func (a *Auth) AccountInfo() (string, string) {
 				}
 			}
 		}
-	}
-
-	// For GitHub provider (including github-copilot), return username
-	if strings.HasPrefix(strings.ToLower(a.Provider), "github") {
-		if a.Metadata != nil {
-			if username, ok := a.Metadata["username"].(string); ok {
-				username = strings.TrimSpace(username)
-				if username != "" {
-					return "oauth", username
-				}
-			}
-		}
-	}
-
-	// Check metadata for email first (OAuth-style auth)
-	if a.Metadata != nil {
-		if method, ok := a.Metadata["auth_method"].(string); ok {
-			switch strings.ToLower(strings.TrimSpace(method)) {
-			case "oauth":
-				for _, key := range []string{"email", "username", "name"} {
-					if value, okValue := a.Metadata[key].(string); okValue {
-						if trimmed := strings.TrimSpace(value); trimmed != "" {
-							return "oauth", trimmed
-						}
-					}
-				}
-			case "pat", "personal_access_token":
-				for _, key := range []string{"username", "email", "name", "token_preview"} {
-					if value, okValue := a.Metadata[key].(string); okValue {
-						if trimmed := strings.TrimSpace(value); trimmed != "" {
-							return "personal_access_token", trimmed
-						}
-					}
-				}
-				return "personal_access_token", ""
-			}
-		}
-		if v, ok := a.Metadata["email"].(string); ok {
-			email := strings.TrimSpace(v)
-			if email != "" {
-				return "oauth", email
-			}
+		return "oauth", ""
+	case AuthKindAPIKey:
+		if apiKey := authAttribute(a, AttributeAPIKey); apiKey != "" {
+			return "api_key", apiKey
 		}
 		return "api_key", ""
 	default:

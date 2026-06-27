@@ -10,37 +10,35 @@ import (
 )
 
 func TestGinLogrusRecoveryRepanicsErrAbortHandler(t *testing.T) {
-	// Test the recovery logic directly: gin.CustomRecovery's internal recovery
-	// handling varies across platforms (macOS vs Linux) and Go versions, so we
-	// invoke the recovery callback that GinLogrusRecovery passes to
-	// gin.CustomRecovery and verify it re-panics ErrAbortHandler.
 	gin.SetMode(gin.TestMode)
 
-	var repanicked bool
-	var repanic interface{}
+	engine := gin.New()
+	engine.Use(GinLogrusRecovery())
+	engine.GET("/abort", func(c *gin.Context) {
+		panic(http.ErrAbortHandler)
+	})
 
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				repanicked = true
-				repanic = r
-			}
-		}()
-		// Simulate what gin.CustomRecovery does: call the recovery func
-		// with the recovered value.
-		ginLogrusRecoveryFunc(nil, http.ErrAbortHandler)
+	req := httptest.NewRequest(http.MethodGet, "/abort", nil)
+	recorder := httptest.NewRecorder()
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("expected panic, got nil")
+		}
+		err, ok := recovered.(error)
+		if !ok {
+			t.Fatalf("expected error panic, got %T", recovered)
+		}
+		if !errors.Is(err, http.ErrAbortHandler) {
+			t.Fatalf("expected ErrAbortHandler, got %v", err)
+		}
+		if err != http.ErrAbortHandler {
+			t.Fatalf("expected exact ErrAbortHandler sentinel, got %v", err)
+		}
 	}()
 
-	if !repanicked {
-		t.Fatalf("expected ginLogrusRecoveryFunc to re-panic http.ErrAbortHandler, but it did not")
-	}
-	err, ok := repanic.(error)
-	if !ok {
-		t.Fatalf("expected error panic, got %T", repanic)
-	}
-	if !errors.Is(err, http.ErrAbortHandler) {
-		t.Fatalf("expected ErrAbortHandler, got %v", err)
-	}
+	engine.ServeHTTP(recorder, req)
 }
 
 func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {
@@ -61,50 +59,67 @@ func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {
 	}
 }
 
-func TestGinLogrusLogger(t *testing.T) {
+func TestIsAIAPIPathIncludesImages(t *testing.T) {
+	if !isAIAPIPath("/v1/images/generations") {
+		t.Fatalf("expected /v1/images/generations to be treated as AI API path")
+	}
+	if !isAIAPIPath("/v1/images/edits") {
+		t.Fatalf("expected /v1/images/edits to be treated as AI API path")
+	}
+	if !isAIAPIPath("/v1/videos") {
+		t.Fatalf("expected /v1/videos to be treated as AI API path")
+	}
+	if !isAIAPIPath("/v1/videos/video_123") {
+		t.Fatalf("expected /v1/videos/video_123 to be treated as AI API path")
+	}
+	if !isAIAPIPath("/openai/v1/videos") {
+		t.Fatalf("expected /openai/v1/videos to be treated as AI API path")
+	}
+	if !isAIAPIPath("/openai/v1/videos/video_123/content") {
+		t.Fatalf("expected /openai/v1/videos/video_123/content to be treated as AI API path")
+	}
+}
+
+func TestIsAIAPIPathIncludesCodexBackend(t *testing.T) {
+	paths := []string{
+		"/backend-api/codex/responses",
+		"/backend-api/codex/responses/compact",
+	}
+	for _, path := range paths {
+		if !isAIAPIPath(path) {
+			t.Fatalf("expected %s to be treated as AI API path", path)
+		}
+	}
+	if isAIAPIPath("/backend-api/codex-status") {
+		t.Fatalf("expected /backend-api/codex-status not to be treated as AI API path")
+	}
+}
+
+func TestGinLogrusLoggerAddsRequestIDForCodexBackend(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
 	engine.Use(GinLogrusLogger())
-	engine.GET("/v1/chat/completions", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
-	engine.GET("/skip", func(c *gin.Context) {
-		SkipGinRequestLogging(c)
-		c.String(http.StatusOK, "skipped")
+
+	var requestIDFromContext string
+	var requestIDFromGin string
+	engine.POST("/backend-api/codex/responses", func(c *gin.Context) {
+		requestIDFromContext = GetRequestID(c.Request.Context())
+		requestIDFromGin = GetGinRequestID(c)
+		c.Status(http.StatusOK)
 	})
 
-	// AI API path
-	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", nil)
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, req)
+
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", recorder.Code)
 	}
-
-	// Regular path
-	req = httptest.NewRequest(http.MethodGet, "/", nil)
-	recorder = httptest.NewRecorder()
-	engine.ServeHTTP(recorder, req)
-
-	// Skipped path
-	req = httptest.NewRequest(http.MethodGet, "/skip", nil)
-	recorder = httptest.NewRecorder()
-	engine.ServeHTTP(recorder, req)
-}
-
-func TestIsAIAPIPath(t *testing.T) {
-	cases := []struct {
-		path string
-		want bool
-	}{
-		{"/v1/chat/completions", true},
-		{"/v1/messages", true},
-		{"/other", false},
+	if requestIDFromContext == "" {
+		t.Fatalf("expected request ID in request context")
 	}
-	for _, tc := range cases {
-		if got := isAIAPIPath(tc.path); got != tc.want {
-			t.Errorf("isAIAPIPath(%q) = %v, want %v", tc.path, got, tc.want)
-		}
+	if requestIDFromGin != requestIDFromContext {
+		t.Fatalf("expected Gin request ID %q to match context request ID %q", requestIDFromGin, requestIDFromContext)
 	}
 }

@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"testing"
 
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/runtime/executor"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 )

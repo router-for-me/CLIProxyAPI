@@ -149,6 +149,16 @@ func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, quali
 	return bestChild, bestNamespace
 }
 
+func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
+	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
+		return originalRequestRawJSON
+	}
+	if len(requestRawJSON) > 0 && gjson.ValidBytes(requestRawJSON) {
+		return requestRawJSON
+	}
+	return nil
+}
+
 func applyResponsesFunctionCallNamespaceFields(item []byte, requestRawJSON []byte, qualifiedName string, itemPath string) []byte {
 	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON, qualifiedName)
 	namePath := "name"

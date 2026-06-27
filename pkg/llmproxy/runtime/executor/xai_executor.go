@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	xaiauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/xai"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/runtime/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"

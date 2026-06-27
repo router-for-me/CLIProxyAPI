@@ -4,16 +4,21 @@
 package kimi
 
 import (
+	"encoding/json"
 	"fmt"
-
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
+	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 )
 
 // KimiTokenStorage stores OAuth2 token information for Kimi API authentication.
 type KimiTokenStorage struct {
-	base.BaseTokenStorage
-
+	// AccessToken is the OAuth2 access token used for authenticating API requests.
+	AccessToken string `json:"access_token"`
+	// RefreshToken is the OAuth2 refresh token used to obtain new access tokens.
+	RefreshToken string `json:"refresh_token"`
 	// TokenType is the type of token, typically "Bearer".
 	TokenType string `json:"token_type"`
 	// Scope is the OAuth2 scope granted to the token.
@@ -22,6 +27,17 @@ type KimiTokenStorage struct {
 	DeviceID string `json:"device_id,omitempty"`
 	// Expired is the RFC3339 timestamp when the access token expires.
 	Expired string `json:"expired,omitempty"`
+	// Type indicates the authentication provider type, always "kimi" for this storage.
+	Type string `json:"type"`
+
+	// Metadata holds arbitrary key-value pairs injected via hooks.
+	// It is not exported to JSON directly to allow flattening during serialization.
+	Metadata map[string]any `json:"-"`
+}
+
+// SetMetadata allows external callers to inject metadata into the storage before saving.
+func (ts *KimiTokenStorage) SetMetadata(meta map[string]any) {
+	ts.Metadata = meta
 }
 
 // KimiTokenData holds the raw OAuth token response from Kimi.
@@ -64,9 +80,31 @@ type DeviceCodeResponse struct {
 
 // SaveTokenToFile serializes the Kimi token storage to a JSON file.
 func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
+	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "kimi"
-	if err := ts.Save(authFilePath, ts); err != nil {
-		return fmt.Errorf("kimi token: %w", err)
+
+	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
+		return fmt.Errorf("failed to create directory: %v", err)
+	}
+
+	f, err := os.Create(authFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create token file: %w", err)
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	// Merge metadata using helper
+	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
+	if errMerge != nil {
+		return fmt.Errorf("failed to merge metadata: %w", errMerge)
+	}
+
+	encoder := json.NewEncoder(f)
+	encoder.SetIndent("", "  ")
+	if err = encoder.Encode(data); err != nil {
+		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
 }

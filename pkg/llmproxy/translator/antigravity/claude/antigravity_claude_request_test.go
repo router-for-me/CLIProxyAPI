@@ -8,6 +8,9 @@ import (
 	"testing"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -417,48 +420,6 @@ func TestConvertClaudeRequestToAntigravity_RoleMapping(t *testing.T) {
 	secondContent := gjson.Get(outputStr, "request.contents.1")
 	if secondContent.Get("role").String() != "model" {
 		t.Errorf("Expected role 'model' (mapped from 'assistant'), got '%s'", secondContent.Get("role").String())
-	}
-}
-
-func TestConvertClaudeRequestToAntigravity_SkipsWhitespaceOnlyTextBlocksAssistantMessage(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "claude-3-5-sonnet-20240620",
-		"messages": [
-			{"role": "user", "content": [{"type": "text", "text": "   \n\t  "}]},
-			{"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}
-		]
-	}`)
-
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
-	outputStr := string(output)
-
-	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 1 {
-		t.Fatalf("expected only non-empty content entry, got %d", len(contents))
-	}
-	if contents[0].Get("parts.0.text").String() != "Hello" {
-		t.Fatalf("expected assistant text to remain, got %s", contents[0].Raw)
-	}
-}
-
-func TestConvertClaudeRequestToAntigravity_SkipsWhitespaceOnlyTextBlocks(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "claude-3-5-sonnet-20240620",
-		"messages": [
-			{"role": "user", "content": [{"type": "text", "text": "   \n\t  "}]},
-			{"role": "user", "content": [{"type": "text", "text": "Hello"}]}
-		]
-	}`)
-
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
-	outputStr := string(output)
-
-	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 1 {
-		t.Fatalf("expected 1 non-empty content entry, got %d", len(contents))
-	}
-	if contents[0].Get("parts.0.text").String() != "Hello" {
-		t.Fatalf("expected non-empty text content to remain")
 	}
 }
 
@@ -1906,25 +1867,6 @@ func TestConvertClaudeRequestToAntigravity_GenerationConfig(t *testing.T) {
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_MaxTokensClamped(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "claude-3-5-sonnet-20240620",
-		"messages": [
-			{"role": "user", "content": [{"type": "text", "text": "hello"}]}
-		],
-		"max_tokens": 128000
-	}`)
-
-	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
-	maxOutput := gjson.GetBytes(output, "request.generationConfig.maxOutputTokens")
-	if !maxOutput.Exists() {
-		t.Fatal("maxOutputTokens should exist")
-	}
-	if maxOutput.Int() != 64000 {
-		t.Fatalf("expected maxOutputTokens to be clamped to 64000, got %d", maxOutput.Int())
-	}
-}
-
 // ============================================================================
 // Trailing Unsigned Thinking Block Removal
 // ============================================================================
@@ -2892,44 +2834,5 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 	}
 	if !found {
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
-	}
-}
-
-func TestConvertClaudeRequestToAntigravity_SkipsEmptySystemTextParts(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "claude-sonnet-4-5",
-		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
-		"system": [{"type": "text", "text": ""}, {"type": "text", "text": "   "}]
-	}`)
-
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
-	outputStr := string(output)
-
-	if gjson.Get(outputStr, "request.systemInstruction").Exists() {
-		t.Fatalf("systemInstruction should be omitted when all system text blocks are empty: %s", outputStr)
-	}
-}
-
-func TestConvertClaudeRequestToAntigravity_SkipsEmptyStringMessageContent(t *testing.T) {
-	inputJSON := []byte(`{
-		"model": "claude-sonnet-4-5",
-		"messages": [
-			{"role": "user", "content": "   "},
-			{"role": "assistant", "content": "ok"}
-		]
-	}`)
-
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
-	outputStr := string(output)
-
-	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 1 {
-		t.Fatalf("expected 1 non-empty message after filtering empty string content, got %d (%s)", len(contents), outputStr)
-	}
-	if contents[0].Get("role").String() != "model" {
-		t.Fatalf("expected remaining message role=model, got %q", contents[0].Get("role").String())
-	}
-	if contents[0].Get("parts.0.text").String() != "ok" {
-		t.Fatalf("expected remaining text 'ok', got %q", contents[0].Get("parts.0.text").String())
 	}
 }

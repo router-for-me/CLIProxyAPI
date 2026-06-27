@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
@@ -61,12 +62,11 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		valid := role == "user" || role == "model"
 		if role == "" || !valid {
 			var newRole string
-			switch prevRole {
-			case "":
+			if prevRole == "" {
 				newRole = "user"
-			case "user":
+			} else if prevRole == "user" {
 				newRole = "model"
-			default:
+			} else {
 				newRole = "user"
 			}
 			path := fmt.Sprintf("contents.%d.role", idx)

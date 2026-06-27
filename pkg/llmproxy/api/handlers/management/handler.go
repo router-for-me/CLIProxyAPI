@@ -5,22 +5,22 @@ package management
 import (
 	"context"
 	"crypto/subtle"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/buildinfo"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/usage"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginhost"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginstore"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -38,20 +38,33 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	routingSelect       *RoutingSelectHandler
+	cfg                     *config.Config
+	configFilePath          string
+	mu                      sync.Mutex
+	reloadMu                sync.Mutex
+	reloadGeneration        uint64
+	appliedReloadGeneration uint64
+	attemptsMu              sync.Mutex
+	failedAttempts          map[string]*attemptInfo // keyed by client IP
+	authManager             *coreauth.Manager
+	tokenStore              coreauth.Store
+	localPassword           string
+	allowRemoteOverride     bool
+	envSecret               string
+	logDir                  string
+	postAuthHook            coreauth.PostAuthHook
+	postAuthPersistHook     coreauth.PostAuthHook
+	pluginHost              *pluginhost.Host
+	configReloadHook        func(context.Context, *config.Config)
+	pluginStoreRegistryURL  string
+	pluginStoreHTTPClient   pluginstore.HTTPDoer
+	pluginReleaseCacheMu    sync.Mutex
+	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+}
+
+type configReloadSnapshot struct {
+	cfg        *config.Config
+	generation uint64
 }
 
 // NewHandler creates a new management handler instance.
@@ -236,15 +249,9 @@ func (h *Handler) SetLogDirectory(dir string) {
 	h.logDir = dir
 }
 
-// SetPostAuthHook registers a hook called after auth record creation.
-func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) { h.postAuthHook = hook }
-
-// POSTRoutingSelect delegates to the RoutingSelectHandler.
-func (h *Handler) POSTRoutingSelect(c *gin.Context) {
-	if h.routingSelect == nil {
-		h.routingSelect = NewRoutingSelectHandler()
-	}
-	h.routingSelect.POSTRoutingSelect(c)
+// SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
+func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
+	h.postAuthHook = hook
 }
 
 // SetPostAuthPersistHook registers a hook to be called after auth persistence.
@@ -401,14 +408,6 @@ func (h *Handler) persist(c *gin.Context) bool {
 func (h *Handler) persistLocked(c *gin.Context) bool {
 	// Preserve comments when writing
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		if isReadOnlyConfigWriteError(err) {
-			c.JSON(http.StatusOK, gin.H{
-				"status":    "ok",
-				"persisted": false,
-				"warning":   "config filesystem is read-only; runtime changes applied but not persisted",
-			})
-			return true
-		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
@@ -420,26 +419,6 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 	}
 	h.reloadConfigAfterManagementSaveAsync(reqCtx, snapshot)
 	return true
-}
-
-func isReadOnlyConfigWriteError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
-		if errors.Is(pathErr.Err, syscall.EROFS) {
-			return true
-		}
-	}
-	if errors.Is(err, syscall.EROFS) {
-		return true
-	}
-	normalized := strings.ToLower(err.Error())
-	return strings.Contains(normalized, "read-only file system") ||
-		strings.Contains(normalized, "read-only filesystem") ||
-		strings.Contains(normalized, "read only file system") ||
-		strings.Contains(normalized, "read only filesystem")
 }
 
 // Helper methods for simple types

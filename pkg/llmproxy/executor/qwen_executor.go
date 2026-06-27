@@ -11,6 +11,7 @@ import (
 
 	qwenauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/qwen"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -72,7 +73,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), "https://portal.qwen.ai/v1", baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -132,7 +133,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publish(ctx, parseOpenAIUsage(data))
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
@@ -151,7 +152,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), "https://portal.qwen.ai/v1", baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -211,8 +212,8 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	var param any
 	processor := func(ctx context.Context, line []byte) ([]string, error) {
 		appendAPIResponseChunk(ctx, e.cfg, line)
-		if detail, ok := parseOpenAIStreamUsage(line); ok {
-			reporter.publish(ctx, detail)
+		if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+			reporter.Publish(ctx, detail)
 		}
 		chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 		result := make([]string, len(chunks))
@@ -224,7 +225,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	result := ProcessSSEStream(ctx, httpResp, processor, func(ctx context.Context, err error) {
 		recordAPIResponseError(ctx, e.cfg, err)
-		reporter.publishFailure(ctx)
+		reporter.PublishFailure(ctx)
 	})
 
 	// Wrap the original channel to append [DONE] sentinel

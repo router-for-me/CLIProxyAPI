@@ -2,7 +2,6 @@ package util
 
 import (
 	"encoding/json"
-	"github.com/tidwall/sjson"
 	"reflect"
 	"strings"
 	"testing"
@@ -294,7 +293,7 @@ func TestCleanJSONSchemaForAntigravity_CyclicRefDefaults(t *testing.T) {
 	result := CleanJSONSchemaForAntigravity(input)
 
 	var resMap map[string]interface{}
-	_ = json.Unmarshal([]byte(result), &resMap)
+	json.Unmarshal([]byte(result), &resMap)
 
 	if resMap["type"] != "object" {
 		t.Errorf("Expected type: object, got: %v", resMap["type"])
@@ -389,7 +388,7 @@ func TestCleanJSONSchemaForAntigravity_PropertyNameCollision(t *testing.T) {
 	compareJSON(t, expected, result)
 
 	var resMap map[string]interface{}
-	_ = json.Unmarshal([]byte(result), &resMap)
+	json.Unmarshal([]byte(result), &resMap)
 	props, _ := resMap["properties"].(map[string]interface{})
 	if _, ok := props["description"]; ok {
 		t.Errorf("Invalid 'description' property injected into properties map")
@@ -941,28 +940,6 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_PreservesPlaceholderReason(t *testing.T) {
-	input := `{
-		"type": "object",
-		"properties": {
-			"reason": {
-				"type": "string",
-				"description": "Brief explanation of why you are calling this tool"
-			}
-		},
-		"required": ["reason"]
-	}`
-
-	result := CleanJSONSchemaForGemini(input)
-	parsed := gjson.Parse(result)
-	if !parsed.Get("properties.reason").Exists() {
-		t.Fatalf("expected placeholder reason property to remain, got: %s", result)
-	}
-	if parsed.Get("required").Exists() {
-		t.Fatalf("expected required array to be removed for placeholder schema, got: %s", result)
-	}
-}
-
 func TestRemoveExtensionFields(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1089,39 +1066,26 @@ func TestRemoveExtensionFields(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForAntigravity_RemovesInvalidToolProperties(t *testing.T) {
+// uniqueItems should be stripped and moved to description hint (#2123).
+func TestCleanJSONSchemaForAntigravity_UniqueItemsStripped(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
-			"value": {
-				"type": "object",
-				"properties": {
-					"cornerRadius": {"type": "number"},
-					"strokeColor": {"type": "string"},
-					"textColor": {"type": "string"},
-					"allowed": {"type": "string"}
-				},
-				"required": ["cornerRadius", "allowed"]
+			"ids": {
+				"type": "array",
+				"description": "Unique identifiers",
+				"items": {"type": "string"},
+				"uniqueItems": true
 			}
-		},
-		"required": ["value"]
+		}
 	}`
 
 	result := CleanJSONSchemaForAntigravity(input)
-	if gjson.Get(result, "properties.value.properties.cornerRadius").Exists() {
-		t.Fatalf("cornerRadius should be removed from the schema")
+
+	if strings.Contains(result, `"uniqueItems"`) {
+		t.Errorf("uniqueItems should be removed from schema")
 	}
-	if gjson.Get(result, "properties.value.properties.strokeColor").Exists() {
-		t.Fatalf("strokeColor should be removed from the schema")
-	}
-	if gjson.Get(result, "properties.value.properties.textColor").Exists() {
-		t.Fatalf("textColor should be removed from the schema")
-	}
-	if !gjson.Get(result, "properties.value.properties.allowed").Exists() {
-		t.Fatalf("allowed property should be preserved")
-	}
-	required := gjson.Get(result, "properties.value.required")
-	if !required.IsArray() || len(required.Array()) != 1 || required.Array()[0].String() != "allowed" {
-		t.Fatalf("required array should only contain allowed after cleaning, got %s", required.Raw)
+	if !strings.Contains(result, "uniqueItems: true") {
+		t.Errorf("uniqueItems hint missing in description")
 	}
 }

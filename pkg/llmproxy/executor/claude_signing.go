@@ -31,7 +31,7 @@ func signAnthropicMessagesBody(body []byte) []byte {
 		return body
 	}
 
-	h := xxhash.New64WithSeed(claudeCCHSeed)
+	h := xxhash.NewWithSeed(claudeCCHSeed)
 	h.Write(unsignedBody)
 	cch := fmt.Sprintf("%05x", h.Sum64()&0xFFFFF)
 	signedBillingHeader := claudeBillingHeaderCCHPattern.ReplaceAllString(unsignedBillingHeader, "cch="+cch+";")

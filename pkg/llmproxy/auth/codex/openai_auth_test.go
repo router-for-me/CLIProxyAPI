@@ -2,312 +2,151 @@ package codex
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"golang.org/x/sync/singleflight"
 )
 
-func TestNewCodexAuth(t *testing.T) {
-	cfg := &config.Config{}
-	auth := NewCodexAuth(cfg)
-	if auth.httpClient == nil {
-		t.Error("expected non-nil httpClient")
-	}
-}
-
-func TestCodexAuth_GenerateAuthURL(t *testing.T) {
-	auth := &CodexAuth{}
-	pkce := &PKCECodes{CodeChallenge: "challenge"}
-	state := "state123"
-
-	url, err := auth.GenerateAuthURL(state, pkce)
-	if err != nil {
-		t.Fatalf("GenerateAuthURL failed: %v", err)
-	}
-
-	if !strings.Contains(url, "state=state123") {
-		t.Errorf("URL missing state: %s", url)
-	}
-	if !strings.Contains(url, "code_challenge=challenge") {
-		t.Errorf("URL missing code_challenge: %s", url)
-	}
-
-	_, err = auth.GenerateAuthURL(state, nil)
-	if err == nil {
-		t.Error("expected error for nil pkceCodes")
-	}
-}
-
-func TestCodexAuth_ExchangeCodeForTokens(t *testing.T) {
-	// Mock ID token payload
-	claims := JWTClaims{
-		Email: "test@example.com",
-		CodexAuthInfo: CodexAuthInfo{
-			ChatgptAccountID: "acc_123",
-		},
-	}
-	payload, _ := json.Marshal(claims)
-	idToken := "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
-			t.Errorf("expected urlencoded content type, got %s", r.Header.Get("Content-Type"))
-		}
-
-		resp := struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			IDToken      string `json:"id_token"`
-			TokenType    string `json:"token_type"`
-			ExpiresIn    int    `json:"expires_in"`
-		}{
-			AccessToken:  "access",
-			RefreshToken: "refresh",
-			IDToken:      idToken,
-			TokenType:    "Bearer",
-			ExpiresIn:    3600,
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	// Override TokenURL for testing if it was possible, but it's a constant.
-	// Since I can't override the constant, I'll need to use a real CodexAuth but with a mocked httpClient that redirects to my server.
-
-	mockClient := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			// Redirect all requests to the test server
-			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
-			mockReq.Header = req.Header
-			return http.DefaultClient.Do(mockReq)
-		}),
-	}
-
-	auth := &CodexAuth{httpClient: mockClient}
-	pkce := &PKCECodes{CodeVerifier: "verifier"}
-
-	bundle, err := auth.ExchangeCodeForTokens(context.Background(), "code", pkce)
-	if err != nil {
-		t.Fatalf("ExchangeCodeForTokens failed: %v", err)
-	}
-
-	if bundle.TokenData.AccessToken != "access" {
-		t.Errorf("expected access token, got %s", bundle.TokenData.AccessToken)
-	}
-	if bundle.TokenData.Email != "test@example.com" {
-		t.Errorf("expected email test@example.com, got %s", bundle.TokenData.Email)
-	}
-}
-
-type roundTripFunc func(req *http.Request) (*http.Response, error)
+type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestCodexAuth_RefreshTokens(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			IDToken      string `json:"id_token"`
-			TokenType    string `json:"token_type"`
-			ExpiresIn    int    `json:"expires_in"`
-		}{
-			AccessToken:  "new_access",
-			RefreshToken: "new_refresh",
-			IDToken:      "header.eyBlbWFpbCI6InJlZnJlc2hAZXhhbXBsZS5jb20ifQ.sig", // email: refresh@example.com
-			TokenType:    "Bearer",
-			ExpiresIn:    3600,
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	mockClient := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
-			return http.DefaultClient.Do(mockReq)
-		}),
-	}
-
-	auth := &CodexAuth{httpClient: mockClient}
-	tokenData, err := auth.RefreshTokens(context.Background(), "old_refresh")
-	if err != nil {
-		t.Fatalf("RefreshTokens failed: %v", err)
-	}
-
-	if tokenData.AccessToken != "new_access" {
-		t.Errorf("expected new_access, got %s", tokenData.AccessToken)
-	}
+func resetCodexRefreshGroupForTest() {
+	codexRefreshGroup = singleflight.Group{}
 }
 
-func TestCodexAuth_RefreshTokens_rateLimit(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":"rate_limit_exceeded"}`))
-	}))
-	defer server.Close()
-
-	mockClient := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
-			return http.DefaultClient.Do(mockReq)
-		}),
-	}
-
-	auth := &CodexAuth{httpClient: mockClient}
-	_, err := auth.RefreshTokens(context.Background(), "old_refresh")
-	if err == nil {
-		t.Fatal("expected RefreshTokens to fail")
-	}
-	se, ok := err.(interface{ StatusCode() int })
-	if !ok {
-		t.Fatalf("expected status-capable error, got %T", err)
-	}
-	if got := se.StatusCode(); got != http.StatusTooManyRequests {
-		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
-	}
-}
-
-func TestCodexAuth_RefreshTokens_serviceUnavailable(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`service temporarily unavailable`))
-	}))
-	defer server.Close()
-
-	mockClient := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
-			return http.DefaultClient.Do(mockReq)
-		}),
-	}
-
-	auth := &CodexAuth{httpClient: mockClient}
-	_, err := auth.RefreshTokens(context.Background(), "old_refresh")
-	if err == nil {
-		t.Fatal("expected RefreshTokens to fail")
-	}
-	se, ok := err.(interface{ StatusCode() int })
-	if !ok {
-		t.Fatalf("expected status-capable error, got %T", err)
-	}
-	if got := se.StatusCode(); got != http.StatusServiceUnavailable {
-		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
-	}
-}
-
-func TestCodexAuth_RefreshTokensWithRetry_preservesStatus(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`service temporarily unavailable`))
-	}))
-	defer server.Close()
-
-	mockClient := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
-			return http.DefaultClient.Do(mockReq)
-		}),
-	}
-
-	auth := &CodexAuth{httpClient: mockClient}
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "old_refresh", 1)
-	if err == nil {
-		t.Fatal("expected RefreshTokensWithRetry to fail")
-	}
-	se, ok := err.(interface{ StatusCode() int })
-	if !ok {
-		t.Fatalf("expected status-capable error, got %T", err)
-	}
-	if got := se.StatusCode(); got != http.StatusServiceUnavailable {
-		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
-	}
-}
-
-func TestCodexAuth_CreateTokenStorage(t *testing.T) {
-	auth := &CodexAuth{}
-	bundle := &CodexAuthBundle{
-		TokenData: CodexTokenData{
-			IDToken:      "id",
-			AccessToken:  "access",
-			RefreshToken: "refresh",
-			AccountID:    "acc",
-			Email:        "test@example.com",
-			Expire:       "exp",
+func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
+	var calls int32
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant","code":"refresh_token_reused"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
 		},
-		LastRefresh: "last",
 	}
 
-	storage := auth.CreateTokenStorage(bundle)
-	if storage.AccessToken != "access" || storage.Email != "test@example.com" {
-		t.Errorf("CreateTokenStorage failed: %+v", storage)
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+	if err == nil {
+		t.Fatalf("expected error for non-retryable refresh failure")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "refresh_token_reused") {
+		t.Fatalf("expected refresh_token_reused in error, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 refresh attempt, got %d", got)
 	}
 }
 
-func TestCodexAuth_RefreshTokensWithRetry(t *testing.T) {
-	count := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count++
-		if count < 2 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+func TestRefreshTokens_DeduplicatesConcurrentRefreshAcrossInstances(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	t.Cleanup(resetCodexRefreshGroupForTest)
+
+	var calls int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		once.Do(func() { close(started) })
+		<-release
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"access_token":"new-access",
+				"refresh_token":"new-refresh",
+				"token_type":"Bearer",
+				"expires_in":3600
+			}`)),
+			Header:  make(http.Header),
+			Request: req,
+		}, nil
+	})
+	authA := &CodexAuth{httpClient: &http.Client{Transport: transport}}
+	authB := &CodexAuth{httpClient: &http.Client{Transport: transport}}
+
+	results := make(chan *CodexTokenData, 2)
+	errs := make(chan error, 2)
+	runRefresh := func(auth *CodexAuth, launched chan<- struct{}) {
+		if launched != nil {
+			close(launched)
 		}
-		resp := struct {
-			AccessToken string `json:"access_token"`
-			ExpiresIn   int    `json:"expires_in"`
-		}{
-			AccessToken: "retry_access",
-			ExpiresIn:   3600,
+		tokenData, errRefresh := auth.RefreshTokens(context.Background(), "shared-refresh-token")
+		results <- tokenData
+		errs <- errRefresh
+	}
+
+	go runRefresh(authA, nil)
+	<-started
+
+	secondLaunched := make(chan struct{})
+	go runRefresh(authB, secondLaunched)
+	<-secondLaunched
+	time.Sleep(20 * time.Millisecond)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected concurrent refresh to share a single upstream call, got %d", got)
+	}
+	close(release)
+
+	for i := 0; i < 2; i++ {
+		if errRefresh := <-errs; errRefresh != nil {
+			t.Fatalf("expected refresh to succeed, got %v", errRefresh)
 		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	mockClient := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
-			return http.DefaultClient.Do(mockReq)
-		}),
+		tokenData := <-results
+		if tokenData == nil || tokenData.AccessToken != "new-access" || tokenData.RefreshToken != "new-refresh" {
+			t.Fatalf("unexpected token data: %#v", tokenData)
+		}
 	}
-
-	auth := &CodexAuth{httpClient: mockClient}
-	tokenData, err := auth.RefreshTokensWithRetry(context.Background(), "refresh", 3)
-	if err != nil {
-		t.Fatalf("RefreshTokensWithRetry failed: %v", err)
-	}
-
-	if tokenData.AccessToken != "retry_access" {
-		t.Errorf("expected retry_access, got %s", tokenData.AccessToken)
-	}
-	if count != 2 {
-		t.Errorf("expected 2 attempts, got %d", count)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected both refresh callers to share a single upstream call, got %d", got)
 	}
 }
 
-func TestCodexAuth_UpdateTokenStorage(t *testing.T) {
-	auth := &CodexAuth{}
-	storage := &CodexTokenStorage{}
-	storage.AccessToken = "old"
-	tokenData := &CodexTokenData{
-		AccessToken: "new",
-		Email:       "new@example.com",
-	}
+func TestNewCodexAuthWithProxyURL_OverrideDirectDisablesProxy(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://proxy.example.com:8080"}}
+	auth := NewCodexAuthWithProxyURL(cfg, "direct")
 
-	auth.UpdateTokenStorage(storage, tokenData)
-	if storage.AccessToken != "new" || storage.Email != "new@example.com" {
-		t.Errorf("UpdateTokenStorage failed: %+v", storage)
+	transport, ok := auth.httpClient.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("expected http.Transport, got %T", auth.httpClient.Transport)
 	}
-	if storage.LastRefresh == "" {
-		t.Error("expected LastRefresh to be set")
+	if transport.Proxy != nil {
+		t.Fatal("expected direct transport to disable proxy function")
+	}
+}
+
+func TestNewCodexAuthWithProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global.example.com:8080"}}
+	auth := NewCodexAuthWithProxyURL(cfg, "http://override.example.com:8081")
+
+	transport, ok := auth.httpClient.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("expected http.Transport, got %T", auth.httpClient.Transport)
+	}
+	req, errReq := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errReq != nil {
+		t.Fatalf("new request: %v", errReq)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("proxy func: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://override.example.com:8081" {
+		t.Fatalf("proxy URL = %v, want http://override.example.com:8081", proxyURL)
 	}
 }

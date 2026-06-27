@@ -11,10 +11,12 @@ import (
 
 	configaccess "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/access/config_access"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/api"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/pluginhost"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher"
 	sdkaccess "github.com/kooshapari/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 )
 
 // Builder constructs a Service instance with customizable providers.

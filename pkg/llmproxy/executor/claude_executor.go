@@ -19,7 +19,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/claude"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+	sigcompat "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -465,8 +468,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// Claude → Claude: direct passthrough without translation
 		processor := func(ctx context.Context, line []byte) ([]string, error) {
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -483,15 +486,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			Header: httpResp.Header,
 		}, processor, func(ctx context.Context, err error) {
 			recordAPIResponseError(ctx, e.cfg, err)
-			reporter.publishFailure(ctx)
+			reporter.PublishFailure(ctx, err)
 		})
 	} else {
 		// Claude → Other format: use translation
 		var param any
 		processor := func(ctx context.Context, line []byte) ([]string, error) {
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -519,7 +522,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			Header: httpResp.Header,
 		}, processor, func(ctx context.Context, err error) {
 			recordAPIResponseError(ctx, e.cfg, err)
-			reporter.publishFailure(ctx)
+			reporter.PublishFailure(ctx, err)
 		})
 	}
 
@@ -688,7 +691,7 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := claudeauth.NewClaudeAuth(e.cfg, nil)
+	svc := claudeauth.NewClaudeAuth(e.cfg)
 	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return nil, err
@@ -1600,10 +1603,11 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string) {
 
 	// An empty cloakMode means this credential did not explicitly configure a mode,
 	// allowing the caller to fall back to the global/default behavior.
-	cloakMode = lookupCloakAttr("cloak_mode")
+	cloakMode := lookupCloakAttr("cloak_mode")
 
-	strictMode = strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
+	strictMode := strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
 
+	var sensitiveWords []string
 	if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
 		sensitiveWords = strings.Split(wordsStr, ",")
 		for i := range sensitiveWords {
@@ -1614,40 +1618,11 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string) {
 	return cloakMode, strictMode, sensitiveWords
 }
 
-// resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
-func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
-	if cfg == nil || auth == nil {
-		return nil
-	}
-
-	apiKey, baseURL := claudeCreds(auth)
-	if apiKey == "" {
-		return nil
-	}
-
-	for i := range cfg.ClaudeKey {
-		entry := &cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-
-		// Match by API key
-		if strings.EqualFold(cfgKey, apiKey) {
-			// If baseURL is specified, also check it
-			if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-				continue
-			}
-			return entry.Cloak
-		}
-	}
-
-	return nil
-}
-
 func nextFakeUserID(apiKey string, useCache bool) string {
 	if useCache && apiKey != "" {
-		return cachedUserID(apiKey)
+		return helps.CachedUserID(apiKey)
 	}
-	return generateFakeUserID()
+	return helps.GenerateFakeUserID()
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
@@ -1659,10 +1634,32 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	}
 
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if existingUserID == "" || !isValidUserID(existingUserID) {
+	if existingUserID == "" || !helps.IsValidUserID(existingUserID) {
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
 	}
-	return payload, nil
+	return payload
+}
+
+func parseEntrypointFromUA(userAgent string) string {
+	start := strings.Index(userAgent, "(")
+	end := strings.LastIndex(userAgent, ")")
+	if start < 0 || end <= start {
+		return "cli"
+	}
+	parts := strings.Split(userAgent[start+1:end], ",")
+	if len(parts) >= 2 {
+		if entrypoint := strings.TrimSpace(parts[1]); entrypoint != "" {
+			return entrypoint
+		}
+	}
+	return "cli"
+}
+
+func getWorkloadFromContext(ctx context.Context) string {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return strings.TrimSpace(ginCtx.GetHeader("X-CPA-Claude-Workload"))
+	}
+	return ""
 }
 
 // fingerprintSalt is the salt used by Claude Code to compute the 3-char build fingerprint.
@@ -1883,14 +1880,13 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string) []byte {
 	clientUserAgent := getClientUserAgent(ctx)
+	apiKey, _ := claudeCreds(auth)
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
 	oauthToken := isClaudeOAuthToken(apiKey)
 	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
-
 	// Determine cloak settings
 	var cloakMode string
 	var strictMode bool
@@ -1916,7 +1912,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
-		return payload, nil
+		return payload
 	}
 
 	// Skip system instructions for claude-3-5-haiku models
@@ -1929,7 +1925,6 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Reuse a stable fake user ID when a matching ClaudeKey cloak config exists.
 	// This keeps consistent metadata across model variants for the same credential.
-	apiKey, _ := claudeCreds(auth)
 	payload = injectFakeUserID(payload, apiKey, cloakCfg != nil)
 
 	// Apply sensitive word obfuscation
@@ -1938,7 +1933,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = helps.ObfuscateSensitiveWords(payload, matcher)
 	}
 
-	return payload, nil
+	return payload
 }
 
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.
@@ -2457,6 +2452,27 @@ func injectSystemCacheControl(payload []byte) []byte {
 	}
 
 	return payload
+}
+
+func ensureModelMaxTokens(body []byte, modelID string) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	if maxTokens := gjson.GetBytes(body, "max_tokens"); maxTokens.Exists() {
+		return body
+	}
+	modelID = strings.TrimSpace(modelID)
+	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelID) {
+		if strings.EqualFold(provider, "claude") {
+			maxTokens := defaultModelMaxTokens
+			if info := registry.GetGlobalRegistry().GetModelInfo(modelID, "claude"); info != nil && info.MaxCompletionTokens > 0 {
+				maxTokens = info.MaxCompletionTokens
+			}
+			body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
+			return body
+		}
+	}
+	return body
 }
 
 func (e *ClaudeExecutor) CloseExecutionSession(sessionID string) {}

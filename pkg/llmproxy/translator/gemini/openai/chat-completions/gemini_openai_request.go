@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
+	sigcompat "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
@@ -27,7 +28,7 @@ const geminiFunctionThoughtSignature = "skip_thought_signature_validator"
 // Returns:
 //   - []byte: The transformed request data in Gemini API format
 func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := []byte(common.SanitizeOpenAIInputForGemini(string(inputRawJSON)))
+	rawJSON := inputRawJSON
 	// Base envelope (no default thinkingConfig)
 	out := []byte(`{"contents":[]}`)
 
@@ -84,8 +85,6 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				responseMods = append(responseMods, "TEXT")
 			case "image":
 				responseMods = append(responseMods, "IMAGE")
-			case "video":
-				responseMods = append(responseMods, "VIDEO")
 			}
 		}
 		if len(responseMods) > 0 {
@@ -101,20 +100,6 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == gjson.String {
 			out, _ = sjson.SetBytes(out, "generationConfig.imageConfig.imageSize", size.Str)
-		}
-	}
-	if videoCfg := gjson.GetBytes(rawJSON, "video_config"); videoCfg.Exists() && videoCfg.IsObject() {
-		if duration := videoCfg.Get("duration_seconds"); duration.Exists() && duration.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.durationSeconds", duration.Str)
-		}
-		if ar := videoCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.aspectRatio", ar.Str)
-		}
-		if resolution := videoCfg.Get("resolution"); resolution.Exists() && resolution.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.resolution", resolution.Str)
-		}
-		if negativePrompt := videoCfg.Get("negative_prompt"); negativePrompt.Exists() && negativePrompt.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.negativePrompt", negativePrompt.Str)
 		}
 	}
 
@@ -194,7 +179,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						switch item.Get("type").String() {
 						case "text":
 							text := item.Get("text").String()
-							if strings.TrimSpace(text) != "" {
+							if text != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
 								p++
 							}
@@ -252,7 +237,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
+				if content.Type == gjson.String {
 					// Assistant text -> single model content
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
@@ -262,7 +247,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						switch item.Get("type").String() {
 						case "text":
 							text := item.Get("text").String()
-							if strings.TrimSpace(text) != "" {
+							if text != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
 								p++
 							}
@@ -303,9 +288,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							fIDs = append(fIDs, fid)
 						}
 					}
-					if hasGeminiParts(node) {
-						out, _ = sjson.SetRawBytes(out, "contents.-1", node)
-					}
+					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 
 					// Append a single tool content combining name + response per function
 					toolNode := []byte(`{"role":"user","parts":[]}`)
@@ -324,7 +307,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "contents.-1", toolNode)
 					}
-				} else if hasGeminiParts(node) {
+				} else {
 					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 				}
 			}
@@ -354,16 +337,48 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				fn := t.Get("function")
 				if fn.Exists() && fn.IsObject() {
 					fnRaw := fn.Raw
-					params := fn.Get("parameters")
-					if !params.Exists() {
-						params = fn.Get("parametersJsonSchema")
+					if fn.Get("parameters").Exists() {
+						renamed, errRename := util.RenameKey(fnRaw, "parameters", "parametersJsonSchema")
+						if errRename != nil {
+							log.Warnf("Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename)
+							var errSet error
+							fnRawBytes := []byte(fnRaw)
+							fnRawBytes, errSet = sjson.SetBytes(fnRawBytes, "parametersJsonSchema.type", "object")
+							if errSet != nil {
+								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
+								continue
+							}
+							fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema.properties", []byte(`{}`))
+							if errSet != nil {
+								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
+								continue
+							}
+							fnRaw = string(fnRawBytes)
+						} else {
+							fnRaw = renamed
+						}
+					} else {
+						var errSet error
+						fnRawBytes := []byte(fnRaw)
+						fnRawBytes, errSet = sjson.SetBytes(fnRawBytes, "parametersJsonSchema.type", "object")
+						if errSet != nil {
+							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
+							continue
+						}
+						fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema.properties", []byte(`{}`))
+						if errSet != nil {
+							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
+							continue
+						}
+						fnRaw = string(fnRawBytes)
 					}
-					strict := fn.Get("strict").Exists() && fn.Get("strict").Bool()
-					schema := common.NormalizeOpenAIFunctionSchemaForGemini(params, strict)
-					fnRaw, _ = sjson.Delete(fnRaw, "parameters")
-					fnRaw, _ = sjson.Delete(fnRaw, "parametersJsonSchema")
+					fnRawBytes := []byte(fnRaw)
+					fnRawBytes, _ = sjson.SetBytes(fnRawBytes, "name", util.SanitizeFunctionName(fn.Get("name").String()))
+					fnRaw = string(fnRawBytes)
+					if parameters := gjson.Get(fnRaw, "parametersJsonSchema"); parameters.Exists() {
+						fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", util.CleanJSONSchemaForGemini(parameters.Raw))
+					}
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
-					fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", schema)
 					if !hasFunction {
 						functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", []byte("[]"))
 					}
@@ -378,9 +393,8 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			}
 			if gs := t.Get("google_search"); gs.Exists() {
 				googleToolNode := []byte(`{}`)
-				cleanedGoogleSearch := common.SanitizeToolSearchForGemini(gs.Raw)
 				var errSet error
-				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(cleanedGoogleSearch))
+				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(gs.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set googleSearch tool: %v", errSet)
 					continue
@@ -448,6 +462,25 @@ func openAIToolCallGeminiThoughtSignature(toolCall gjson.Result) string {
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
 
-func hasGeminiParts(node []byte) bool {
-	return gjson.GetBytes(node, "parts.#").Int() > 0
+func openAIInputAudioMimeType(audioFormat string) string {
+	switch audioFormat {
+	case "", "wav":
+		return "audio/wav"
+	case "mp3":
+		return "audio/mpeg"
+	case "ogg":
+		return "audio/ogg"
+	case "flac":
+		return "audio/flac"
+	case "aac":
+		return "audio/aac"
+	case "webm":
+		return "audio/webm"
+	case "pcm16":
+		return "audio/pcm"
+	case "g711_ulaw", "g711_alaw":
+		return "audio/basic"
+	default:
+		return "audio/" + audioFormat
+	}
 }

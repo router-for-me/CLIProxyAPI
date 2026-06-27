@@ -6,23 +6,22 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	latestReleaseURL       = "https://api.github.com/repos/kooshapari/cliproxyapi-plusplus/releases/latest"
-	latestReleaseUserAgent = "cliproxyapi++"
+	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
+	latestReleaseUserAgent = "CLIProxyAPI"
 )
-
-var writeConfigFile = WriteConfig
 
 func (h *Handler) GetConfig(c *gin.Context) {
 	if h == nil || h.cfg == nil {
@@ -45,7 +44,8 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
 	}
 	if proxyURL != "" {
-		util.SetProxy(&h.cfg.SDKConfig, client)
+		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
+		util.SetProxy(sdkCfg, client)
 	}
 
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)
@@ -119,9 +119,9 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
-	// Validate config using LoadConfigOptional with optional=false to enforce parsing.
-	// Use the system temp dir so validation remains available even when config dir is read-only.
-	tmpFile, err := os.CreateTemp("", "config-validate-*.yaml")
+	// Validate config using LoadConfigOptional with optional=false to enforce parsing
+	tmpDir := filepath.Dir(h.configFilePath)
+	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
@@ -141,28 +141,24 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	validatedCfg, err := config.LoadConfigOptional(tempFile, false)
+	_, err = config.LoadConfigOptional(tempFile, false)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if errWrite := writeConfigFile(h.configFilePath, body); errWrite != nil {
-		if isReadOnlyConfigWriteError(errWrite) {
-			h.cfg = validatedCfg
-			c.JSON(http.StatusOK, gin.H{
-				"ok":        true,
-				"changed":   []string{"config"},
-				"persisted": false,
-				"warning":   "config filesystem is read-only; runtime changes applied but not persisted",
-			})
-			return
-		}
+	if WriteConfig(h.configFilePath, body) != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
-	h.cfg = validatedCfg
+	// Reload into handler to keep memory in sync
+	newCfg, err := config.LoadConfig(h.configFilePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
+		return
+	}
+	h.cfg = newCfg
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
@@ -286,9 +282,9 @@ func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 func normalizeRoutingStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {
-	case "", "round-robin", "round_robin", "roundrobin", "rr":
+	case "", "round-robin", "roundrobin", "rr":
 		return "round-robin", true
-	case "fill-first", "fill_first", "fillfirst", "ff":
+	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
 	default:
 		return "", false
@@ -329,43 +325,4 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
-}
-
-// Quota exceeded toggles
-func (h *Handler) GetSwitchProject(c *gin.Context) {
-	c.JSON(200, gin.H{"switch-project": h.cfg.QuotaExceeded.SwitchProject})
-}
-func (h *Handler) PutSwitchProject(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.SwitchProject = v })
-}
-
-func (h *Handler) GetSwitchPreviewModel(c *gin.Context) {
-	c.JSON(200, gin.H{"switch-preview-model": h.cfg.QuotaExceeded.SwitchPreviewModel})
-}
-func (h *Handler) PutSwitchPreviewModel(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.SwitchPreviewModel = v })
-}
-
-// GetStaticModelDefinitions returns static model metadata for a given channel.
-// Channel is provided via path param (:channel) or query param (?channel=...).
-func (h *Handler) GetStaticModelDefinitions(c *gin.Context) {
-	channel := strings.TrimSpace(c.Param("channel"))
-	if channel == "" {
-		channel = strings.TrimSpace(c.Query("channel"))
-	}
-	if channel == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "channel is required"})
-		return
-	}
-
-	models := registry.GetStaticModelDefinitionsByChannel(channel)
-	if models == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown channel", "channel": channel})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"channel": strings.ToLower(strings.TrimSpace(channel)),
-		"models":  models,
-	})
 }

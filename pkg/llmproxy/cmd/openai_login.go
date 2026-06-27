@@ -16,6 +16,9 @@ import (
 // It provides configuration for authentication flows including browser behavior
 // and interactive prompting capabilities.
 type LoginOptions struct {
+	// ConfigPath is the configuration file to update during login.
+	ConfigPath string
+
 	// NoBrowser indicates whether to skip opening the browser automatically.
 	NoBrowser bool
 
@@ -24,9 +27,6 @@ type LoginOptions struct {
 
 	// Prompt allows the caller to provide interactive input when needed.
 	Prompt func(prompt string) (string, error)
-
-	// ConfigPath is the path to the config file (for login flows that write config, e.g. minimax).
-	ConfigPath string
 }
 
 // DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.
@@ -55,7 +55,7 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:       promptFn,
 	}
 
-	_, savedPath, err := manager.Login(context.Background(), "codex", castToInternalConfig(cfg), authOpts)
+	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)
 	if err != nil {
 		if authErr, ok := errors.AsType[*codex.AuthenticationError](err); ok {
 			log.Error(codex.GetUserFriendlyMessage(authErr))

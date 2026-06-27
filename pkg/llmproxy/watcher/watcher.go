@@ -11,6 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/watcher/synthesizer"
 	"gopkg.in/yaml.v3"
 
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
@@ -34,6 +35,7 @@ type Watcher struct {
 	authDir           string
 	config            *config.Config
 	clientsMutex      sync.RWMutex
+	authRescanMu      sync.Mutex
 	configReloadMu    sync.Mutex
 	configReloadTimer *time.Timer
 	serverUpdateMu    sync.Mutex
@@ -57,6 +59,7 @@ type Watcher struct {
 	pendingOrder      []string
 	dispatchCancel    context.CancelFunc
 	storePersister    storePersister
+	pluginAuthParser  synthesizer.PluginAuthParser
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
 }
@@ -130,88 +133,19 @@ func (w *Watcher) Stop() error {
 	return w.watcher.Close()
 }
 
-func (w *Watcher) stopServerUpdateTimer() {
-	w.serverUpdateMu.Lock()
-	defer w.serverUpdateMu.Unlock()
-	if w.serverUpdateTimer != nil {
-		w.serverUpdateTimer.Stop()
-		w.serverUpdateTimer = nil
-	}
-	w.serverUpdatePend = false
-}
-
-func (w *Watcher) triggerServerUpdate(cfg *config.Config) {
-	if w == nil || w.reloadCallback == nil || cfg == nil {
-		return
-	}
-	if w.stopped.Load() {
-		return
-	}
-
-	now := time.Now()
-
-	w.serverUpdateMu.Lock()
-	if w.serverUpdateLast.IsZero() || now.Sub(w.serverUpdateLast) >= serverUpdateDebounce {
-		w.serverUpdateLast = now
-		if w.serverUpdateTimer != nil {
-			w.serverUpdateTimer.Stop()
-			w.serverUpdateTimer = nil
-		}
-		w.serverUpdatePend = false
-		w.serverUpdateMu.Unlock()
-		w.reloadCallback(cfg)
-		return
-	}
-
-	if w.serverUpdatePend {
-		w.serverUpdateMu.Unlock()
-		return
-	}
-
-	delay := serverUpdateDebounce - now.Sub(w.serverUpdateLast)
-	if delay < 10*time.Millisecond {
-		delay = 10 * time.Millisecond
-	}
-	w.serverUpdatePend = true
-	if w.serverUpdateTimer != nil {
-		w.serverUpdateTimer.Stop()
-		w.serverUpdateTimer = nil
-	}
-	var timer *time.Timer
-	timer = time.AfterFunc(delay, func() {
-		if w.stopped.Load() {
-			return
-		}
-		w.clientsMutex.RLock()
-		latestCfg := w.config
-		w.clientsMutex.RUnlock()
-
-		w.serverUpdateMu.Lock()
-		if w.serverUpdateTimer != timer || !w.serverUpdatePend {
-			w.serverUpdateMu.Unlock()
-			return
-		}
-		w.serverUpdateTimer = nil
-		w.serverUpdatePend = false
-		if latestCfg == nil || w.reloadCallback == nil || w.stopped.Load() {
-			w.serverUpdateMu.Unlock()
-			return
-		}
-
-		w.serverUpdateLast = time.Now()
-		w.serverUpdateMu.Unlock()
-		w.reloadCallback(latestCfg)
-	})
-	w.serverUpdateTimer = timer
-	w.serverUpdateMu.Unlock()
-}
-
 // SetConfig updates the current configuration
 func (w *Watcher) SetConfig(cfg *config.Config) {
 	w.clientsMutex.Lock()
 	defer w.clientsMutex.Unlock()
 	w.config = cfg
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+}
+
+// SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.
+func (w *Watcher) SetPluginAuthParser(parser synthesizer.PluginAuthParser) {
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+	w.pluginAuthParser = parser
 }
 
 // SetAuthUpdateQueue sets the queue used to emit auth updates.
@@ -226,118 +160,18 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchRuntimeAuthUpdate(update)
 }
 
+// DispatchPersistedAuthUpdate pushes already-persisted file auth updates through the watcher queue.
+// Returns true if the update was enqueued; false if no queue is configured.
+func (w *Watcher) DispatchPersistedAuthUpdate(update AuthUpdate) bool {
+	return w.dispatchPersistedAuthUpdate(update)
+}
+
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.
 func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()
 	cfg := w.config
+	authDir := w.authDir
+	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
-	return snapshotCoreAuths(cfg, w.authDir)
-}
-
-// NotifyTokenRefreshed 处理后台刷新器的 token 更新通知
-// 当后台刷新器成功刷新 token 后调用此方法，更新内存中的 Auth 对象
-// tokenID: token 文件名（如 kiro-xxx.json）
-// accessToken: 新的 access token
-// refreshToken: 新的 refresh token
-// expiresAt: 新的过期时间
-func (w *Watcher) NotifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt string) {
-	if w == nil {
-		return
-	}
-
-	w.clientsMutex.Lock()
-	defer w.clientsMutex.Unlock()
-
-	// 遍历 currentAuths，找到匹配的 Auth 并更新
-	updated := false
-	for id, auth := range w.currentAuths {
-		if auth == nil || auth.Metadata == nil {
-			continue
-		}
-
-		// 检查是否是 kiro 类型的 auth
-		authType, _ := auth.Metadata["type"].(string)
-		if authType != "kiro" {
-			continue
-		}
-
-		// 多种匹配方式，解决不同来源的 auth 对象字段差异
-		matched := false
-
-		// 1. 通过 auth.ID 匹配（ID 可能包含文件名）
-		if !matched && auth.ID != "" {
-			if auth.ID == tokenID || strings.HasSuffix(auth.ID, "/"+tokenID) || strings.HasSuffix(auth.ID, "\\"+tokenID) {
-				matched = true
-			}
-			// ID 可能是 "kiro-xxx" 格式（无扩展名），tokenID 是 "kiro-xxx.json"
-			if !matched && strings.TrimSuffix(tokenID, ".json") == auth.ID {
-				matched = true
-			}
-		}
-
-		// 2. 通过 auth.Attributes["path"] 匹配
-		if !matched && auth.Attributes != nil {
-			if authPath := auth.Attributes["path"]; authPath != "" {
-				// 提取文件名部分进行比较
-				pathBase := authPath
-				if idx := strings.LastIndexAny(authPath, "/\\"); idx >= 0 {
-					pathBase = authPath[idx+1:]
-				}
-				if pathBase == tokenID || strings.TrimSuffix(pathBase, ".json") == strings.TrimSuffix(tokenID, ".json") {
-					matched = true
-				}
-			}
-		}
-
-		// 3. 通过 auth.FileName 匹配（原有逻辑）
-		if !matched && auth.FileName != "" {
-			if auth.FileName == tokenID || strings.HasSuffix(auth.FileName, "/"+tokenID) || strings.HasSuffix(auth.FileName, "\\"+tokenID) {
-				matched = true
-			}
-		}
-
-		if matched {
-			// 更新内存中的 token
-			auth.Metadata["access_token"] = accessToken
-			auth.Metadata["refresh_token"] = refreshToken
-			auth.Metadata["expires_at"] = expiresAt
-			auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
-			auth.UpdatedAt = time.Now()
-			auth.LastRefreshedAt = time.Now()
-
-			log.Infof("watcher: updated in-memory auth for token %s (auth ID: %s)", tokenID, id)
-			updated = true
-
-			// 同时更新 runtimeAuths 中的副本（如果存在）
-			if w.runtimeAuths != nil {
-				if runtimeAuth, ok := w.runtimeAuths[id]; ok && runtimeAuth != nil {
-					if runtimeAuth.Metadata == nil {
-						runtimeAuth.Metadata = make(map[string]any)
-					}
-					runtimeAuth.Metadata["access_token"] = accessToken
-					runtimeAuth.Metadata["refresh_token"] = refreshToken
-					runtimeAuth.Metadata["expires_at"] = expiresAt
-					runtimeAuth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
-					runtimeAuth.UpdatedAt = time.Now()
-					runtimeAuth.LastRefreshedAt = time.Now()
-				}
-			}
-
-			// 发送更新通知到 authQueue
-			if w.authQueue != nil {
-				go func(authClone *coreauth.Auth) {
-					update := AuthUpdate{
-						Action: AuthUpdateActionModify,
-						ID:     authClone.ID,
-						Auth:   authClone,
-					}
-					w.dispatchAuthUpdates([]AuthUpdate{update})
-				}(auth.Clone())
-			}
-		}
-	}
-
-	if !updated {
-		log.Debugf("watcher: no matching auth found for token %s, will be picked up on next file scan", tokenID)
-	}
+	return snapshotCoreAuths(cfg, authDir, parser)
 }

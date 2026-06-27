@@ -53,9 +53,9 @@ func newSession(conn *websocket.Conn, mgr *Manager, id string) *session {
 		closed:   make(chan struct{}),
 	}
 	conn.SetReadLimit(maxInboundMessageLen)
-	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		return nil
 	})
 	s.startHeartbeat()

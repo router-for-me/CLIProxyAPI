@@ -3,7 +3,7 @@ package responses
 import (
 	"context"
 
-	geminiopenai "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/openai/responses"
+	. "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/openai/responses"
 	"github.com/tidwall/gjson"
 )
 
@@ -12,12 +12,7 @@ func ConvertAntigravityResponseToOpenAIResponses(ctx context.Context, modelName 
 	if responseResult.Exists() {
 		rawJSON = []byte(responseResult.Raw)
 	}
-	out := geminiopenai.ConvertGeminiResponseToOpenAIResponses(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-	res := make([][]byte, len(out))
-	for i, s := range out {
-		res[i] = []byte(s)
-	}
-	return res
+	return ConvertGeminiResponseToOpenAIResponses(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
 func ConvertAntigravityResponseToOpenAIResponsesNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
@@ -36,5 +31,5 @@ func ConvertAntigravityResponseToOpenAIResponsesNonStream(ctx context.Context, m
 		requestRawJSON = []byte(requestResult.Raw)
 	}
 
-	return geminiopenai.ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	return ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }

@@ -20,6 +20,7 @@ import (
 	cursorauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/cursor"
 	cursorproto "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/cursor/proto"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -39,6 +40,10 @@ const (
 	cursorSessionTTL        = 5 * time.Minute
 	cursorCheckpointTTL     = 30 * time.Minute
 )
+
+func apiKeyFromContext(ctx context.Context) string {
+	return helps.APIKeyFromContext(ctx)
+}
 
 // CursorExecutor handles requests to the Cursor API via Connect+Protobuf protocol.
 type CursorExecutor struct {
@@ -70,7 +75,7 @@ type cursorSession struct {
 }
 
 type pendingMcpExec struct {
-	ExecMsgId  uint32
+	ExecMsgId  string
 	ExecId     string
 	ToolCallId string
 	ToolName   string

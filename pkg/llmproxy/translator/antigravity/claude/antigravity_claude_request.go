@@ -10,8 +10,9 @@ import (
 	"strings"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+	sigcompat "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
@@ -309,7 +310,9 @@ func logDroppedAntigravityToolUseSignature(modelName string, messageIndex, conte
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
-	modelOverrides := registry.GetAntigravityModelConfig()
+	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
+		return buildAntigravityWebSearchRequest(modelName, rawJSON)
+	}
 
 	// system instruction
 	var systemInstructionJSON []byte
@@ -322,23 +325,22 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemPromptResult := systemResults[i]
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
-				systemPrompt := strings.TrimSpace(systemPromptResult.Get("text").String())
-				if systemPrompt == "" {
+				systemPrompt := systemPromptResult.Get("text").String()
+				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
 					continue
 				}
 				partJSON := []byte(`{}`)
-				partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
+				if systemPrompt != "" {
+					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
+				}
 				systemInstructionJSON, _ = sjson.SetRawBytes(systemInstructionJSON, "parts.-1", partJSON)
 				hasSystemInstruction = true
 			}
 		}
-	} else if systemResult.Type == gjson.String {
-		systemPrompt := strings.TrimSpace(systemResult.String())
-		if systemPrompt != "" {
-			systemInstructionJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
-			systemInstructionJSON, _ = sjson.SetBytes(systemInstructionJSON, "parts.0.text", systemPrompt)
-			hasSystemInstruction = true
-		}
+	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
+		systemInstructionJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
+		systemInstructionJSON, _ = sjson.SetBytes(systemInstructionJSON, "parts.0.text", systemResult.String())
+		hasSystemInstruction = true
 	}
 
 	// contents
@@ -421,10 +423,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
-						prompt := strings.TrimSpace(contentResult.Get("text").String())
+						prompt := contentResult.Get("text").String()
 						// Skip empty text parts to avoid Gemini API error:
 						// "required oneof field 'data' must have one initialized field"
-						if strings.TrimSpace(prompt) == "" {
+						if prompt == "" {
 							continue
 						}
 						partJSON := []byte(`{}`)
@@ -642,12 +644,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
 				hasContents = true
 			} else if contentsResult.Type == gjson.String {
-				prompt := strings.TrimSpace(contentsResult.String())
-				if prompt == "" {
-					continue
-				}
+				prompt := contentsResult.String()
 				partJSON := []byte(`{}`)
-				partJSON, _ = sjson.SetBytes(partJSON, "text", prompt)
+				if prompt != "" {
+					partJSON, _ = sjson.SetBytes(partJSON, "text", prompt)
+				}
 				clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 				contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
 				hasContents = true
@@ -793,14 +794,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetBytes(out, "request.generationConfig.topK", v.Num)
 	}
 	if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() && v.Type == gjson.Number {
-		maxTokens := v.Int()
-		if override, ok := modelOverrides[modelName]; ok && override.MaxCompletionTokens > 0 {
-			limit := int64(override.MaxCompletionTokens)
-			if maxTokens > limit {
-				maxTokens = limit
-			}
-		}
-		out, _ = sjson.SetBytes(out, "request.generationConfig.maxOutputTokens", maxTokens)
+		out, _ = sjson.SetBytes(out, "request.generationConfig.maxOutputTokens", v.Num)
 	}
 
 	out = common.AttachDefaultSafetySettings(out, "request.safetySettings")

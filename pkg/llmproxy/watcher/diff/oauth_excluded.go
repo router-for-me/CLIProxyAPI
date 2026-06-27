@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 )
 
 type ExcludedModelsSummary struct {

@@ -116,9 +116,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.total_tokens", totalTokenCountResult.Int())
 		}
-		promptTokenCount := usageResult.Get("promptTokenCount").Int() - cachedTokenCount
+		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
+		baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.prompt_tokens", promptTokenCount)
 		if thoughtsTokenCount > 0 {
 			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
@@ -259,11 +259,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	} else {
 		// If there are no candidates (e.g., a pure usageMetadata chunk), return the usage chunk if present.
 		if gjson.GetBytes(rawJSON, "usageMetadata").Exists() && len(responseStrings) == 0 {
-			// OpenAI spec: chunks with only usage should have empty choices or OMIT it.
-			// LiteLLM can fail with "missing finish_reason for choice 0" if a choice exists with null finish_reason.
-			template, _ := sjson.DeleteBytes(baseTemplate, "choices")
-			template, _ = sjson.SetRawBytes(template, "choices", []byte("[]"))
-			responseStrings = append(responseStrings, template)
+			responseStrings = append(responseStrings, append([]byte(nil), baseTemplate...))
 		}
 	}
 
@@ -317,7 +313,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
+		template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount)
 		if thoughtsTokenCount > 0 {
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/gitlab"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
@@ -91,7 +92,7 @@ func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	translated, err := e.translateToOpenAI(req, opts)
 	if err != nil {
@@ -110,8 +111,8 @@ func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	responseModel := gitLabResolvedModel(auth, req.Model)
 	openAIResponse := buildGitLabOpenAIResponse(responseModel, text, translated)
-	reporter.publish(ctx, parseOpenAIUsage(openAIResponse))
-	reporter.ensurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResponse))
+	reporter.EnsurePublished(ctx)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(
@@ -134,7 +135,7 @@ func (e *GitLabExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	translated, err := e.translateToOpenAI(req, opts)
 	if err != nil {
@@ -157,8 +158,8 @@ func (e *GitLabExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	responseModel := gitLabResolvedModel(auth, req.Model)
 	openAIResponse := buildGitLabOpenAIResponse(responseModel, text, translated)
-	reporter.publish(ctx, parseOpenAIUsage(openAIResponse))
-	reporter.ensurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResponse))
+	reporter.EnsurePublished(ctx)
 
 	out := make(chan cliproxyexecutor.StreamChunk, 8)
 	go func() {
@@ -346,7 +347,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 	translated []byte,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-	reporter *usageReporter,
+	reporter *helps.UsageReporter,
 ) (*cliproxyexecutor.StreamResult, error) {
 	contentAbove := strings.TrimSpace(prompt.ContentAboveCursor)
 	if contentAbove == "" {
@@ -414,8 +415,8 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 			normalized := normalizeGitLabStreamChunk(eventName, payload, responseModel, &state)
 			eventName = ""
 			for _, item := range normalized {
-				if detail, ok := parseOpenAIStreamUsage(item); ok {
-					reporter.publish(ctx, detail)
+				if detail, ok := helps.ParseOpenAIStreamUsage(item); ok {
+					reporter.Publish(ctx, detail)
 				}
 				chunks := sdktranslator.TranslateStream(
 					ctx,
@@ -434,7 +435,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			return
 		}
@@ -455,7 +456,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 				}
 			}
 		}
-		reporter.ensurePublished(ctx)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{

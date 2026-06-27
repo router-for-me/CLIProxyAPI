@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
 )
 
 // PassthroughGeminiResponseStream forwards Gemini responses unchanged.

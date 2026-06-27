@@ -10,6 +10,10 @@ import (
 
 // H2Stream represents an HTTP/2 stream connection to Cursor.
 type H2Stream struct {
+	id     string
+	dataCh chan []byte
+	doneCh chan struct{}
+	err    error
 	// TODO(cursor-proto): implement real H2 framing
 }
 
@@ -17,29 +21,42 @@ type H2Stream struct {
 type McpToolDef struct {
 	Name        string
 	Description string
-	InputSchema map[string]interface{}
+	InputSchema any
 }
 
 // ImageData represents an image in Cursor protocol.
 type ImageData struct {
-	URL string
+	URL      string
+	MimeType string
+	Data     []byte
 	// TODO(cursor-proto): add other fields
 }
 
 // TurnData represents a conversation turn.
 type TurnData struct {
-	UserText string
+	UserText      string
+	AssistantText string
 	// TODO(cursor-proto): add other fields
 }
 
 // RunRequestParams parameters for a run request.
 type RunRequestParams struct {
-	McpTools []McpToolDef
+	ModelId        string
+	SystemPrompt   string
+	UserText       string
+	MessageId      string
+	ConversationId string
+	Images         []ImageData
+	Turns          []TurnData
+	McpTools       []McpToolDef
+	BlobStore      map[string][]byte
+	RawCheckpoint  []byte
 	// TODO(cursor-proto): add other fields
 }
 
 // ConnectError represents a connection error.
 type ConnectError struct {
+	Code    string
 	Message string
 }
 
@@ -77,6 +94,14 @@ const (
 
 // AgentServerMessage represents a message from the server.
 type AgentServerMessage struct {
+	Type             int
+	Text             string
+	CheckpointData   []byte
+	TokenDelta       int64
+	BlobData         []byte
+	McpArgs          map[string][]byte
+	McpToolCallId    string
+	McpToolName      string
 	MsgType          int
 	ExecMsgId        string
 	ExecId           string
@@ -85,6 +110,7 @@ type AgentServerMessage struct {
 	KvId             string
 	Path             string
 	URL              string
+	Url              string
 	Command          string
 	WorkingDirectory string
 }
@@ -232,6 +258,46 @@ func ProtobufValueBytesToJSON(data []byte) (interface{}, error) {
 func (s *H2Stream) Write(data []byte) error {
 	// TODO(cursor-proto): implement
 	return errors.New("cursor-proto: Write not implemented (protoc stub)")
+}
+
+func (s *H2Stream) ID() string {
+	if s == nil || s.id == "" {
+		return "cursor-stub"
+	}
+	return s.id
+}
+
+func (s *H2Stream) Data() <-chan []byte {
+	if s == nil {
+		ch := make(chan []byte)
+		close(ch)
+		return ch
+	}
+	if s.dataCh == nil {
+		s.dataCh = make(chan []byte)
+		close(s.dataCh)
+	}
+	return s.dataCh
+}
+
+func (s *H2Stream) Done() <-chan struct{} {
+	if s == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	if s.doneCh == nil {
+		s.doneCh = make(chan struct{})
+		close(s.doneCh)
+	}
+	return s.doneCh
+}
+
+func (s *H2Stream) Err() error {
+	if s == nil {
+		return nil
+	}
+	return s.err
 }
 
 // Read reads data from the stream.

@@ -12,8 +12,10 @@ import (
 	"strconv"
 	"strings"
 
+	sigcompat "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/signature"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/util"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -265,37 +267,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
-			if util.IsWebSearchTool(toolResult.Get("name").String(), toolResult.Get("type").String()) {
-				// Replace the tool content entirely with {"type":"web_search"}
-				template, _ = sjson.SetRawBytes(template, "tools.-1", []byte(`{"type":"web_search"}`))
-				continue
-			}
-			// Special handling: Codex sends "custom" type tools (e.g., apply_patch with Lark grammar)
-			// These have "format" instead of "input_schema" and cannot be directly translated.
-			// Convert to minimal valid function schema to avoid 400 errors (GitHub #1671).
-			if toolResult.Get("type").String() == "custom" {
-				toolName := toolResult.Get("name").String()
-				toolDesc := toolResult.Get("description").String()
-				if toolName == "" {
-					toolName = "custom_tool"
-				}
-				minimalTool := fmt.Sprintf(`{"type":"function","name":"%s","description":"%s","parameters":{"type":"object","properties":{}}}`,
-					toolName, toolDesc)
-				template, _ = sjson.SetRawBytes(template, "tools.-1", []byte(minimalTool))
-				continue
-			}
-			// Special handling: Codex sends "custom" type tools (e.g., apply_patch with Lark grammar)
-			// These have "format" instead of "input_schema" and cannot be directly translated.
-			// Convert to minimal valid function schema to avoid 400 errors (GitHub #1671).
-			if toolResult.Get("type").String() == "custom" {
-				toolName := toolResult.Get("name").String()
-				toolDesc := toolResult.Get("description").String()
-				if toolName == "" {
-					toolName = "custom_tool"
-				}
-				minimalTool := fmt.Sprintf(`{"type":"function","name":"%s","description":"%s","parameters":{"type":"object","properties":{}}}`,
-					toolName, toolDesc)
-				template, _ = sjson.SetRawBytes(template, "tools.-1", []byte(minimalTool))
+			if isClaudeWebSearchToolType(toolResult.Get("type").String()) {
+				template, _ = sjson.SetRawBytes(template, "tools.-1", convertClaudeWebSearchToolToCodex(toolResult))
 				continue
 			}
 			tool := []byte(toolResult.Raw)

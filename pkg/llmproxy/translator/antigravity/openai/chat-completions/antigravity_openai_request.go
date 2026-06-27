@@ -87,8 +87,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				responseMods = append(responseMods, "TEXT")
 			case "image":
 				responseMods = append(responseMods, "IMAGE")
-			case "video":
-				responseMods = append(responseMods, "VIDEO")
 			}
 		}
 		if len(responseMods) > 0 {
@@ -104,20 +102,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == gjson.String {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.imageSize", size.Str)
-		}
-	}
-	if videoCfg := gjson.GetBytes(rawJSON, "video_config"); videoCfg.Exists() && videoCfg.IsObject() {
-		if duration := videoCfg.Get("duration_seconds"); duration.Exists() && duration.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.durationSeconds", duration.Str)
-		}
-		if ar := videoCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.aspectRatio", ar.Str)
-		}
-		if resolution := videoCfg.Get("resolution"); resolution.Exists() && resolution.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.resolution", resolution.Str)
-		}
-		if negativePrompt := videoCfg.Get("negative_prompt"); negativePrompt.Exists() && negativePrompt.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.negativePrompt", negativePrompt.Str)
 		}
 	}
 
@@ -197,7 +181,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						switch item.Get("type").String() {
 						case "text":
 							text := item.Get("text").String()
-							if strings.TrimSpace(text) != "" {
+							if text != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
 								p++
 							}
@@ -262,7 +246,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
+				if content.Type == gjson.String && content.String() != "" {
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
 				} else if content.IsArray() {
@@ -271,7 +255,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						switch item.Get("type").String() {
 						case "text":
 							text := item.Get("text").String()
-							if strings.TrimSpace(text) != "" {
+							if text != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
 								p++
 							}
@@ -317,9 +301,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							fIDs = append(fIDs, fid)
 						}
 					}
-					if hasAntigravityParts(node) {
-						out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
-					}
+					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 
 					// Append a single tool content combining name + response per function
 					toolNode := []byte(`{"role":"user","parts":[]}`)
@@ -347,7 +329,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "request.contents.-1", toolNode)
 					}
-				} else if hasAntigravityParts(node) {
+				} else {
 					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 				}
 			}
@@ -419,9 +401,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			}
 			if gs := t.Get("google_search"); gs.Exists() {
 				googleToolNode := []byte(`{}`)
-				cleanedGoogleSearch := common.SanitizeToolSearchForGemini(gs.Raw)
 				var errSet error
-				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(cleanedGoogleSearch))
+				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(gs.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set googleSearch tool: %v", errSet)
 					continue
@@ -472,7 +453,3 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
-
-func hasAntigravityParts(node []byte) bool {
-	return gjson.GetBytes(node, "parts.#").Int() > 0
-}

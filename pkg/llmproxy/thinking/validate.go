@@ -181,10 +181,10 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 		config.Level = LevelMedium
 		config.Budget = 0
 		log.WithFields(log.Fields{
-			"provider":      redactLogText(provider),
-			"model":         redactLogText(model),
+			"provider":      provider,
+			"model":         model,
 			"original_mode": "auto",
-			"clamped_to":    redactLogLevel(LevelMedium),
+			"clamped_to":    string(LevelMedium),
 		}).Debug("thinking: mode converted, dynamic not allowed, using medium level |")
 		return config
 	}
@@ -202,10 +202,10 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 		config.Budget = mid
 	}
 	log.WithFields(log.Fields{
-		"provider":      redactLogText(provider),
-		"model":         redactLogText(model),
+		"provider":      provider,
+		"model":         model,
 		"original_mode": "auto",
-		"clamped_to":    redactLogInt(config.Budget),
+		"clamped_to":    config.Budget,
 	}).Debug("thinking: mode converted, dynamic not allowed |")
 	return config
 }
@@ -248,10 +248,10 @@ func clampLevel(level ThinkingLevel, modelInfo *registry.ModelInfo, provider str
 	if bestIdx >= 0 {
 		clamped := standardLevelOrder[bestIdx]
 		log.WithFields(log.Fields{
-			"provider":       redactLogText(provider),
-			"model":          redactLogText(model),
-			"original_value": redactLogLevel(level),
-			"clamped_to":     redactLogLevel(clamped),
+			"provider":       provider,
+			"model":          model,
+			"original_value": string(level),
+			"clamped_to":     string(clamped),
 		}).Debug("thinking: level clamped |")
 		return clamped
 	}
@@ -280,12 +280,12 @@ func clampBudget(value int, modelInfo *registry.ModelInfo, provider string) int 
 	min, max := support.Min, support.Max
 	if value == 0 && !support.ZeroAllowed {
 		log.WithFields(log.Fields{
-			"provider":       redactLogText(provider),
-			"model":          redactLogText(model),
-			"original_value": redactLogInt(value),
-			"clamped_to":     redactLogInt(min),
-			"min":            redactLogInt(min),
-			"max":            redactLogInt(max),
+			"provider":       provider,
+			"model":          model,
+			"original_value": value,
+			"clamped_to":     min,
+			"min":            min,
+			"max":            max,
 		}).Warn("thinking: budget zero not allowed |")
 		return min
 	}
@@ -381,11 +381,11 @@ func abs(x int) int {
 
 func logClamp(provider, model string, original, clampedTo, min, max int) {
 	log.WithFields(log.Fields{
-		"provider":       redactLogText(provider),
-		"model":          redactLogText(model),
-		"original_value": redactLogInt(original),
-		"min":            redactLogInt(min),
-		"max":            redactLogInt(max),
-		"clamped_to":     redactLogInt(clampedTo),
+		"provider":       provider,
+		"model":          model,
+		"original_value": original,
+		"min":            min,
+		"max":            max,
+		"clamped_to":     clampedTo,
 	}).Debug("thinking: budget clamped |")
 }

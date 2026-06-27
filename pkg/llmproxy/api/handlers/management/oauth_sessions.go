@@ -198,12 +198,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 		return false
 	}
 	if session.Status != "" {
-		if !strings.EqualFold(session.Provider, "kiro") {
-			return false
-		}
-		if !strings.HasPrefix(session.Status, "device_code|") && !strings.HasPrefix(session.Status, "auth_url|") {
-			return false
-		}
+		return false
 	}
 	if provider == "" {
 		return true
@@ -310,20 +305,10 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "anthropic", nil
 	case "codex", "openai":
 		return "codex", nil
-	case "gitlab":
-		return "gitlab", nil
-	case "gemini", "google":
-		return "gemini", nil
-	case "iflow", "i-flow":
-		return "iflow", nil
 	case "antigravity", "anti-gravity":
 		return "antigravity", nil
-	case "qwen":
-		return "qwen", nil
-	case "kiro":
-		return "kiro", nil
-	case "github":
-		return "github", nil
+	case "xai", "x-ai", "x.ai", "grok":
+		return "xai", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
@@ -367,47 +352,29 @@ type oauthCallbackFilePayload struct {
 	Error string `json:"error"`
 }
 
-func sanitizeOAuthCallbackPath(authDir, fileName string) (string, error) {
-	trimmedAuthDir := strings.TrimSpace(authDir)
-	if trimmedAuthDir == "" {
-		return "", fmt.Errorf("auth dir is empty")
-	}
-	if fileName != filepath.Base(fileName) || strings.ContainsAny(fileName, `/\`) {
-		return "", fmt.Errorf("invalid oauth callback file name")
-	}
-	cleanAuthDir, err := filepath.Abs(filepath.Clean(trimmedAuthDir))
-	if err != nil {
-		return "", fmt.Errorf("resolve auth dir: %w", err)
-	}
-	if resolvedDir, err := filepath.EvalSymlinks(cleanAuthDir); err == nil {
-		cleanAuthDir = resolvedDir
-	}
-	filePath := filepath.Join(cleanAuthDir, fileName)
-	relPath, err := filepath.Rel(cleanAuthDir, filePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve oauth callback file path: %w", err)
-	}
-	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("invalid oauth callback file path")
-	}
-	return filePath, nil
-}
-
 func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
-	canonicalProvider, err := NormalizeOAuthProvider(provider)
+	canonicalProvider, err := NormalizeOAuthCallbackProvider(provider)
 	if err != nil {
 		return "", err
+	}
+	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+}
+
+func writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage string) (string, error) {
+	if strings.TrimSpace(authDir) == "" {
+		return "", fmt.Errorf("auth dir is empty")
+	}
+	canonicalProvider = strings.TrimSpace(canonicalProvider)
+	if canonicalProvider == "" {
+		return "", errUnsupportedOAuthFlow
 	}
 	if err := ValidateOAuthState(state); err != nil {
 		return "", err
 	}
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
-	filePath, err := sanitizeOAuthCallbackPath(authDir, fileName)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
+	filePath := filepath.Join(authDir, fileName)
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		return "", fmt.Errorf("create oauth callback dir: %w", err)
 	}
 	payload := oauthCallbackFilePayload{

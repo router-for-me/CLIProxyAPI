@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -224,21 +224,27 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			return noSSEOutput(out)
 		}
 		idx := int(root.Get("index").Int())
-		switch cb.Get("type").String() {
-		case "text":
-			// open message item + content part
+		typ := cb.Get("type").String()
+		if typ == "text" {
 			st.InTextBlock = true
-			st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
-			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
-			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
-			item, _ = sjson.SetBytes(item, "item.id", st.CurrentMsgID)
-			out = append(out, emitEvent("response.output_item.added", item))
-
-			part := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
-			part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
-			part, _ = sjson.SetBytes(part, "item_id", st.CurrentMsgID)
-			out = append(out, emitEvent("response.content_part.added", part))
-		case "tool_use":
+			if st.CurrentMsgID == "" {
+				st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
+			}
+			if !st.MessageOpen {
+				item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
+				item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+				item, _ = sjson.SetBytes(item, "item.id", st.CurrentMsgID)
+				out = append(out, emitEvent("response.output_item.added", item))
+				st.MessageOpen = true
+			}
+			if !st.ContentPartOpen {
+				part := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
+				part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
+				part, _ = sjson.SetBytes(part, "item_id", st.CurrentMsgID)
+				out = append(out, emitEvent("response.content_part.added", part))
+				st.ContentPartOpen = true
+			}
+		} else if typ == "tool_use" {
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
 			name := cb.Get("name").String()
@@ -255,7 +261,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			// record function metadata for aggregation
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
-		case "thinking":
+		} else if typ == "thinking" {
 			// start reasoning item
 			st.ReasoningActive = true
 			st.ReasoningIndex = idx
@@ -284,8 +290,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if !d.Exists() {
 			return noSSEOutput(out)
 		}
-		switch d.Get("type").String() {
-		case "text_delta":
+		dt := d.Get("type").String()
+		if dt == "text_delta" {
 			if t := d.Get("text"); t.Exists() {
 				msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
 				msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
@@ -296,7 +302,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				st.TextBuf.WriteString(t.String())
 				st.CurrentTextBuf.WriteString(t.String())
 			}
-		case "input_json_delta":
+		} else if dt == "input_json_delta" {
+			if !st.InFuncBlock || st.CurrentFCID == "" {
+				return [][]byte{}
+			}
 			idx := int(root.Get("index").Int())
 			if pj := d.Get("partial_json"); pj.Exists() {
 				if st.FuncArgsBuf[idx] == nil {
@@ -310,7 +319,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				msg, _ = sjson.SetBytes(msg, "delta", pj.String())
 				out = append(out, emitEvent("response.function_call_arguments.delta", msg))
 			}
-		case "thinking_delta":
+		} else if dt == "thinking_delta" {
 			if st.ReasoningActive {
 				if t := d.Get("thinking"); t.Exists() {
 					st.ReasoningBuf.WriteString(t.String())
@@ -322,18 +331,19 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
 				}
 			}
-		case "signature_delta":
+		} else if dt == "signature_delta" {
 			if st.ReasoningActive {
 				if signature := d.Get("signature"); signature.Exists() && signature.String() != "" {
 					st.ReasoningSignature = signature.String()
 				}
 			}
 			return [][]byte{}
-		case "citations_delta":
+		} else if dt == "citations_delta" {
 			if citation := d.Get("citation"); citation.Exists() {
 				st.appendMessageAnnotation(citation.Value())
 			}
 			return [][]byte{}
+		}
 	case "content_block_stop":
 		idx := int(root.Get("index").Int())
 		if st.InTextBlock {

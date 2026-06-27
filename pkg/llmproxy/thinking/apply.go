@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -177,6 +176,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
+			"model":    model,
 		}).Debug("thinking: unknown provider, passthrough |")
 		return body, nil
 	}
@@ -197,12 +197,15 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		config := extractThinkingConfig(body, providerFormat)
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
-				"model":    util.RedactAPIKey(baseModel),
+				"model":    baseModel,
 				"provider": providerFormat,
 			}).Debug("thinking: model does not support thinking, stripping config |")
 			return StripThinkingConfig(body, providerFormat), nil
 		}
-		log.Debug("thinking: model does not support thinking, passthrough |")
+		log.WithFields(log.Fields{
+			"provider": providerFormat,
+			"model":    baseModel,
+		}).Debug("thinking: model does not support thinking, passthrough |")
 		return body, nil
 	}
 
@@ -212,6 +215,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		config = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
+			"model":    model,
 			"mode":     config.Mode,
 			"budget":   config.Budget,
 			"level":    config.Level,
@@ -219,33 +223,32 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	} else {
 		config = extractThinkingConfig(body, providerFormat)
 		if hasThinkingConfig(config) {
-			log.WithField("provider", providerFormat).Debug("thinking: request includes thinking config |")
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+				"mode":     config.Mode,
+				"budget":   config.Budget,
+				"level":    config.Level,
+			}).Debug("thinking: original config from request |")
 		}
 	}
 
 	if !hasThinkingConfig(config) {
-		// Force thinking for thinking models even without explicit config
-		// Models with "thinking" in their name should have thinking enabled by default
-		if isForcedThinkingModel(modelInfo.ID, model) {
-			config = ThinkingConfig{Mode: ModeAuto, Budget: -1}
-			log.WithFields(log.Fields{
-				"provider": providerFormat,
-				"mode":     config.Mode,
-				"forced":   true,
-			}).Debug("thinking: forced thinking for thinking model |")
-		} else {
-			log.WithFields(log.Fields{
-				"provider": providerFormat,
-				"model":    util.RedactAPIKey(modelInfo.ID),
-			}).Debug("thinking: no config found, passthrough |")
-			return body, nil
-		}
+		log.WithFields(log.Fields{
+			"provider": providerFormat,
+			"model":    modelInfo.ID,
+		}).Debug("thinking: no config found, passthrough |")
+		return body, nil
 	}
 
 	// 5. Validate and normalize configuration
 	validated, err := ValidateConfig(config, modelInfo, fromFormat, providerFormat, suffixResult.HasSuffix)
 	if err != nil {
-		log.Warn("thinking: validation failed |")
+		log.WithFields(log.Fields{
+			"provider": providerFormat,
+			"model":    modelInfo.ID,
+			"error":    err.Error(),
+		}).Warn("thinking: validation failed |")
 		// Return original body on validation failure (defensive programming).
 		// This ensures callers who ignore the error won't receive nil body.
 		// The upstream service will decide how to handle the unmodified request.
@@ -256,17 +259,17 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if validated == nil {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
-			"model":    util.RedactAPIKey(modelInfo.ID),
+			"model":    modelInfo.ID,
 		}).Warn("thinking: ValidateConfig returned nil config without error, passthrough |")
 		return body, nil
 	}
 
 	log.WithFields(log.Fields{
-		"provider": redactLogText(providerFormat),
-		"model":    redactLogText(modelInfo.ID),
-		"mode":     redactLogMode(validated.Mode),
-		"budget":   redactLogInt(validated.Budget),
-		"level":    redactLogLevel(validated.Level),
+		"provider": providerFormat,
+		"model":    modelInfo.ID,
+		"mode":     validated.Mode,
+		"budget":   validated.Budget,
+		"level":    validated.Level,
 	}).Debug("thinking: processed config to apply |")
 
 	// 6. Apply configuration using provider-specific applier
@@ -307,9 +310,9 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 
 	// Unknown suffix format - return empty config
 	log.WithFields(log.Fields{
-		"provider":   redactLogText(provider),
-		"model":      redactLogText(model),
-		"raw_suffix": redactLogText(rawSuffix),
+		"provider":   provider,
+		"model":      model,
+		"raw_suffix": rawSuffix,
 	}).Debug("thinking: unknown suffix format, treating as no config |")
 	return ThinkingConfig{}
 }
@@ -354,8 +357,8 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 
 	if !hasThinkingConfig(config) {
 		log.WithFields(log.Fields{
-			"model":    redactLogText(modelID),
-			"provider": redactLogText(toFormat),
+			"model":    modelID,
+			"provider": toFormat,
 		}).Debug("thinking: user-defined model, passthrough (no config) |")
 		return body, nil
 	}
@@ -363,22 +366,20 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	applier := GetProviderApplier(toFormat)
 	if applier == nil {
 		log.WithFields(log.Fields{
-			"model":    redactLogText(modelID),
-			"provider": redactLogText(toFormat),
+			"model":    modelID,
+			"provider": toFormat,
 		}).Debug("thinking: user-defined model, passthrough (unknown provider) |")
 		return body, nil
 	}
 
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
 	log.WithFields(log.Fields{
-		"provider": redactLogText(toFormat),
-		"model":    redactLogText(modelID),
-		"mode":     redactLogMode(config.Mode),
-		"budget":   redactLogInt(config.Budget),
-		"level":    redactLogLevel(config.Level),
-	}).Debug("thinking: applying config for user-defined model (skip validation)")
-
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+		"provider": toFormat,
+		"model":    modelID,
+		"mode":     config.Mode,
+		"budget":   config.Budget,
+		"level":    config.Level,
+	}).Debug("thinking: processed config to apply |")
 	return applier.Apply(body, config, modelInfo)
 }
 
@@ -501,27 +502,11 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
 // Claude API format:
 //   - thinking.type: "enabled" or "disabled"
 //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
-//   - output_config.effort: "low", "medium", "high" (Claude Opus 4.6+)
 //
 // Priority: thinking.type="disabled" takes precedence over budget_tokens.
-// output_config.effort is checked first as it's the newer format.
 // When type="enabled" without budget_tokens, returns ModeAuto to indicate
 // the user wants thinking enabled but didn't specify a budget.
 func extractClaudeConfig(body []byte) ThinkingConfig {
-	// Check output_config.effort first (newer format for Claude Opus 4.6+)
-	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() {
-		value := strings.ToLower(strings.TrimSpace(effort.String()))
-		switch value {
-		case "none", "":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			// Treat as level (low, medium, high)
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-		}
-	}
-
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -659,127 +644,5 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
 
-	// Compatibility fallback: some clients send Claude-style `variant`
-	// instead of OpenAI/Codex `reasoning.effort`.
-	if variant := gjson.GetBytes(body, "variant"); variant.Exists() {
-		switch strings.ToLower(strings.TrimSpace(variant.String())) {
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "xhigh", "x-high", "x_high":
-			return ThinkingConfig{Mode: ModeLevel, Level: LevelXHigh}
-		case "high":
-			return ThinkingConfig{Mode: ModeLevel, Level: LevelHigh}
-		case "medium":
-			return ThinkingConfig{Mode: ModeLevel, Level: LevelMedium}
-		case "low":
-			return ThinkingConfig{Mode: ModeLevel, Level: LevelLow}
-		case "minimal":
-			return ThinkingConfig{Mode: ModeLevel, Level: LevelMinimal}
-		case "auto":
-			return ThinkingConfig{Mode: ModeLevel, Level: LevelAuto}
-		}
-	}
-
 	return ThinkingConfig{}
-}
-
-// extractIFlowConfig extracts thinking configuration from iFlow format request body.
-//
-// iFlow API format (supports multiple model families):
-//   - GLM format: chat_template_kwargs.enable_thinking (boolean)
-//   - MiniMax format: reasoning_split (boolean)
-//
-// Returns ModeBudget with Budget=1 as a sentinel value indicating "enabled".
-// The actual budget/configuration is determined by the iFlow applier based on model capabilities.
-// Budget=1 is used because iFlow models don't use numeric budgets; they only support on/off.
-func extractIFlowConfig(body []byte) ThinkingConfig {
-	// GLM format: chat_template_kwargs.enable_thinking
-	if enabled := gjson.GetBytes(body, "chat_template_kwargs.enable_thinking"); enabled.Exists() {
-		if enabled.Bool() {
-			// Budget=1 is a sentinel meaning "enabled" (iFlow doesn't use numeric budgets)
-			return ThinkingConfig{Mode: ModeBudget, Budget: 1}
-		}
-		return ThinkingConfig{Mode: ModeNone, Budget: 0}
-	}
-
-	// MiniMax format: reasoning_split
-	if split := gjson.GetBytes(body, "reasoning_split"); split.Exists() {
-		if split.Bool() {
-			// Budget=1 is a sentinel meaning "enabled" (iFlow doesn't use numeric budgets)
-			return ThinkingConfig{Mode: ModeBudget, Budget: 1}
-		}
-		return ThinkingConfig{Mode: ModeNone, Budget: 0}
-	}
-
-	// iFlow compatibility format: nested reasoning object
-	if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() {
-		if effort := reasoning.Get("effort"); effort.Exists() {
-			value := strings.ToLower(strings.TrimSpace(effort.String()))
-			switch value {
-			case "":
-				return ThinkingConfig{}
-			case "none":
-				return ThinkingConfig{Mode: ModeNone, Budget: 0}
-			case "auto":
-				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-			default:
-				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-			}
-		}
-	}
-
-	// iFlow compatibility format: literal key 'reasoning.effort'
-	if effort := gjson.GetBytes(body, `reasoning\.effort`); effort.Exists() {
-		value := strings.ToLower(strings.TrimSpace(effort.String()))
-		switch value {
-		case "":
-			return ThinkingConfig{}
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-		}
-	}
-
-	// iFlow compatibility format: dotted path reasoning.effort
-	if effort := gjson.GetBytes(body, "reasoning.effort"); effort.Exists() {
-		value := strings.ToLower(strings.TrimSpace(effort.String()))
-		switch value {
-		case "":
-			return ThinkingConfig{}
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-		}
-	}
-
-	// iFlow compatibility format: openai-style reasoning_effort
-	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
-		value := strings.ToLower(strings.TrimSpace(effort.String()))
-		switch value {
-		case "":
-			return ThinkingConfig{}
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-		}
-	}
-
-	return ThinkingConfig{}
-}
-
-// isForcedThinkingModel checks if a model should have thinking forced on.
-// Models with "thinking" in their name (like claude-opus-4-6-thinking) should
-// have thinking enabled by default even without explicit budget.
-func isForcedThinkingModel(modelID, fullModelName string) bool {
-	return strings.Contains(strings.ToLower(modelID), "thinking") ||
-		strings.Contains(strings.ToLower(fullModelName), "thinking")
 }

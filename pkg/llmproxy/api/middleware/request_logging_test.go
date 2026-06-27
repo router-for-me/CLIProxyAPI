@@ -2,114 +2,241 @@ package middleware
 
 import (
 	"bytes"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
+	"github.com/klauspost/compress/zstd"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
 )
 
-type mockRequestLogger struct {
-	enabled bool
-	logged  bool
-	headers map[string][]string
-	body    []byte
-}
-
-func (m *mockRequestLogger) IsEnabled() bool { return m.enabled }
-func (m *mockRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	m.logged = true
-	m.headers = requestHeaders
-	m.body = body
-	return nil
-}
-func (m *mockRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
-	return &logging.NoOpStreamingLogWriter{}, nil
-}
-
-func TestRequestLoggingMiddleware(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	t.Run("LoggerNil", func(t *testing.T) {
-		router := gin.New()
-		router.Use(RequestLoggingMiddleware(nil))
-		router.POST("/test", func(c *gin.Context) { c.Status(200) })
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/test", nil)
-		router.ServeHTTP(w, req)
-		if w.Code != 200 {
-			t.Errorf("expected 200")
-		}
-	})
-
-	t.Run("GETMethod", func(t *testing.T) {
-		logger := &mockRequestLogger{enabled: true}
-		router := gin.New()
-		router.Use(RequestLoggingMiddleware(logger))
-		router.GET("/test", func(c *gin.Context) { c.Status(200) })
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/test", nil)
-		router.ServeHTTP(w, req)
-		if logger.logged {
-			t.Errorf("should not log GET requests")
-		}
-	})
-
-	t.Run("ManagementPath", func(t *testing.T) {
-		logger := &mockRequestLogger{enabled: true}
-		router := gin.New()
-		router.Use(RequestLoggingMiddleware(logger))
-		router.POST("/management/test", func(c *gin.Context) { c.Status(200) })
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/management/test", nil)
-		router.ServeHTTP(w, req)
-		if logger.logged {
-			t.Errorf("should not log management paths")
-		}
-	})
-
-	t.Run("LogEnabled", func(t *testing.T) {
-		logger := &mockRequestLogger{enabled: true}
-		router := gin.New()
-		router.Use(RequestLoggingMiddleware(logger))
-		router.POST("/v1/chat/completions", func(c *gin.Context) {
-			c.JSON(200, gin.H{"ok": true})
-		})
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"test":true}`)))
-		req.Header.Set("Authorization", "Bearer secret")
-		req.Header.Set("X-Api-Key", "super-secret")
-		router.ServeHTTP(w, req)
-		if !logger.logged {
-			t.Errorf("should have logged the request")
-		}
-		if got := logger.headers["Authorization"]; len(got) != 1 || got[0] != "[redacted]" {
-			t.Fatalf("authorization header should be redacted, got %#v", got)
-		}
-	})
-}
-
-func TestShouldLogRequest(t *testing.T) {
-	cases := []struct {
-		path     string
-		expected bool
+func TestShouldSkipMethodForRequestLogging(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *http.Request
+		skip bool
 	}{
-		{"/v1/chat/completions", true},
-		{"/management/config", false},
-		{"/v0/management/config", false},
-		{"/api/provider/test", true},
-		{"/api/other", false},
+		{
+			name: "nil request",
+			req:  nil,
+			skip: true,
+		},
+		{
+			name: "post request should not skip",
+			req: &http.Request{
+				Method: http.MethodPost,
+				URL:    &url.URL{Path: "/v1/responses"},
+			},
+			skip: false,
+		},
+		{
+			name: "plain get should skip",
+			req: &http.Request{
+				Method: http.MethodGet,
+				URL:    &url.URL{Path: "/v1/models"},
+				Header: http.Header{},
+			},
+			skip: true,
+		},
+		{
+			name: "responses websocket upgrade should not skip",
+			req: &http.Request{
+				Method: http.MethodGet,
+				URL:    &url.URL{Path: "/v1/responses"},
+				Header: http.Header{"Upgrade": []string{"websocket"}},
+			},
+			skip: false,
+		},
+		{
+			name: "responses get without upgrade should skip",
+			req: &http.Request{
+				Method: http.MethodGet,
+				URL:    &url.URL{Path: "/v1/responses"},
+				Header: http.Header{},
+			},
+			skip: true,
+		},
 	}
 
-	for _, c := range cases {
-		if got := shouldLogRequest(c.path); got != c.expected {
-			t.Errorf("path %s: expected %v, got %v", c.path, c.expected, got)
+	for i := range tests {
+		got := shouldSkipMethodForRequestLogging(tests[i].req)
+		if got != tests[i].skip {
+			t.Fatalf("%s: got skip=%t, want %t", tests[i].name, got, tests[i].skip)
 		}
+	}
+}
+
+func TestShouldCaptureRequestBody(t *testing.T) {
+	tests := []struct {
+		name          string
+		loggerEnabled bool
+		req           *http.Request
+		want          bool
+	}{
+		{
+			name:          "logger enabled always captures",
+			loggerEnabled: true,
+			req: &http.Request{
+				Body:          io.NopCloser(strings.NewReader("{}")),
+				ContentLength: -1,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+			},
+			want: true,
+		},
+		{
+			name:          "nil request",
+			loggerEnabled: false,
+			req:           nil,
+			want:          false,
+		},
+		{
+			name:          "small known size json in error-only mode",
+			loggerEnabled: false,
+			req: &http.Request{
+				Body:          io.NopCloser(strings.NewReader("{}")),
+				ContentLength: 2,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+			},
+			want: true,
+		},
+		{
+			name:          "large known size skipped in error-only mode",
+			loggerEnabled: false,
+			req: &http.Request{
+				Body:          io.NopCloser(strings.NewReader("x")),
+				ContentLength: maxErrorOnlyCapturedRequestBodyBytes + 1,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+			},
+			want: false,
+		},
+		{
+			name:          "unknown size skipped in error-only mode",
+			loggerEnabled: false,
+			req: &http.Request{
+				Body:          io.NopCloser(strings.NewReader("x")),
+				ContentLength: -1,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+			},
+			want: false,
+		},
+		{
+			name:          "multipart skipped in error-only mode",
+			loggerEnabled: false,
+			req: &http.Request{
+				Body:          io.NopCloser(strings.NewReader("x")),
+				ContentLength: 1,
+				Header:        http.Header{"Content-Type": []string{"multipart/form-data; boundary=abc"}},
+			},
+			want: false,
+		},
+	}
+
+	for i := range tests {
+		got := shouldCaptureRequestBody(tests[i].loggerEnabled, tests[i].req)
+		if got != tests[i].want {
+			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+		}
+	}
+}
+
+func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	c.Request.Header.Set("Upgrade", "websocket")
+
+	attachRequestLogSources(c, logger, true)
+	defer cleanupFileBodySourcesFromContext(c)
+
+	for _, key := range []string{
+		logging.WebsocketTimelineSourceContextKey,
+		logging.APIWebsocketTimelineSourceContextKey,
+	} {
+		value, exists := c.Get(key)
+		if !exists {
+			t.Fatalf("expected %s source to be attached", key)
+		}
+		source, ok := value.(*logging.FileBodySource)
+		if !ok || source == nil {
+			t.Fatalf("%s source type = %T", key, value)
+		}
+		file, errPart := source.CreatePart("probe")
+		if errPart != nil {
+			t.Fatalf("CreatePart(%s): %v", key, errPart)
+		}
+		path := file.Name()
+		if errClose := file.Close(); errClose != nil {
+			t.Fatalf("close part: %v", errClose)
+		}
+		if !strings.HasPrefix(path, logsDir+string(os.PathSeparator)) {
+			t.Fatalf("%s part path %s is not under logs dir %s", key, path, logsDir)
+		}
+	}
+}
+
+func cleanupFileBodySourcesFromContext(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	for _, key := range []string{
+		logging.WebsocketTimelineSourceContextKey,
+		logging.APIWebsocketTimelineSourceContextKey,
+	} {
+		value, exists := c.Get(key)
+		if !exists {
+			continue
+		}
+		if source, ok := value.(*logging.FileBodySource); ok && source != nil {
+			_ = source.Cleanup()
+		}
+	}
+}
+
+func TestCaptureRequestInfoDecodesZstdRequestBodyForLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	payload := []byte(`{"model":"test-model","stream":true}`)
+	var compressed bytes.Buffer
+	encoder, errNewWriter := zstd.NewWriter(&compressed)
+	if errNewWriter != nil {
+		t.Fatalf("zstd.NewWriter: %v", errNewWriter)
+	}
+	if _, errWrite := encoder.Write(payload); errWrite != nil {
+		t.Fatalf("zstd write: %v", errWrite)
+	}
+	if errClose := encoder.Close(); errClose != nil {
+		t.Fatalf("zstd close: %v", errClose)
+	}
+	compressedBytes := compressed.Bytes()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(compressedBytes))
+	req.Header.Set("Content-Encoding", "zstd")
+	c.Request = req
+
+	info, errCapture := captureRequestInfo(c, true)
+	if errCapture != nil {
+		t.Fatalf("captureRequestInfo: %v", errCapture)
+	}
+	if !bytes.Equal(info.Body, payload) {
+		t.Fatalf("logged request body = %q, want %q", string(info.Body), string(payload))
+	}
+
+	restoredBody, errRead := io.ReadAll(c.Request.Body)
+	if errRead != nil {
+		t.Fatalf("read restored request body: %v", errRead)
+	}
+	if !bytes.Equal(restoredBody, compressedBytes) {
+		t.Fatal("request body was not restored with the original compressed bytes")
 	}
 }

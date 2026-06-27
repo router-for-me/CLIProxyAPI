@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/translatorcommon"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

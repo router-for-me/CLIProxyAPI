@@ -53,6 +53,10 @@ type responsesSSEFramer struct {
 	unindexedOutputItems [][]byte
 }
 
+func newResponsesSSEFramer() *responsesSSEFramer {
+	return &responsesSSEFramer{}
+}
+
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 	if len(chunk) == 0 {
 		return
@@ -696,7 +700,10 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 	})
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
+	if framer == nil {
+		framer = newResponsesSSEFramer()
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			framer.WriteChunk(c.Writer, chunk)

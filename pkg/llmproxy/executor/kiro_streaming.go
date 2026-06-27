@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	kiroauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/kiro"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/executor/helps"
 	kiroclaude "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/kiro/claude"
 	kirocommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/kiro/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
@@ -93,7 +94,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("kiro")
@@ -127,7 +128,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // - CodeWhisperer endpoint (AI_EDITOR origin) uses Kiro IDE quota
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
-func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, body []byte, from sdktranslator.Format, reporter *usageReporter, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, body []byte, from sdktranslator.Format, reporter *helps.UsageReporter, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
 	var currentOrigin string
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
@@ -1139,7 +1140,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 // Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
 // Extracts stop_reason from upstream events when available.
 // thinkingEnabled controls whether <thinking> tags are parsed - only parse when request enabled thinking.
-func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
+func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *helps.UsageReporter, thinkingEnabled bool) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
@@ -1218,7 +1219,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Ensure usage is published even on early return
 	defer func() {
-		reporter.publish(ctx, totalUsage)
+		reporter.Publish(ctx, totalUsage)
 	}()
 
 	for {
@@ -2496,7 +2497,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 
 	go func() {
 		var wsErr error
-		defer reporter.trackFailure(ctx, &wsErr)
+		defer reporter.TrackFailure(ctx, &wsErr)
 		defer close(out)
 
 		// Estimate input tokens using tokenizer (matching streamToChannel pattern)
@@ -2522,7 +2523,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 			if accumulatedOutputLen > 0 && totalUsage.OutputTokens == 0 {
 				totalUsage.OutputTokens = 1
 			}
-			reporter.publish(ctx, totalUsage)
+			reporter.Publish(ctx, totalUsage)
 		}()
 
 		// Send message_start event to client (aligned with streamToChannel pattern)
@@ -2826,7 +2827,7 @@ func (e *KiroExecutor) callKiroDirectStream(
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	var streamErr error
-	defer reporter.trackFailure(ctx, &streamErr)
+	defer reporter.TrackFailure(ctx, &streamErr)
 
 	stream, streamErr := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
@@ -2875,7 +2876,7 @@ func (e *KiroExecutor) executeNonStreamFallback(
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	var err error
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, to, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err

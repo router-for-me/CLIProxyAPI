@@ -18,14 +18,12 @@ func CredentialFileName(email, planType, hashAccountID string, includeProviderPr
 		prefix = "codex"
 	}
 
-	switch plan {
-	case "":
+	if plan == "" {
 		return fmt.Sprintf("%s-%s.json", prefix, email)
-	case "team":
+	} else if plan == "team" {
 		return fmt.Sprintf("%s-%s-%s-%s.json", prefix, hashAccountID, email, plan)
-	default:
-		return fmt.Sprintf("%s-%s-%s.json", prefix, email, plan)
 	}
+	return fmt.Sprintf("%s-%s-%s.json", prefix, email, plan)
 }
 
 func normalizePlanTypeForFilename(planType string) string {

@@ -45,79 +45,15 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
-	jsonStr = removeInvalidToolProperties(jsonStr)
 	if !addPlaceholder {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
-		// Process nullable first to update required array before removing the keyword.
-		jsonStr = processNullableKeyword(jsonStr)
-		jsonStr = removeKeywords(jsonStr, []string{"title"})
+		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
 		jsonStr = removePlaceholderFields(jsonStr)
 	}
 	jsonStr = cleanupRequiredFields(jsonStr)
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
 	if addPlaceholder {
 		jsonStr = addEmptySchemaPlaceholder(jsonStr)
-	}
-
-	return jsonStr
-}
-
-// processNullableKeyword processes the "nullable" keyword and updates required arrays.
-// When nullable: true is found on a property, that property is removed from the parent's
-// required array since nullable properties are optional.
-func processNullableKeyword(jsonStr string) string {
-	paths := findPaths(jsonStr, "nullable")
-	nullableFields := make(map[string][]string)
-
-	for _, p := range paths {
-		val := gjson.Get(jsonStr, p)
-		if !val.Exists() || val.Type != gjson.True {
-			continue
-		}
-
-		// Determine if this is a property with nullable: true
-		parts := splitGJSONPath(p)
-		if len(parts) >= 3 && parts[len(parts)-3] == "properties" {
-			fieldNameEscaped := parts[len(parts)-2]
-			fieldName := unescapeGJSONPathKey(fieldNameEscaped)
-			objectPath := strings.Join(parts[:len(parts)-3], ".")
-
-			nullableFields[objectPath] = append(nullableFields[objectPath], fieldName)
-
-			// Add hint to description
-			propPath := joinPath(objectPath, "properties."+fieldNameEscaped)
-			jsonStr = appendHint(jsonStr, propPath, "(nullable)")
-		}
-	}
-
-	// Update required arrays to remove nullable fields
-	for objectPath, fields := range nullableFields {
-		reqPath := joinPath(objectPath, "required")
-		req := gjson.Get(jsonStr, reqPath)
-		if !req.IsArray() {
-			continue
-		}
-
-		var filtered []string
-		for _, r := range req.Array() {
-			if !contains(fields, r.String()) {
-				filtered = append(filtered, r.String())
-			}
-		}
-
-		if len(filtered) == 0 {
-			jsonStr, _ = sjson.Delete(jsonStr, reqPath)
-		} else {
-			jsonStr, _ = sjson.Set(jsonStr, reqPath, filtered)
-		}
-	}
-
-	// Remove all nullable keywords
-	deletePaths := make([]string, 0)
-	deletePaths = append(deletePaths, paths...)
-	sortByDepth(deletePaths)
-	for _, p := range deletePaths {
-		jsonStr, _ = sjson.Delete(jsonStr, p)
 	}
 
 	return jsonStr
@@ -187,6 +123,7 @@ func removePlaceholderFields(jsonStr string) string {
 		if desc != placeholderReasonDescription {
 			continue
 		}
+		jsonStr, _ = sjson.Delete(jsonStr, p)
 		reqPath := joinPath(parentPath, "required")
 		req := gjson.Get(jsonStr, reqPath)
 		if req.IsArray() {
@@ -205,101 +142,6 @@ func removePlaceholderFields(jsonStr string) string {
 		}
 	}
 
-	// Some schemas surface only the required marker path; strip required=["reason"]
-	// when the sibling placeholder object is present.
-	requiredPaths := findPaths(jsonStr, "required")
-	sortByDepth(requiredPaths)
-	for _, p := range requiredPaths {
-		if !strings.HasSuffix(p, ".required") {
-			continue
-		}
-		req := gjson.Get(jsonStr, p)
-		if !req.IsArray() {
-			continue
-		}
-		values := req.Array()
-		if len(values) != 1 || values[0].String() != "reason" {
-			continue
-		}
-		parentPath := trimSuffix(p, ".required")
-		propsPath := joinPath(parentPath, "properties")
-		props := gjson.Get(jsonStr, propsPath)
-		if !props.IsObject() || len(props.Map()) != 1 {
-			continue
-		}
-		desc := gjson.Get(jsonStr, joinPath(parentPath, "properties.reason.description")).String()
-		if desc != placeholderReasonDescription {
-			continue
-		}
-		jsonStr, _ = sjson.Delete(jsonStr, p)
-	}
-
-	// Deterministic top-level cleanup for placeholder-only schemas.
-	// Some client payloads bypass path discovery but still carry:
-	// properties.reason + required:["reason"].
-	topReq := gjson.Get(jsonStr, "required")
-	if topReq.IsArray() {
-		values := topReq.Array()
-		if len(values) == 1 && values[0].String() == "reason" {
-			topProps := gjson.Get(jsonStr, "properties")
-			if topProps.IsObject() && len(topProps.Map()) == 1 {
-				topDesc := gjson.Get(jsonStr, "properties.reason.description").String()
-				if topDesc == placeholderReasonDescription {
-					jsonStr, _ = sjson.Delete(jsonStr, "required")
-				}
-			}
-		}
-	}
-
-	return jsonStr
-}
-
-var invalidToolPropertyNames = []string{
-	"cornerRadius",
-	"fillColor",
-	"fontFamily",
-	"fontSize",
-	"fontWeight",
-	"gap",
-	"padding",
-	"strokeColor",
-	"strokeThickness",
-	"textColor",
-}
-
-// removeInvalidToolProperties strips known UI style properties that the Antigravity API rejects
-// from nested tool parameter schemas. It also cleans up any required arrays that listed these fields.
-func removeInvalidToolProperties(jsonStr string) string {
-	if len(invalidToolPropertyNames) == 0 {
-		return jsonStr
-	}
-	pathsByField := findPathsByFields(jsonStr, invalidToolPropertyNames)
-	var deletePaths []string
-	for _, field := range invalidToolPropertyNames {
-		for _, path := range pathsByField[field] {
-			deletePaths = append(deletePaths, path)
-			parentPath := trimSuffix(path, "."+field)
-			reqPath := joinPath(parentPath, "required")
-			req := gjson.Get(jsonStr, reqPath)
-			if req.IsArray() {
-				var filtered []string
-				for _, r := range req.Array() {
-					if r.String() != field {
-						filtered = append(filtered, r.String())
-					}
-				}
-				if len(filtered) == 0 {
-					jsonStr, _ = sjson.Delete(jsonStr, reqPath)
-				} else if len(filtered) != len(req.Array()) {
-					jsonStr, _ = sjson.Set(jsonStr, reqPath, filtered)
-				}
-			}
-		}
-	}
-	sortByDepth(deletePaths)
-	for _, path := range deletePaths {
-		jsonStr, _ = sjson.Delete(jsonStr, path)
-	}
 	return jsonStr
 }
 
@@ -894,7 +736,7 @@ func orDefault(val, def string) string {
 }
 
 func escapeGJSONPathKey(key string) string {
-	if !strings.ContainsAny(key, ".*?") {
+	if strings.IndexAny(key, ".*?") == -1 {
 		return key
 	}
 	return gjsonPathKeyReplacer.Replace(key)
@@ -947,11 +789,11 @@ func splitGJSONPath(path string) []string {
 
 func mergeDescriptionRaw(schemaRaw, parentDesc string) string {
 	childDesc := gjson.Get(schemaRaw, "description").String()
-	switch childDesc {
-	case "":
-		schemaRaw, _ = sjson.Set(schemaRaw, "description", parentDesc)
-		return schemaRaw
-	case parentDesc:
+	switch {
+	case childDesc == "":
+		updated, _ := sjson.SetBytes([]byte(schemaRaw), "description", parentDesc)
+		return string(updated)
+	case childDesc == parentDesc:
 		return schemaRaw
 	default:
 		combined := fmt.Sprintf("%s (%s)", parentDesc, childDesc)

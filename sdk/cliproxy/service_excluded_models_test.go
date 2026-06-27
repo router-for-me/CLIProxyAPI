@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	internalregistry "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 )

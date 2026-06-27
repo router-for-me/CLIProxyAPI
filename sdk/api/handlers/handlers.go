@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
@@ -25,7 +24,10 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/kooshapari/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 // CtxKey is a typed key for context values in the handlers package, preventing collisions.
@@ -1264,7 +1266,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 		sentPayload := false
 		bootstrapRetries := 0
-		chunkIndex := 0
 		var historyChunks [][]byte
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
@@ -1387,7 +1388,19 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	if routeDecision.Provider != "" {
+		resolvedModelName := strings.TrimSpace(routeDecision.Model)
+		if resolvedModelName == "" {
+			resolvedModelName = strings.TrimSpace(modelName)
+		}
+		baseModel := strings.TrimSpace(thinking.ParseSuffix(resolvedModelName).ModelName)
+		if errMsg := h.validateImageOnlyModel(baseModel, allowImageModel); errMsg != nil {
+			return nil, "", errMsg
+		}
+		return []string{routeDecision.Provider}, resolvedModelName, nil
+	}
+
 	var resolvedModelName string
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -1437,6 +1450,27 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func validateSSEDataJSON(payload []byte) error {
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || bytes.HasPrefix(line, []byte(":")) {
+			continue
+		}
+		data, ok := bytes.CutPrefix(line, []byte("data:"))
+		if !ok {
+			continue
+		}
+		data = bytes.TrimSpace(data)
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		if !gjson.ValidBytes(data) {
+			return fmt.Errorf("invalid SSE data JSON: %s", string(data))
+		}
+	}
+	return nil
 }
 
 func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageModel bool) *interfaces.ErrorMessage {

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
@@ -82,15 +81,13 @@ func (k *KimiAuth) CreateTokenStorage(bundle *KimiAuthBundle) *KimiTokenStorage 
 		expired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	}
 	return &KimiTokenStorage{
-		BaseTokenStorage: base.BaseTokenStorage{
-			AccessToken:  bundle.TokenData.AccessToken,
-			RefreshToken: bundle.TokenData.RefreshToken,
-			Type:         "kimi",
-		},
-		TokenType: bundle.TokenData.TokenType,
-		Scope:     bundle.TokenData.Scope,
-		DeviceID:  strings.TrimSpace(bundle.DeviceID),
-		Expired:   expired,
+		AccessToken:  bundle.TokenData.AccessToken,
+		RefreshToken: bundle.TokenData.RefreshToken,
+		TokenType:    bundle.TokenData.TokenType,
+		Scope:        bundle.TokenData.Scope,
+		DeviceID:     strings.TrimSpace(bundle.DeviceID),
+		Expired:      expired,
+		Type:         "kimi",
 	}
 }
 
@@ -103,15 +100,24 @@ type DeviceFlowClient struct {
 
 // NewDeviceFlowClient creates a new device flow client.
 func NewDeviceFlowClient(cfg *config.Config) *DeviceFlowClient {
-	return NewDeviceFlowClientWithDeviceID(cfg, "", nil)
+	return NewDeviceFlowClientWithDeviceID(cfg, "")
 }
 
 // NewDeviceFlowClientWithDeviceID creates a new device flow client with the specified device ID.
-func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string, httpClient *http.Client) *DeviceFlowClient {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-		if cfg != nil {
-			httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
+func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string) *DeviceFlowClient {
+	return NewDeviceFlowClientWithDeviceIDAndProxyURL(cfg, deviceID, "")
+}
+
+// NewDeviceFlowClientWithDeviceIDAndProxyURL creates a new device flow client with a proxy override.
+// proxyURL takes precedence over cfg.ProxyURL when non-empty.
+func NewDeviceFlowClientWithDeviceIDAndProxyURL(cfg *config.Config, deviceID string, proxyURL string) *DeviceFlowClient {
+	client := &http.Client{Timeout: 30 * time.Second}
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	var sdkCfg config.SDKConfig
+	if cfg != nil {
+		sdkCfg = cfg.SDKConfig
+		if effectiveProxyURL == "" {
+			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
 		}
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
@@ -122,7 +128,7 @@ func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string, httpCl
 		resolvedDeviceID = getOrCreateDeviceID()
 	}
 	return &DeviceFlowClient{
-		httpClient: httpClient,
+		httpClient: client,
 		cfg:        cfg,
 		deviceID:   resolvedDeviceID,
 	}

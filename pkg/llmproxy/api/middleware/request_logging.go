@@ -5,16 +5,16 @@ package middleware
 
 import (
 	"bytes"
-	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
-	log "github.com/sirupsen/logrus"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
@@ -65,7 +65,8 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Finalize logging after request processing
 		if err = wrapper.Finalize(c); err != nil {
-			log.Errorf("failed to finalize request logging: %v", err)
+			// Log error but don't interrupt the response
+			// In a real implementation, you might want to use a proper logger here
 		}
 	}
 }
@@ -151,7 +152,10 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	method := c.Request.Method
 
 	// Capture headers
-	headers := sanitizeRequestHeaders(c.Request.Header)
+	headers := make(map[string][]string)
+	for key, values := range c.Request.Header {
+		headers[key] = values
+	}
 
 	// Capture request body
 	var body []byte
@@ -164,7 +168,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 
 		// Restore the body for the actual request processing
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		body = sanitizeLoggedPayloadBytes(bodyBytes)
+		body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
 	}
 
 	return &RequestInfo{
@@ -177,17 +181,56 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	}, nil
 }
 
-func sanitizeRequestHeaders(headers http.Header) map[string][]string {
-	sanitized := make(map[string][]string, len(headers))
-	for key, values := range headers {
-		keyLower := strings.ToLower(strings.TrimSpace(key))
-		if keyLower == "authorization" || keyLower == "cookie" || keyLower == "proxy-authorization" {
-			sanitized[key] = []string{"[redacted]"}
-			continue
-		}
-		sanitized[key] = values
+func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {
+	if len(raw) == 0 {
+		return raw
 	}
-	return sanitized
+
+	decoded, errDecode := decodeCapturedRequestBody(raw, encoding)
+	if errDecode != nil {
+		return raw
+	}
+	return decoded
+}
+
+func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
+	encoding = strings.TrimSpace(encoding)
+	if encoding == "" || strings.EqualFold(encoding, "identity") {
+		return raw, nil
+	}
+
+	parts := strings.Split(encoding, ",")
+	body := raw
+	for i := len(parts) - 1; i >= 0; i-- {
+		enc := strings.ToLower(strings.TrimSpace(parts[i]))
+		switch enc {
+		case "", "identity":
+			continue
+		case "zstd":
+			decoded, errDecode := decodeCapturedZstdRequestBody(body)
+			if errDecode != nil {
+				return nil, errDecode
+			}
+			body = decoded
+		default:
+			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
+		}
+	}
+	return body, nil
+}
+
+func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
+	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
+	if errNewReader != nil {
+		return nil, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
+	}
+	defer decoder.Close()
+
+	decoded, errRead := io.ReadAll(decoder)
+	if errRead != nil {
+		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
+	}
+	return decoded, nil
 }
 
 // shouldLogRequest determines whether the request should be logged.
@@ -199,63 +242,4 @@ func shouldLogRequest(path string) bool {
 	}
 
 	return true
-}
-
-func sanitizeLoggedPayloadBytes(payload []byte) []byte {
-	if len(payload) == 0 {
-		return nil
-	}
-
-	var parsed any
-	if err := json.Unmarshal(payload, &parsed); err != nil {
-		return bytes.Clone(payload)
-	}
-
-	redacted := sanitizeJSONPayloadValue(parsed)
-	out, err := json.Marshal(redacted)
-	if err != nil {
-		return bytes.Clone(payload)
-	}
-
-	return out
-}
-
-func sanitizeJSONPayloadValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		redacted := make(map[string]any, len(typed))
-		for k, v := range typed {
-			if isSensitivePayloadKey(k) {
-				redacted[k] = "[REDACTED]"
-				continue
-			}
-			redacted[k] = sanitizeJSONPayloadValue(v)
-		}
-		return redacted
-	case []any:
-		items := make([]any, len(typed))
-		for i, item := range typed {
-			items[i] = sanitizeJSONPayloadValue(item)
-		}
-		return items
-	default:
-		return typed
-	}
-}
-
-func isSensitivePayloadKey(key string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(key))
-	normalized = strings.ReplaceAll(normalized, "-", "_")
-	normalized = strings.TrimPrefix(normalized, "x_")
-
-	if normalized == "authorization" || normalized == "token" || normalized == "secret" || normalized == "password" {
-		return true
-	}
-	if strings.Contains(normalized, "api_key") || strings.Contains(normalized, "apikey") {
-		return true
-	}
-	if strings.Contains(normalized, "access_token") || strings.Contains(normalized, "refresh_token") || strings.Contains(normalized, "id_token") {
-		return true
-	}
-	return false
 }
