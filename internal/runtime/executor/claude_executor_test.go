@@ -2701,6 +2701,19 @@ func TestNormalizeClaudeOAuthStableBillingHeader_RewritesExistingHeader(t *testi
 	}
 }
 
+func TestNormalizeClaudeOAuthStableBillingHeader_RewritesNonFirstHeader(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"original instructions"},{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.195.d80; cc_entrypoint=cli;"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := normalizeClaudeOAuthStableBillingHeader(payload)
+	billingHeader := gjson.GetBytes(out, "system.1.text").String()
+	if matched, errMatch := regexp.MatchString(`cc_version=2\.1\.186\.[0-9a-f]{3};`, billingHeader); errMatch != nil || !matched {
+		t.Fatalf("billing header version = %q, want cc_version=2.1.186.<build>", billingHeader)
+	}
+	if !strings.Contains(billingHeader, "cc_entrypoint=cli;") {
+		t.Fatalf("billing header entrypoint = %q, want cli", billingHeader)
+	}
+}
+
 func TestClaudeExecutor_RebuildMidSystemMessageDisabledByDefault(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

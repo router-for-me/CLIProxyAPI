@@ -1923,44 +1923,63 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func normalizeClaudeOAuthStableBillingHeader(payload []byte) []byte {
-	billingHeader := gjson.GetBytes(payload, "system.0.text").String()
-	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
+	system := gjson.GetBytes(payload, "system")
+	if !system.IsArray() {
 		return payload
 	}
 	messageText := ""
-	system := gjson.GetBytes(payload, "system")
-	if system.IsArray() {
-		system.ForEach(func(_, part gjson.Result) bool {
-			text := part.Get("text").String()
-			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header:") {
-				return true
-			}
-			messageText = text
-			return false
-		})
-	}
+	system.ForEach(func(_, part gjson.Result) bool {
+		text := part.Get("text").String()
+		if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header:") {
+			return true
+		}
+		messageText = text
+		return false
+	})
 	buildHash := computeFingerprint(messageText, claudeOAuthStableBillingVersion)
-	updated := false
+	out := payload
+	updatedAny := false
+	system.ForEach(func(key, part gjson.Result) bool {
+		billingHeader := part.Get("text").String()
+		if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
+			return true
+		}
+		updatedHeader, updated := normalizeClaudeOAuthStableBillingHeaderText(billingHeader, buildHash)
+		if !updated {
+			return true
+		}
+		next, errSet := sjson.SetBytes(out, "system."+key.String()+".text", updatedHeader)
+		if errSet != nil {
+			return true
+		}
+		out = next
+		updatedAny = true
+		return true
+	})
+	if !updatedAny {
+		return payload
+	}
+	return out
+}
+
+func normalizeClaudeOAuthStableBillingHeaderText(billingHeader, buildHash string) (string, bool) {
+	updatedAny := false
 	segments := strings.Split(billingHeader, ";")
 	for i, segment := range segments {
 		trimmed := strings.TrimSpace(segment)
 		switch {
 		case strings.HasPrefix(trimmed, "cc_version="):
 			segments[i] = strings.Replace(segment, trimmed, "cc_version="+claudeOAuthStableBillingVersion+"."+buildHash, 1)
-			updated = true
+			updatedAny = true
 		case strings.HasPrefix(trimmed, "cc_entrypoint="):
 			segments[i] = strings.Replace(segment, trimmed, "cc_entrypoint="+claudeOAuthStableBillingEntrypoint, 1)
-			updated = true
+			updatedAny = true
 		}
 	}
-	if !updated {
-		return payload
+	if !updatedAny {
+		return billingHeader, false
 	}
-	out, errSet := sjson.SetBytes(payload, "system.0.text", strings.Join(segments, ";"))
-	if errSet != nil {
-		return payload
-	}
-	return out
+	return strings.Join(segments, ";"), true
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
