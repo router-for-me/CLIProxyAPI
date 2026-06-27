@@ -190,24 +190,41 @@ func claudeOAuthHeaderSession(direction string, inboundHeaders, outboundHeaders 
 	return extractClaudeOAuthSessionFromHeader(outboundHeaders)
 }
 
+func truncateClaudeOAuthOptionalLogToken(value string, exists bool) string {
+	if !exists {
+		return "n/a"
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8]
+}
+
 func claudeOAuthIdentityLogParts(identity claudeOAuthLogIdentity) []string {
 	if identity.Format == "legacy" {
 		return []string{
-			"user=" + truncateClaudeOAuthLogToken(identity.UserHash),
-			"account=" + truncateClaudeOAuthLogToken(identity.AccountID),
+			"user=" + truncateClaudeOAuthOptionalLogToken(identity.UserHash, identity.UserHashExists),
+			"account=" + truncateClaudeOAuthOptionalLogToken(identity.AccountID, identity.AccountIDExists),
 		}
 	}
 	return []string{
-		"device=" + truncateClaudeOAuthLogToken(identity.DeviceID),
-		"account=" + truncateClaudeOAuthLogToken(identity.AccountID),
+		"device=" + truncateClaudeOAuthOptionalLogToken(identity.DeviceID, identity.DeviceIDExists),
+		"account=" + truncateClaudeOAuthOptionalLogToken(identity.AccountID, identity.AccountIDExists),
 	}
 }
 
 type claudeOAuthLogIdentity struct {
-	Format    string
-	DeviceID  string
-	AccountID string
-	UserHash  string
+	Format          string
+	DeviceID        string
+	DeviceIDExists  bool
+	AccountID       string
+	AccountIDExists bool
+	UserHash        string
+	UserHashExists  bool
 }
 
 func claudeOAuthInboundLogIdentity(gateResult *ClaudeOAuthFingerprintGateResult) claudeOAuthLogIdentity {
@@ -215,20 +232,26 @@ func claudeOAuthInboundLogIdentity(gateResult *ClaudeOAuthFingerprintGateResult)
 		return claudeOAuthLogIdentity{}
 	}
 	return claudeOAuthLogIdentity{
-		Format:    gateResult.InboundFormat,
-		DeviceID:  gateResult.InboundDeviceID,
-		AccountID: gateResult.InboundAccountID,
-		UserHash:  gateResult.InboundUserHash,
+		Format:          gateResult.InboundFormat,
+		DeviceID:        gateResult.InboundDeviceID,
+		DeviceIDExists:  gateResult.InboundDeviceIDExists,
+		AccountID:       gateResult.InboundAccountID,
+		AccountIDExists: gateResult.InboundAccountIDExists,
+		UserHash:        gateResult.InboundUserHash,
+		UserHashExists:  gateResult.InboundUserHashExists,
 	}
 }
 
 func claudeOAuthLogIdentityFromBody(body []byte) claudeOAuthLogIdentity {
 	inbound := extractClaudeOAuthIdentityFromBody(body)
 	return claudeOAuthLogIdentity{
-		Format:    inbound.Format,
-		DeviceID:  inbound.DeviceID,
-		AccountID: inbound.AccountUUID,
-		UserHash:  inbound.UserHash,
+		Format:          inbound.Format,
+		DeviceID:        inbound.DeviceID,
+		DeviceIDExists:  inbound.DeviceIDExists,
+		AccountID:       inbound.AccountUUID,
+		AccountIDExists: inbound.AccountUUIDExists,
+		UserHash:        inbound.UserHash,
+		UserHashExists:  inbound.UserHashExists,
 	}
 }
 

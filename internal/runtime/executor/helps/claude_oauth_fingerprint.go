@@ -63,23 +63,26 @@ type claudeOAuthAccountRegistry struct {
 
 // ClaudeOAuthFingerprintGateResult captures gate output for logging and header override.
 type ClaudeOAuthFingerprintGateResult struct {
-	RequestID        string
-	SessionID        string
-	AffinitySessionID string
-	Slot             int
-	Violation        string
-	OverrideApplied  bool
-	SessionMismatch  bool
-	HeaderSessionID  string
-	BodySessionID    string
-	InboundDeviceID  string
-	InboundAccountID string
-	InboundUserHash  string
-	InboundFormat    string
-	DeviceID         string
-	AccountID        string
-	UserHash         string
-	Format           string
+	RequestID              string
+	SessionID              string
+	AffinitySessionID      string
+	Slot                   int
+	Violation              string
+	OverrideApplied        bool
+	SessionMismatch        bool
+	HeaderSessionID        string
+	BodySessionID          string
+	InboundDeviceID        string
+	InboundDeviceIDExists  bool
+	InboundAccountID       string
+	InboundAccountIDExists bool
+	InboundUserHash        string
+	InboundUserHashExists  bool
+	InboundFormat          string
+	DeviceID               string
+	AccountID              string
+	UserHash               string
+	Format                 string
 }
 
 // ClaudeOAuthFingerprintError is returned when the session gate blocks a request.
@@ -251,14 +254,17 @@ func ClaudeOAuthFingerprintGateWithSessionPayload(ctx context.Context, cfg *conf
 	affinitySession := cliproxyauth.ExtractSessionID(inboundHeaders, sessionPayload, nil)
 
 	result := &ClaudeOAuthFingerprintGateResult{
-		RequestID:          shortClaudeOAuthRequestID(ctx),
-		HeaderSessionID:    headerSession,
-		BodySessionID:      bodySession,
-		AffinitySessionID:  affinitySession,
-		InboundDeviceID:    inboundIdentity.DeviceID,
-		InboundAccountID:   inboundIdentity.AccountUUID,
-		InboundUserHash:    inboundIdentity.UserHash,
-		InboundFormat:      inboundIdentity.Format,
+		RequestID:              shortClaudeOAuthRequestID(ctx),
+		HeaderSessionID:        headerSession,
+		BodySessionID:          bodySession,
+		AffinitySessionID:      affinitySession,
+		InboundDeviceID:        inboundIdentity.DeviceID,
+		InboundDeviceIDExists:  inboundIdentity.DeviceIDExists,
+		InboundAccountID:       inboundIdentity.AccountUUID,
+		InboundAccountIDExists: inboundIdentity.AccountUUIDExists,
+		InboundUserHash:        inboundIdentity.UserHash,
+		InboundUserHashExists:  inboundIdentity.UserHashExists,
+		InboundFormat:          inboundIdentity.Format,
 	}
 	if headerSession != "" && bodySession != "" && headerSession != bodySession {
 		result.SessionMismatch = true
@@ -441,30 +447,46 @@ func extractClaudeOAuthBillingCCVersion(body []byte) (string, bool) {
 }
 
 type claudeOAuthInboundIdentity struct {
-	Format      string
-	UserHash    string
-	AccountUUID string
-	DeviceID    string
+	Format            string
+	UserHash          string
+	UserHashExists    bool
+	AccountUUID       string
+	AccountUUIDExists bool
+	DeviceID          string
+	DeviceIDExists    bool
 }
 
 func extractClaudeOAuthIdentityFromBody(payload []byte) claudeOAuthInboundIdentity {
-	userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	userResult := gjson.GetBytes(payload, "metadata.user_id")
+	if !userResult.Exists() {
+		return claudeOAuthInboundIdentity{}
+	}
+	userID := strings.TrimSpace(userResult.String())
 	if userID == "" {
 		return claudeOAuthInboundIdentity{}
 	}
 	if matches := claudeOAuthLegacyUserIDPattern.FindStringSubmatch(userID); len(matches) == 4 {
 		return claudeOAuthInboundIdentity{
-			Format:      "legacy",
-			UserHash:    matches[1],
-			AccountUUID: matches[2],
+			Format:            "legacy",
+			UserHash:          matches[1],
+			UserHashExists:    true,
+			AccountUUID:       matches[2],
+			AccountUUIDExists: true,
 		}
 	}
 	if strings.HasPrefix(userID, "{") {
-		return claudeOAuthInboundIdentity{
-			Format:      "json",
-			DeviceID:    strings.TrimSpace(gjson.Get(userID, "device_id").String()),
-			AccountUUID: strings.TrimSpace(gjson.Get(userID, "account_uuid").String()),
+		deviceResult := gjson.Get(userID, "device_id")
+		accountResult := gjson.Get(userID, "account_uuid")
+		identity := claudeOAuthInboundIdentity{Format: "json"}
+		if deviceResult.Exists() {
+			identity.DeviceID = strings.TrimSpace(deviceResult.String())
+			identity.DeviceIDExists = true
 		}
+		if accountResult.Exists() {
+			identity.AccountUUID = strings.TrimSpace(accountResult.String())
+			identity.AccountUUIDExists = true
+		}
+		return identity
 	}
 	return claudeOAuthInboundIdentity{}
 }
