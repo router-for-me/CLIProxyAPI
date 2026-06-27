@@ -177,6 +177,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if opts.Alt == "responses/compact" {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
+	if codexRequestIsCompaction(req.Payload) {
+		log.Debugf("codex websockets: routing compaction request over HTTP to avoid WS message size limit (auth ID: %s, model: %s)", auth.ID, req.Model)
+		stripCodexWebsocketEnvelopeType(&req, &opts)
+		return e.CodexExecutor.Execute(ctx, auth, req, opts)
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
@@ -401,19 +406,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
-	if codexRequestIsCompaction(ctx) {
+	if codexRequestIsCompaction(req.Payload) {
 		log.Debugf("codex websockets: routing compaction request over HTTP to avoid WS message size limit (auth ID: %s, model: %s)", auth.ID, req.Model)
-		// The WebSocket request body carries a top-level "type":"response.create"
-		// field (WS v2 semantics). The HTTP /responses endpoint rejects it with
-		// `Unsupported parameter: type`, so strip it before delegating to HTTP.
-		if stripped, errDelete := sjson.DeleteBytes(req.Payload, "type"); errDelete == nil {
-			req.Payload = stripped
-		}
-		if len(opts.OriginalRequest) > 0 {
-			if stripped, errDelete := sjson.DeleteBytes(opts.OriginalRequest, "type"); errDelete == nil {
-				opts.OriginalRequest = stripped
-			}
-		}
+		stripCodexWebsocketEnvelopeType(&req, &opts)
 		return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
 
@@ -713,24 +708,38 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
 }
 
-// codexRequestIsCompaction reports whether the incoming request is a codex
-// compaction turn. Such turns carry the full transcript and must not be sent as a
-// single WebSocket message, which upstream rejects with close 1009 (message too
-// big); they are routed over HTTP instead. Detection uses the X-Codex-Turn-Metadata
-// request header (request_kind == "compaction").
-func codexRequestIsCompaction(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
-	if !ok || ginCtx == nil || ginCtx.Request == nil {
-		return false
-	}
-	raw := strings.TrimSpace(ginCtx.Request.Header.Get("X-Codex-Turn-Metadata"))
+// codexRequestIsCompaction reports whether the request is a codex compaction turn.
+// Such turns carry the full transcript and must not be sent as a single WebSocket
+// message, which upstream rejects with close 1009 (message too big); they are routed
+// over HTTP instead.
+//
+// Detection reads the per-message X-Codex-Turn-Metadata embedded in the request body
+// (client_metadata.x-codex-turn-metadata, request_kind == "compaction"). The body is
+// used rather than the connection-level upgrade header because a single downstream
+// websocket connection can carry many turns sharing one upgrade request, so a
+// connection-scoped header would misclassify every later turn on a connection whose
+// handshake happened to be a compaction.
+func codexRequestIsCompaction(payload []byte) bool {
+	raw := strings.TrimSpace(gjson.GetBytes(payload, "client_metadata.x-codex-turn-metadata").String())
 	if raw == "" {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(gjson.Get(raw, "request_kind").String()), "compaction")
+}
+
+// stripCodexWebsocketEnvelopeType removes the websocket-only top-level
+// "type":"response.create" field before a request is forwarded over the HTTP
+// transport, which the /responses endpoint otherwise rejects with
+// `Unsupported parameter: type`.
+func stripCodexWebsocketEnvelopeType(req *cliproxyexecutor.Request, opts *cliproxyexecutor.Options) {
+	if stripped, err := sjson.DeleteBytes(req.Payload, "type"); err == nil {
+		req.Payload = stripped
+	}
+	if len(opts.OriginalRequest) > 0 {
+		if stripped, err := sjson.DeleteBytes(opts.OriginalRequest, "type"); err == nil {
+			opts.OriginalRequest = stripped
+		}
+	}
 }
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {

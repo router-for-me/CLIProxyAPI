@@ -18,6 +18,7 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestCodexRequestIsCompaction(t *testing.T) {
@@ -25,30 +26,32 @@ func TestCodexRequestIsCompaction(t *testing.T) {
 	const autoMeta = `{"installation_id":"xx","turn_id":"t2","request_kind":"compaction","compaction":{"trigger":"auto","reason":"context_limit"}}`
 	const normalMeta = `{"installation_id":"xx","turn_id":"t3","request_kind":"turn"}`
 
-	ctxWithHeader := func(value string, set bool) context.Context {
-		req := httptest.NewRequest(http.MethodGet, "/responses", nil)
-		if set {
-			req.Header.Set("X-Codex-Turn-Metadata", value)
+	// payload embeds the per-turn metadata as a JSON string at
+	// client_metadata.x-codex-turn-metadata, matching the real codex websocket body.
+	payloadWithMeta := func(meta string, set bool) []byte {
+		base := []byte(`{"model":"gpt-5.5","input":[]}`)
+		if !set {
+			return base
 		}
-		return context.WithValue(context.Background(), "gin", &gin.Context{Request: req})
+		out, _ := sjson.SetBytes(base, "client_metadata.x-codex-turn-metadata", meta)
+		return out
 	}
 
 	cases := []struct {
-		name string
-		ctx  context.Context
-		want bool
+		name    string
+		payload []byte
+		want    bool
 	}{
-		{name: "manual compaction", ctx: ctxWithHeader(manualMeta, true), want: true},
-		{name: "auto compaction", ctx: ctxWithHeader(autoMeta, true), want: true},
-		{name: "normal turn", ctx: ctxWithHeader(normalMeta, true), want: false},
-		{name: "missing header", ctx: ctxWithHeader("", false), want: false},
-		{name: "empty header", ctx: ctxWithHeader("", true), want: false},
-		{name: "no gin context", ctx: context.Background(), want: false},
-		{name: "nil context", ctx: nil, want: false},
+		{name: "manual compaction", payload: payloadWithMeta(manualMeta, true), want: true},
+		{name: "auto compaction", payload: payloadWithMeta(autoMeta, true), want: true},
+		{name: "normal turn", payload: payloadWithMeta(normalMeta, true), want: false},
+		{name: "missing client_metadata", payload: payloadWithMeta("", false), want: false},
+		{name: "empty metadata", payload: payloadWithMeta("", true), want: false},
+		{name: "empty payload", payload: nil, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := codexRequestIsCompaction(tc.ctx); got != tc.want {
+			if got := codexRequestIsCompaction(tc.payload); got != tc.want {
 				t.Fatalf("codexRequestIsCompaction = %v, want %v", got, tc.want)
 			}
 		})
