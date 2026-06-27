@@ -26,7 +26,7 @@ const (
 	defaultClaudeFingerprintRuntimeVersion = "v24.3.0"
 	defaultClaudeFingerprintOS             = "MacOS"
 	defaultClaudeFingerprintArch           = "arm64"
-	claudeOAuthStableUserAgent             = "claude-cli/2.1.186 (external, cli)"
+	claudeOAuthStableUserAgent             = "claude-cli/2.1.195.d80 (external, cli)"
 	claudeOAuthStablePackageVersion        = "0.94.0"
 	claudeOAuthStableRuntimeVersion        = "v24.3.0"
 	claudeOAuthStableOS                    = "MacOS"
