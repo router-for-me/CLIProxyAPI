@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -535,6 +536,47 @@ func DefaultClaudeVersion(cfg *config.Config) string {
 		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
 	}
 	return "2.1.63"
+}
+
+func ClaudeOAuthProfileDeviceProfile(auth *cliproxyauth.Auth, cfg *config.Config) (ClaudeDeviceProfile, bool) {
+	if !claudeoauth.OverrideDevice(cfg) || !claudeoauth.IsClaudeOAuthAuth(auth) {
+		return ClaudeDeviceProfile{}, false
+	}
+	profile, ok := claudeoauth.ProfileFromAuth(auth)
+	if !ok {
+		return ClaudeDeviceProfile{}, false
+	}
+	if !claudeoauth.ValidDeviceID(profile.DeviceID) || strings.TrimSpace(profile.AccountUUID) == "" {
+		return ClaudeDeviceProfile{}, false
+	}
+	deviceProfile := ClaudeDeviceProfile{
+		UserAgent:      strings.TrimSpace(profile.Header.UserAgent),
+		PackageVersion: strings.TrimSpace(profile.Header.PackageVersion),
+		RuntimeVersion: strings.TrimSpace(profile.Header.RuntimeVersion),
+		OS:             strings.TrimSpace(profile.Header.OS),
+		Arch:           strings.TrimSpace(profile.Header.Arch),
+	}
+	baseline := defaultClaudeDeviceProfile(cfg)
+	if deviceProfile.UserAgent == "" {
+		deviceProfile.UserAgent = baseline.UserAgent
+	}
+	if deviceProfile.PackageVersion == "" {
+		deviceProfile.PackageVersion = baseline.PackageVersion
+	}
+	if deviceProfile.RuntimeVersion == "" {
+		deviceProfile.RuntimeVersion = baseline.RuntimeVersion
+	}
+	if deviceProfile.OS == "" {
+		deviceProfile.OS = baseline.OS
+	}
+	if deviceProfile.Arch == "" {
+		deviceProfile.Arch = baseline.Arch
+	}
+	if version, ok := parseClaudeCLIVersion(deviceProfile.UserAgent); ok {
+		deviceProfile.version = version
+		deviceProfile.hasVersion = true
+	}
+	return deviceProfile, true
 }
 
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {

@@ -30,12 +30,24 @@ func ClaudeOAuthFingerprintLogEnabled(cfg *config.Config) bool {
 	return cfg.ClaudeOAuthFingerprint.LogFingerprint
 }
 
-// MaybeLogClaudeOAuthFingerprint appends one concise fingerprint line to a per-account log file.
+// MaybeLogClaudeOAuthFingerprint appends one outbound fingerprint line to a per-account log file.
 func MaybeLogClaudeOAuthFingerprint(cfg *config.Config, auth *cliproxyauth.Auth, inboundHeaders, outboundHeaders http.Header, outboundBody []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) {
+	MaybeLogClaudeOAuthFingerprintOutbound(cfg, auth, inboundHeaders, outboundHeaders, outboundBody, model, gateResult)
+}
+
+func MaybeLogClaudeOAuthFingerprintInbound(cfg *config.Config, auth *cliproxyauth.Auth, inboundHeaders http.Header, inboundBody []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) {
+	maybeLogClaudeOAuthFingerprintLine(cfg, auth, "in", inboundHeaders, nil, inboundBody, model, gateResult)
+}
+
+func MaybeLogClaudeOAuthFingerprintOutbound(cfg *config.Config, auth *cliproxyauth.Auth, inboundHeaders, outboundHeaders http.Header, outboundBody []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) {
+	maybeLogClaudeOAuthFingerprintLine(cfg, auth, "out", inboundHeaders, outboundHeaders, outboundBody, model, gateResult)
+}
+
+func maybeLogClaudeOAuthFingerprintLine(cfg *config.Config, auth *cliproxyauth.Auth, direction string, inboundHeaders, outboundHeaders http.Header, body []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) {
 	if !ClaudeOAuthFingerprintLogEnabled(cfg) {
 		return
 	}
-	line := formatClaudeOAuthFingerprintLine(inboundHeaders, outboundHeaders, outboundBody, model, gateResult)
+	line := formatClaudeOAuthFingerprintLine(direction, inboundHeaders, outboundHeaders, body, model, gateResult)
 	if line == "" {
 		return
 	}
@@ -95,16 +107,27 @@ func appendClaudeOAuthFingerprintLogLine(cfg *config.Config, auth *cliproxyauth.
 	return nil
 }
 
-func formatClaudeOAuthFingerprintLine(inboundHeaders, outboundHeaders http.Header, outboundBody []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) string {
+func formatClaudeOAuthFingerprintLine(direction string, inboundHeaders, outboundHeaders http.Header, body []byte, model string, gateResult *ClaudeOAuthFingerprintGateResult) string {
 	if gateResult == nil {
 		return ""
 	}
+	direction = strings.TrimSpace(direction)
+	if direction == "" {
+		direction = "out"
+	}
 	parts := []string{
 		time.Now().Format("01-02 15:04:05"),
+		"dir=" + direction,
+		"req=" + truncateClaudeOAuthLogToken(gateResult.RequestID),
 		"session=" + truncateClaudeOAuthLogToken(gateResult.SessionID),
 	}
-	parts = append(parts, claudeOAuthIdentityLogParts(gateResult, outboundBody)...)
-	if outboundHeaders != nil {
+	if direction == "in" {
+		parts = append(parts, claudeOAuthInboundIdentityLogParts(gateResult)...)
+	} else {
+		parts = append(parts, claudeOAuthIdentityLogParts(gateResult, body)...)
+		parts = append(parts, claudeOAuthInboundMismatchLogParts(gateResult, body)...)
+	}
+	if direction == "out" && outboundHeaders != nil {
 		parts = append(parts, claudeOAuthOutboundHeaderLogParts(outboundHeaders)...)
 	}
 	if gateResult.Slot > 0 {
@@ -113,9 +136,7 @@ func formatClaudeOAuthFingerprintLine(inboundHeaders, outboundHeaders http.Heade
 	if model != "" {
 		parts = append(parts, "model="+truncateClaudeOAuthLogValue(model, 32))
 	}
-	if entry := claudeOAuthEntrypointFromBody(outboundBody); entry != "" {
-		parts = append(parts, "entry="+entry)
-	}
+	parts = append(parts, claudeOAuthBillingLogParts(body)...)
 	violation := gateResult.Violation
 	if violation == "" {
 		violation = "-"
@@ -148,40 +169,130 @@ func claudeOAuthOutboundHeaderLogParts(headers http.Header) []string {
 }
 
 func claudeOAuthIdentityLogParts(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) []string {
-	if gateResult.Format == "legacy" {
+	identity := claudeOAuthOutboundLogIdentity(gateResult, outboundBody)
+	if identity.Format == "legacy" {
 		return []string{
-			"user=" + truncateClaudeOAuthLogToken(gateResult.UserHash),
-			"account=" + truncateClaudeOAuthLogToken(gateResult.AccountID),
-		}
-	}
-	deviceID := gateResult.DeviceID
-	accountID := gateResult.AccountID
-	if len(outboundBody) > 0 {
-		userID := gjson.GetBytes(outboundBody, "metadata.user_id").String()
-		if strings.HasPrefix(userID, "{") {
-			if v := strings.TrimSpace(gjson.Get(userID, "device_id").String()); v != "" {
-				deviceID = v
-			}
-			if v := strings.TrimSpace(gjson.Get(userID, "account_uuid").String()); v != "" {
-				accountID = v
-			}
+			"user=" + truncateClaudeOAuthLogToken(identity.UserHash),
+			"account=" + truncateClaudeOAuthLogToken(identity.AccountID),
 		}
 	}
 	return []string{
-		"device=" + truncateClaudeOAuthLogToken(deviceID),
-		"account=" + truncateClaudeOAuthLogToken(accountID),
+		"device=" + truncateClaudeOAuthLogToken(identity.DeviceID),
+		"account=" + truncateClaudeOAuthLogToken(identity.AccountID),
 	}
 }
 
-func claudeOAuthEntrypointFromBody(body []byte) string {
+func claudeOAuthInboundIdentityLogParts(gateResult *ClaudeOAuthFingerprintGateResult) []string {
+	if gateResult.InboundFormat == "legacy" {
+		return []string{
+			"user=" + truncateClaudeOAuthLogToken(gateResult.InboundUserHash),
+			"account=" + truncateClaudeOAuthLogToken(gateResult.InboundAccountID),
+		}
+	}
+	return []string{
+		"device=" + truncateClaudeOAuthLogToken(gateResult.InboundDeviceID),
+		"account=" + truncateClaudeOAuthLogToken(gateResult.InboundAccountID),
+	}
+}
+
+func claudeOAuthInboundMismatchLogParts(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) []string {
+	inbound := claudeOAuthLogIdentity{
+		Format:    gateResult.InboundFormat,
+		DeviceID:  gateResult.InboundDeviceID,
+		AccountID: gateResult.InboundAccountID,
+		UserHash:  gateResult.InboundUserHash,
+	}
+	if inbound.Format == "" {
+		return nil
+	}
+	outbound := claudeOAuthOutboundLogIdentity(gateResult, outboundBody)
+	if !claudeOAuthLogIdentityMismatch(inbound, outbound) {
+		return nil
+	}
+	if inbound.Format == "legacy" {
+		return []string{
+			"warn=identity_mismatch",
+			"in_user=" + truncateClaudeOAuthLogToken(inbound.UserHash),
+			"in_account=" + truncateClaudeOAuthLogToken(inbound.AccountID),
+		}
+	}
+	return []string{
+		"warn=identity_mismatch",
+		"in_device=" + truncateClaudeOAuthLogToken(inbound.DeviceID),
+		"in_account=" + truncateClaudeOAuthLogToken(inbound.AccountID),
+	}
+}
+
+type claudeOAuthLogIdentity struct {
+	Format    string
+	DeviceID  string
+	AccountID string
+	UserHash  string
+}
+
+func claudeOAuthOutboundLogIdentity(gateResult *ClaudeOAuthFingerprintGateResult, outboundBody []byte) claudeOAuthLogIdentity {
+	identity := claudeOAuthLogIdentity{
+		Format:    gateResult.Format,
+		DeviceID:  gateResult.DeviceID,
+		AccountID: gateResult.AccountID,
+		UserHash:  gateResult.UserHash,
+	}
+	if len(outboundBody) > 0 {
+		userID := gjson.GetBytes(outboundBody, "metadata.user_id").String()
+		if strings.HasPrefix(userID, "{") {
+			identity.Format = "json"
+			if v := strings.TrimSpace(gjson.Get(userID, "device_id").String()); v != "" {
+				identity.DeviceID = v
+			}
+			if v := strings.TrimSpace(gjson.Get(userID, "account_uuid").String()); v != "" {
+				identity.AccountID = v
+			}
+		}
+	}
+	return identity
+}
+
+func claudeOAuthLogIdentityMismatch(inbound, outbound claudeOAuthLogIdentity) bool {
+	if inbound.Format == "legacy" {
+		if outbound.Format != "legacy" {
+			return true
+		}
+		return inbound.UserHash != "" && outbound.UserHash != "" && !strings.EqualFold(inbound.UserHash, outbound.UserHash) ||
+			inbound.AccountID != "" && outbound.AccountID != "" && inbound.AccountID != outbound.AccountID
+	}
+	if inbound.DeviceID != "" && outbound.DeviceID != "" && inbound.DeviceID != outbound.DeviceID {
+		return true
+	}
+	return inbound.AccountID != "" && outbound.AccountID != "" && inbound.AccountID != outbound.AccountID
+}
+
+func claudeOAuthBillingLogParts(body []byte) []string {
+	billing := claudeOAuthBillingFromBody(body)
+	if billing.Version == "" && billing.Entrypoint == "" && billing.CCH == "" {
+		return nil
+	}
+	return []string{
+		"ccver=" + truncateClaudeOAuthLogValue(billing.Version, 24),
+		"entry=" + truncateClaudeOAuthLogValue(billing.Entrypoint, 16),
+		"cch=" + truncateClaudeOAuthLogValue(billing.CCH, 8),
+	}
+}
+
+type claudeOAuthBillingLog struct {
+	Version    string
+	Entrypoint string
+	CCH        string
+}
+
+func claudeOAuthBillingFromBody(body []byte) claudeOAuthBillingLog {
 	if len(body) == 0 {
-		return ""
+		return claudeOAuthBillingLog{}
 	}
 	system := gjson.GetBytes(body, "system")
 	if !system.IsArray() {
-		return ""
+		return claudeOAuthBillingLog{}
 	}
-	var entry string
+	var billing claudeOAuthBillingLog
 	system.ForEach(func(_, part gjson.Result) bool {
 		text := part.Get("text").String()
 		if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
@@ -189,14 +300,18 @@ func claudeOAuthEntrypointFromBody(body []byte) string {
 		}
 		for _, segment := range strings.Split(strings.TrimPrefix(text, "x-anthropic-billing-header:"), ";") {
 			segment = strings.TrimSpace(segment)
-			if strings.HasPrefix(segment, "cc_entrypoint=") {
-				entry = strings.TrimPrefix(segment, "cc_entrypoint=")
-				return false
+			switch {
+			case strings.HasPrefix(segment, "cc_version="):
+				billing.Version = strings.TrimPrefix(segment, "cc_version=")
+			case strings.HasPrefix(segment, "cc_entrypoint="):
+				billing.Entrypoint = strings.TrimPrefix(segment, "cc_entrypoint=")
+			case strings.HasPrefix(segment, "cch="):
+				billing.CCH = strings.TrimPrefix(segment, "cch=")
 			}
 		}
-		return true
+		return false
 	})
-	return truncateClaudeOAuthLogValue(entry, 16)
+	return billing
 }
 
 func truncateClaudeOAuthLogToken(value string) string {

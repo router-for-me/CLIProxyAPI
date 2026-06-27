@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -237,6 +238,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
+	var fpResult *helps.ClaudeOAuthFingerprintGateResult
+	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
+	if err != nil {
+		return resp, err
+	}
+
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
@@ -259,19 +266,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
-
-	var fpResult *helps.ClaudeOAuthFingerprintGateResult
-	if helps.ClaudeOAuthFingerprintEnabled(e.cfg, apiKey) {
-		var errFP error
-		body, fpResult, errFP = helps.ClaudeOAuthFingerprintGate(ctx, e.cfg, auth, opts.Headers, body, baseModel)
-		if errFP != nil {
-			helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, nil, body, baseModel, fpResult)
-			return resp, statusErr{code: helps.ClaudeOAuthFingerprintHTTPStatus(errFP), msg: errFP.Error()}
-		}
-		if fpResult != nil {
-			ctx = helps.ContextWithClaudeOAuthFingerprint(ctx, fpResult)
-		}
-	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -441,6 +435,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
+	var fpResult *helps.ClaudeOAuthFingerprintGateResult
+	body, fpResult, ctx, err = e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
+	if err != nil {
+		return nil, err
+	}
+
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
@@ -460,19 +460,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
-
-	var fpResult *helps.ClaudeOAuthFingerprintGateResult
-	if helps.ClaudeOAuthFingerprintEnabled(e.cfg, apiKey) {
-		var errFP error
-		body, fpResult, errFP = helps.ClaudeOAuthFingerprintGate(ctx, e.cfg, auth, opts.Headers, body, baseModel)
-		if errFP != nil {
-			helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, nil, body, baseModel, fpResult)
-			return nil, statusErr{code: helps.ClaudeOAuthFingerprintHTTPStatus(errFP), msg: errFP.Error()}
-		}
-		if fpResult != nil {
-			ctx = helps.ContextWithClaudeOAuthFingerprint(ctx, fpResult)
-		}
-	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -723,6 +710,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = checkSystemInstructions(body)
 	}
 
+	var fpResult *helps.ClaudeOAuthFingerprintGateResult
+	body, fpResult, ctx, err := e.applyClaudeOAuthFingerprintGate(ctx, auth, apiKey, opts.Headers, body, baseModel)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
 	body = normalizeCacheControlTTL(body)
@@ -743,6 +736,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
+	helps.MaybeLogClaudeOAuthFingerprint(e.cfg, auth, opts.Headers, httpReq.Header, body, baseModel, fpResult)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -845,12 +839,46 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
+	if td.AccountUUID != "" {
+		auth.Metadata["account_uuid"] = td.AccountUUID
+	}
 	auth.Metadata["email"] = td.Email
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "claude"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
+	if _, errProfile := claudeoauth.EnsureAuthProfile(auth, e.cfg); errProfile != nil {
+		return nil, errProfile
+	}
 	return auth, nil
+}
+
+func (e *ClaudeExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if e == nil || !claudeoauth.Enabled(e.cfg) || !claudeoauth.IsClaudeOAuthAuth(auth) {
+		return false
+	}
+	profile, ok := claudeoauth.ProfileFromAuth(auth)
+	if !ok {
+		return claudeoauth.GenerateMissingProfile(e.cfg)
+	}
+	_, changed, err := claudeoauth.NormalizeProfile(profile, e.cfg, claudeoauth.MetadataString(auth.Metadata, "account_uuid"))
+	return err == nil && changed
+}
+
+func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	_ = ctx
+	if e == nil || auth == nil || !e.ShouldPrepareRequestAuth(auth) {
+		return auth, nil
+	}
+	updated := auth.Clone()
+	changed, err := claudeoauth.EnsureAuthProfile(updated, e.cfg)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return nil, nil
+	}
+	return updated, nil
 }
 
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.
@@ -1071,9 +1099,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
-	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
+	oauthProfileDeviceProfile, useOAuthProfileDeviceProfile := helps.ClaudeOAuthProfileDeviceProfile(auth, cfg)
+	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg) && !useOAuthProfileDeviceProfile
 	var deviceProfile helps.ClaudeDeviceProfile
-	if stabilizeDeviceProfile {
+	if useOAuthProfileDeviceProfile {
+		deviceProfile = oauthProfileDeviceProfile
+	} else if stabilizeDeviceProfile {
 		var errDeviceProfile error
 		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, ginHeaders, cfg)
 		if errDeviceProfile != nil {
@@ -1146,7 +1177,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official
 	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
-	if stabilizeDeviceProfile {
+	if useOAuthProfileDeviceProfile || stabilizeDeviceProfile {
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
@@ -1161,9 +1192,6 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// scanner regardless of user preference, so this is non-negotiable for streams.
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
-	}
-	if fpResult := helps.ClaudeOAuthFingerprintGateResultFromContext(r.Context()); fpResult != nil && fpResult.SessionID != "" {
-		helps.ClaudeOAuthFingerprintApplySessionHeader(r, fpResult.SessionID)
 	}
 	return nil
 }
@@ -1826,6 +1854,11 @@ func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCac
 // fingerprintSalt is the salt used by Claude Code to compute the 3-char build fingerprint.
 const fingerprintSalt = "59cf53e54c78"
 
+const (
+	claudeOAuthStableBillingVersion    = "2.1.186"
+	claudeOAuthStableBillingEntrypoint = "cli"
+)
+
 // computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.
 // Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3]
 func computeFingerprint(messageText, version string) string {
@@ -1865,6 +1898,47 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 	h := sha256.Sum256(payload)
 	cch := hex.EncodeToString(h[:])[:5]
 	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s;%s", version, buildHash, entrypoint, cch, workloadPart)
+}
+
+func normalizeClaudeOAuthStableBillingHeader(payload []byte) []byte {
+	billingHeader := gjson.GetBytes(payload, "system.0.text").String()
+	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
+		return payload
+	}
+	messageText := ""
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			text := part.Get("text").String()
+			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header:") {
+				return true
+			}
+			messageText = text
+			return false
+		})
+	}
+	buildHash := computeFingerprint(messageText, claudeOAuthStableBillingVersion)
+	updated := false
+	segments := strings.Split(billingHeader, ";")
+	for i, segment := range segments {
+		trimmed := strings.TrimSpace(segment)
+		switch {
+		case strings.HasPrefix(trimmed, "cc_version="):
+			segments[i] = strings.Replace(segment, trimmed, "cc_version="+claudeOAuthStableBillingVersion+"."+buildHash, 1)
+			updated = true
+		case strings.HasPrefix(trimmed, "cc_entrypoint="):
+			segments[i] = strings.Replace(segment, trimmed, "cc_entrypoint="+claudeOAuthStableBillingEntrypoint, 1)
+			updated = true
+		}
+	}
+	if !updated {
+		return payload
+	}
+	out, errSet := sjson.SetBytes(payload, "system.0.text", strings.Join(segments, ";"))
+	if errSet != nil {
+		return payload
+	}
+	return out
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
@@ -2090,8 +2164,15 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
+		if oauthToken && claudeoauth.OverrideDevice(cfg) {
+			billingVersion = claudeOAuthStableBillingVersion
+			entrypoint = claudeOAuthStableBillingEntrypoint
+		}
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		if oauthToken && claudeoauth.OverrideDevice(cfg) {
+			payload = normalizeClaudeOAuthStableBillingHeader(payload)
+		}
 	}
 
 	// Inject fake user ID

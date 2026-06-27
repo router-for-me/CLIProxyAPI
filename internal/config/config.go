@@ -266,14 +266,15 @@ type ClaudeHeaderDefaults struct {
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
 }
 
-// ClaudeOAuthFingerprintConfig configures Claude OAuth outbound fingerprint monitoring.
+// ClaudeOAuthFingerprintConfig configures Claude OAuth session limiting and device overrides.
 type ClaudeOAuthFingerprintConfig struct {
-	Enabled        bool   `yaml:"enabled" json:"enabled"`
-	Mode           string `yaml:"mode" json:"mode"`
-	MaxSessions    int    `yaml:"max-sessions" json:"max-sessions"`
-	SessionTTL     string `yaml:"session-ttl" json:"session-ttl"`
-	LogFingerprint bool   `yaml:"log-fingerprint" json:"log-fingerprint"`
-	LogDir         string `yaml:"fingerprint-log-dir" json:"fingerprint-log-dir"`
+	Enabled                bool   `yaml:"enabled" json:"enabled"`
+	OverrideDevice         bool   `yaml:"override_device" json:"override_device"`
+	GenerateMissingProfile bool   `yaml:"generate_missing_profile" json:"generate_missing_profile"`
+	MaxSessions            int    `yaml:"max-sessions" json:"max-sessions"`
+	SessionTTL             string `yaml:"session-ttl" json:"session-ttl"`
+	LogFingerprint         bool   `yaml:"log-fingerprint" json:"log-fingerprint"`
+	LogDir                 string `yaml:"fingerprint-log-dir" json:"fingerprint-log-dir"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -931,10 +932,6 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 func (cfg *Config) SanitizeClaudeOAuthFingerprint() {
 	if cfg == nil {
 		return
-	}
-	cfg.ClaudeOAuthFingerprint.Mode = strings.ToLower(strings.TrimSpace(cfg.ClaudeOAuthFingerprint.Mode))
-	if cfg.ClaudeOAuthFingerprint.Mode == "" {
-		cfg.ClaudeOAuthFingerprint.Mode = "monitor"
 	}
 	if cfg.ClaudeOAuthFingerprint.MaxSessions <= 0 {
 		cfg.ClaudeOAuthFingerprint.MaxSessions = 4

@@ -284,17 +284,19 @@ nonstream-keepalive-interval: 0
 # still upgrade to newer official Claude client versions.
 # claude-header-defaults:
 #   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
-#   package-version: "0.74.0"
+#   package-version: "0.94.0"
 #   runtime-version: "v24.3.0"
 #   os: "MacOS"
 #   arch: "arm64"
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
-# Claude OAuth outbound fingerprint monitoring (OAuth tokens only, sk-ant-oat*).
+# Claude OAuth session limiting and optional outbound device override (OAuth tokens only, sk-ant-oat*).
+# When enabled is false, every other setting in this block is ignored.
 # claude-oauth-fingerprint:
 #   enabled: false
-#   mode: monitor              # monitor | enforce
+#   override_device: false     # when true, Claude OAuth requests use the persisted auth-file device profile
+#   generate_missing_profile: false # when true, existing/uploaded Claude OAuth auth files missing a profile get one generated
 #   max-sessions: 4
 #   session-ttl: "1h"
 #   log-fingerprint: false     # independent of commercial-mode and request-log

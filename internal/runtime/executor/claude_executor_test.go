@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -109,6 +110,111 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
 	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
 		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
+	}
+}
+
+func TestApplyClaudeHeaders_ClaudeOAuthOverrideUsesPersistedProfile(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+	cfg := &config.Config{
+		ClaudeOAuthFingerprint: config.ClaudeOAuthFingerprintConfig{
+			Enabled:        true,
+			OverrideDevice: true,
+		},
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-oauth.json",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"access_token": "sk-ant-oat-test",
+			"email":        "user@example.com",
+			claudeoauth.ProfileMetadataKey: claudeoauth.Profile{
+				Version:     claudeoauth.ProfileVersion,
+				CreatedAt:   "2026-06-26T00:00:00Z",
+				DeviceID:    strings.Repeat("a", 64),
+				AccountUUID: "account-uuid",
+				Header: claudeoauth.HeaderProfile{
+					UserAgent:      "claude-cli/2.1.63 (external, cli)",
+					PackageVersion: "0.74.0",
+					RuntimeVersion: "v24.3.0",
+					OS:             "Linux",
+					Arch:           "x64",
+				},
+			},
+		},
+	}
+	incoming := http.Header{
+		"User-Agent":                  []string{"claude-cli/9.9.9 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"9.9.9"},
+		"X-Stainless-Runtime-Version": []string{"v99.0.0"},
+		"X-Stainless-Os":              []string{"MacOS"},
+		"X-Stainless-Arch":            []string{"arm64"},
+	}
+
+	req := newClaudeHeaderTestRequest(t, incoming)
+	if err := applyClaudeHeaders(req, auth, "sk-ant-oat-test", false, nil, cfg); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.63 (external, cli)", "0.74.0", "v24.3.0", "Linux", "x64")
+}
+
+func TestClaudeExecutorPrepareRequestAuthAddsMissingOAuthProfile(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeOAuthFingerprint: config.ClaudeOAuthFingerprintConfig{
+			Enabled:                true,
+			GenerateMissingProfile: true,
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-user.json",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"access_token": "sk-ant-oat-test",
+			"email":        "user@example.com",
+			"account_uuid": "account-uuid",
+		},
+	}
+	if !executor.ShouldPrepareRequestAuth(auth) {
+		t.Fatal("expected missing profile to require request auth preparation")
+	}
+	updated, err := executor.PrepareRequestAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("PrepareRequestAuth() error = %v", err)
+	}
+	if updated == nil {
+		t.Fatal("PrepareRequestAuth() returned nil")
+	}
+	profile, ok := claudeoauth.ProfileFromAuth(updated)
+	if !ok {
+		t.Fatalf("missing %s", claudeoauth.ProfileMetadataKey)
+	}
+	if !claudeoauth.ValidDeviceID(profile.DeviceID) {
+		t.Fatalf("device_id = %q, want 64 lowercase hex", profile.DeviceID)
+	}
+	if profile.AccountUUID != "account-uuid" {
+		t.Fatalf("account_uuid = %q, want account-uuid", profile.AccountUUID)
+	}
+}
+
+func TestClaudeExecutorPrepareRequestAuthSkipsMissingOAuthProfileByDefault(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeOAuthFingerprint: config.ClaudeOAuthFingerprintConfig{Enabled: true},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-user.json",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"access_token": "sk-ant-oat-test",
+			"email":        "user@example.com",
+			"account_uuid": "account-uuid",
+		},
+	}
+	if executor.ShouldPrepareRequestAuth(auth) {
+		t.Fatal("missing profile should not require preparation unless generate_missing_profile is true")
 	}
 }
 
@@ -2529,6 +2635,60 @@ func TestClaudeExecutor_ExperimentalCCHSigningOptInSignsFinalBody(t *testing.T) 
 	wantCCH := fmt.Sprintf("%05x", xxHash64.Checksum(unsignedBody, 0x6E52736AC806831E)&0xFFFFF)
 	if actualCCH != wantCCH {
 		t.Fatalf("cch = %q, want %q\nbody: %s", actualCCH, wantCCH, string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_ClaudeOAuthStableFingerprintPinsBillingHeader(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeOAuthFingerprint: config.ClaudeOAuthFingerprintConfig{
+			Enabled:        true,
+			OverrideDevice: true,
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "sk-ant-oat-test",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	billingHeader := gjson.GetBytes(seenBody, "system.0.text").String()
+	if matched, errMatch := regexp.MatchString(`cc_version=2\.1\.186\.[0-9a-f]{3};`, billingHeader); errMatch != nil || !matched {
+		t.Fatalf("billing header version = %q, want cc_version=2.1.186.<build>", billingHeader)
+	}
+	if !strings.Contains(billingHeader, "cc_entrypoint=cli;") {
+		t.Fatalf("billing header entrypoint = %q, want cli", billingHeader)
+	}
+}
+
+func TestNormalizeClaudeOAuthStableBillingHeader_RewritesExistingHeader(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.old; cc_entrypoint=vscode; cch=12345;"},{"type":"text","text":"original instructions"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := normalizeClaudeOAuthStableBillingHeader(payload)
+	billingHeader := gjson.GetBytes(out, "system.0.text").String()
+	if matched, errMatch := regexp.MatchString(`cc_version=2\.1\.186\.[0-9a-f]{3};`, billingHeader); errMatch != nil || !matched {
+		t.Fatalf("billing header version = %q, want cc_version=2.1.186.<build>", billingHeader)
+	}
+	if !strings.Contains(billingHeader, "cc_entrypoint=cli;") {
+		t.Fatalf("billing header entrypoint = %q, want cli", billingHeader)
+	}
+	if !strings.Contains(billingHeader, "cch=12345;") {
+		t.Fatalf("billing header should preserve cch until final signing, got %q", billingHeader)
 	}
 }
 

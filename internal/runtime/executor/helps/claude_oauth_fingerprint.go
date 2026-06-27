@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,7 +13,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -22,8 +23,6 @@ import (
 )
 
 const (
-	claudeOAuthViolationNone              = ""
-	claudeOAuthViolationIdentityMismatch  = "identity_mismatch"
 	claudeOAuthViolationSessionLimit      = "session_limit"
 	claudeOAuthHTTPStatusTooManySessions  = 529
 	claudeOAuthSessionLimitErrorBody      = `{"type":"error","error":{"type":"too_many_sessions","message":"too many sessions"}}`
@@ -60,19 +59,25 @@ type claudeOAuthAccountRegistry struct {
 
 // ClaudeOAuthFingerprintGateResult captures gate output for logging and header override.
 type ClaudeOAuthFingerprintGateResult struct {
-	SessionID       string
-	Slot            int
-	Violation       string
-	SessionMismatch bool
-	HeaderSessionID string
-	BodySessionID   string
-	DeviceID        string
-	AccountID       string
-	UserHash        string
-	Format          string
+	RequestID        string
+	SessionID        string
+	Slot             int
+	Violation        string
+	OverrideApplied  bool
+	SessionMismatch  bool
+	HeaderSessionID  string
+	BodySessionID    string
+	InboundDeviceID  string
+	InboundAccountID string
+	InboundUserHash  string
+	InboundFormat    string
+	DeviceID         string
+	AccountID        string
+	UserHash         string
+	Format           string
 }
 
-// ClaudeOAuthFingerprintError is returned when enforce mode blocks a request.
+// ClaudeOAuthFingerprintError is returned when the session gate blocks a request.
 type ClaudeOAuthFingerprintError struct {
 	Code    string
 	Message string
@@ -88,7 +93,7 @@ func (e *ClaudeOAuthFingerprintError) Error() string {
 	return e.Message
 }
 
-// HTTPStatus returns the HTTP status code for an enforce-mode fingerprint error.
+// HTTPStatus returns the HTTP status code for a fingerprint gate error.
 func (e *ClaudeOAuthFingerprintError) HTTPStatus() int {
 	if e == nil {
 		return http.StatusTooManyRequests
@@ -129,13 +134,6 @@ func claudeOAuthFingerprintSessionTTL(cfg *config.Config) time.Duration {
 		return time.Hour
 	}
 	return parsed
-}
-
-func claudeOAuthFingerprintEnforce(cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(cfg.ClaudeOAuthFingerprint.Mode), "enforce")
 }
 
 func claudeOAuthFingerprintMaxSessions(cfg *config.Config) int {
@@ -206,18 +204,11 @@ func ClaudeOAuthFingerprintGateResultFromContext(ctx context.Context) *ClaudeOAu
 	return result
 }
 
-// ClaudeOAuthFingerprintApplySessionHeader sets the outbound Claude Code session header.
-func ClaudeOAuthFingerprintApplySessionHeader(r *http.Request, sessionID string) {
-	if r == nil || strings.TrimSpace(sessionID) == "" {
-		return
-	}
-	r.Header.Set(ClaudeCodeSessionHeader, strings.TrimSpace(sessionID))
-}
-
 // ClaudeOAuthFingerprintGate resolves, registers, and normalizes OAuth outbound identity.
 func ClaudeOAuthFingerprintGate(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, inboundHeaders http.Header, body []byte, model string) ([]byte, *ClaudeOAuthFingerprintGateResult, error) {
-	_ = ctx
-	_ = model
+	if cfg == nil || !cfg.ClaudeOAuthFingerprint.Enabled {
+		return body, nil, nil
+	}
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return body, nil, nil
 	}
@@ -227,8 +218,13 @@ func ClaudeOAuthFingerprintGate(ctx context.Context, cfg *config.Config, auth *c
 	inboundIdentity := extractClaudeOAuthIdentityFromBody(body)
 
 	result := &ClaudeOAuthFingerprintGateResult{
+		RequestID:       shortClaudeOAuthRequestID(ctx),
 		HeaderSessionID: headerSession,
 		BodySessionID:   bodySession,
+		InboundDeviceID: inboundIdentity.DeviceID,
+		InboundAccountID: inboundIdentity.AccountUUID,
+		InboundUserHash:  inboundIdentity.UserHash,
+		InboundFormat:    inboundIdentity.Format,
 	}
 	if headerSession != "" && bodySession != "" && headerSession != bodySession {
 		result.SessionMismatch = true
@@ -242,46 +238,47 @@ func ClaudeOAuthFingerprintGate(ctx context.Context, cfg *config.Config, auth *c
 
 	authID := strings.TrimSpace(auth.ID)
 	registry := registryForAuth(authID)
+	overrideDevice := claudeoauth.OverrideDevice(cfg)
+	profileIdentity, hasProfileIdentity := claudeOAuthAccountIdentityFromProfile(auth)
+	useProfileOverride := overrideDevice && hasProfileIdentity
 	ttl := claudeOAuthFingerprintSessionTTL(cfg)
 	now := time.Now()
 
 	claudeOAuthRegistryMu.Lock()
 	purgeExpiredSessionsLocked(registry, now)
-	identityViolation := pinClaudeOAuthAccountIdentity(registry, authID, inboundIdentity)
+	if useProfileOverride {
+		registry.account = profileIdentity
+	} else if registry.account.Format == "" {
+		registry.account = firstClaudeOAuthAccountIdentity(authID, inboundIdentity)
+	}
 	slot, sessionViolation := registerClaudeOAuthSessionLocked(registry, sessionID, now, ttl, claudeOAuthFingerprintMaxSessions(cfg))
-	fillClaudeOAuthGateResultIdentity(result, registry.account)
+	account := registry.account
+	fillClaudeOAuthGateResultIdentity(result, account)
 	result.Slot = slot
-	result.Violation = firstClaudeOAuthViolation(identityViolation, sessionViolation)
+	result.Violation = sessionViolation
 	claudeOAuthRegistryMu.Unlock()
+
+	MaybeLogClaudeOAuthFingerprintInbound(cfg, auth, inboundHeaders, body, model, result)
 
 	if result.Violation != "" {
 		logClaudeOAuthViolation(authID, result, cfg)
-		if claudeOAuthFingerprintEnforce(cfg) {
-			return body, result, claudeOAuthFingerprintErrorFor(result.Violation)
-		}
+		return body, result, claudeOAuthFingerprintErrorFor(result.Violation)
 	}
 
-	outBody, errSet := setClaudeOAuthOutboundUserID(body, registry.account, sessionID)
+	if !useProfileOverride {
+		return body, result, nil
+	}
+
+	outBody, changed, errSet := setClaudeOAuthOutboundUserID(body, account)
 	if errSet != nil {
 		return body, result, fmt.Errorf("claude oauth fingerprint: set user_id: %w", errSet)
 	}
+	result.OverrideApplied = changed
 	return outBody, result, nil
-}
-
-func firstClaudeOAuthViolation(identityViolation, sessionViolation string) string {
-	if identityViolation != "" {
-		return identityViolation
-	}
-	return sessionViolation
 }
 
 func claudeOAuthFingerprintErrorFor(violation string) error {
 	switch violation {
-	case claudeOAuthViolationIdentityMismatch:
-		return &ClaudeOAuthFingerprintError{
-			Code:    claudeOAuthViolationIdentityMismatch,
-			Message: "claude oauth fingerprint: account identity mismatch",
-		}
 	case claudeOAuthViolationSessionLimit:
 		return &ClaudeOAuthFingerprintError{
 			Code:    claudeOAuthViolationSessionLimit,
@@ -296,13 +293,11 @@ func logClaudeOAuthViolation(authID string, result *ClaudeOAuthFingerprintGateRe
 	if result == nil || cfg == nil {
 		return
 	}
-	mode := strings.TrimSpace(cfg.ClaudeOAuthFingerprint.Mode)
 	log.WithFields(log.Fields{
 		"auth_id":   authID,
 		"session":   truncateClaudeOAuthLogToken(result.SessionID),
 		"slot":      result.Slot,
 		"violation": result.Violation,
-		"mode":      mode,
 	}).Warn("claude oauth fingerprint: violation")
 }
 
@@ -314,6 +309,18 @@ func fillClaudeOAuthGateResultIdentity(result *ClaudeOAuthFingerprintGateResult,
 	result.AccountID = account.AccountUUID
 	result.UserHash = account.UserHash
 	result.Format = account.Format
+}
+
+func claudeOAuthAccountIdentityFromProfile(auth *cliproxyauth.Auth) (claudeOAuthAccountIdentity, bool) {
+	profile, ok := claudeoauth.ProfileFromAuth(auth)
+	if !ok || !claudeoauth.ValidDeviceID(profile.DeviceID) || strings.TrimSpace(profile.AccountUUID) == "" {
+		return claudeOAuthAccountIdentity{}, false
+	}
+	return claudeOAuthAccountIdentity{
+		Format:      "json",
+		DeviceID:    strings.TrimSpace(profile.DeviceID),
+		AccountUUID: strings.TrimSpace(profile.AccountUUID),
+	}, true
 }
 
 func extractClaudeOAuthSessionFromHeader(headers http.Header) string {
@@ -366,35 +373,6 @@ func extractClaudeOAuthIdentityFromBody(payload []byte) claudeOAuthInboundIdenti
 	return claudeOAuthInboundIdentity{}
 }
 
-func pinClaudeOAuthAccountIdentity(registry *claudeOAuthAccountRegistry, authID string, inbound claudeOAuthInboundIdentity) string {
-	if registry == nil {
-		return ""
-	}
-	if registry.account.Format == "" {
-		registry.account = firstClaudeOAuthAccountIdentity(authID, inbound)
-		return ""
-	}
-	if inbound.Format == "" {
-		return ""
-	}
-	if registry.account.Format == "legacy" {
-		if inbound.UserHash != "" && !strings.EqualFold(inbound.UserHash, registry.account.UserHash) {
-			return claudeOAuthViolationIdentityMismatch
-		}
-		if inbound.AccountUUID != "" && inbound.AccountUUID != registry.account.AccountUUID {
-			return claudeOAuthViolationIdentityMismatch
-		}
-		return ""
-	}
-	if inbound.DeviceID != "" && inbound.DeviceID != registry.account.DeviceID {
-		return claudeOAuthViolationIdentityMismatch
-	}
-	if inbound.AccountUUID != "" && inbound.AccountUUID != registry.account.AccountUUID {
-		return claudeOAuthViolationIdentityMismatch
-	}
-	return ""
-}
-
 func firstClaudeOAuthAccountIdentity(authID string, inbound claudeOAuthInboundIdentity) claudeOAuthAccountIdentity {
 	if inbound.Format == "legacy" && inbound.UserHash != "" && inbound.AccountUUID != "" {
 		return claudeOAuthAccountIdentity{
@@ -432,7 +410,18 @@ func claudeOAuthDerivedUUID(authID, kind string) string {
 
 func claudeOAuthDerivedToken(authID, kind string) string {
 	sum := sha256.Sum256([]byte("cli-proxy-api:claude:oauth-fp:" + kind + ":" + strings.TrimSpace(authID)))
-	return hex.EncodeToString(sum[:16])
+	return hex.EncodeToString(sum[:])
+}
+
+func shortClaudeOAuthRequestID(ctx context.Context) string {
+	requestID := strings.TrimSpace(logging.GetRequestID(ctx))
+	if requestID == "" {
+		requestID = logging.GenerateRequestID()
+	}
+	if len(requestID) > 8 {
+		return requestID[:8]
+	}
+	return requestID
 }
 
 func registerClaudeOAuthSessionLocked(registry *claudeOAuthAccountRegistry, sessionID string, now time.Time, ttl time.Duration, maxSessions int) (int, string) {
@@ -482,30 +471,43 @@ func nextClaudeOAuthSessionSlotLocked(registry *claudeOAuthAccountRegistry, now 
 	return maxSessions
 }
 
-func setClaudeOAuthOutboundUserID(body []byte, account claudeOAuthAccountIdentity, sessionID string) ([]byte, error) {
+func setClaudeOAuthOutboundUserID(body []byte, account claudeOAuthAccountIdentity) ([]byte, bool, error) {
 	if len(body) == 0 {
-		return body, nil
+		return body, false, nil
 	}
-	var userID string
-	switch account.Format {
-	case "legacy":
-		if account.UserHash == "" || account.AccountUUID == "" {
-			return body, fmt.Errorf("missing legacy account identity")
-		}
-		userID = fmt.Sprintf("user_%s_account_%s_session_%s", account.UserHash, account.AccountUUID, sessionID)
-	default:
-		payload := map[string]string{
-			"device_id":    account.DeviceID,
-			"account_uuid": account.AccountUUID,
-			"session_id":   sessionID,
-		}
-		raw, errMarshal := json.Marshal(payload)
-		if errMarshal != nil {
-			return body, errMarshal
-		}
-		userID = string(raw)
+	userID := strings.TrimSpace(gjson.GetBytes(body, "metadata.user_id").String())
+	if userID == "" {
+		return body, false, nil
 	}
-	return sjson.SetBytes(body, "metadata.user_id", userID)
+	if matches := claudeOAuthLegacyUserIDPattern.FindStringSubmatch(userID); len(matches) == 4 {
+		userHash := strings.TrimSpace(account.DeviceID)
+		if userHash == "" {
+			userHash = strings.TrimSpace(account.UserHash)
+		}
+		accountUUID := strings.TrimSpace(account.AccountUUID)
+		if userHash == "" || accountUUID == "" {
+			return body, false, fmt.Errorf("missing account identity")
+		}
+		outUserID := "user_" + userHash + "_account_" + accountUUID + "_session_" + matches[3]
+		out, errSet := sjson.SetBytes(body, "metadata.user_id", outUserID)
+		return out, outUserID != userID, errSet
+	}
+	if !strings.HasPrefix(userID, "{") {
+		return body, false, nil
+	}
+	if strings.TrimSpace(account.DeviceID) == "" || strings.TrimSpace(account.AccountUUID) == "" {
+		return body, false, fmt.Errorf("missing account identity")
+	}
+	outUserID, errSetDevice := sjson.Set(userID, "device_id", strings.TrimSpace(account.DeviceID))
+	if errSetDevice != nil {
+		return body, false, errSetDevice
+	}
+	outUserID, errSetAccount := sjson.Set(outUserID, "account_uuid", strings.TrimSpace(account.AccountUUID))
+	if errSetAccount != nil {
+		return body, false, errSetAccount
+	}
+	out, errSet := sjson.SetBytes(body, "metadata.user_id", outUserID)
+	return out, outUserID != userID, errSet
 }
 
 // ResetClaudeOAuthFingerprintRegistry clears in-memory registries (tests).

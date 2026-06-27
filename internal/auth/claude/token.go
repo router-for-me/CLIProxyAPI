@@ -25,6 +25,9 @@ type ClaudeTokenStorage struct {
 	// RefreshToken is used to obtain new access tokens when the current one expires.
 	RefreshToken string `json:"refresh_token"`
 
+	// AccountUUID is the Anthropic account UUID returned by OAuth.
+	AccountUUID string `json:"account_uuid,omitempty"`
+
 	// LastRefresh is the timestamp of the last token refresh operation.
 	LastRefresh string `json:"last_refresh"`
 

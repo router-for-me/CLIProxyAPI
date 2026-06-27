@@ -303,6 +303,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	tokenData := ClaudeTokenData{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
+		AccountUUID:  tokenResp.Account.UUID,
 		Email:        tokenResp.Account.EmailAddress,
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
@@ -420,6 +421,7 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 	return &ClaudeTokenData{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
+		AccountUUID:  tokenResp.Account.UUID,
 		Email:        tokenResp.Account.EmailAddress,
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}, nil
@@ -438,6 +440,7 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 	storage := &ClaudeTokenStorage{
 		AccessToken:  bundle.TokenData.AccessToken,
 		RefreshToken: bundle.TokenData.RefreshToken,
+		AccountUUID:  bundle.TokenData.AccountUUID,
 		LastRefresh:  bundle.LastRefresh,
 		Email:        bundle.TokenData.Email,
 		Expire:       bundle.TokenData.Expire,
@@ -496,6 +499,9 @@ func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken st
 func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *ClaudeTokenData) {
 	storage.AccessToken = tokenData.AccessToken
 	storage.RefreshToken = tokenData.RefreshToken
+	if tokenData.AccountUUID != "" {
+		storage.AccountUUID = tokenData.AccountUUID
+	}
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
 	storage.Email = tokenData.Email
 	storage.Expire = tokenData.Expire

@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/claudeoauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -414,6 +415,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				var metadata map[string]any
+				if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal == nil {
+					if profile, ok := claudeoauth.ProfileFromMetadata(metadata); ok {
+						fileData[claudeoauth.ProfileMetadataKey] = claudeoauth.Summary(profile)
+					}
+				}
 				if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
 					fileData["project_id"] = projectID
 				}
@@ -566,6 +573,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
+	}
+	if profile, ok := claudeoauth.ProfileFromMetadata(auth.Metadata); ok {
+		entry[claudeoauth.ProfileMetadataKey] = claudeoauth.Summary(profile)
 	}
 	return entry
 }
@@ -949,6 +959,13 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
 			dst = abs
 		}
+	}
+	preparedData, changed, errPrepare := claudeoauth.EnsureRawAuthProfile(data, h.cfg)
+	if errPrepare != nil {
+		return fmt.Errorf("invalid auth file: %w", errPrepare)
+	}
+	if changed {
+		data = preparedData
 	}
 	auth, err := h.buildAuthFromFileData(dst, data)
 	if err != nil {
@@ -1939,12 +1956,18 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Create token storage
 		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
+		metadata, errMetadata := claudeoauth.AuthMetadata(h.cfg, tokenStorage.Email, tokenStorage.AccountUUID)
+		if errMetadata != nil {
+			log.Errorf("Failed to create Claude OAuth metadata: %v", errMetadata)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
 		record := &coreauth.Auth{
 			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Provider: "claude",
 			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
-			Metadata: map[string]any{"email": tokenStorage.Email},
+			Metadata: metadata,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
