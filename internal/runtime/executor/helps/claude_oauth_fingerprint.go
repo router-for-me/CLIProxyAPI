@@ -529,25 +529,20 @@ func setClaudeOAuthOutboundUserID(body []byte, account claudeOAuthAccountIdentit
 		if userHash == "" {
 			return body, false, fmt.Errorf("missing account identity")
 		}
-		if accountUUID == "" {
-			outUserID, errSetDevice := sjson.Set("{}", "device_id", userHash)
-			if errSetDevice != nil {
-				return body, false, errSetDevice
-			}
-			outUserID, errSetAccount := sjson.Set(outUserID, "account_uuid", "")
-			if errSetAccount != nil {
-				return body, false, errSetAccount
-			}
-			outUserID, errSetSession := sjson.Set(outUserID, "session_id", matches[3])
-			if errSetSession != nil {
-				return body, false, errSetSession
-			}
-			out, errSet := sjson.SetBytes(body, "metadata.user_id", outUserID)
-			return out, true, errSet
+		outUserID, errSetDevice := sjson.Set("{}", "device_id", userHash)
+		if errSetDevice != nil {
+			return body, false, errSetDevice
 		}
-		outUserID := "user_" + userHash + "_account_" + accountUUID + "_session_" + matches[3]
+		outUserID, errSetAccount := sjson.Set(outUserID, "account_uuid", accountUUID)
+		if errSetAccount != nil {
+			return body, false, errSetAccount
+		}
+		outUserID, errSetSession := sjson.Set(outUserID, "session_id", matches[3])
+		if errSetSession != nil {
+			return body, false, errSetSession
+		}
 		out, errSet := sjson.SetBytes(body, "metadata.user_id", outUserID)
-		return out, outUserID != userID, errSet
+		return out, true, errSet
 	}
 	if !strings.HasPrefix(userID, "{") {
 		return body, false, nil
