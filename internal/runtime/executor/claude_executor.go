@@ -1878,7 +1878,7 @@ const fingerprintSalt = "59cf53e54c78"
 const (
 	claudeOAuthStableBillingVersion    = "2.1.186"
 	claudeOAuthStableBillingEntrypoint = "cli"
-	claudeOAuthStableBetas             = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thin"
+	claudeOAuthStableBetas             = "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-"
 )
 
 // computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.
