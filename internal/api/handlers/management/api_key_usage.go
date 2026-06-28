@@ -119,8 +119,8 @@ func apiKeyUsageProviderKey(auth *coreauth.Auth) string {
 
 // GetAPIKeyUsage returns recent request buckets for in-memory API-key-class auths,
 // grouped by provider. Static API-key credentials are keyed by "base_url|api_key".
-// Command-auth credentials have no static api_key, so they keep the legacy
-// "base_url|" key and expose their stable non-secret identity in auth_key.
+// Command-auth credentials have no static api_key, so they are keyed by the
+// stable non-secret command identity exposed in auth_key.
 func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
