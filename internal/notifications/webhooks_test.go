@@ -212,7 +212,7 @@ func TestWebhookDispatcherFormatsFeishuAndDedupes(t *testing.T) {
 		"owner@example.com",
 		"401",
 		"https://proxy.example.test",
-		"https://proxy.example.test/management.html",
+		"https://proxy.example.test/management.html#/quota",
 	})
 }
 
@@ -300,7 +300,7 @@ func TestWebhookDispatcherFormatsSlack(t *testing.T) {
 		"auth.refresh_failed",
 		"refresh failed",
 		"https://proxy.example.test",
-		"https://proxy.example.test/management.html",
+		"https://proxy.example.test/management.html#/quota",
 	})
 }
 
@@ -365,7 +365,7 @@ func TestWebhookDispatcherFormatsTelegram(t *testing.T) {
 	if len(body.ReplyMarkup.InlineKeyboard) != 1 || len(body.ReplyMarkup.InlineKeyboard[0]) != 2 {
 		t.Fatalf("inline keyboard = %#v, want two buttons", body.ReplyMarkup.InlineKeyboard)
 	}
-	if body.ReplyMarkup.InlineKeyboard[0][0].URL != "https://proxy.example.test" || body.ReplyMarkup.InlineKeyboard[0][1].URL != "https://proxy.example.test/management.html" {
+	if body.ReplyMarkup.InlineKeyboard[0][0].URL != "https://proxy.example.test" || body.ReplyMarkup.InlineKeyboard[0][1].URL != "https://proxy.example.test/management.html#/quota" {
 		t.Fatalf("unexpected telegram button URLs: %#v", body.ReplyMarkup.InlineKeyboard)
 	}
 }
@@ -387,6 +387,14 @@ func TestFormatWebhookBodyRejectsTelegramWithoutTarget(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("formatWebhookBody returned nil error, want telegram target error")
+	}
+}
+
+func TestManagementPanelURLUsesQuotaHashRoute(t *testing.T) {
+	got := managementPanelURL("https://proxy.example.test/api?debug=1")
+	want := "https://proxy.example.test/management.html#/quota"
+	if got != want {
+		t.Fatalf("managementPanelURL() = %q, want %q", got, want)
 	}
 }
 

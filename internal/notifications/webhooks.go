@@ -534,7 +534,7 @@ func slackCardActions(serviceURL string) []any {
 	actions := []any{
 		slackButton("Open Service", serviceURL, "primary"),
 	}
-	if managementURL := appendURLPath(serviceURL, "/management.html"); managementURL != "" && managementURL != serviceURL {
+	if managementURL := managementPanelURL(serviceURL); managementURL != "" && managementURL != serviceURL {
 		actions = append(actions, slackButton("Management Panel", managementURL, ""))
 	}
 	return actions
@@ -579,7 +579,7 @@ func telegramInlineKeyboard(serviceURL string) [][]map[string]string {
 	row := []map[string]string{
 		{"text": "Open Service", "url": serviceURL},
 	}
-	if managementURL := appendURLPath(serviceURL, "/management.html"); managementURL != "" && managementURL != serviceURL {
+	if managementURL := managementPanelURL(serviceURL); managementURL != "" && managementURL != serviceURL {
 		row = append(row, map[string]string{"text": "Management Panel", "url": managementURL})
 	}
 	return [][]map[string]string{row}
@@ -666,7 +666,7 @@ func feishuCardActions(serviceURL string) []any {
 	actions := []any{
 		feishuCardButton("Open Service", serviceURL, "primary"),
 	}
-	if managementURL := appendURLPath(serviceURL, "/management.html"); managementURL != "" && managementURL != serviceURL {
+	if managementURL := managementPanelURL(serviceURL); managementURL != "" && managementURL != serviceURL {
 		actions = append(actions, feishuCardButton("Management Panel", managementURL, "default"))
 	}
 	return actions
@@ -734,6 +734,17 @@ func appendURLPath(rawURL, path string) string {
 	parsed.Path = path
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func managementPanelURL(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	parsed.Path = "/management.html"
+	parsed.RawQuery = ""
+	parsed.Fragment = "/quota"
 	return parsed.String()
 }
 
