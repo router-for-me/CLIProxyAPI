@@ -822,6 +822,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 
+		mgmt.GET("/notification-webhooks", s.mgmt.GetNotificationWebhooks)
+		mgmt.PUT("/notification-webhooks", s.mgmt.PutNotificationWebhooks)
+		mgmt.PATCH("/notification-webhooks", s.mgmt.PatchNotificationWebhook)
+		mgmt.DELETE("/notification-webhooks", s.mgmt.DeleteNotificationWebhook)
+
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
