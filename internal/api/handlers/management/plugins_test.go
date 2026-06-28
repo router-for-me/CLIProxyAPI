@@ -526,16 +526,21 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	t.Parallel()
 
 	pluginsDir := writeManagementPluginFile(t, "sample")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte("plugins:\n  configs:\n    sample:\n      enabled: true\n      mode: safe\n    keep:\n      enabled: true\n      mode: retained\n"), 0o600); errWrite != nil {
+		t.Fatalf("failed to write test config: %v", errWrite)
+	}
 	h := &Handler{
 		cfg: &config.Config{
 			Plugins: config.PluginsConfig{
 				Dir: pluginsDir,
 				Configs: map[string]config.PluginInstanceConfig{
 					"sample": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
+					"keep":   pluginConfigFromYAML(t, "enabled: true\nmode: retained\n"),
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configFilePath: configPath,
 	}
 	reloads := make(chan *config.Config, 1)
 	releaseReload := make(chan struct{})
@@ -576,6 +581,20 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	}
 	if _, ok := h.cfg.Plugins.Configs["sample"]; ok {
 		t.Fatal("plugin config still exists after delete")
+	}
+	if _, ok := h.cfg.Plugins.Configs["keep"]; !ok {
+		t.Fatal("retained plugin config was removed")
+	}
+	data, errReadConfig := os.ReadFile(configPath)
+	if errReadConfig != nil {
+		t.Fatalf("failed to read saved config: %v", errReadConfig)
+	}
+	text := string(data)
+	if strings.Contains(text, "sample:") || strings.Contains(text, "mode: safe") {
+		t.Fatalf("saved config still contains removed plugin:\n%s", text)
+	}
+	if !strings.Contains(text, "keep:") || !strings.Contains(text, "mode: retained") {
+		t.Fatalf("saved config lost retained plugin:\n%s", text)
 	}
 	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
 		t.Fatalf("plugin file stat error = %v, want not exist", errStat)
