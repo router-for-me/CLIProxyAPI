@@ -96,6 +96,37 @@ func AuthConfigured(auth []AuthConfig, requestURL string, kind string) bool {
 	}
 }
 
+func PluginAuthConfigured(source Source, plugin Plugin, auth []AuthConfig) bool {
+	if AuthConfigured(auth, source.URL, RequestKindRegistry) {
+		return true
+	}
+	switch PluginInstallType(plugin) {
+	case InstallTypeDirect:
+		for _, artifact := range PluginArtifacts(plugin) {
+			if AuthConfigured(auth, artifact.URL, RequestKindArtifact) {
+				return true
+			}
+		}
+	case InstallTypeGitHubRelease:
+		return pluginGitHubReleaseAuthConfigured(plugin, auth)
+	}
+	return false
+}
+
+func pluginGitHubReleaseAuthConfigured(plugin Plugin, auth []AuthConfig) bool {
+	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	if errRepository != nil {
+		return false
+	}
+	releasesURL := fmt.Sprintf(
+		"https://api.github.com/repos/%s/%s/releases/",
+		url.PathEscape(owner),
+		url.PathEscape(repo),
+	)
+	return AuthConfigured(auth, releasesURL+"latest", RequestKindMetadata) ||
+		AuthConfigured(auth, releasesURL+"tags/", RequestKindMetadata)
+}
+
 func applyPluginStoreAuth(headers http.Header, auth []AuthConfig, requestURL string, kind string) error {
 	item, ok := matchingAuthConfig(auth, requestURL, kind)
 	if !ok {
