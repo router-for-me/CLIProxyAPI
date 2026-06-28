@@ -16,14 +16,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
-	"golang.org/x/sys/cpu"
 	"gopkg.in/yaml.v3"
 )
 
 type Platform struct {
-	GOOS    string `json:"goos"`
-	GOARCH  string `json:"goarch"`
-	Variant string `json:"variant,omitempty"`
+	GOOS   string `json:"goos"`
+	GOARCH string `json:"goarch"`
 }
 
 type PluginRuntime interface {
@@ -56,6 +54,7 @@ type PluginInstallStatus struct {
 	Version       string `json:"version,omitempty"`
 	ReleaseTag    string `json:"release_tag,omitempty"`
 	Repository    string `json:"repository,omitempty"`
+	InstallType   string `json:"install_type,omitempty"`
 	InstallStatus string `json:"install_status"`
 	LoadStatus    string `json:"load_status,omitempty"`
 	Path          string `json:"path,omitempty"`
@@ -85,9 +84,8 @@ const (
 // CurrentPlatform reports the platform used by pluginhost discovery.
 func CurrentPlatform() Platform {
 	return Platform{
-		GOOS:    runtime.GOOS,
-		GOARCH:  runtime.GOARCH,
-		Variant: cpuVariant(),
+		GOOS:   runtime.GOOS,
+		GOARCH: runtime.GOARCH,
 	}
 }
 
@@ -104,8 +102,7 @@ func NormalizePlatform(platform Platform) Platform {
 	case "aarch64":
 		goarch = "arm64"
 	}
-	variant := strings.ToLower(strings.TrimSpace(platform.Variant))
-	return Platform{GOOS: goos, GOARCH: goarch, Variant: variant}
+	return Platform{GOOS: goos, GOARCH: goarch}
 }
 
 func Sync(ctx context.Context, cfg *config.Config, pluginRuntime PluginRuntime) error {
@@ -311,7 +308,7 @@ func pluginFileInfos(root string, id string) ([]pluginFileInfo, error) {
 	platform := CurrentPlatform()
 	extension := pluginExtension(platform.GOOS)
 	candidates := make([]pluginFileInfo, 0)
-	for _, dir := range pluginCandidateDirs(root, platform.GOOS, platform.GOARCH, platform.Variant) {
+	for _, dir := range pluginCandidateDirs(root, platform.GOOS, platform.GOARCH) {
 		entries, errReadDir := os.ReadDir(dir)
 		if errReadDir != nil {
 			if errors.Is(errReadDir, os.ErrNotExist) {
@@ -366,11 +363,8 @@ type pluginFileInfo struct {
 	Version string
 }
 
-func pluginCandidateDirs(root string, goos string, goarch string, variant string) []string {
-	dirs := make([]string, 0, 3)
-	if variant != "" {
-		dirs = append(dirs, filepath.Join(root, goos, goarch+"-"+variant))
-	}
+func pluginCandidateDirs(root string, goos string, goarch string) []string {
+	dirs := make([]string, 0, 2)
 	dirs = append(dirs, filepath.Join(root, goos, goarch))
 	dirs = append(dirs, root)
 	return dirs
@@ -551,6 +545,7 @@ func pluginStatusFromManifest(manifest sdkpluginstore.Manifest) PluginInstallSta
 		Version:       strings.TrimSpace(manifest.Version),
 		ReleaseTag:    strings.TrimSpace(manifest.ReleaseTag),
 		Repository:    strings.TrimSpace(manifest.Repository),
+		InstallType:   manifest.InstallType(),
 		InstallStatus: pluginInstallStatusFailed,
 	}
 }
@@ -592,28 +587,16 @@ func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
 
 var newPluginStoreClient = func(cfg *config.Config) sdkpluginstore.Client {
 	client := &http.Client{}
+	var storeAuth []sdkpluginstore.AuthConfig
 	if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
 		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(cfg.ProxyURL)}, client)
 	}
-	return sdkpluginstore.NewClient(client, "")
+	if cfg != nil {
+		storeAuth = cfg.Plugins.StoreAuth
+	}
+	return sdkpluginstore.NewClientWithAuth(client, "", storeAuth)
 }
 
 func pluginConfigEnabled(item config.PluginInstanceConfig) bool {
 	return item.Enabled != nil && *item.Enabled
-}
-
-func cpuVariant() string {
-	if runtime.GOARCH != "amd64" {
-		return ""
-	}
-	if cpu.X86.HasAVX512F && cpu.X86.HasAVX512BW && cpu.X86.HasAVX512CD && cpu.X86.HasAVX512DQ && cpu.X86.HasAVX512VL {
-		return "v4"
-	}
-	if cpu.X86.HasAVX && cpu.X86.HasAVX2 && cpu.X86.HasBMI1 && cpu.X86.HasBMI2 && cpu.X86.HasFMA {
-		return "v3"
-	}
-	if cpu.X86.HasSSE3 && cpu.X86.HasSSSE3 && cpu.X86.HasSSE41 && cpu.X86.HasSSE42 && cpu.X86.HasPOPCNT {
-		return "v2"
-	}
-	return "v1"
 }

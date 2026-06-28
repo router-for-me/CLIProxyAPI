@@ -64,6 +64,13 @@ plugins:
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:
   #   - "https://example.com/cliproxy-plugins/registry.json"
+  # Optional plugin store auth rules. Values are read from environment variables;
+  # tokens are not written into plugin manifests or node status.
+  # store-auth:
+  #   - match: "https://example.com/cliproxy-plugins/"
+  #     apply-to: ["registry", "artifact"]
+  #     type: bearer
+  #     token-env: "CLIPROXY_PLUGIN_STORE_TOKEN"
   configs:
     example:
       enabled: true
