@@ -2,23 +2,31 @@ package auth
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/notifications"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 )
 
 type errorEvent struct {
-	Timestamp  time.Time            `json:"timestamp"`
-	Provider   string               `json:"provider,omitempty"`
-	Model      string               `json:"model,omitempty"`
-	AuthID     string               `json:"auth_id,omitempty"`
-	AuthIndex  string               `json:"auth_index"`
-	StatusCode int                  `json:"status_code"`
-	Body       string               `json:"body"`
-	Code       string               `json:"code,omitempty"`
-	Retryable  bool                 `json:"retryable,omitempty"`
-	AuthStatus errorEventAuthStatus `json:"auth_status"`
+	Timestamp   time.Time            `json:"timestamp"`
+	Type        string               `json:"type,omitempty"`
+	Severity    string               `json:"severity,omitempty"`
+	Provider    string               `json:"provider,omitempty"`
+	Model       string               `json:"model,omitempty"`
+	AuthID      string               `json:"auth_id,omitempty"`
+	AuthIndex   string               `json:"auth_index"`
+	AccountType string               `json:"account_type,omitempty"`
+	Account     string               `json:"account,omitempty"`
+	StatusCode  int                  `json:"status_code"`
+	Body        string               `json:"body"`
+	Message     string               `json:"message,omitempty"`
+	Code        string               `json:"code,omitempty"`
+	Retryable   bool                 `json:"retryable,omitempty"`
+	ServiceURL  string               `json:"service_url,omitempty"`
+	AuthStatus  errorEventAuthStatus `json:"auth_status"`
 }
 
 type errorEventAuthStatus struct {
@@ -48,30 +56,43 @@ type errorEventModelStatus struct {
 }
 
 func (m *Manager) publishErrorEvent(result Result, authSnapshot *Auth) {
+	m.publishTypedErrorEvent(errorEventTypeFromResult(result), result, authSnapshot)
+}
+
+func (m *Manager) publishTypedErrorEvent(eventType string, result Result, authSnapshot *Auth) {
 	if m == nil || result.Success || authSnapshot == nil || m.HomeEnabled() {
 		return
 	}
-	payload, ok := buildErrorEventPayload(result, authSnapshot)
+	payload, ok := buildErrorEventPayload(eventType, result, authSnapshot)
 	if !ok {
 		return
 	}
 	redisqueue.EnqueueError(payload)
+	notifications.PublishEventPayload(payload)
 }
 
-func buildErrorEventPayload(result Result, authSnapshot *Auth) ([]byte, bool) {
+func buildErrorEventPayload(eventType string, result Result, authSnapshot *Auth) ([]byte, bool) {
 	if authSnapshot == nil || result.Success {
 		return nil, false
 	}
 	authSnapshot.EnsureIndex()
+	accountType, account := errorEventAccountInfo(authSnapshot)
+	body := errorEventBody(result.Error)
 	event := errorEvent{
-		Timestamp:  time.Now(),
-		Provider:   strings.TrimSpace(result.Provider),
-		Model:      strings.TrimSpace(result.Model),
-		AuthID:     strings.TrimSpace(result.AuthID),
-		AuthIndex:  strings.TrimSpace(authSnapshot.Index),
-		StatusCode: errorEventStatusCode(result.Error),
-		Body:       errorEventBody(result.Error),
-		AuthStatus: buildErrorEventAuthStatus(result.Model, authSnapshot),
+		Timestamp:   time.Now(),
+		Type:        strings.TrimSpace(eventType),
+		Severity:    notifications.SeverityError,
+		Provider:    strings.TrimSpace(result.Provider),
+		Model:       strings.TrimSpace(result.Model),
+		AuthID:      strings.TrimSpace(result.AuthID),
+		AuthIndex:   strings.TrimSpace(authSnapshot.Index),
+		AccountType: accountType,
+		Account:     account,
+		StatusCode:  errorEventStatusCode(result.Error),
+		Body:        body,
+		Message:     body,
+		ServiceURL:  notifications.CurrentServiceURL(),
+		AuthStatus:  buildErrorEventAuthStatus(result.Model, authSnapshot),
 	}
 	if result.Error != nil {
 		event.Code = strings.TrimSpace(result.Error.Code)
@@ -82,6 +103,22 @@ func buildErrorEventPayload(result Result, authSnapshot *Auth) ([]byte, bool) {
 		return nil, false
 	}
 	return payload, true
+}
+
+func errorEventTypeFromResult(result Result) string {
+	if errorEventStatusCode(result.Error) == http.StatusUnauthorized {
+		return notifications.EventAuthRequestUnauthorized
+	}
+	return notifications.EventAuthRequestFailed
+}
+
+func errorEventAccountInfo(authSnapshot *Auth) (string, string) {
+	accountType, account := authSnapshot.AccountInfo()
+	accountType = strings.TrimSpace(accountType)
+	if accountType != "oauth" {
+		return accountType, ""
+	}
+	return accountType, strings.TrimSpace(account)
 }
 
 func buildErrorEventAuthStatus(model string, authSnapshot *Auth) errorEventAuthStatus {

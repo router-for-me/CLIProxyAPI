@@ -102,6 +102,36 @@ usage-statistics-enabled: false
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 
+# Optional outbound notifications. Webhooks are best-effort and never block requests.
+# Slack, Feishu/Lark, and Telegram messages include action buttons only after the
+# server observes a public request host (Forwarded/X-Forwarded-Proto/X-Forwarded-Host/Host).
+notifications:
+  webhooks:
+    # Example: Feishu/Lark bot webhook for OAuth refresh credential failures.
+    # auth.refresh_failed is emitted when refreshing OAuth credentials fails with 401.
+    - name: "oauth-refresh-failed-feishu"
+      url: ""
+      adapter: "feishu" # generic/json, slack, feishu/lark, telegram
+      # Required. Use ["*"] only when this webhook should receive every notification event.
+      events: ["auth.refresh_failed"]
+      status-codes: [401]
+      timeout-seconds: 5
+      retry: 1
+      dedupe-seconds: 1800
+      disabled: true
+    # Example: Telegram bot API sendMessage endpoint. Target is the chat_id.
+    - name: "oauth-refresh-failed-telegram"
+      url: "https://api.telegram.org/bot<token>/sendMessage"
+      adapter: "telegram"
+      target: ""
+      # Required. Use ["*"] only when this webhook should receive every notification event.
+      events: ["auth.refresh_failed"]
+      status-codes: [401]
+      timeout-seconds: 5
+      retry: 1
+      dedupe-seconds: 1800
+      disabled: true
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""

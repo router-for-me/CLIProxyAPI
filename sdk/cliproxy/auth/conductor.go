@@ -21,6 +21,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/notifications"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -5880,14 +5881,24 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		shouldReschedule := false
+		var authSnapshot *Auth
+		var eventResult Result
+		refreshErr := refreshErrorFromError(err)
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.LastError = refreshErrorFromError(err)
+			current.LastError = refreshErr
 			if unauthorized {
 				current.NextRefreshAfter = time.Time{}
 				current.Unavailable = true
 				current.Status = StatusError
 				current.StatusMessage = "unauthorized"
+				authSnapshot = current.Clone()
+				eventResult = Result{
+					AuthID:   current.ID,
+					Provider: current.Provider,
+					Success:  false,
+					Error:    cloneError(refreshErr),
+				}
 			} else {
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
@@ -5900,6 +5911,9 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		m.mu.Unlock()
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
+		}
+		if authSnapshot != nil {
+			m.publishTypedErrorEvent(notifications.EventAuthRefreshFailed, eventResult, authSnapshot)
 		}
 		return nil, err
 	}

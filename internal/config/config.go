@@ -44,6 +44,9 @@ type Config struct {
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
+	// Notifications configures optional outbound notification sinks.
+	Notifications NotificationsConfig `yaml:"notifications" json:"notifications"`
+
 	// Plugins configures dynamic plugin discovery and per-plugin settings.
 	Plugins PluginsConfig `yaml:"plugins" json:"plugins"`
 
@@ -801,6 +804,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.NormalizeNotificationsConfig()
 	cfg.NormalizePluginsConfig()
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.

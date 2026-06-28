@@ -75,6 +75,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.NormalizeNotificationsConfig()
 	cfg.NormalizePluginsConfig()
 
 	// Apply the same sanitization pipeline.
