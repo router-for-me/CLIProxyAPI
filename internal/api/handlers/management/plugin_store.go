@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -637,36 +636,7 @@ func sanitizePluginStorePlatforms(platforms []pluginstore.Platform) []pluginStor
 }
 
 func pluginAuthConfigured(source pluginstore.Source, plugin pluginstore.Plugin, storeAuth []pluginstore.AuthConfig) bool {
-	if pluginstore.AuthConfigured(storeAuth, source.URL, pluginstore.RequestKindRegistry) {
-		return true
-	}
-	switch pluginstore.PluginInstallType(plugin) {
-	case pluginstore.InstallTypeDirect:
-		for _, artifact := range pluginstore.PluginArtifacts(plugin) {
-			if pluginstore.AuthConfigured(storeAuth, artifact.URL, pluginstore.RequestKindArtifact) {
-				return true
-			}
-		}
-	case pluginstore.InstallTypeGitHubRelease:
-		return pluginGitHubReleaseAuthConfigured(plugin, storeAuth)
-	}
-	return false
-}
-
-func pluginGitHubReleaseAuthConfigured(plugin pluginstore.Plugin, storeAuth []pluginstore.AuthConfig) bool {
-	owner, repo, errRepository := pluginstore.GitHubRepositoryParts(plugin.Repository)
-	if errRepository != nil {
-		return false
-	}
-	releasesURL := fmt.Sprintf(
-		"https://api.github.com/repos/%s/%s/releases/",
-		url.PathEscape(owner),
-		url.PathEscape(repo),
-	)
-	latestURL := releasesURL + "latest"
-	tagsURL := releasesURL + "tags/"
-	return pluginstore.AuthConfigured(storeAuth, latestURL, pluginstore.RequestKindMetadata) ||
-		pluginstore.AuthConfigured(storeAuth, tagsURL, pluginstore.RequestKindMetadata)
+	return pluginstore.PluginAuthConfigured(source, plugin, storeAuth)
 }
 
 // latestPluginVersions resolves the latest release version of each registry

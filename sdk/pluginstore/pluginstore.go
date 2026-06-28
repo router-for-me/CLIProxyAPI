@@ -106,6 +106,10 @@ func AuthConfigured(auth []AuthConfig, requestURL string, kind string) bool {
 	return internalpluginstore.AuthConfigured(auth, requestURL, kind)
 }
 
+func PluginAuthConfigured(source Source, plugin Plugin, auth []AuthConfig) bool {
+	return internalpluginstore.PluginAuthConfigured(source, plugin, auth)
+}
+
 func UpdateAvailable(installed, latest string) bool {
 	return internalpluginstore.UpdateAvailable(installed, latest)
 }

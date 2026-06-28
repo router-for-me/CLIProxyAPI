@@ -1181,6 +1181,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "plugins", "configs")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -1762,8 +1763,41 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 	}
 }
 
-func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
-	if key == "" || dstRoot == nil || srcRoot == nil {
+func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, keyPath ...string) {
+	if len(keyPath) == 0 || dstRoot == nil || srcRoot == nil {
+		return
+	}
+	if len(keyPath) > 1 {
+		dstParent := dstRoot
+		srcParent := srcRoot
+		for _, key := range keyPath[:len(keyPath)-1] {
+			if key == "" || dstParent == nil || dstParent.Kind != yaml.MappingNode {
+				return
+			}
+			dstIdx := findMapKeyIndex(dstParent, key)
+			if dstIdx < 0 || dstIdx+1 >= len(dstParent.Content) {
+				return
+			}
+			dstParent = dstParent.Content[dstIdx+1]
+
+			if srcParent != nil && srcParent.Kind == yaml.MappingNode {
+				srcIdx := findMapKeyIndex(srcParent, key)
+				if srcIdx >= 0 && srcIdx+1 < len(srcParent.Content) {
+					srcParent = srcParent.Content[srcIdx+1]
+				} else {
+					srcParent = nil
+				}
+			}
+		}
+		if srcParent == nil || srcParent.Kind != yaml.MappingNode {
+			removeMapKey(dstParent, keyPath[len(keyPath)-1])
+			return
+		}
+		pruneMappingToGeneratedKeys(dstParent, srcParent, keyPath[len(keyPath)-1])
+		return
+	}
+	key := keyPath[0]
+	if key == "" {
 		return
 	}
 	if dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {
