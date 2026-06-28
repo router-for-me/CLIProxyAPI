@@ -25,7 +25,7 @@ func TestInstallBlocksLoadedWindowsPlugin(t *testing.T) {
 		loaded      bool
 		wantBlocked bool
 	}{
-		{name: "windows loaded", goos: "windows", loaded: true, wantBlocked: true},
+		{name: "windows loaded", goos: "windows", loaded: true, wantBlocked: false},
 		{name: "windows not loaded", goos: "windows", loaded: false, wantBlocked: false},
 		{name: "linux loaded", goos: "linux", loaded: true, wantBlocked: false},
 		{name: "darwin loaded", goos: "darwin", loaded: true, wantBlocked: false},
@@ -53,10 +53,18 @@ func TestInstallBlocksLoadedWindowsPlugin(t *testing.T) {
 func TestInstallArchiveBlocksLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	t.Parallel()
 
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "windows", "amd64")
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(filepath.Join(targetDir, "sample-provider-v0.1.0.dll"), []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
 	_, errInstall := InstallArchive(makeZip(t, map[string]string{
 		"sample-provider.dll": "library-data",
 	}), testPlugin(), InstallOptions{
-		PluginsDir:   t.TempDir(),
+		PluginsDir:   root,
 		GOOS:         "windows",
 		GOARCH:       "amd64",
 		PluginLoaded: func() bool { return true },
@@ -74,7 +82,7 @@ func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
 		t.Fatalf("MkdirAll() error = %v", errMkdir)
 	}
-	targetPath := filepath.Join(targetDir, "sample-provider.dll")
+	targetPath := filepath.Join(targetDir, "sample-provider-v0.1.0.dll")
 	if errWrite := os.WriteFile(targetPath, []byte("old"), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
@@ -120,7 +128,7 @@ func TestInstallArchiveSkipsIdenticalLoadedWindowsPlugin(t *testing.T) {
 	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
 		t.Fatalf("MkdirAll() error = %v", errMkdir)
 	}
-	targetPath := filepath.Join(targetDir, "sample-provider.dll")
+	targetPath := filepath.Join(targetDir, "sample-provider-v0.1.0.dll")
 	if errWrite := os.WriteFile(targetPath, []byte("same"), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
@@ -170,7 +178,7 @@ func TestInstallArchiveWritesPlatformPlugin(t *testing.T) {
 	if errInstall != nil {
 		t.Fatalf("InstallArchive() error = %v", errInstall)
 	}
-	wantPath := filepath.Join(root, "darwin", "arm64", "sample-provider.dylib")
+	wantPath := filepath.Join(root, "darwin", "arm64", "sample-provider-v0.1.0.dylib")
 	if result.Path != wantPath {
 		t.Fatalf("Path = %q, want %q", result.Path, wantPath)
 	}
@@ -191,7 +199,7 @@ func TestInstallArchiveReportsOverwrite(t *testing.T) {
 	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
 		t.Fatalf("MkdirAll() error = %v", errMkdir)
 	}
-	if errWrite := os.WriteFile(filepath.Join(targetDir, "sample-provider.dylib"), []byte("old"), 0o644); errWrite != nil {
+	if errWrite := os.WriteFile(filepath.Join(targetDir, "sample-provider-v0.1.0.dylib"), []byte("old"), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
 	result, errInstall := InstallArchive(makeZip(t, map[string]string{
@@ -209,7 +217,10 @@ func TestInstallArchiveOverwritesRuntimeSelectedPlugin(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	existingPath := filepath.Join(root, "sample-provider"+pluginExtension(runtime.GOOS))
+	existingPath := filepath.Join(root, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+pluginExtension(runtime.GOOS))
+	if errMkdir := os.MkdirAll(filepath.Dir(existingPath), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
 	if errWrite := os.WriteFile(existingPath, []byte("old"), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
@@ -327,7 +338,7 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 	if result.Version != "0.2.0" {
 		t.Fatalf("Version = %q, want 0.2.0 from latest release tag", result.Version)
 	}
-	data, errRead := os.ReadFile(filepath.Join(root, "darwin", "arm64", "sample-provider.dylib"))
+	data, errRead := os.ReadFile(filepath.Join(root, "darwin", "arm64", "sample-provider-v0.2.0.dylib"))
 	if errRead != nil {
 		t.Fatalf("ReadFile() error = %v", errRead)
 	}
@@ -366,12 +377,188 @@ func TestInstallVersionUsesPinnedReleaseTag(t *testing.T) {
 	if result.Version != "0.3.0" {
 		t.Fatalf("Version = %q, want 0.3.0", result.Version)
 	}
-	data, errRead := os.ReadFile(filepath.Join(root, "linux", "amd64", "sample-provider.so"))
+	data, errRead := os.ReadFile(filepath.Join(root, "linux", "amd64", "sample-provider-v0.3.0.so"))
 	if errRead != nil {
 		t.Fatalf("ReadFile() error = %v", errRead)
 	}
 	if string(data) != "library-data" {
 		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestInstallManifestResolvesDirectArtifactsFromSource(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.so": "library-data"})
+	checksum := sha256.Sum256(archiveData)
+	registryURL := "https://registry.example/registry.json"
+	artifactURL := "https://downloads.example/sample-provider_0.4.0_linux_amd64.zip"
+	latestArtifactURL := "https://downloads.example/sample-provider_0.5.0_linux_amd64.zip"
+	client := Client{HTTPClient: mapHTTPDoer{
+		registryURL: []byte(`{
+			"schema_version": 2,
+			"plugins": [{
+				"id": "sample-provider",
+				"name": "Sample Provider",
+				"description": "Adds sample provider support.",
+				"author": "author-name",
+				"version": "0.5.0",
+				"install": {
+					"type": "direct",
+					"artifacts": [{
+						"goos": "linux",
+						"goarch": "amd64",
+						"url": "` + latestArtifactURL + `",
+						"sha256": "` + hex.EncodeToString(checksum[:]) + `"
+					}]
+				},
+				"versions": [{
+					"version": "0.4.0",
+					"install": {
+						"type": "direct",
+						"artifacts": [{
+							"goos": "linux",
+							"goarch": "amd64",
+							"url": "` + artifactURL + `",
+							"sha256": "` + hex.EncodeToString(checksum[:]) + `"
+						}]
+					}
+				}]
+			}]
+		}`),
+		artifactURL: archiveData,
+	}}
+
+	result, errInstall := client.InstallManifest(context.Background(), Manifest{
+		SchemaVersion: SchemaVersionV2,
+		ID:            "sample-provider",
+		Version:       "0.4.0",
+		SourceURL:     registryURL,
+		Install:       InstallPlan{Type: InstallTypeDirect},
+	}, InstallOptions{
+		PluginsDir: root,
+		GOOS:       "linux",
+		GOARCH:     "amd64",
+	})
+	if errInstall != nil {
+		t.Fatalf("InstallManifest() error = %v", errInstall)
+	}
+	if result.InstallType != InstallTypeDirect || result.Version != "0.4.0" {
+		t.Fatalf("result = %#v, want direct 0.4.0", result)
+	}
+	data, errRead := os.ReadFile(filepath.Join(root, "linux", "amd64", "sample-provider-v0.4.0.so"))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "library-data" {
+		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestInstallDirectDownloadsMatchingArtifactWithBearerAuth(t *testing.T) {
+	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.so": "library-data"})
+	checksum := sha256.Sum256(archiveData)
+	artifactURL := "https://downloads.example/private/sample-provider_0.4.0_linux_amd64.zip"
+	client := Client{
+		HTTPClient: authCheckingHTTPDoer{
+			url:           artifactURL,
+			wantAuth:      "Bearer secret-token",
+			responseBytes: archiveData,
+		},
+		Auth: []AuthConfig{{
+			Match:    "https://downloads.example/private/",
+			ApplyTo:  []string{RequestKindArtifact},
+			Type:     AuthTypeBearer,
+			TokenEnv: "PLUGIN_STORE_TOKEN",
+		}},
+	}
+
+	plugin := testPlugin()
+	plugin.Version = "0.4.0"
+	plugin.Install = InstallPlan{
+		Type: InstallTypeDirect,
+		Artifacts: []Artifact{{
+			GOOS:   "linux",
+			GOARCH: "amd64",
+			URL:    artifactURL,
+			SHA256: hex.EncodeToString(checksum[:]),
+		}},
+	}
+	result, errInstall := client.Install(context.Background(), plugin, InstallOptions{
+		PluginsDir: root,
+		GOOS:       "linux",
+		GOARCH:     "amd64",
+	})
+	if errInstall != nil {
+		t.Fatalf("Install() error = %v", errInstall)
+	}
+	if result.InstallType != InstallTypeDirect || result.Version != "0.4.0" {
+		t.Fatalf("result = %#v, want direct 0.4.0", result)
+	}
+	data, errRead := os.ReadFile(filepath.Join(root, "linux", "amd64", "sample-provider-v0.4.0.so"))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "library-data" {
+		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestInstallDirectRejectsChecksumMismatch(t *testing.T) {
+	t.Parallel()
+
+	archiveData := makeZip(t, map[string]string{"sample-provider.so": "library-data"})
+	client := Client{HTTPClient: mapHTTPDoer{
+		"https://downloads.example/sample-provider.zip": archiveData,
+	}}
+	plugin := testPlugin()
+	plugin.Version = "0.4.0"
+	plugin.Install = InstallPlan{
+		Type: InstallTypeDirect,
+		Artifacts: []Artifact{{
+			GOOS:   "linux",
+			GOARCH: "amd64",
+			URL:    "https://downloads.example/sample-provider.zip",
+			SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		}},
+	}
+	_, errInstall := client.Install(context.Background(), plugin, InstallOptions{
+		PluginsDir: t.TempDir(),
+		GOOS:       "linux",
+		GOARCH:     "amd64",
+	})
+	if errInstall == nil {
+		t.Fatal("Install() error = nil")
+	}
+	if !strings.Contains(errInstall.Error(), "checksum mismatch") {
+		t.Fatalf("Install() error = %v, want checksum mismatch", errInstall)
+	}
+}
+
+func TestDownloadArtifactEnforcesDeclaredSizeDuringRead(t *testing.T) {
+	t.Parallel()
+
+	body := &trackingReadCloser{data: []byte("0123456789")}
+	sum := sha256.Sum256(body.data)
+	client := Client{HTTPClient: singleResponseHTTPDoer{body: body}}
+	_, errDownload := client.DownloadArtifact(context.Background(), Artifact{
+		GOOS:   "linux",
+		GOARCH: "amd64",
+		URL:    "https://downloads.example/sample-provider.zip",
+		SHA256: hex.EncodeToString(sum[:]),
+		Size:   4,
+	})
+	if errDownload == nil {
+		t.Fatal("DownloadArtifact() error = nil")
+	}
+	if !strings.Contains(errDownload.Error(), "maximum allowed size") {
+		t.Fatalf("DownloadArtifact() error = %v, want size limit", errDownload)
+	}
+	if body.offset > 5 {
+		t.Fatalf("download read %d bytes, want at most size+1", body.offset)
 	}
 }
 
@@ -435,6 +622,68 @@ func (c mapHTTPDoer) Do(req *http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(bytes.NewReader(body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+type authCheckingHTTPDoer struct {
+	url           string
+	wantAuth      string
+	responseBytes []byte
+}
+
+type singleResponseHTTPDoer struct {
+	body io.ReadCloser
+}
+
+func (c singleResponseHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       c.body,
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+type trackingReadCloser struct {
+	data   []byte
+	offset int
+}
+
+func (r *trackingReadCloser) Read(p []byte) (int, error) {
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
+}
+
+func (r *trackingReadCloser) Close() error {
+	return nil
+}
+
+func (c authCheckingHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	if req.URL.String() != c.url {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	if gotAuth := req.Header.Get("Authorization"); gotAuth != c.wantAuth {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(strings.NewReader("bad auth")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(c.responseBytes)),
 		Header:     make(http.Header),
 		Request:    req,
 	}, nil

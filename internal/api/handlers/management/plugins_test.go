@@ -172,6 +172,60 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	}
 }
 
+func TestListPluginsUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
+	t.Parallel()
+
+	pluginsDir := t.TempDir()
+	archDir := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", archDir, errMkdirAll)
+	}
+	extension := managementPluginExtension(runtime.GOOS)
+	pinnedPath := filepath.Join(archDir, "sample-provider-v0.1.0"+extension)
+	newerPath := filepath.Join(archDir, "sample-provider-v0.2.0"+extension)
+	for _, path := range []string{pinnedPath, newerPath} {
+		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+		}
+	}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: true\nstore:\n  version: 0.1.0\n"),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
+
+	h.ListPlugins(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body pluginListResponse
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("decode response: %v; body=%s", errDecode, rec.Body.String())
+	}
+	for _, entry := range body.Plugins {
+		if entry.ID != "sample-provider" {
+			continue
+		}
+		if entry.Path != pinnedPath || !entry.Configured || !entry.Enabled {
+			t.Fatalf("plugin entry = %#v, want pinned path %s", entry, pinnedPath)
+		}
+		return
+	}
+	t.Fatalf("sample-provider entry missing: %#v", body.Plugins)
+}
+
 func TestGetPluginConfigReturnsPreservedRawConfig(t *testing.T) {
 	t.Parallel()
 
@@ -539,6 +593,55 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	}
 	close(releaseReload)
 	waitForReloadDone(t, reloadDone)
+}
+
+func TestDeletePluginUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
+	t.Parallel()
+
+	pluginsDir := t.TempDir()
+	archDir := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", archDir, errMkdirAll)
+	}
+	extension := managementPluginExtension(runtime.GOOS)
+	pinnedPath := filepath.Join(archDir, "sample-provider-v0.1.0"+extension)
+	newerPath := filepath.Join(archDir, "sample-provider-v0.2.0"+extension)
+	for _, path := range []string{pinnedPath, newerPath} {
+		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+		}
+	}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir: pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: true\nstore:\n  version: 0.1.0\n"),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample-provider", nil)
+
+	h.DeletePlugin(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if _, ok := h.cfg.Plugins.Configs["sample-provider"]; ok {
+		t.Fatal("plugin config still exists after delete")
+	}
+	if _, errStat := os.Stat(pinnedPath); !os.IsNotExist(errStat) {
+		t.Fatalf("pinned plugin stat error = %v, want not exist", errStat)
+	}
+	if _, errStat := os.Stat(newerPath); errStat != nil {
+		t.Fatalf("newer plugin stat error = %v, want still exists", errStat)
+	}
 }
 
 func TestDeletePluginReturnsNotFoundForUnknownPlugin(t *testing.T) {
