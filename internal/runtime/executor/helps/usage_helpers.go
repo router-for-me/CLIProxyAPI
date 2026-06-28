@@ -480,6 +480,8 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 		usageNode.Get("completion_tokens").Exists() ||
 		usageNode.Get("output_tokens").Exists() ||
 		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("prompt_cache_hit_tokens").Exists() ||
+		usageNode.Get("prompt_cache_miss_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
@@ -500,12 +502,28 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		OutputTokens: outputNode.Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
+	cacheHit := usageNode.Get("prompt_cache_hit_tokens")
+	cacheMiss := usageNode.Get("prompt_cache_miss_tokens")
+	if cacheHit.Exists() {
+		detail.CacheHitInputTokens = cacheHit.Int()
+		detail.CachedTokens = detail.CacheHitInputTokens
+	}
+	if cacheMiss.Exists() {
+		detail.CacheMissInputTokens = cacheMiss.Int()
+	}
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
-	if cached.Exists() {
+	if cached.Exists() && detail.CachedTokens == 0 {
 		detail.CachedTokens = cached.Int()
+		detail.CacheHitInputTokens = detail.CachedTokens
+		if detail.InputTokens > detail.CacheHitInputTokens {
+			detail.CacheMissInputTokens = detail.InputTokens - detail.CacheHitInputTokens
+		}
+	}
+	if detail.InputTokens == 0 && (detail.CacheHitInputTokens > 0 || detail.CacheMissInputTokens > 0) {
+		detail.InputTokens = detail.CacheHitInputTokens + detail.CacheMissInputTokens
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {

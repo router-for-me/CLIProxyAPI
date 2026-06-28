@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,99 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
 		requireFailField(t, payload, http.StatusOK, "")
+	})
+}
+
+func TestUsageQueuePluginPayloadIncludesDeepSeekCacheSplit(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "deepseek-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "deepseek",
+			Model:       "deepseek-v4-pro",
+			Alias:       "deepseek-reasoner",
+			APIKey:      "test-key",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:          1222504,
+				OutputTokens:         12287,
+				ReasoningTokens:      3544,
+				CachedTokens:         1056256,
+				CacheHitInputTokens:  1056256,
+				CacheMissInputTokens: 166248,
+				TotalTokens:          1234791,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireIntField(t, payload, "tokens.input_tokens", 1222504)
+		requireIntField(t, payload, "tokens.output_tokens", 12287)
+		requireIntField(t, payload, "tokens.reasoning_tokens", 3544)
+		requireIntField(t, payload, "tokens.cached_tokens", 1056256)
+		requireIntField(t, payload, "tokens.cache_hit_input_tokens", 1056256)
+		requireIntField(t, payload, "tokens.cache_miss_input_tokens", 166248)
+	})
+}
+
+func TestUsageQueuePluginPayloadInfersInputFromCachedTokensOnly(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "cached-only-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "openai",
+			Model:       "gpt-5.4",
+			APIKey:      "test-key",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				CachedTokens: 11,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireIntField(t, payload, "tokens.input_tokens", 11)
+		requireIntField(t, payload, "tokens.cached_tokens", 11)
+		requireIntField(t, payload, "tokens.cache_hit_input_tokens", 11)
+		requireIntField(t, payload, "tokens.cache_miss_input_tokens", 0)
+	})
+}
+
+func TestUsageQueuePluginPayloadDoesNotInferCacheMissWithoutCacheFields(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "plain-usage-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "openai",
+			Model:       "gpt-5.4",
+			APIKey:      "test-key",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:  42,
+				OutputTokens: 7,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireIntField(t, payload, "tokens.input_tokens", 42)
+		requireIntField(t, payload, "tokens.cache_hit_input_tokens", 0)
+		requireIntField(t, payload, "tokens.cache_miss_input_tokens", 0)
 	})
 }
 
@@ -282,6 +376,36 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	}
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
+	}
+}
+
+func requireIntField(t *testing.T, payload map[string]json.RawMessage, dottedPath string, want int64) {
+	t.Helper()
+
+	parts := strings.Split(dottedPath, ".")
+	current := payload
+	var raw json.RawMessage
+	for index, part := range parts {
+		value, ok := current[part]
+		if !ok {
+			t.Fatalf("payload missing field %q", dottedPath)
+		}
+		if index == len(parts)-1 {
+			raw = value
+			break
+		}
+		var next map[string]json.RawMessage
+		if err := json.Unmarshal(value, &next); err != nil {
+			t.Fatalf("unmarshal nested field %q: %v", part, err)
+		}
+		current = next
+	}
+	var got int64
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal int field %q: %v", dottedPath, err)
+	}
+	if got != want {
+		t.Fatalf("field %q = %d, want %d", dottedPath, got, want)
 	}
 }
 
