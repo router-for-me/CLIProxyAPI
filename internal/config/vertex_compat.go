@@ -17,6 +17,10 @@ type VertexCompatKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// SelectionWeight controls weighted-round-robin share within the same priority bucket.
+	// Defaults to 1 when unset; 0 drains new selections without disabling the credential.
+	SelectionWeight *int `yaml:"selection-weight,omitempty" json:"selection-weight,omitempty"`
+
 	// Prefix optionally namespaces model aliases for this credential (e.g., "teamA/vertex-pro").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -74,6 +78,7 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.SelectionWeight = normalizeSelectionWeight(entry.SelectionWeight)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)

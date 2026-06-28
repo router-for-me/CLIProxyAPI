@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -427,6 +428,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
+				if weight, okWeight := gjsonSelectionWeight(data); okWeight {
+					fileData["selection_weight"] = weight
+				} else {
+					fileData["selection_weight"] = 1
+				}
 				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
 					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
 						fileData["note"] = trimmed
@@ -553,6 +559,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	entry["selection_weight"] = effectiveAuthFileSelectionWeight(auth)
 	// Expose note from Attributes (set by synthesizer from JSON "note" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if note := strings.TrimSpace(authAttribute(auth, "note")); note != "" {
@@ -1218,6 +1225,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		}
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
+	syncAuthFileSelectionWeightAttribute(auth)
 	return auth, nil
 }
 
@@ -1408,6 +1416,28 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
+		root := rootAuthFileField(fieldPath)
+		if root == "selection_weight" || root == "selection-weight" {
+			if fieldPath != root {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
+				return
+			}
+			if value != nil {
+				if _, okWeight := authFileSelectionWeightValue(value); !okWeight {
+					c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
+					return
+				}
+			}
+			fieldPath = "selection_weight"
+			delete(targetAuth.Metadata, "selection-weight")
+			root = "selection_weight"
+			if value == nil {
+				delete(targetAuth.Metadata, "selection_weight")
+				touchedRoots[root] = struct{}{}
+				changed = true
+				continue
+			}
+		}
 
 		if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
@@ -1415,7 +1445,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
 			return
 		}
-		if root := rootAuthFileField(fieldPath); root != "" {
+		if root != "" {
 			touchedRoots[root] = struct{}{}
 		}
 		changed = true
@@ -1566,6 +1596,12 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["priority"]; ok {
 		syncAuthFilePriorityAttribute(auth)
 	}
+	if _, ok := touchedRoots["selection_weight"]; ok {
+		syncAuthFileSelectionWeightAttribute(auth)
+	}
+	if _, ok := touchedRoots["selection-weight"]; ok {
+		syncAuthFileSelectionWeightAttribute(auth)
+	}
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
@@ -1617,6 +1653,8 @@ func authFileIntValue(value any) (int, bool) {
 	switch typed := value.(type) {
 	case int:
 		return typed, true
+	case int32:
+		return int(typed), true
 	case int64:
 		return int(typed), true
 	case float64:
@@ -1628,6 +1666,111 @@ func authFileIntValue(value any) (int, bool) {
 	case string:
 		if i, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
 			return i, true
+		}
+	}
+	return 0, false
+}
+
+func authFileSelectionWeightValue(value any) (int, bool) {
+	weight, ok := authFileStrictIntValue(value)
+	if !ok || weight < 0 {
+		return 0, false
+	}
+	return weight, true
+}
+
+func authFileStrictIntValue(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case float64:
+		if math.Trunc(typed) != typed {
+			return 0, false
+		}
+		return int(typed), true
+	case json.Number:
+		if i, err := typed.Int64(); err == nil {
+			return int(i), true
+		}
+	case string:
+		if i, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func syncAuthFileSelectionWeightAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	weight, ok := metadataAuthFileSelectionWeight(auth.Metadata)
+	if !ok {
+		delete(auth.Attributes, "selection_weight")
+		return
+	}
+	auth.Attributes["selection_weight"] = strconv.Itoa(weight)
+}
+
+func metadataAuthFileSelectionWeight(metadata map[string]any) (int, bool) {
+	if metadata == nil {
+		return 0, false
+	}
+	value, ok := metadata["selection_weight"]
+	if !ok {
+		value, ok = metadata["selection-weight"]
+	}
+	if !ok || value == nil {
+		return 0, false
+	}
+	return authFileSelectionWeightValue(value)
+}
+
+func effectiveAuthFileSelectionWeight(auth *coreauth.Auth) int {
+	if auth == nil {
+		return 1
+	}
+	for _, key := range []string{"selection_weight", "selection-weight", "weight"} {
+		if raw := strings.TrimSpace(authAttribute(auth, key)); raw != "" {
+			parsed, errParse := strconv.Atoi(raw)
+			if errParse == nil && parsed >= 0 {
+				return parsed
+			}
+			return 1
+		}
+	}
+	if weight, ok := metadataAuthFileSelectionWeight(auth.Metadata); ok {
+		return weight
+	}
+	return 1
+}
+
+func gjsonSelectionWeight(data []byte) (int, bool) {
+	value := gjson.GetBytes(data, "selection_weight")
+	if !value.Exists() {
+		value = gjson.GetBytes(data, "selection-weight")
+	}
+	if !value.Exists() {
+		return 0, false
+	}
+	switch value.Type {
+	case gjson.Number:
+		parsed, errParse := strconv.ParseInt(value.Raw, 10, 0)
+		if errParse != nil || parsed < 0 {
+			return 0, false
+		}
+		return int(parsed), true
+	case gjson.String:
+		parsed, errParse := strconv.Atoi(strings.TrimSpace(value.String()))
+		if errParse == nil && parsed >= 0 {
+			return parsed, true
 		}
 	}
 	return 0, false

@@ -29,6 +29,14 @@ type RoundRobinSelector struct {
 	maxKeys int
 }
 
+// WeightedRoundRobinSelector selects available credentials according to each
+// credential's selection_weight attribute within the highest priority bucket.
+type WeightedRoundRobinSelector struct {
+	mu      sync.Mutex
+	cursors map[string]int
+	maxKeys int
+}
+
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
@@ -127,6 +135,31 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+func authSelectionWeight(auth *Auth) int {
+	if auth == nil || auth.Attributes == nil {
+		return 1
+	}
+	for _, key := range []string{"selection_weight", "selection-weight", "weight"} {
+		raw := strings.TrimSpace(auth.Attributes[key])
+		if raw == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return 1
+		}
+		return parsed
+	}
+	return 1
+}
+
+func scheduledAuthSelectionWeight(entry *scheduledAuth) int {
+	if entry == nil || entry.meta == nil {
+		return 0
+	}
+	return entry.meta.selectionWeight
+}
+
 func canonicalModelKey(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -172,7 +205,7 @@ func authWebsocketsEnabled(auth *Auth) bool {
 	return false
 }
 
-func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
+func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth, selectable func(*Auth) bool) []*Auth {
 	if len(available) == 0 {
 		return available
 	}
@@ -186,7 +219,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	wsEnabled := make([]*Auth, 0, len(available))
 	for i := 0; i < len(available); i++ {
 		candidate := available[i]
-		if authWebsocketsEnabled(candidate) {
+		if authWebsocketsEnabled(candidate) && (selectable == nil || selectable(candidate)) {
 			wsEnabled = append(wsEnabled, candidate)
 		}
 	}
@@ -253,6 +286,75 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 	return available, nil
 }
 
+func getWeightedAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+
+	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	if len(availableByPriority) == 0 {
+		if cooldownCount == len(auths) && !earliest.IsZero() {
+			providerForError := provider
+			if providerForError == "mixed" {
+				providerForError = ""
+			}
+			resetIn := earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
+			return nil, newModelCooldownError(model, providerForError, resetIn)
+		}
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+
+	priorities := make([]int, 0, len(availableByPriority))
+	for priority := range availableByPriority {
+		priorities = append(priorities, priority)
+	}
+	sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+
+	for _, priority := range priorities {
+		available := availableByPriority[priority]
+		hasPositiveWeight := false
+		for _, candidate := range available {
+			if authSelectionWeight(candidate) > 0 {
+				hasPositiveWeight = true
+				break
+			}
+		}
+		if !hasPositiveWeight {
+			continue
+		}
+		if len(available) > 1 {
+			sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+		}
+		return available, nil
+	}
+
+	return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+}
+
+func getPinnedAvailableAuth(auths []*Auth, provider, model, authID string, now time.Time) (*Auth, error) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	for _, auth := range auths {
+		if auth == nil || auth.ID != authID {
+			continue
+		}
+		available, err := getAvailableAuths([]*Auth{auth}, provider, model, now)
+		if err != nil {
+			return nil, err
+		}
+		if len(available) == 0 {
+			return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+		}
+		return available[0], nil
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
 // Pick selects the next available auth for the provider in a round-robin manner.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
@@ -261,7 +363,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferCodexWebsocketAuths(ctx, provider, available, nil)
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -282,9 +384,84 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	return available[index%len(available)], nil
 }
 
+// Pick selects the next available auth for the provider using weighted round-robin.
+func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	if pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata); pinnedAuthID != "" {
+		return getPinnedAvailableAuth(auths, provider, model, pinnedAuthID, now)
+	}
+	available, err := getWeightedAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available, func(auth *Auth) bool {
+		return authSelectionWeight(auth) > 0
+	})
+	key := provider + ":" + canonicalModelKey(model)
+	s.mu.Lock()
+	if s.cursors == nil {
+		s.cursors = make(map[string]int)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+
+	s.ensureCursorKey(key, limit)
+	cursor := s.cursors[key]
+	if cursor >= 2_147_483_640 {
+		cursor = 0
+	}
+	picked, nextCursor := pickWeightedAuth(available, cursor)
+	if picked == nil {
+		s.mu.Unlock()
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+	s.cursors[key] = nextCursor
+	s.mu.Unlock()
+	return picked, nil
+}
+
+func pickWeightedAuth(auths []*Auth, cursor int) (*Auth, int) {
+	totalWeight := 0
+	for _, auth := range auths {
+		weight := authSelectionWeight(auth)
+		if weight > 0 {
+			totalWeight += weight
+		}
+	}
+	if totalWeight <= 0 {
+		return nil, cursor
+	}
+	slot := cursor % totalWeight
+	if slot < 0 {
+		slot += totalWeight
+	}
+	running := 0
+	for _, auth := range auths {
+		weight := authSelectionWeight(auth)
+		if weight <= 0 {
+			continue
+		}
+		running += weight
+		if slot < running {
+			return auth, cursor + 1
+		}
+	}
+	return nil, cursor
+}
+
 // ensureCursorKey ensures the cursor map has capacity for the given key.
 // Must be called with s.mu held.
 func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
+	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
+		s.cursors = make(map[string]int)
+	}
+}
+
+// ensureCursorKey ensures the cursor map has capacity for the given key.
+// Must be called with s.mu held.
+func (s *WeightedRoundRobinSelector) ensureCursorKey(key string, limit int) {
 	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
 		s.cursors = make(map[string]int)
 	}
@@ -298,7 +475,7 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferCodexWebsocketAuths(ctx, provider, available, nil)
 	return available[0], nil
 }
 
@@ -369,14 +546,21 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback Selector
-	cache    *SessionCache
+	fallback        Selector
+	cache           *SessionCache
+	modelResolverMu sync.RWMutex
+	modelResolver   SessionAffinityModelResolver
 }
+
+// SessionAffinityModelResolver resolves the model used to validate a bound
+// auth's availability in route-aware manager flows.
+type SessionAffinityModelResolver func(auth *Auth, routeModel string) string
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
-	Fallback Selector
-	TTL      time.Duration
+	Fallback      Selector
+	TTL           time.Duration
+	ModelResolver SessionAffinityModelResolver
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -396,9 +580,75 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:      cfg.Fallback,
+		cache:         NewSessionCache(cfg.TTL),
+		modelResolver: cfg.ModelResolver,
 	}
+}
+
+// SetModelResolver updates the optional route-aware availability model resolver.
+func (s *SessionAffinitySelector) SetModelResolver(resolver SessionAffinityModelResolver) {
+	if s == nil {
+		return
+	}
+	s.modelResolverMu.Lock()
+	s.modelResolver = resolver
+	s.modelResolverMu.Unlock()
+}
+
+func (s *SessionAffinitySelector) availabilityModel(auth *Auth, routeModel string) string {
+	if s == nil {
+		return routeModel
+	}
+	s.modelResolverMu.RLock()
+	resolver := s.modelResolver
+	s.modelResolverMu.RUnlock()
+	if resolver == nil {
+		return routeModel
+	}
+	if resolved := strings.TrimSpace(resolver(auth, routeModel)); resolved != "" {
+		return resolved
+	}
+	return routeModel
+}
+
+func (s *SessionAffinitySelector) hasModelResolver() bool {
+	if s == nil {
+		return false
+	}
+	s.modelResolverMu.RLock()
+	hasResolver := s.modelResolver != nil
+	s.modelResolverMu.RUnlock()
+	return hasResolver
+}
+
+func (s *SessionAffinitySelector) pickFallback(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if !s.hasModelResolver() {
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+
+	sanitized := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		candidate := auth.Clone()
+		candidate.ModelStates = nil
+		candidate.Unavailable = false
+		candidate.NextRetryAfter = time.Time{}
+		candidate.Quota = QuotaState{}
+		sanitized = append(sanitized, candidate)
+	}
+	picked, err := s.fallback.Pick(ctx, provider, model, opts, sanitized)
+	if err != nil || picked == nil {
+		return picked, err
+	}
+	for _, auth := range auths {
+		if auth != nil && auth.ID == picked.ID {
+			return auth, nil
+		}
+	}
+	return picked, nil
 }
 
 // Pick selects an auth with session affinity when possible.
@@ -419,26 +669,18 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	if primaryID == "" {
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, auths)
-	}
-
-	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
-	if err != nil {
-		return nil, err
+		return s.pickFallback(ctx, provider, model, opts, auths)
 	}
 
 	cacheKey := provider + "::" + primaryID + "::" + model
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
-		for _, auth := range available {
-			if auth.ID == cachedAuthID {
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return auth, nil
-			}
+		if auth := s.availableAuthByID(auths, cachedAuthID, model, time.Now()); auth != nil {
+			entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+			return auth, nil
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
+		auth, err := s.pickFallback(ctx, provider, model, opts, auths)
 		if err != nil {
 			return nil, err
 		}
@@ -450,23 +692,39 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey := provider + "::" + fallbackID + "::" + model
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-			for _, auth := range available {
-				if auth.ID == cachedAuthID {
-					s.cache.Set(cacheKey, auth.ID)
-					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-					return auth, nil
-				}
+			if auth := s.availableAuthByID(auths, cachedAuthID, model, time.Now()); auth != nil {
+				s.cache.Set(cacheKey, auth.ID)
+				entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+				return auth, nil
 			}
 		}
 	}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
+	auth, err := s.pickFallback(ctx, provider, model, opts, auths)
 	if err != nil {
 		return nil, err
 	}
 	s.cache.Set(cacheKey, auth.ID)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
+}
+
+func (s *SessionAffinitySelector) availableAuthByID(auths []*Auth, authID string, model string, now time.Time) *Auth {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	for _, auth := range auths {
+		if auth == nil || auth.ID != authID {
+			continue
+		}
+		blocked, _, _ := isAuthBlockedForModel(auth, s.availabilityModel(auth, model), now)
+		if !blocked {
+			return auth
+		}
+		return nil
+	}
+	return nil
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {

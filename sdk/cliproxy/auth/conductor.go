@@ -282,6 +282,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.bindSessionAffinitySelector(selector)
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
@@ -313,7 +314,7 @@ func (m *Manager) hasPluginScheduler() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *FillFirstSelector, *WeightedRoundRobinSelector:
 		return true
 	default:
 		return false
@@ -465,6 +466,7 @@ func (m *Manager) SetSelector(selector Selector) {
 	if selector == nil {
 		selector = &RoundRobinSelector{}
 	}
+	m.bindSessionAffinitySelector(selector)
 	m.mu.Lock()
 	m.selector = selector
 	m.mu.Unlock()
@@ -472,6 +474,14 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
 	}
+}
+
+func (m *Manager) bindSessionAffinitySelector(selector Selector) {
+	sessionSelector, ok := selector.(*SessionAffinitySelector)
+	if !ok || sessionSelector == nil {
+		return
+	}
+	sessionSelector.SetModelResolver(m.selectionModelForAuth)
 }
 
 // SetStore swaps the underlying persistence store.
@@ -1407,6 +1417,71 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	return available, nil
 }
 
+func (m *Manager) allAvailableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+
+	available := make([]*Auth, 0, len(auths))
+	cooldownCount := 0
+	var earliest time.Time
+	for _, candidate := range auths {
+		checkModel := m.selectionModelForAuth(candidate, routeModel)
+		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+		if !blocked {
+			available = append(available, candidate)
+			continue
+		}
+		if reason == blockReasonCooldown {
+			cooldownCount++
+			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
+				earliest = next
+			}
+		}
+	}
+	if len(available) == 0 {
+		if cooldownCount == len(auths) && !earliest.IsZero() {
+			providerForError := provider
+			if providerForError == "mixed" {
+				providerForError = ""
+			}
+			resetIn := earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
+			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+		}
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+	sort.Slice(available, func(i, j int) bool {
+		leftPriority := authPriority(available[i])
+		rightPriority := authPriority(available[j])
+		if leftPriority != rightPriority {
+			return leftPriority > rightPriority
+		}
+		return available[i].ID < available[j].ID
+	})
+	return available, nil
+}
+
+func (m *Manager) availableAuthsForRouteModelForSelector(auths []*Auth, provider, routeModel string, now time.Time, selector Selector) ([]*Auth, error) {
+	if selectorNeedsAllAvailableAuths(selector) {
+		return m.allAvailableAuthsForRouteModel(auths, provider, routeModel, now)
+	}
+	return m.availableAuthsForRouteModel(auths, provider, routeModel, now)
+}
+
+func selectorNeedsAllAvailableAuths(selector Selector) bool {
+	switch typed := selector.(type) {
+	case *WeightedRoundRobinSelector:
+		return true
+	case *SessionAffinitySelector:
+		return typed != nil
+	default:
+		return false
+	}
+}
+
 func selectionArgForSelector(selector Selector, routeModel string) string {
 	if isBuiltInSelector(selector) {
 		return ""
@@ -1490,11 +1565,12 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 			continue
 		}
 		out = append(out, pluginapi.SchedulerAuthCandidate{
-			ID:         auth.ID,
-			Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
-			Priority:   authPriority(auth),
-			Status:     string(auth.Status),
-			Attributes: schedulerSafeAttributes(auth.Attributes),
+			ID:              auth.ID,
+			Provider:        strings.ToLower(strings.TrimSpace(auth.Provider)),
+			Priority:        authPriority(auth),
+			SelectionWeight: authSelectionWeight(auth),
+			Status:          string(auth.Status),
+			Attributes:      schedulerSafeAttributes(auth.Attributes),
 		})
 	}
 	return out
@@ -1547,6 +1623,8 @@ func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
 		return schedulerStrategyRoundRobin, true
 	case pluginapi.SchedulerBuiltinFillFirst:
 		return schedulerStrategyFillFirst, true
+	case pluginapi.SchedulerBuiltinWeightedRoundRobin:
+		return schedulerStrategyWeightedRR, true
 	default:
 		return schedulerStrategyCustom, false
 	}
@@ -4339,7 +4417,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModelForSelector(candidates, provider, model, time.Now(), selector)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
@@ -4499,7 +4577,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModelForSelector(candidates, "mixed", model, time.Now(), selector)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable

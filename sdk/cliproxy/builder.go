@@ -248,6 +248,8 @@ func (b *Builder) Build() (*Service, error) {
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
+		case "weighted-round-robin", "weighted_round_robin", "weighted-rr", "weightedrr", "wrr":
+			selector = &coreauth.WeightedRoundRobinSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}

@@ -1277,6 +1277,8 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			return "fill-first"
+		case "weighted-round-robin", "weighted_round_robin", "weighted-rr", "weightedrr", "wrr":
+			return "weighted-round-robin"
 		default:
 			return "round-robin"
 		}
@@ -1296,6 +1298,8 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(newCfg *config.Config, synt
 		switch nextStrategy {
 		case "fill-first":
 			selector = &coreauth.FillFirstSelector{}
+		case "weighted-round-robin":
+			selector = &coreauth.WeightedRoundRobinSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}

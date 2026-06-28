@@ -474,6 +474,135 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_SelectionWeightParsing(t *testing.T) {
+	tests := []struct {
+		name      string
+		fieldName string
+		weight    any
+		want      string
+		hasValue  bool
+	}{
+		{
+			name:      "string with spaces",
+			fieldName: "selection_weight",
+			weight:    " 10 ",
+			want:      "10",
+			hasValue:  true,
+		},
+		{
+			name:      "hyphen field",
+			fieldName: "selection-weight",
+			weight:    8,
+			want:      "8",
+			hasValue:  true,
+		},
+		{
+			name:      "zero drains new selections",
+			fieldName: "selection_weight",
+			weight:    0,
+			want:      "0",
+			hasValue:  true,
+		},
+		{
+			name:      "invalid string",
+			fieldName: "selection_weight",
+			weight:    "1x",
+			hasValue:  false,
+		},
+		{
+			name:      "negative",
+			fieldName: "selection_weight",
+			weight:    -1,
+			hasValue:  false,
+		},
+		{
+			name:      "fractional number",
+			fieldName: "selection_weight",
+			weight:    1.5,
+			hasValue:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			authData := map[string]any{
+				"type":       "claude",
+				tt.fieldName: tt.weight,
+			}
+			data, _ := json.Marshal(authData)
+			errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+			if errWriteFile != nil {
+				t.Fatalf("failed to write auth file: %v", errWriteFile)
+			}
+
+			synth := NewFileSynthesizer()
+			ctx := &SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+
+			auths, errSynthesize := synth.Synthesize(ctx)
+			if errSynthesize != nil {
+				t.Fatalf("unexpected error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+
+			value, ok := auths[0].Attributes["selection_weight"]
+			if tt.hasValue {
+				if !ok {
+					t.Fatal("expected selection_weight attribute to be set")
+				}
+				if value != tt.want {
+					t.Fatalf("expected selection_weight %q, got %q", tt.want, value)
+				}
+				return
+			}
+			if ok {
+				t.Fatalf("expected selection_weight attribute to be absent, got %q", value)
+			}
+		})
+	}
+}
+
+func TestMetadataSelectionWeight_ProgrammaticIntegerTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    int
+		wantOK  bool
+		keyName string
+	}{
+		{name: "int", value: int(2), want: 2, wantOK: true},
+		{name: "int32", value: int32(3), want: 3, wantOK: true},
+		{name: "int64", value: int64(4), want: 4, wantOK: true},
+		{name: "json number", value: json.Number("5"), want: 5, wantOK: true},
+		{name: "hyphen json number", keyName: "selection-weight", value: json.Number("6"), want: 6, wantOK: true},
+		{name: "negative int", value: int(-1), wantOK: false},
+		{name: "fractional json number", value: json.Number("1.5"), wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keyName := tt.keyName
+			if keyName == "" {
+				keyName = "selection_weight"
+			}
+			got, ok := metadataSelectionWeight(map[string]any{keyName: tt.value})
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("weight = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{

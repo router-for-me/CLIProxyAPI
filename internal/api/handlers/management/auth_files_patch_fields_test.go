@@ -212,6 +212,264 @@ func TestPatchAuthFileFields_WebsocketsFalseIsUpdate(t *testing.T) {
 	}
 }
 
+func TestPatchAuthFileFields_SelectionWeightIsSynced(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "weighted.json",
+		FileName: "weighted.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": "/tmp/weighted.json",
+		},
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"weighted.json","selection_weight":0}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("weighted.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	if got := updated.Attributes["selection_weight"]; got != "0" {
+		t.Fatalf("attrs selection_weight = %q, want 0", got)
+	}
+	if got, ok := updated.Metadata["selection_weight"].(json.Number); !ok || got.String() != "0" {
+		t.Fatalf("metadata.selection_weight = %#v, want json.Number(0)", updated.Metadata["selection_weight"])
+	}
+}
+
+func TestPatchAuthFileFields_SelectionWeightCanonicalizesAlias(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "weighted.json",
+		FileName: "weighted.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":             "/tmp/weighted.json",
+			"selection_weight": "2",
+		},
+		Metadata: map[string]any{
+			"type":             "codex",
+			"selection-weight": 2,
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"weighted.json","selection_weight":0}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("weighted.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	if _, ok := updated.Metadata["selection-weight"]; ok {
+		t.Fatalf("metadata still contains selection-weight alias: %#v", updated.Metadata)
+	}
+	if got, ok := updated.Metadata["selection_weight"].(json.Number); !ok || got.String() != "0" {
+		t.Fatalf("metadata.selection_weight = %#v, want json.Number(0)", updated.Metadata["selection_weight"])
+	}
+	if got := updated.Attributes["selection_weight"]; got != "0" {
+		t.Fatalf("attrs selection_weight = %q, want 0", got)
+	}
+}
+
+func TestPatchAuthFileFields_SelectionWeightNullClearsField(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "weighted.json",
+		FileName: "weighted.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":             "/tmp/weighted.json",
+			"selection_weight": "2",
+		},
+		Metadata: map[string]any{
+			"type":             "codex",
+			"selection_weight": 2,
+			"selection-weight": 3,
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"weighted.json","selection_weight":null}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("weighted.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	if _, ok := updated.Metadata["selection_weight"]; ok {
+		t.Fatalf("metadata still contains selection_weight: %#v", updated.Metadata)
+	}
+	if _, ok := updated.Metadata["selection-weight"]; ok {
+		t.Fatalf("metadata still contains selection-weight alias: %#v", updated.Metadata)
+	}
+	if _, ok := updated.Attributes["selection_weight"]; ok {
+		t.Fatalf("attrs still contain selection_weight: %#v", updated.Attributes)
+	}
+}
+
+func TestPatchAuthFileFields_SelectionWeightRejectsNegative(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "weighted.json",
+		FileName: "weighted.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": "/tmp/weighted.json",
+		},
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"weighted.json","selection_weight":-1}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchAuthFileFields_SelectionWeightRejectsFractional(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "weighted.json",
+		FileName: "weighted.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": "/tmp/weighted.json",
+		},
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"weighted.json","selection_weight":1.5}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
+
+func TestBuildAuthFromFileDataSelectionWeightFallback(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "weighted.json")
+	auth, err := (&Handler{}).buildAuthFromFileData(authPath, []byte(`{"type":"codex","selection_weight":0}`))
+	if err != nil {
+		t.Fatalf("buildAuthFromFileData() error = %v", err)
+	}
+	if auth == nil {
+		t.Fatalf("buildAuthFromFileData() = nil")
+	}
+	if got := auth.Attributes["selection_weight"]; got != "0" {
+		t.Fatalf("Attributes selection_weight = %q, want 0", got)
+	}
+}
+
+func TestAuthFileSelectionWeightValueProgrammaticIntegerTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  any
+		want   int
+		wantOK bool
+	}{
+		{name: "int32", value: int32(7), want: 7, wantOK: true},
+		{name: "json number", value: json.Number("8"), want: 8, wantOK: true},
+		{name: "fractional json number", value: json.Number("1.5"), wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := authFileSelectionWeightValue(tt.value)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("weight = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPatchAuthFileFields_ArbitraryFieldsPersistToFile(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 

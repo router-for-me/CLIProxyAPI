@@ -227,6 +227,33 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	}
 }
 
+func TestCodexIdentityConfuseEnabledRoutingStrategies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		strategy string
+		want     bool
+	}{
+		{name: "weighted round robin", strategy: "weighted-round-robin", want: true},
+		{name: "round robin", strategy: "round-robin", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := &config.Config{
+				Routing: config.RoutingConfig{Strategy: tt.strategy},
+				Codex:   config.CodexConfig{IdentityConfuse: true},
+			}
+			if got := codexIdentityConfuseEnabled(cfg); got != tt.want {
+				t.Fatalf("codexIdentityConfuseEnabled(%q) = %v, want %v", tt.strategy, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyCodexHeadersUsesAccountHeaderForOAuth(t *testing.T) {
 	httpReq := httptest.NewRequest("POST", "https://example.com/responses", nil)
 	auth := &cliproxyauth.Auth{

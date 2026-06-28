@@ -328,7 +328,7 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "weighted-round-robin".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -439,6 +439,10 @@ type ClaudeKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// SelectionWeight controls weighted-round-robin share within the same priority bucket.
+	// Defaults to 1 when unset; 0 drains new selections without disabling the credential.
+	SelectionWeight *int `yaml:"selection-weight,omitempty" json:"selection-weight,omitempty"`
+
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -502,6 +506,10 @@ type CodexKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// SelectionWeight controls weighted-round-robin share within the same priority bucket.
+	// Defaults to 1 when unset; 0 drains new selections without disabling the credential.
+	SelectionWeight *int `yaml:"selection-weight,omitempty" json:"selection-weight,omitempty"`
+
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -557,6 +565,10 @@ type GeminiKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// SelectionWeight controls weighted-round-robin share within the same priority bucket.
+	// Defaults to 1 when unset; 0 drains new selections without disabling the credential.
+	SelectionWeight *int `yaml:"selection-weight,omitempty" json:"selection-weight,omitempty"`
+
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-3-pro-preview").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -608,6 +620,10 @@ type OpenAICompatibility struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// SelectionWeight controls weighted-round-robin share for credentials derived from this provider.
+	// Per-key entries may override it. Defaults to 1 when unset.
+	SelectionWeight *int `yaml:"selection-weight,omitempty" json:"selection-weight,omitempty"`
+
 	// Disabled prevents this provider from being used for routing.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 
@@ -634,6 +650,10 @@ type OpenAICompatibility struct {
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// SelectionWeight controls weighted-round-robin share for this API key.
+	// Defaults to the provider selection-weight, then 1.
+	SelectionWeight *int `yaml:"selection-weight,omitempty" json:"selection-weight,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
@@ -961,8 +981,12 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e := cfg.OpenAICompatibility[i]
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.SelectionWeight = normalizeSelectionWeight(e.SelectionWeight)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		for j := range e.APIKeyEntries {
+			e.APIKeyEntries[j].SelectionWeight = normalizeSelectionWeight(e.APIKeyEntries[j].SelectionWeight)
+		}
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -982,6 +1006,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 	for i := range cfg.CodexKey {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.SelectionWeight = normalizeSelectionWeight(e.SelectionWeight)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
@@ -1001,6 +1026,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.SelectionWeight = normalizeSelectionWeight(entry.SelectionWeight)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
@@ -1022,6 +1048,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.SelectionWeight = normalizeSelectionWeight(entry.SelectionWeight)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
@@ -1034,6 +1061,13 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		out = append(out, entry)
 	}
 	cfg.GeminiKey = out
+}
+
+func normalizeSelectionWeight(weight *int) *int {
+	if weight == nil || *weight >= 0 {
+		return weight
+	}
+	return nil
 }
 
 func normalizeModelPrefix(prefix string) string {

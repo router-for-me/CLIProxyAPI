@@ -297,12 +297,12 @@ func TestRegisterModelsPrunesStaleClientAfterSnapshotChange(t *testing.T) {
 	})
 	host.RegisterModels(context.Background(), modelRegistry)
 
-	host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+	setHostTestSnapshot(host, capabilityRecord{
 		id: "bravo",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 			ModelRegistrar: staticModelRegistrar("provider-b", "model-b"),
 		}},
-	}}})
+	})
 	host.RegisterModels(context.Background(), modelRegistry)
 
 	if _, okClient := modelRegistry.clients["plugin:alpha:provider-a"]; okClient {
@@ -319,16 +319,16 @@ func TestRegisterModelsPrunesStaleClientAfterSnapshotChange(t *testing.T) {
 func TestRegisterModelsDropsResultsWhenSnapshotChangesDuringRegistration(t *testing.T) {
 	modelRegistry := newFakeModelRegistry()
 	host := New()
-	oldSnap := &Snapshot{enabled: true, records: []capabilityRecord{{
+	setHostTestSnapshot(host, capabilityRecord{
 		id: "alpha",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 			ModelRegistrar: modelRegistrarFunc(func(ctx context.Context, req pluginapi.ModelRegistrationRequest) (pluginapi.ModelRegistrationResponse, error) {
-				host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+				setHostTestSnapshot(host, capabilityRecord{
 					id: "bravo",
 					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 						ModelRegistrar: staticModelRegistrar("provider-b", "model-b"),
 					}},
-				}}})
+				})
 				return pluginapi.ModelRegistrationResponse{
 					Provider: "provider-a",
 					Models: []pluginapi.ModelInfo{{
@@ -337,8 +337,7 @@ func TestRegisterModelsDropsResultsWhenSnapshotChangesDuringRegistration(t *test
 				}, nil
 			}),
 		}},
-	}}}
-	host.snapshot.Store(oldSnap)
+	})
 	host.modelProviders["alpha"] = "existing-provider"
 
 	host.RegisterModels(context.Background(), modelRegistry)
@@ -805,17 +804,17 @@ func TestRegisterExecutorsDropsResultsWhenSnapshotChangesBeforeCommit(t *testing
 		identifierFunc: func() string {
 			if !changedSnapshot {
 				changedSnapshot = true
-				host.snapshot.Store(&Snapshot{enabled: true})
+				setHostTestSnapshot(host)
 			}
 			return "provider-a"
 		},
 	}
-	host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+	setHostTestSnapshot(host, capabilityRecord{
 		id: "alpha",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 			Executor: exec,
 		}},
-	}}})
+	})
 
 	host.RegisterExecutors(manager, nil)
 
@@ -1113,7 +1112,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 			name:     "request translator",
 			pluginID: "request-translator-panic",
 			call: func(host *Host) ([]byte, bool) {
-				host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+				setHostTestSnapshot(host, capabilityRecord{
 					id:       "request-translator-panic",
 					priority: 10,
 					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
@@ -1121,7 +1120,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 							panic("request translator panic")
 						}),
 					}},
-				}}})
+				})
 				return host.TranslateRequest(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("body"), false)
 			},
 		},
@@ -1129,7 +1128,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 			name:     "response before normalizer",
 			pluginID: "response-before-panic",
 			call: func(host *Host) ([]byte, bool) {
-				host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+				setHostTestSnapshot(host, capabilityRecord{
 					id:       "response-before-panic",
 					priority: 10,
 					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
@@ -1137,7 +1136,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 							panic("response before panic")
 						}),
 					}},
-				}}})
+				})
 				return host.NormalizeResponseBefore(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", nil, nil, []byte("body"), false), false
 			},
 		},
@@ -1145,7 +1144,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 			name:     "response translator",
 			pluginID: "response-translator-panic",
 			call: func(host *Host) ([]byte, bool) {
-				host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+				setHostTestSnapshot(host, capabilityRecord{
 					id:       "response-translator-panic",
 					priority: 10,
 					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
@@ -1153,7 +1152,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 							panic("response translator panic")
 						}),
 					}},
-				}}})
+				})
 				return host.TranslateResponse(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", nil, nil, []byte("body"), false)
 			},
 		},
@@ -1161,7 +1160,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 			name:     "response after normalizer",
 			pluginID: "response-after-panic",
 			call: func(host *Host) ([]byte, bool) {
-				host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+				setHostTestSnapshot(host, capabilityRecord{
 					id:       "response-after-panic",
 					priority: 10,
 					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
@@ -1169,7 +1168,7 @@ func TestTranslatorPanicFusesEveryHookPath(t *testing.T) {
 							panic("response after panic")
 						}),
 					}},
-				}}})
+				})
 				return host.NormalizeResponseAfter(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", nil, nil, []byte("body"), false), false
 			},
 		},
@@ -2189,7 +2188,7 @@ func TestRegisterFrontendAuthProvidersPrunesStaleKeys(t *testing.T) {
 		t.Fatalf("registered providers did not include %q", key)
 	}
 
-	host.snapshot.Store(&Snapshot{enabled: true})
+	setHostTestSnapshot(host)
 	host.RegisterFrontendAuthProviders()
 	if registeredProviderIdentifier(key) {
 		t.Fatalf("registered providers still included stale key %q", key)
@@ -2330,14 +2329,12 @@ func TestRegisterFrontendAuthProvidersClearsExclusiveProviderWhenExclusivePlugin
 		t.Fatalf("exclusive RegisteredProviders() = %#v, want only %q", got, exclusiveKey)
 	}
 
-	host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{
-		{
-			id: "normal-auth",
-			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-				FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
-			}},
-		},
-	}})
+	setHostTestSnapshot(host, capabilityRecord{
+		id: "normal-auth",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			FrontendAuthProvider: frontendAuthProviderFunc{identifier: "custom-auth"},
+		}},
+	})
 	host.RegisterFrontendAuthProviders()
 
 	providers := sdkaccess.RegisteredProviders()
@@ -2402,12 +2399,12 @@ func TestUsageAdapterUsesCurrentSnapshotCapability(t *testing.T) {
 		pluginID: "usage-active",
 		plugin:   oldPlugin,
 	}
-	host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{
+	setHostTestSnapshot(host, capabilityRecord{
 		id: "usage-active",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 			UsagePlugin: newPlugin,
 		}},
-	}}})
+	})
 
 	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider"})
 
@@ -2437,7 +2434,7 @@ func TestRegisterUsagePluginsStaleAdapterSkipsRemovedCapability(t *testing.T) {
 		pluginID: "usage-active",
 		plugin:   plugin,
 	}
-	host.snapshot.Store(&Snapshot{enabled: true})
+	setHostTestSnapshot(host)
 	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider"})
 
 	if calls != 0 {
@@ -2447,9 +2444,12 @@ func TestRegisterUsagePluginsStaleAdapterSkipsRemovedCapability(t *testing.T) {
 
 func TestAccessAdapterUnauthenticatedReturnsNotHandled(t *testing.T) {
 	host := New()
+	path, version := setHostTestPluginIdentity(host, "auth-plugin")
 	adapter := &accessAdapter{
 		host:     host,
 		pluginID: "auth-plugin",
+		path:     path,
+		version:  version,
 		provider: frontendAuthProviderFunc{
 			identifier: "custom-auth",
 			authenticate: func(ctx context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
@@ -2473,9 +2473,12 @@ func TestAccessAdapterUnauthenticatedReturnsNotHandled(t *testing.T) {
 
 func TestAccessAdapterPanicFusesAndReturnsNotHandled(t *testing.T) {
 	host := New()
+	path, version := setHostTestPluginIdentity(host, "auth-panic")
 	adapter := &accessAdapter{
 		host:     host,
 		pluginID: "auth-panic",
+		path:     path,
+		version:  version,
 		provider: frontendAuthProviderFunc{
 			identifier: "custom-auth",
 			authenticate: func(ctx context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
@@ -2502,10 +2505,13 @@ func TestAccessAdapterPanicFusesAndReturnsNotHandled(t *testing.T) {
 
 func TestAccessAdapterBodyReadFailureReturnsInternalError(t *testing.T) {
 	host := New()
+	path, version := setHostTestPluginIdentity(host, "auth-plugin")
 	called := false
 	adapter := &accessAdapter{
 		host:     host,
 		pluginID: "auth-plugin",
+		path:     path,
+		version:  version,
 		provider: frontendAuthProviderFunc{
 			identifier: "custom-auth",
 			authenticate: func(ctx context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
@@ -2534,9 +2540,12 @@ func TestAccessAdapterBodyReadFailureReturnsInternalError(t *testing.T) {
 
 func TestAccessAdapterErrorReturnsNotHandledAndRestoresBody(t *testing.T) {
 	host := New()
+	path, version := setHostTestPluginIdentity(host, "auth-plugin")
 	adapter := &accessAdapter{
 		host:     host,
 		pluginID: "auth-plugin",
+		path:     path,
+		version:  version,
 		provider: frontendAuthProviderFunc{
 			identifier: "custom-auth",
 			authenticate: func(ctx context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
@@ -2640,9 +2649,12 @@ func TestExecutorAdapterMethods(t *testing.T) {
 			}, nil
 		},
 	}
+	path, version := setHostTestPluginIdentity(host, "executor-plugin")
 	adapter := &executorAdapter{
 		host:          host,
 		pluginID:      "executor-plugin",
+		path:          path,
+		version:       version,
 		provider:      "plugin-provider",
 		executor:      exec,
 		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
@@ -2764,9 +2776,13 @@ func TestExecutorAdapterUsesResponseFormatForOutputTranslation(t *testing.T) {
 	openAIRequest := []byte(`{"model":"model-1","messages":[{"role":"user","content":"hi"}]}`)
 
 	var captured pluginapi.ExecutorRequest
+	host := New()
+	path, version := setHostTestPluginIdentity(host, "executor-plugin")
 	adapter := &executorAdapter{
-		host:          New(),
+		host:          host,
 		pluginID:      "executor-plugin",
+		path:          path,
+		version:       version,
 		provider:      "plugin-provider",
 		inputFormats:  []sdktranslator.Format{sdktranslator.FormatClaude},
 		outputFormats: []sdktranslator.Format{sdktranslator.FormatClaude},
@@ -2824,9 +2840,12 @@ func TestExecutorAdapterSelectsCustomOutputWithHostResponseTranslator(t *testing
 		sdktranslator.SetPluginHooks(nil)
 	})
 
+	path, version := setHostTestPluginIdentity(host, "executor-plugin")
 	adapter := &executorAdapter{
 		host:          host,
 		pluginID:      "executor-plugin",
+		path:          path,
+		version:       version,
 		provider:      "plugin-provider",
 		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
 		outputFormats: []sdktranslator.Format{customOutputFormat},
@@ -2960,10 +2979,13 @@ func TestExecutorAdapterKeepsRawStreamFallbackWithOnlyHostResponseTranslator(t *
 
 func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 	host := New()
+	path, version := setHostTestPluginIdentity(host, "executor-panic")
 	calls := 0
 	adapter := &executorAdapter{
 		host:          host,
 		pluginID:      "executor-panic",
+		path:          path,
+		version:       version,
 		provider:      "plugin-provider",
 		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
 		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
@@ -3036,9 +3058,61 @@ func TestMapExecutorStreamChunksExitsWhenContextCanceledWithoutDownstreamConsume
 
 func newHostWithRecords(records ...capabilityRecord) *Host {
 	host := New()
-	sortRecords(records)
-	host.snapshot.Store(&Snapshot{enabled: true, records: records})
+	setHostTestSnapshot(host, records...)
 	return host
+}
+
+func setHostTestPluginIdentity(host *Host, id string) (string, string) {
+	id = strings.TrimSpace(id)
+	path := cleanPluginPath("/test/plugins/" + id)
+	version := "test-version"
+	host.mu.Lock()
+	if host.pluginFileVersions == nil {
+		host.pluginFileVersions = make(map[string]string)
+	}
+	if host.activePluginVersions == nil {
+		host.activePluginVersions = make(map[string]string)
+	}
+	if host.activePluginPaths == nil {
+		host.activePluginPaths = make(map[string]string)
+	}
+	host.pluginFileVersions[path] = version
+	host.activePluginVersions[id] = version
+	host.activePluginPaths[id] = path
+	host.mu.Unlock()
+	return path, version
+}
+
+func setHostTestSnapshot(host *Host, records ...capabilityRecord) *Snapshot {
+	sortRecords(records)
+	host.mu.Lock()
+	host.pluginFileVersions = make(map[string]string)
+	host.activePluginVersions = make(map[string]string)
+	host.activePluginPaths = make(map[string]string)
+	for index := range records {
+		id := strings.TrimSpace(records[index].id)
+		if id == "" {
+			continue
+		}
+		records[index].id = id
+		path := cleanPluginPath(records[index].path)
+		if path == "" {
+			path = cleanPluginPath("/test/plugins/" + id)
+		}
+		version := strings.TrimSpace(records[index].version)
+		if version == "" {
+			version = "test-version"
+		}
+		records[index].path = path
+		records[index].version = version
+		host.pluginFileVersions[path] = version
+		host.activePluginVersions[id] = version
+		host.activePluginPaths[id] = path
+	}
+	host.mu.Unlock()
+	snap := &Snapshot{enabled: true, records: records}
+	host.snapshot.Store(snap)
+	return snap
 }
 
 type stringSliceAlias []string
