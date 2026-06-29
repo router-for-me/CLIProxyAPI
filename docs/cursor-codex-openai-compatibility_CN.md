@@ -275,3 +275,43 @@ cli-proxy-api.before-...
 - Cursor “一句话结束”已通过 `custom_tool_call` 桥接修复。
 - Cursor 反复读文件的原因是 `tool_choice:"required"` 强制范围过大。
 - `e55f5497` 已将规则收窄：工具结果返回后不再强制 required，让模型可以最终回答。
+
+## 2026-06-29 继续诊断：Cursor 本地文件查找失败
+
+用户反馈 Cursor 仍然显示“读取不到文件”，截图中表现为：
+
+- 在当前工作区找不到 Word 或其他文件
+- 去上一级或 `Documents` 下搜索
+- 搜索 `最终缺失图片清单.txt` / `生成报告.txt`
+- 仍然停留在“Search files attempted”
+
+服务器 trace 显示：
+
+```text
+orig_last_role=tool
+converted_tool_choice=<missing>
+converted_output_matched=true
+orig_last_tool_class=not-found / error / ok
+```
+
+这个结果说明：
+
+- `e55f5497` 的修复生效了：工具结果回来后不再强制 `tool_choice:"required"`。
+- 代理没有丢掉工具结果：`converted_output_matched=true`。
+- Cursor 本地工具确实返回了结果，其中有 `not-found` / `error`，也有 `ok`。
+- 当前问题更像是 Cursor 本地工具的工作区/路径解析失败，而不是 OpenAI/Codex 协议转换层再次丢工具。
+
+为继续定位，新增 trace 字段：
+
+- Codex 返回工具调用时，记录 `item_arg_hint`
+  - 对 `Glob` / `ReadFile` 等记录 `path` / `file_path` / `query` / `pattern` / `cwd`
+  - 对 `Shell.command` 只记录长度，不记录命令正文
+- Cursor 返回工具失败时，记录 `orig_last_tool_failure`
+  - 只在 `not-found` / `empty-glob` / `permission` / `outside-workspace` / `error` 等失败分类时出现
+  - 成功工具输出不记录正文，避免把文件内容写进日志
+
+下一步复现时需要看：
+
+- `item_arg_hint` 中 Cursor 实际被要求查找的路径/模式
+- `orig_last_tool_failure` 中 Cursor 本地工具返回的失败摘要
+- 如果路径指向工作区外，则应调整 Cursor 打开的工作区根目录，或让任务文件进入当前 workspace；代理无法让 Cursor 本地工具越过它自己的工作区权限边界。

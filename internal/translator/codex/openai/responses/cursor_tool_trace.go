@@ -59,6 +59,7 @@ func traceOpenAIResponsesResponse(rawJSON []byte) {
 		fields["item_name"] = gjson.GetBytes(rawJSON, "item.name").String()
 		fields["item_input"] = lengthBucket(gjson.GetBytes(rawJSON, "item.input").String())
 		fields["item_arguments"] = lengthBucket(gjson.GetBytes(rawJSON, "item.arguments").String())
+		fields["item_arg_hint"] = summarizeToolArguments(rawJSON)
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		fields["arguments_delta"] = true
 	case "response.custom_tool_call_input.done":
@@ -140,6 +141,67 @@ func lastInputCallID(raw []byte) string {
 		}
 	}
 	return ""
+}
+
+func summarizeToolArguments(rawJSON []byte) string {
+	item := gjson.GetBytes(rawJSON, "item")
+	arguments := item.Get("arguments").String()
+	if arguments == "" {
+		arguments = item.Get("input").String()
+	}
+	if arguments == "" {
+		return ""
+	}
+	args := gjson.Parse(arguments)
+	if !args.IsObject() {
+		return lengthBucket(arguments)
+	}
+	values := make([]string, 0)
+	for _, key := range []string{
+		"path",
+		"file_path",
+		"filePath",
+		"filepath",
+		"file",
+		"query",
+		"pattern",
+		"glob",
+		"cwd",
+		"relative_workspace_path",
+	} {
+		value := args.Get(key)
+		if !value.Exists() {
+			continue
+		}
+		values = append(values, key+"="+compactTraceText(value.String(), 160))
+	}
+	if command := args.Get("command").String(); command != "" {
+		values = append(values, "command_"+lengthBucket(command))
+	}
+	if len(values) > 0 {
+		return strings.Join(values, ",")
+	}
+	keys := make([]string, 0, len(args.Map()))
+	for key := range args.Map() {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return "<object>"
+	}
+	return "keys=" + strings.Join(keys, ",")
+}
+
+func compactTraceText(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(value), "_")
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		value = string(runes[:maxRunes]) + "..."
+	}
+	return value
 }
 
 func lengthBucket(value string) string {

@@ -32,6 +32,7 @@ func traceOpenAIChatRequest(original []byte, converted []byte) {
 		"orig_last_tool_call_id":   lastToolCallID(original),
 		"orig_last_tool_output":    lastToolOutputSummary(original),
 		"orig_last_tool_class":     lastToolOutputClass(original),
+		"orig_last_tool_failure":   lastToolOutputFailureHint(original),
 		"converted_tools":          countArray(converted, "tools"),
 		"converted_tool_choice":    summarizeJSONField(converted, "tool_choice"),
 		"converted_input":          countArray(converted, "input"),
@@ -67,6 +68,7 @@ func traceOpenAIChatResponse(dataType string, useLegacy bool, rawJSON []byte, ou
 		fields["item_name"] = gjson.GetBytes(rawJSON, "item.name").String()
 		fields["item_input"] = lengthBucket(gjson.GetBytes(rawJSON, "item.input").String())
 		fields["item_arguments"] = lengthBucket(gjson.GetBytes(rawJSON, "item.arguments").String())
+		fields["item_arg_hint"] = summarizeToolArguments(rawJSON)
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		fields["arguments_delta"] = true
 	case "response.custom_tool_call_input.done":
@@ -205,6 +207,26 @@ func lastToolOutputClass(raw []byte) string {
 	return ""
 }
 
+func lastToolOutputFailureHint(raw []byte) string {
+	messages := gjson.GetBytes(raw, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	items := messages.Array()
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Get("role").String() != "tool" {
+			continue
+		}
+		content := items[i].Get("content")
+		class := classifyToolOutput(content)
+		if class == "" || class == "ok" {
+			return ""
+		}
+		return compactTraceText(class+":"+toolOutputText(content), 240)
+	}
+	return ""
+}
+
 func lastInputTypes(raw []byte, limit int) []string {
 	input := gjson.GetBytes(raw, "input")
 	if !input.IsArray() {
@@ -292,10 +314,7 @@ func classifyToolOutput(result gjson.Result) string {
 	if !result.Exists() {
 		return "missing"
 	}
-	text := result.String()
-	if text == "" {
-		text = result.Raw
-	}
+	text := toolOutputText(result)
 	if text == "" {
 		return "empty"
 	}
@@ -327,6 +346,104 @@ func classifyToolOutput(result gjson.Result) string {
 	default:
 		return "ok"
 	}
+}
+
+func toolOutputText(result gjson.Result) string {
+	if !result.Exists() {
+		return ""
+	}
+	if result.IsArray() {
+		parts := make([]string, 0)
+		for _, item := range result.Array() {
+			if text := item.Get("text").String(); text != "" {
+				parts = append(parts, text)
+				continue
+			}
+			if text := item.Get("content").String(); text != "" {
+				parts = append(parts, text)
+				continue
+			}
+			if item.Raw != "" {
+				parts = append(parts, item.Raw)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " ")
+		}
+	}
+	if result.IsObject() {
+		for _, key := range []string{"error", "message", "text", "content", "output"} {
+			if text := result.Get(key).String(); text != "" {
+				return text
+			}
+		}
+	}
+	text := result.String()
+	if text == "" {
+		text = result.Raw
+	}
+	return text
+}
+
+func summarizeToolArguments(rawJSON []byte) string {
+	item := gjson.GetBytes(rawJSON, "item")
+	arguments := item.Get("arguments").String()
+	if arguments == "" {
+		arguments = item.Get("input").String()
+	}
+	if arguments == "" {
+		return ""
+	}
+	args := gjson.Parse(arguments)
+	if !args.IsObject() {
+		return lengthBucket(arguments)
+	}
+	values := make([]string, 0)
+	for _, key := range []string{
+		"path",
+		"file_path",
+		"filePath",
+		"filepath",
+		"file",
+		"query",
+		"pattern",
+		"glob",
+		"cwd",
+		"relative_workspace_path",
+	} {
+		value := args.Get(key)
+		if !value.Exists() {
+			continue
+		}
+		values = append(values, key+"="+compactTraceText(value.String(), 160))
+	}
+	if command := args.Get("command").String(); command != "" {
+		values = append(values, "command_"+lengthBucket(command))
+	}
+	if len(values) > 0 {
+		return strings.Join(values, ",")
+	}
+	keys := make([]string, 0, len(args.Map()))
+	for key := range args.Map() {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return "<object>"
+	}
+	return "keys=" + strings.Join(keys, ",")
+}
+
+func compactTraceText(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(value), "_")
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		value = string(runes[:maxRunes]) + "..."
+	}
+	return value
 }
 
 func lengthBucket(value string) string {
