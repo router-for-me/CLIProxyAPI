@@ -42,7 +42,10 @@ func traceOpenAIChatResponse(dataType string, useLegacy bool, rawJSON []byte, ou
 		return
 	}
 	if dataType != "response.output_item.added" &&
+		dataType != "response.output_item.done" &&
 		dataType != "response.function_call_arguments.delta" &&
+		dataType != "response.custom_tool_call_input.delta" &&
+		dataType != "response.custom_tool_call_input.done" &&
 		dataType != "response.output_text.delta" &&
 		dataType != "response.completed" {
 		return
@@ -54,11 +57,15 @@ func traceOpenAIChatResponse(dataType string, useLegacy bool, rawJSON []byte, ou
 		"out_chunks": len(out),
 	}
 	switch dataType {
-	case "response.output_item.added":
+	case "response.output_item.added", "response.output_item.done":
 		fields["item_type"] = gjson.GetBytes(rawJSON, "item.type").String()
 		fields["item_name"] = gjson.GetBytes(rawJSON, "item.name").String()
-	case "response.function_call_arguments.delta":
+		fields["item_input"] = lengthBucket(gjson.GetBytes(rawJSON, "item.input").String())
+		fields["item_arguments"] = lengthBucket(gjson.GetBytes(rawJSON, "item.arguments").String())
+	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		fields["arguments_delta"] = true
+	case "response.custom_tool_call_input.done":
+		fields["input_done"] = lengthBucket(gjson.GetBytes(rawJSON, "input").String())
 	case "response.output_text.delta":
 		fields["text_delta"] = true
 	case "response.completed":

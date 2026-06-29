@@ -124,6 +124,72 @@ func TestConvertCodexResponseToOpenAI_LegacyFunctionsEmitFunctionCall(t *testing
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_CustomToolCallEmitsToolCall(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected custom tool call announcement chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.id").String(); got != "call_apply" {
+		t.Fatalf("tool call id = %q, want call_apply; chunk=%s", got, string(out[0]))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "ApplyPatch" {
+		t.Fatalf("tool call name = %q, want ApplyPatch; chunk=%s", got, string(out[0]))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"*** Begin Patch\n*** End Patch"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected custom tool input chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("tool call arguments = %q; chunk=%s", got, string(out[0]))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.completed","response":{"status":"completed"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected completion chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls; chunk=%s", got, string(out[0]))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_CustomToolCallInputDoneEmitsArguments(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected custom tool call announcement chunk, got %d", len(out))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.custom_tool_call_input.done","input":"patch text"}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected custom tool input done chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "patch text" {
+		t.Fatalf("tool call arguments = %q; chunk=%s", got, string(out[0]))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamCustomToolCall(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"patch text"}]}}`)
+
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.5", nil, nil, raw, nil)
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.name").String(); got != "ApplyPatch" {
+		t.Fatalf("tool call name = %q, want ApplyPatch; response=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != "patch text" {
+		t.Fatalf("tool call arguments = %q; response=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls; response=%s", got, string(out))
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamPartialImageEmitsDeltaImages(t *testing.T) {
 	ctx := context.Background()
 	var param any
