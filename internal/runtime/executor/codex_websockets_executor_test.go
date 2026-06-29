@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -224,6 +225,101 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for error stream chunk")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompact(t *testing.T) {
+	capturedCompactPayload := make(chan []byte, 1)
+	websocketHit := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses/compact":
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+				http.Error(w, "read compact body", http.StatusInternalServerError)
+				return
+			}
+			capturedCompactPayload <- bytes.Clone(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_codex_ws_compact","model":"gpt-5.5","output":[{"type":"compaction","encrypted_content":"opaque-ws"}],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`))
+		case "/responses":
+			select {
+			case websocketHit <- struct{}{}:
+			default:
+			}
+			http.Error(w, "unexpected websocket request", http.StatusInternalServerError)
+		default:
+			t.Errorf("path = %q, want /responses/compact", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "sk-test",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"gpt-5.5","stream":true,"previous_response_id":"resp_old_ws","input":[{"type":"compaction_trigger"}]}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: payload,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		ResponseFormat:  sdktranslator.FromString("openai-response"),
+		OriginalRequest: payload,
+		Stream:          true,
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream compaction trigger error: %v", err)
+	}
+
+	var streamed bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("compact stream chunk error = %v", chunk.Err)
+		}
+		streamed.Write(chunk.Payload)
+	}
+
+	select {
+	case payload := <-capturedCompactPayload:
+		if codexWebsocketInputHasItemType(payload, "compaction_trigger") {
+			t.Fatalf("compaction_trigger reached codex compact body: %s", payload)
+		}
+		if gjson.GetBytes(payload, "stream").Exists() {
+			t.Fatalf("stream exists in compact body: %s", payload)
+		}
+		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp_old_ws" {
+			t.Fatalf("previous_response_id = %q, want resp_old_ws: %s", got, payload)
+		}
+		if input := gjson.GetBytes(payload, "input"); !input.IsArray() || len(input.Array()) != 0 {
+			t.Fatalf("compact input = %s, want empty array after trigger removal: %s", input.Raw, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for compact HTTP payload")
+	}
+
+	select {
+	case <-websocketHit:
+		t.Fatal("compaction trigger unexpectedly hit upstream websocket /responses endpoint")
+	default:
+	}
+
+	output := streamed.String()
+	if !strings.Contains(output, "event: response.completed\n") {
+		t.Fatalf("missing response.completed event in compact stream: %s", output)
+	}
+	if !strings.Contains(output, `"type":"compaction"`) || !strings.Contains(output, `"encrypted_content":"opaque-ws"`) {
+		t.Fatalf("compaction output missing from compact stream: %s", output)
+	}
+	if !strings.Contains(output, `"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}`) {
+		t.Fatalf("usage missing from compact stream: %s", output)
 	}
 }
 
