@@ -3,6 +3,7 @@
 package cursorcomposer
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -90,7 +91,7 @@ func decodeMacCursorAPISettings(raw []byte) (macCursorAPISettings, bool) {
 }
 
 func bytesTrimSpace(b []byte) []byte {
-	return []byte(strings.TrimSpace(string(b)))
+	return bytes.TrimSpace(b)
 }
 
 func macCursorAPIBackendBase() string {

@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -449,23 +450,29 @@ func readCursorComposerText(resp *http.Response) (string, error) {
 func streamCursorComposerText(resp *http.Response) func(func(string, error) bool) {
 	return func(yield func(string, error) bool) {
 		if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/connect+proto") {
-			scanner := bufio.NewScanner(resp.Body)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if strings.HasPrefix(line, "data:") {
-					raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-					if raw == "[DONE]" {
-						return
-					}
-					if text := gjson.Get(raw, "text").String(); text != "" && !yield(stripComposerControlTokens(text), nil) {
-						return
+			reader := bufio.NewReader(resp.Body)
+			for {
+				line, readErr := reader.ReadString('\n')
+				if line != "" {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "data:") {
+						raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+						if raw == "[DONE]" {
+							return
+						}
+						if text := gjson.Get(raw, "text").String(); text != "" && !yield(stripComposerControlTokens(text), nil) {
+							return
+						}
 					}
 				}
+				if readErr != nil {
+					if errors.Is(readErr, io.EOF) {
+						return
+					}
+					yield("", readErr)
+					return
+				}
 			}
-			if err := scanner.Err(); err != nil {
-				yield("", err)
-			}
-			return
 		}
 		for frame, err := range parseConnectProtoFrames(resp.Body) {
 			if err != nil {
@@ -571,7 +578,7 @@ func parseConnectProtoFrames(r io.Reader) func(func([]byte, error) bool) {
 				if err := handleConnectEndStreamFrame(payload); err != nil {
 					yield(nil, err)
 				}
-				continue
+				return
 			}
 			if !yield(payload, nil) {
 				return
@@ -688,6 +695,9 @@ func decodeProtoFields(data []byte) ([]protoDecodedField, error) {
 func readProtoVarint(data []byte, offset int) (uint64, int, error) {
 	var value uint64
 	for shift := uint(0); offset < len(data); shift += 7 {
+		if shift >= 64 {
+			return 0, offset, errors.New("varint overflow")
+		}
 		b := data[offset]
 		offset++
 		value |= uint64(b&0x7f) << shift

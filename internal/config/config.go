@@ -992,9 +992,6 @@ func (cfg *Config) SanitizeCursorComposerKeys() {
 		entry.ChatEndpoint = cursorcomposer.ResolveChatEndpoint(entry.ChatEndpoint)
 		entry.ClientVersion = cursorcomposer.ResolveClientVersion(entry.ClientVersion)
 		entry.SDKBridgeURL = strings.TrimSpace(entry.SDKBridgeURL)
-		if entry.SDKBridgeURL == "" {
-			entry.SDKBridgeURL = "http://127.0.0.1:8792/sdk"
-		}
 		if strings.TrimSpace(entry.BaseURL) == "" {
 			entry.BaseURL = "https://api.cursor.com"
 		}

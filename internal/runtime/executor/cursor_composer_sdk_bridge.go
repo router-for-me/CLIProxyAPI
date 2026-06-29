@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,8 +16,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
-
-const defaultCursorSDKBridgeURL = "http://127.0.0.1:8792/sdk"
 
 type cursorSDKBridgeOutput struct {
 	Text    string `json:"text"`
@@ -31,7 +30,7 @@ func cursorComposerSDKBridgeURL(auth *cliproxyauth.Auth) string {
 			return normalizeSDKBridgeURL(v)
 		}
 	}
-	return normalizeSDKBridgeURL(defaultCursorSDKBridgeURL)
+	return ""
 }
 
 func normalizeSDKBridgeURL(raw string) string {
@@ -119,31 +118,36 @@ func (e *CursorComposerExecutor) executeViaSDKBridgeStream(ctx context.Context, 
 		return "", statusErr{code: cursorHTTPStatus(resp.StatusCode), msg: cursorSDKBridgeErrorMessage(raw, resp.StatusCode)}
 	}
 	var text strings.Builder
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if line != "" {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				switch gjson.Get(line, "type").String() {
+				case "text":
+					if delta := gjson.Get(line, "text").String(); delta != "" {
+						text.WriteString(delta)
+					}
+				case "error":
+					msg := gjson.Get(line, "error.message").String()
+					if msg == "" {
+						msg = line
+					}
+					return "", statusErr{code: http.StatusBadGateway, msg: msg}
+				case "done":
+					if final := gjson.Get(line, "output.text").String(); final != "" && text.Len() == 0 {
+						text.WriteString(final)
+					}
+				}
+			}
 		}
-		switch gjson.Get(line, "type").String() {
-		case "text":
-			if delta := gjson.Get(line, "text").String(); delta != "" {
-				text.WriteString(delta)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
 			}
-		case "error":
-			msg := gjson.Get(line, "error.message").String()
-			if msg == "" {
-				msg = line
-			}
-			return "", statusErr{code: http.StatusBadGateway, msg: msg}
-		case "done":
-			if final := gjson.Get(line, "output.text").String(); final != "" && text.Len() == 0 {
-				text.WriteString(final)
-			}
+			return "", readErr
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return "", err
 	}
 	return strings.TrimSpace(text.String()), nil
 }

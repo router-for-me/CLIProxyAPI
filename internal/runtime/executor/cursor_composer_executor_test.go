@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -54,5 +56,57 @@ func TestCursorSessionIDUsesAccessTokenHash(t *testing.T) {
 	}
 	if got == stableUUID("", "access-token-example") {
 		t.Fatal("cursorSessionID must not use stableUUID with empty namespace")
+	}
+}
+
+func TestCursorComposerSDKBridgeURLEmptyWhenUnset(t *testing.T) {
+	got := cursorComposerSDKBridgeURL(&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "crsr_test"}})
+	if got != "" {
+		t.Fatalf("cursorComposerSDKBridgeURL() = %q, want empty string", got)
+	}
+}
+
+func TestCursorComposerSDKBridgeURLNormalizesExplicitValue(t *testing.T) {
+	got := cursorComposerSDKBridgeURL(&cliproxyauth.Auth{Attributes: map[string]string{"sdk_bridge_url": "http://127.0.0.1:8792"}})
+	if got != "http://127.0.0.1:8792/sdk" {
+		t.Fatalf("cursorComposerSDKBridgeURL() = %q, want http://127.0.0.1:8792/sdk", got)
+	}
+}
+
+func TestReadProtoVarintOverflow(t *testing.T) {
+	_, _, err := readProtoVarint(bytes.Repeat([]byte{0x80}, 11), 0)
+	if err == nil {
+		t.Fatal("readProtoVarint() expected overflow error")
+	}
+	if !strings.Contains(err.Error(), "varint overflow") {
+		t.Fatalf("readProtoVarint() error = %v, want varint overflow", err)
+	}
+}
+
+func TestParseConnectProtoFramesStopsAfterEndStream(t *testing.T) {
+	endStreamPayload := []byte(`{"error":{"message":"boom"}}`)
+	endStreamFrame := encodeConnectFrame(endStreamPayload)
+	endStreamFrame[0] = 2
+	followUpFrame := encodeConnectFrame([]byte("late-frame"))
+	stream := bytes.NewReader(append(endStreamFrame, followUpFrame...))
+
+	var gotErr error
+	var payloads [][]byte
+	for frame, err := range parseConnectProtoFrames(stream) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		payloads = append(payloads, append([]byte(nil), frame...))
+	}
+
+	if gotErr == nil {
+		t.Fatal("parseConnectProtoFrames() expected error from end stream frame")
+	}
+	if !strings.Contains(gotErr.Error(), "boom") {
+		t.Fatalf("parseConnectProtoFrames() error = %v, want boom", gotErr)
+	}
+	if len(payloads) != 0 {
+		t.Fatalf("parseConnectProtoFrames() yielded %d payload(s), want 0", len(payloads))
 	}
 }
