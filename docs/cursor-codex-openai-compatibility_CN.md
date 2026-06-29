@@ -166,9 +166,9 @@ response.completed output_types=[reasoning message custom_tool_call]
 - 日志显示 Cursor 回传了 `role=tool`
 - 后续模型继续发出 `ReadLints` / `Shell` 等 function calls
 
-## 当前待部署修复：tool 输出后不要继续强制 required
+### e55f5497 - allow final answers after tool outputs
 
-新问题：修复工具调用后，Cursor 能执行工具了，但出现反复 `ReadFile` / `Glob`，例如多次读取 `最终缺失图片清单.txt L1-5`。
+问题：修复工具调用后，Cursor 能执行工具了，但出现反复 `ReadFile` / `Glob`，例如多次读取 `最终缺失图片清单.txt L1-5`。
 
 诊断日志显示：
 
@@ -230,6 +230,12 @@ converted_tool_choice=required
 
 排查完成后应关闭该环境变量，避免日志刷屏。
 
+部署：
+
+- 服务器镜像：`cli-proxy-api:cursor-fix-e55f5497`
+- 部署时临时开启 `CLIPROXY_CURSOR_TOOL_TRACE=1`，用于确认工具输出后的下一轮请求不再被强制 `required`
+- 确认完成后应关闭 trace，避免日志刷屏
+
 ## 测试记录
 
 已经通过过的相关测试：
@@ -239,7 +245,7 @@ go test ./internal/translator/codex/openai/chat-completions ./internal/translato
 go test ./internal/runtime/executor -run "CodexExecutor|Codex.*ReasoningReplay|ReasoningReplay.*Codex|Codex.*ShortensLongCallIDs"
 ```
 
-当前待部署修复需要再次通过：
+`e55f5497` 提交前已通过：
 
 ```text
 go test ./internal/util ./internal/translator/codex/openai/chat-completions ./internal/translator/codex/openai/responses ./internal/runtime/executor -run "AgentToolUseInstruction|FunctionToolChoice|DoesNotRequireAfterToolOutput|LegacyFunctions|CustomToolCall|ToolCall|ToolsDefinitionTranslated|CodexExecutor|Codex.*ReasoningReplay|ReasoningReplay.*Codex|ShortensLongCallIDs"
@@ -268,4 +274,4 @@ cli-proxy-api.before-...
 - `call_id` 过长已通过稳定短 ID 修复。
 - Cursor “一句话结束”已通过 `custom_tool_call` 桥接修复。
 - Cursor 反复读文件的原因是 `tool_choice:"required"` 强制范围过大。
-- 最新修复方向是：工具结果返回后不再强制 required，让模型可以最终回答。
+- `e55f5497` 已将规则收窄：工具结果返回后不再强制 required，让模型可以最终回答。
