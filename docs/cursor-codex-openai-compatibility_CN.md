@@ -315,3 +315,16 @@ orig_last_tool_class=not-found / error / ok
 - `item_arg_hint` 中 Cursor 实际被要求查找的路径/模式
 - `orig_last_tool_failure` 中 Cursor 本地工具返回的失败摘要
 - 如果路径指向工作区外，则应调整 Cursor 打开的工作区根目录，或让任务文件进入当前 workspace；代理无法让 Cursor 本地工具越过它自己的工作区权限边界。
+
+部署记录：
+
+- 源码提交：`feed7d4b chore: trace cursor tool path hints`
+- 服务器镜像：`cli-proxy-api:cursor-trace-feed7d4b`
+- 当前容器：`cli-proxy-api`
+- 旧容器备份：`cli-proxy-api.before-feed7d4b-20260629055000`
+- 端口沿用旧容器：`1455` / `8085` / `8317` / `11451` / `51121` / `54545`
+- 挂载沿用旧容器：
+  - `/opt/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml`
+  - `/opt/CLIProxyAPI/auths:/root/.cli-proxy-api`
+  - `/opt/CLIProxyAPI/logs:/CLIProxyAPI/logs`
+- `CLIPROXY_CURSOR_TOOL_TRACE=1` 仍然开启，待定位完成后关闭。
