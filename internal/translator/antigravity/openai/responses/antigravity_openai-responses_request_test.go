@@ -174,3 +174,19 @@ func firstByte(s string) string {
 	}
 	return s[:1]
 }
+
+func TestConvertOpenAIResponsesRequestToAntigravity_GeminiReasoningUsesNativeVisibleSignaturePlacement(t *testing.T) {
+	sig := "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
+	raw := []byte(`{"model":"gemini-3.5-flash","input":[{"type":"reasoning","encrypted_content":"gemini#` + sig + `","summary":[{"type":"summary_text","text":"reasoning summary"}]}]}`)
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash-agent", raw, false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts length = %d, want 2. Output: %s", len(parts), out)
+	}
+	if got := parts[0].Get("thought").Bool(); !got {
+		t.Fatalf("parts[0] should be thought. Output: %s", out)
+	}
+	if got := parts[1].Get("thoughtSignature").String(); got != sig {
+		t.Fatalf("parts[1].thoughtSignature = %q, want preserved Gemini signature. Output: %s", got, out)
+	}
+}
