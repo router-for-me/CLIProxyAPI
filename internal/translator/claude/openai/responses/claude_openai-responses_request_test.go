@@ -40,8 +40,8 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToClaude_ReasoningItemToThinkingBlock(t *testing.T) {
-	rawSignature, expectedSignature := testClaudeResponsesThinkingSignature(t)
+func TestConvertOpenAIResponsesRequestToClaude_DropsReasoningItems(t *testing.T) {
+	rawSignature, _ := testClaudeResponsesThinkingSignature(t)
 	raw := []byte(`{
 		"model":"claude-test",
 		"input":[
@@ -70,19 +70,7 @@ func TestConvertOpenAIResponsesRequestToClaude_ReasoningItemToThinkingBlock(t *t
 	if got := assistant.Get("role").String(); got != "assistant" {
 		t.Fatalf("first message role = %q, want assistant. Output: %s", got, string(out))
 	}
-	if got := assistant.Get("content.0.type").String(); got != "thinking" {
-		t.Fatalf("first content type = %q, want thinking. Output: %s", got, string(out))
-	}
-	if got := assistant.Get("content.0.signature").String(); got != expectedSignature {
-		t.Fatalf("thinking signature = %q, want %q", got, expectedSignature)
-	}
-	if got := assistant.Get("content.0.thinking").String(); got != "internal reasoning" {
-		t.Fatalf("thinking text = %q, want internal reasoning", got)
-	}
-	if got := assistant.Get("content.1.type").String(); got != "text" {
-		t.Fatalf("second content type = %q, want text. Output: %s", got, string(out))
-	}
-	if got := assistant.Get("content.1.text").String(); got != "visible answer" {
+	if got := assistant.Get("content").String(); got != "visible answer" {
 		t.Fatalf("assistant text = %q, want visible answer", got)
 	}
 	if got := root.Get("messages.1.role").String(); got != "user" {
@@ -90,8 +78,8 @@ func TestConvertOpenAIResponsesRequestToClaude_ReasoningItemToThinkingBlock(t *t
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToClaude_SignatureOnlyReasoningFlushesBeforeUser(t *testing.T) {
-	rawSignature, expectedSignature := testClaudeResponsesThinkingSignature(t)
+func TestConvertOpenAIResponsesRequestToClaude_DropsSignatureOnlyReasoning(t *testing.T) {
+	rawSignature, _ := testClaudeResponsesThinkingSignature(t)
 	raw := []byte(`{
 		"model":"claude-test",
 		"input":[
@@ -111,18 +99,11 @@ func TestConvertOpenAIResponsesRequestToClaude_SignatureOnlyReasoningFlushesBefo
 	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
 	root := gjson.ParseBytes(out)
 
-	thinking := root.Get("messages.0.content.0")
-	if got := thinking.Get("type").String(); got != "thinking" {
-		t.Fatalf("first content type = %q, want thinking. Output: %s", got, string(out))
+	if got := root.Get("messages.#").Int(); got != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", got, string(out))
 	}
-	if got := thinking.Get("signature").String(); got != expectedSignature {
-		t.Fatalf("thinking signature = %q, want %q", got, expectedSignature)
-	}
-	if got := thinking.Get("thinking").String(); got != "" {
-		t.Fatalf("thinking text = %q, want empty", got)
-	}
-	if got := root.Get("messages.1.role").String(); got != "user" {
-		t.Fatalf("second message role = %q, want user. Output: %s", got, string(out))
+	if got := root.Get("messages.0.role").String(); got != "user" {
+		t.Fatalf("first message role = %q, want user. Output: %s", got, string(out))
 	}
 }
 
@@ -199,6 +180,51 @@ func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(
 	}
 	if got := root.Get("messages.2.content.0.tool_use_id").String(); got != "call_00_awGuheXs4aRbtedNK8LE3743" {
 		t.Fatalf("tool_result id = %q, want call_00_awGuheXs4aRbtedNK8LE3743. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolResultImageArrayUsesClaudeImageContent(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{
+				"type":"function_call",
+				"call_id":"call_image",
+				"name":"view_image",
+				"arguments":"{\"path\":\"/tmp/a.png\"}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_image",
+				"output":[
+					{"type":"input_image","image_url":"data:image/png;base64,QUJD"},
+					{"type":"input_text","text":"screenshot"}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+	content := root.Get("messages.1.content.0.content")
+
+	if got := content.Get("0.type").String(); got != "image" {
+		t.Fatalf("tool_result content.0.type = %q, want image. Output: %s", got, string(out))
+	}
+	if got := content.Get("0.source.type").String(); got != "base64" {
+		t.Fatalf("image source type = %q, want base64. Output: %s", got, string(out))
+	}
+	if got := content.Get("0.source.media_type").String(); got != "image/png" {
+		t.Fatalf("image media type = %q, want image/png. Output: %s", got, string(out))
+	}
+	if got := content.Get("0.source.data").String(); got != "QUJD" {
+		t.Fatalf("image data = %q, want QUJD. Output: %s", got, string(out))
+	}
+	if got := content.Get("1.type").String(); got != "text" {
+		t.Fatalf("tool_result content.1.type = %q, want text. Output: %s", got, string(out))
+	}
+	if got := content.Get("1.text").String(); got != "screenshot" {
+		t.Fatalf("tool_result text = %q, want screenshot. Output: %s", got, string(out))
 	}
 }
 

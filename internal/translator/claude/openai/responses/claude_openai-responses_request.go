@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -362,9 +361,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 			case "reasoning":
-				if thinkingPart := convertResponsesReasoningToClaudeThinking(item); len(thinkingPart) > 0 {
-					pendingReasoningParts = append(pendingReasoningParts, string(thinkingPart))
-				}
+				// Do not reconstruct Claude thinking blocks from OpenAI Responses
+				// reasoning items. Claude requires replayed thinking blocks in the
+				// latest assistant message to remain byte-for-byte equivalent to the
+				// original response; Responses summaries are not that original text.
 
 			case "function_call":
 				// Map to assistant tool_use
@@ -403,10 +403,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				callID := item.Get("call_id").String()
 				callID = util.SanitizeClaudeToolID(callID)
 				flushPendingToolUseFor(callID)
-				outputStr := item.Get("output").String()
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+				toolResult = setResponsesToolResultContent(toolResult, item.Get("output"))
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
@@ -477,32 +476,87 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	return out
 }
 
-func convertResponsesReasoningToClaudeThinking(item gjson.Result) []byte {
-	signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderClaude, item.Get("encrypted_content").String())
-	if !ok {
-		return nil
-	}
-
-	thinkingText := responsesReasoningSummaryText(item)
-	thinkingPart := []byte(`{"type":"thinking","thinking":"","signature":""}`)
-	thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", thinkingText)
-	thinkingPart, _ = sjson.SetBytes(thinkingPart, "signature", signature)
-	return thinkingPart
-}
-
-func responsesReasoningSummaryText(item gjson.Result) string {
-	var builder strings.Builder
-	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
-		summary.ForEach(func(_, part gjson.Result) bool {
-			if text := part.Get("text"); text.Exists() {
-				builder.WriteString(text.String())
-			} else if part.Type == gjson.String {
-				builder.WriteString(part.String())
+func setResponsesToolResultContent(toolResult []byte, output gjson.Result) []byte {
+	if output.IsArray() {
+		content := []byte(`[]`)
+		added := false
+		output.ForEach(func(_, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "input_text", "output_text", "text":
+				text := part.Get("text").String()
+				textPart := []byte(`{"type":"text","text":""}`)
+				textPart, _ = sjson.SetBytes(textPart, "text", text)
+				content, _ = sjson.SetRawBytes(content, "-1", textPart)
+				added = true
+			case "input_image", "image":
+				if imagePart := convertResponsesImagePartToClaudeImage(part); len(imagePart) > 0 {
+					content, _ = sjson.SetRawBytes(content, "-1", imagePart)
+					added = true
+				}
 			}
 			return true
 		})
+		if added {
+			toolResult, _ = sjson.SetRawBytes(toolResult, "content", content)
+			return toolResult
+		}
 	}
-	return builder.String()
+
+	toolResult, _ = sjson.SetBytes(toolResult, "content", output.String())
+	return toolResult
+}
+
+func convertResponsesImagePartToClaudeImage(part gjson.Result) []byte {
+	url := part.Get("image_url").String()
+	if url == "" {
+		url = part.Get("url").String()
+	}
+	if url == "" {
+		source := part.Get("source")
+		if source.Exists() {
+			data := source.Get("data").String()
+			if data == "" {
+				data = source.Get("base64").String()
+			}
+			if data != "" {
+				mediaType := source.Get("media_type").String()
+				if mediaType == "" {
+					mediaType = source.Get("mime_type").String()
+				}
+				if mediaType == "" {
+					mediaType = "application/octet-stream"
+				}
+				url = fmt.Sprintf("data:%s;base64,%s", mediaType, data)
+			}
+		}
+	}
+	if url == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(url, "data:") {
+		trimmed := strings.TrimPrefix(url, "data:")
+		mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+		mediaType := "application/octet-stream"
+		data := ""
+		if len(mediaAndData) == 2 {
+			if mediaAndData[0] != "" {
+				mediaType = mediaAndData[0]
+			}
+			data = mediaAndData[1]
+		}
+		if data == "" {
+			return nil
+		}
+		contentPart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+		return contentPart
+	}
+
+	contentPart := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+	contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+	return contentPart
 }
 
 func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {
