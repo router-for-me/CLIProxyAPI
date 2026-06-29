@@ -388,6 +388,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 	if sess != nil && codexWebsocketRequestStartsFreshContext(upstreamBody) {
 		sess.clearLostTerminalState()
+		if codexWebsocketRequestResetsUpstreamContext(upstreamBody) {
+			e.resetUpstreamConnForFreshContext(sess, "fresh_context_reset")
+		}
 	}
 	if sess != nil && codexWebsocketRequestRequiresExistingUpstream(sess, upstreamBody) && !sess.hasUpstreamConn() {
 		errAppend := e.failCodexWebsocketRequestWithoutUpstreamContext(ctx, sess, nil, "request_without_upstream_context", nil)
@@ -768,6 +771,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	if sess != nil && codexWebsocketRequestStartsFreshContext(upstreamBody) {
 		sess.clearLostTerminalState()
+		if codexWebsocketRequestResetsUpstreamContext(upstreamBody) {
+			e.resetUpstreamConnForFreshContext(sess, "fresh_context_reset")
+		}
 	}
 	if sess != nil && codexWebsocketRequestRequiresExistingUpstream(sess, upstreamBody) && !sess.hasUpstreamConn() {
 		errAppend := e.failCodexWebsocketRequestWithoutUpstreamContext(ctx, sess, nil, "request_without_upstream_context", nil)
@@ -1490,6 +1496,17 @@ func codexWebsocketRequestUsesPreviousResponseID(body []byte) bool {
 
 func codexWebsocketRequestStartsFreshContext(body []byte) bool {
 	return !codexWebsocketRequestNeedsLiveUpstream(body)
+}
+
+func codexWebsocketRequestResetsUpstreamContext(body []byte) bool {
+	requestType := strings.TrimSpace(gjson.GetBytes(body, "type").String())
+	if requestType != "response.create" && requestType != "response.append" {
+		return false
+	}
+	if codexWebsocketRequestUsesPreviousResponseID(body) || codexWebsocketRequestIsAppendOnly(body) {
+		return false
+	}
+	return codexWebsocketInputLooksFullTranscript(gjson.GetBytes(body, "input"))
 }
 
 func codexWebsocketRequestNeedsLiveUpstream(body []byte) bool {
@@ -2392,6 +2409,19 @@ func (e *CodexWebsocketsExecutor) failCodexWebsocketRequestWithoutUpstreamContex
 		return err
 	}
 	return err
+}
+
+func (e *CodexWebsocketsExecutor) resetUpstreamConnForFreshContext(sess *codexWebsocketSession, reason string) {
+	if sess == nil {
+		return
+	}
+
+	sess.connMu.Lock()
+	conn := sess.conn
+	sess.connMu.Unlock()
+	if conn != nil {
+		e.clearUpstreamConn(sess, conn, reason, nil, false)
+	}
 }
 
 func (e *CodexWebsocketsExecutor) clearUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error, notify bool) {

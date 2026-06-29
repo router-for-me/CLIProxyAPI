@@ -1646,6 +1646,11 @@ func assertNoCodexWebsocketDisconnectSignal(t *testing.T, disconnectCh <-chan er
 	}
 }
 
+type codexWebsocketCapturedPayload struct {
+	connection int32
+	payload    []byte
+}
+
 func TestCodexWebsocketsExecuteStreamDoesNotFallbackToHTTPForIncrementalRequest(t *testing.T) {
 	tests := []struct {
 		name                      string
@@ -1813,6 +1818,116 @@ func TestCanFallbackCodexWebsocketRequestToHTTPBlocksLiveSessionCreate(t *testin
 	if canFallbackCodexWebsocketRequestToHTTP(sess, liveConn, withPreviousResponseID) {
 		t.Fatal("previous_response_id request should not fallback to HTTP")
 	}
+}
+
+func TestCodexWebsocketsFreshContextResetsUpstreamSession(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	payloadCh := make(chan codexWebsocketCapturedPayload, 2)
+	errCh := make(chan error, 4)
+	var websocketConnections atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			errCh <- fmt.Errorf("request path = %s, want /responses", r.URL.Path)
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			errCh <- fmt.Errorf("unexpected non-websocket request")
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			errCh <- fmt.Errorf("upgrade websocket: %w", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		connectionIndex := websocketConnections.Add(1)
+		for {
+			msgType, payload, errRead := conn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			if msgType != websocket.TextMessage {
+				errCh <- fmt.Errorf("upstream message type = %d, want text", msgType)
+				return
+			}
+			payloadCh <- codexWebsocketCapturedPayload{connection: connectionIndex, payload: bytes.Clone(payload)}
+			completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%d","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, connectionIndex))
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				errCh <- fmt.Errorf("write completed websocket message: %w", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	sessionID := "sess-fresh-context-reset"
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	if disconnectCh == nil {
+		t.Fatal("expected disconnect channel")
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	firstReq := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	result, err := exec.ExecuteStream(ctx, auth, firstReq, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() first request error = %v", err)
+	}
+	assertCodexWebsocketCompletedChunk(t, result, "resp-1")
+	firstPayload := readCodexWebsocketUpstreamPayload(t, payloadCh)
+	if firstPayload.connection != 1 {
+		t.Fatalf("first payload connection = %d, want 1", firstPayload.connection)
+	}
+
+	freshReq := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"compaction_summary","summary":"compressed history"},{"type":"message","role":"user","content":"after compaction"}]}`),
+	}
+	result, err = exec.ExecuteStream(ctx, auth, freshReq, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() fresh context request error = %v", err)
+	}
+	assertCodexWebsocketCompletedChunk(t, result, "resp-2")
+	freshPayload := readCodexWebsocketUpstreamPayload(t, payloadCh)
+	if freshPayload.connection != 2 {
+		t.Fatalf("fresh context payload connection = %d, want 2", freshPayload.connection)
+	}
+	if got := gjson.GetBytes(freshPayload.payload, "input.0.type").String(); got != "compaction_summary" {
+		t.Fatalf("fresh context input.0.type = %s, want compaction_summary: %s", got, freshPayload.payload)
+	}
+	assertNoCodexWebsocketDisconnectSignal(t, disconnectCh, "during fresh context upstream reset")
+	select {
+	case errServer := <-errCh:
+		t.Fatal(errServer)
+	default:
+	}
+}
+
+func readCodexWebsocketUpstreamPayload(t *testing.T, payloadCh <-chan codexWebsocketCapturedPayload) codexWebsocketCapturedPayload {
+	t.Helper()
+	select {
+	case payload := <-payloadCh:
+		return payload
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+	return codexWebsocketCapturedPayload{}
 }
 
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
