@@ -359,7 +359,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				signature := openAIResponsesGeminiThoughtSignature(item.Get("encrypted_content").String())
 
 				visibleText := ""
-				if useGeminiNativeReasoningLayout && i+1 < len(normalized) && !isTrailingOpenAIResponsesAssistantPrefill(normalized, i+1) {
+				if useGeminiNativeReasoningLayout && i+1 < len(normalized) {
 					next := normalized[i+1]
 					if visible, ok := openAIResponsesAssistantVisibleText(next); ok {
 						visibleText = visible
@@ -528,19 +528,25 @@ func openAIResponsesAssistantVisibleText(item gjson.Result) (string, bool) {
 		return "", false
 	}
 
-	switch strings.ToLower(strings.TrimSpace(itemRole)) {
-	case "assistant", "model":
-	default:
+	content := item.Get("content")
+	if !content.Exists() {
 		return "", false
 	}
-
-	contentArray := item.Get("content")
-	if !contentArray.Exists() || !contentArray.IsArray() {
+	if content.Type == gjson.String {
+		switch strings.ToLower(strings.TrimSpace(itemRole)) {
+		case "assistant", "model":
+			return content.String(), true
+		default:
+			return "", false
+		}
+	}
+	if !content.IsArray() {
 		return "", false
 	}
 
 	var textParts []string
-	contentArray.ForEach(func(_, contentItem gjson.Result) bool {
+	hasOutputText := false
+	content.ForEach(func(_, contentItem gjson.Result) bool {
 		contentType := contentItem.Get("type").String()
 		if contentType == "" {
 			contentType = "input_text"
@@ -548,14 +554,14 @@ func openAIResponsesAssistantVisibleText(item gjson.Result) (string, bool) {
 		if contentType != "output_text" {
 			return true
 		}
-		if text := strings.TrimSpace(contentItem.Get("text").String()); text != "" {
-			textParts = append(textParts, text)
-		}
+		hasOutputText = true
+		textParts = append(textParts, contentItem.Get("text").String())
 		return true
 	})
-	if len(textParts) == 0 {
+	if !hasOutputText {
 		return "", false
 	}
+	// output_text marks model-visible content even when message.role is "user".
 	return strings.Join(textParts, "\n"), true
 }
 

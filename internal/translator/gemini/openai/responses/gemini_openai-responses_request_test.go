@@ -285,6 +285,81 @@ func TestConvertOpenAIResponsesRequestToGemini_MergesReasoningWithAssistantVisib
 		t.Fatalf("visible thoughtSignature = %q, want preserved signature", got)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_MergesReasoningWithUserRoleOutputText(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"input": [
+			{
+				"type": "reasoning",
+				"encrypted_content": "gemini#` + testResponsesGeminiThoughtSignature + `",
+				"summary": [{"type": "summary_text", "text": "reasoning summary"}]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "output_text", "text": "visible from user role"}]
+			}
+		]
+	}`
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("contents length = %d, want 1. Output: %s", len(contents), output)
+	}
+	if got := contents[0].Get("parts.1.text").String(); got != "visible from user role" {
+		t.Fatalf("visible text = %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MergesReasoningWithAssistantStringContent(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"input": [
+			{
+				"type": "reasoning",
+				"encrypted_content": "gemini#` + testResponsesGeminiThoughtSignature + `",
+				"summary": [{"type": "summary_text", "text": "reasoning summary"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": "string visible answer"
+			}
+		]
+	}`
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	if got := gjson.GetBytes(output, "contents.0.parts.1.text").String(); got != "string visible answer" {
+		t.Fatalf("visible text = %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_PreservesWhitespaceWhenMergingReasoning(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"input": [
+			{
+				"type": "reasoning",
+				"encrypted_content": "gemini#` + testResponsesGeminiThoughtSignature + `",
+				"summary": [{"type": "summary_text", "text": "reasoning summary"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "  lead trail  "}]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "next"}]
+			}
+		]
+	}`
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	if got := gjson.GetBytes(output, "contents.0.parts.1.text").String(); got != "  lead trail  " {
+		t.Fatalf("visible text = %q, want preserved whitespace", got)
+	}
+}
 func TestConvertOpenAIResponsesRequestToGemini_SystemAndDeveloperRoles(t *testing.T) {
 	tests := []struct {
 		name     string
