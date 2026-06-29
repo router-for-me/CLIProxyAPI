@@ -9,7 +9,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -17,8 +19,51 @@ import (
 )
 
 var (
-	dataTag = []byte("data:")
+	dataTag                 = []byte("data:")
+	chatCompletionIDCounter uint64
 )
+
+func normalizeChatCompletionID(upstreamID string) string {
+	id := strings.TrimSpace(upstreamID)
+	if strings.HasPrefix(id, "chatcmpl-") {
+		return id
+	}
+
+	switch {
+	case strings.HasPrefix(id, "resp_"):
+		id = strings.TrimPrefix(id, "resp_")
+	case strings.HasPrefix(id, "resp-"):
+		id = strings.TrimPrefix(id, "resp-")
+	}
+
+	id = sanitizeChatCompletionIDSuffix(id)
+	if id == "" {
+		n := atomic.AddUint64(&chatCompletionIDCounter, 1)
+		id = fmt.Sprintf("%x-%d", time.Now().UnixNano(), n)
+	}
+
+	return "chatcmpl-" + id
+}
+
+func sanitizeChatCompletionIDSuffix(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+
+	return strings.Trim(b.String(), "-_")
+}
 
 // ConvertCliToOpenAIParams holds parameters for response conversion.
 type ConvertCliToOpenAIParams struct {
@@ -71,7 +116,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	typeResult := rootResult.Get("type")
 	dataType := typeResult.String()
 	if dataType == "response.created" {
-		(*param).(*ConvertCliToOpenAIParams).ResponseID = rootResult.Get("response.id").String()
+		(*param).(*ConvertCliToOpenAIParams).ResponseID = normalizeChatCompletionID(rootResult.Get("response.id").String())
 		(*param).(*ConvertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
 		(*param).(*ConvertCliToOpenAIParams).Model = rootResult.Get("response.model").String()
 		if (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID == nil {
@@ -340,7 +385,9 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 	// Extract and set the response ID.
 	if idResult := responseResult.Get("id"); idResult.Exists() {
-		template, _ = sjson.SetBytes(template, "id", idResult.String())
+		template, _ = sjson.SetBytes(template, "id", normalizeChatCompletionID(idResult.String()))
+	} else {
+		template, _ = sjson.SetBytes(template, "id", normalizeChatCompletionID(""))
 	}
 
 	// Extract and set usage metadata (token counts).
