@@ -2,9 +2,14 @@ package executor
 
 import (
 	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -108,5 +113,46 @@ func TestParseConnectProtoFramesStopsAfterEndStream(t *testing.T) {
 	}
 	if len(payloads) != 0 {
 		t.Fatalf("parseConnectProtoFrames() yielded %d payload(s), want 0", len(payloads))
+	}
+}
+
+func TestCursorComposerExchangeAPIKeyCachesConcurrentCalls(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer crsr_test" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accessToken":"token-abc"}`))
+	}))
+	defer server.Close()
+
+	exec := &CursorComposerExecutor{cfg: &config.Config{}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "crsr_test"}}
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	tokens := make(chan string, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			token, err := exec.exchangeAPIKey(context.Background(), auth, "crsr_test", server.URL)
+			errs <- err
+			tokens <- token
+		}()
+	}
+	close(start)
+	for i := 0; i < workers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("exchangeAPIKey() error = %v", err)
+		}
+		if token := <-tokens; token != "token-abc" {
+			t.Fatalf("exchangeAPIKey() token = %q, want token-abc", token)
+		}
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Fatalf("exchangeAPIKey() upstream requests = %d, want 1", got)
 	}
 }

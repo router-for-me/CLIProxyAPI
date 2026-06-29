@@ -43,6 +43,7 @@ type CursorComposerExecutor struct {
 	cfg           *config.Config
 	identityCache sync.Map
 	tokenCache    sync.Map
+	tokenMu       sync.Mutex
 }
 
 type cursorComposerTokenCacheEntry struct {
@@ -341,6 +342,13 @@ func (e *CursorComposerExecutor) cursorIdentity(ctx context.Context, auth *clipr
 }
 
 func (e *CursorComposerExecutor) exchangeAPIKey(ctx context.Context, auth *cliproxyauth.Auth, apiKey, backendBase string) (string, error) {
+	if val, ok := e.tokenCache.Load(apiKey); ok {
+		if entry, ok := val.(cursorComposerTokenCacheEntry); ok && entry.token != "" && time.Now().Before(entry.expiresAt) {
+			return entry.token, nil
+		}
+	}
+	e.tokenMu.Lock()
+	defer e.tokenMu.Unlock()
 	if val, ok := e.tokenCache.Load(apiKey); ok {
 		if entry, ok := val.(cursorComposerTokenCacheEntry); ok && entry.token != "" && time.Now().Before(entry.expiresAt) {
 			return entry.token, nil
