@@ -2,6 +2,7 @@ package chat_completions
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -71,11 +72,14 @@ func TestConvertCodexResponseToOpenAI_StreamNormalizesResponseID(t *testing.T) {
 
 func TestNormalizeChatCompletionID(t *testing.T) {
 	tests := []struct {
-		name string
-		in   string
-		want string
+		name       string
+		in         string
+		want       string
+		wantPrefix string
+		wantNot    string
 	}{
 		{name: "already chat completion", in: "chatcmpl-existing", want: "chatcmpl-existing"},
+		{name: "empty chat completion suffix", in: "chatcmpl-", wantPrefix: "chatcmpl-", wantNot: "chatcmpl-"},
 		{name: "responses underscore", in: "resp_abc123", want: "chatcmpl-abc123"},
 		{name: "responses hyphen", in: "resp-abc123", want: "chatcmpl-abc123"},
 		{name: "trims whitespace", in: "  resp_abc123  ", want: "chatcmpl-abc123"},
@@ -85,6 +89,15 @@ func TestNormalizeChatCompletionID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := normalizeChatCompletionID(tt.in)
+			if tt.wantPrefix != "" && !strings.HasPrefix(got, tt.wantPrefix) {
+				t.Fatalf("normalizeChatCompletionID(%q) = %q, want prefix %q", tt.in, got, tt.wantPrefix)
+			}
+			if tt.wantNot != "" && got == tt.wantNot {
+				t.Fatalf("normalizeChatCompletionID(%q) = %q, want a generated id", tt.in, got)
+			}
+			if tt.want == "" {
+				return
+			}
 			if got != tt.want {
 				t.Fatalf("normalizeChatCompletionID(%q) = %q, want %q", tt.in, got, tt.want)
 			}

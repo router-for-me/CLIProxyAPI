@@ -26,7 +26,10 @@ var (
 func normalizeChatCompletionID(upstreamID string) string {
 	id := strings.TrimSpace(upstreamID)
 	if strings.HasPrefix(id, "chatcmpl-") {
-		return id
+		if len(id) > len("chatcmpl-") {
+			return id
+		}
+		id = ""
 	}
 
 	switch {
@@ -384,11 +387,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	}
 
 	// Extract and set the response ID.
-	if idResult := responseResult.Get("id"); idResult.Exists() {
-		template, _ = sjson.SetBytes(template, "id", normalizeChatCompletionID(idResult.String()))
-	} else {
-		template, _ = sjson.SetBytes(template, "id", normalizeChatCompletionID(""))
-	}
+	template, _ = sjson.SetBytes(template, "id", normalizeChatCompletionID(responseResult.Get("id").String()))
 
 	// Extract and set usage metadata (token counts).
 	if usageResult := responseResult.Get("usage"); usageResult.Exists() {
