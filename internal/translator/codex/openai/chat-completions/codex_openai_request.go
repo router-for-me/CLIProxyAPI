@@ -412,6 +412,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	out = util.RequireOpenAIAgentFunctionToolChoice(out)
 	out = util.AddOpenAIAgentToolUseInstruction(out)
 	out, _ = sjson.SetBytes(out, "store", false)
+	traceOpenAIChatRequest(rawJSON, out)
 	return out
 }
 

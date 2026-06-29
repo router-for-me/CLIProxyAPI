@@ -116,6 +116,12 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 	}
 
+	defer func() {
+		if *param != nil {
+			traceOpenAIChatResponse(dataType, (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall, rawJSON, nil)
+		}
+	}()
+
 	if dataType == "response.reasoning_summary_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
