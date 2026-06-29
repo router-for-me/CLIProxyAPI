@@ -78,6 +78,40 @@ func TestRequireOpenAIAgentFunctionToolChoice_SetsRequiredWhenMissing(t *testing
 	}
 }
 
+func TestRequireOpenAIAgentFunctionToolChoice_AllowsFinalAfterToolOutput(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"type":"function","name":"read_file"}],
+		"tool_choice":"auto",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"read then summarize"}]},
+			{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"file content"}
+		]
+	}`)
+
+	out := RequireOpenAIAgentFunctionToolChoice(input)
+
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto after tool output; output=%s", got, string(out))
+	}
+}
+
+func TestRequireOpenAIAgentFunctionToolChoice_LeavesMissingChoiceAfterToolOutput(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"type":"function","name":"read_file"}],
+		"input":[
+			{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"ok"}
+		]
+	}`)
+
+	out := RequireOpenAIAgentFunctionToolChoice(input)
+
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice should remain missing after tool output; output=%s", string(out))
+	}
+}
+
 func TestRequireOpenAIAgentFunctionToolChoice_PreservesNoneAndSpecificFunction(t *testing.T) {
 	cases := []struct {
 		name  string

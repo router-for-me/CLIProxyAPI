@@ -958,8 +958,8 @@ func TestConvertOpenAIRequestToCodex_LegacyFunctionsAndFunctionMessages(t *testi
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Read" {
 		t.Fatalf("tools.0.name = %q, want Read; output=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "tool_choice").String(); got != "required" {
-		t.Fatalf("tool_choice = %q, want required; output=%s", got, string(out))
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto after function output; output=%s", got, string(out))
 	}
 	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call" {
 		t.Fatalf("input.1.type = %q, want function_call; output=%s", got, string(out))

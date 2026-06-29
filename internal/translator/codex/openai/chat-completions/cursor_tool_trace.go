@@ -30,9 +30,14 @@ func traceOpenAIChatRequest(original []byte, converted []byte) {
 		"orig_last_has_tool_calls": lastMessageHasArray(original, "tool_calls"),
 		"orig_last_has_function":   lastMessageHasObject(original, "function_call"),
 		"orig_last_tool_call_id":   lastToolCallID(original),
+		"orig_last_tool_output":    lastToolOutputSummary(original),
+		"orig_last_tool_class":     lastToolOutputClass(original),
 		"converted_tools":          countArray(converted, "tools"),
 		"converted_tool_choice":    summarizeJSONField(converted, "tool_choice"),
 		"converted_input":          countArray(converted, "input"),
+		"converted_last_types":     lastInputTypes(converted, 6),
+		"converted_last_output":    lastFunctionOutputSummary(converted),
+		"converted_output_matched": lastFunctionOutputHasMatchingCall(converted),
 	}
 	log.Infof("cursor tool trace: chat request %s", formatTraceFields(fields))
 }
@@ -168,6 +173,160 @@ func lastToolCallID(raw []byte) string {
 		}
 	}
 	return ""
+}
+
+func lastToolOutputSummary(raw []byte) string {
+	messages := gjson.GetBytes(raw, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	items := messages.Array()
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Get("role").String() != "tool" {
+			continue
+		}
+		return resultLengthSummary(items[i].Get("content"))
+	}
+	return ""
+}
+
+func lastToolOutputClass(raw []byte) string {
+	messages := gjson.GetBytes(raw, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	items := messages.Array()
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Get("role").String() != "tool" {
+			continue
+		}
+		return classifyToolOutput(items[i].Get("content"))
+	}
+	return ""
+}
+
+func lastInputTypes(raw []byte, limit int) []string {
+	input := gjson.GetBytes(raw, "input")
+	if !input.IsArray() {
+		return nil
+	}
+	items := input.Array()
+	if len(items) == 0 {
+		return nil
+	}
+	start := len(items) - limit
+	if start < 0 {
+		start = 0
+	}
+	types := make([]string, 0, len(items)-start)
+	for _, item := range items[start:] {
+		itemType := item.Get("type").String()
+		if itemType == "" {
+			itemType = "<missing>"
+		}
+		types = append(types, itemType)
+	}
+	return types
+}
+
+func lastFunctionOutputSummary(raw []byte) string {
+	input := gjson.GetBytes(raw, "input")
+	if !input.IsArray() {
+		return ""
+	}
+	items := input.Array()
+	for i := len(items) - 1; i >= 0; i-- {
+		itemType := items[i].Get("type").String()
+		if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
+			continue
+		}
+		return resultLengthSummary(items[i].Get("output"))
+	}
+	return ""
+}
+
+func lastFunctionOutputHasMatchingCall(raw []byte) bool {
+	input := gjson.GetBytes(raw, "input")
+	if !input.IsArray() {
+		return false
+	}
+	items := input.Array()
+	outputCallID := ""
+	for i := len(items) - 1; i >= 0; i-- {
+		itemType := items[i].Get("type").String()
+		if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
+			continue
+		}
+		outputCallID = items[i].Get("call_id").String()
+		break
+	}
+	if outputCallID == "" {
+		return false
+	}
+	for i := len(items) - 1; i >= 0; i-- {
+		itemType := items[i].Get("type").String()
+		if itemType != "function_call" && itemType != "custom_tool_call" {
+			continue
+		}
+		if items[i].Get("call_id").String() == outputCallID {
+			return true
+		}
+	}
+	return false
+}
+
+func resultLengthSummary(result gjson.Result) string {
+	if !result.Exists() {
+		return "<missing>"
+	}
+	if result.IsArray() {
+		return "array_len=" + stringInt(len(result.Array())) + ",raw_" + lengthBucket(result.Raw)
+	}
+	if result.IsObject() {
+		return "object,raw_" + lengthBucket(result.Raw)
+	}
+	return lengthBucket(result.String())
+}
+
+func classifyToolOutput(result gjson.Result) string {
+	if !result.Exists() {
+		return "missing"
+	}
+	text := result.String()
+	if text == "" {
+		text = result.Raw
+	}
+	if text == "" {
+		return "empty"
+	}
+	if len(text) > 4096 {
+		text = text[:4096]
+	}
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "enoent") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "no such file") ||
+		strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "cannot find"):
+		return "not-found"
+	case strings.Contains(lower, "no files") ||
+		strings.Contains(lower, "no matches") ||
+		strings.Contains(lower, "found 0"):
+		return "empty-glob"
+	case strings.Contains(lower, "permission") ||
+		strings.Contains(lower, "access denied") ||
+		strings.Contains(lower, "eperm") ||
+		strings.Contains(lower, "eacces"):
+		return "permission"
+	case strings.Contains(lower, "outside") && strings.Contains(lower, "workspace"):
+		return "outside-workspace"
+	case strings.Contains(lower, "error") ||
+		strings.Contains(lower, "failed"):
+		return "error"
+	default:
+		return "ok"
+	}
 }
 
 func lengthBucket(value string) string {

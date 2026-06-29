@@ -482,6 +482,32 @@ func TestConvertOpenAIResponsesRequestToCodex_PreservesSpecificFunctionToolChoic
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_DoesNotRequireAfterToolOutput(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.5",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"read then summarize"}]},
+			{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"file content"}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "read_file",
+				"description": "Read a file",
+				"parameters": {"type": "object"}
+			}
+		],
+		"tool_choice": "auto"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.5", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto after tool output; output=%s", got, string(output))
+	}
+}
+
 func BenchmarkConvertSystemRoleToDeveloperLargeInput(b *testing.B) {
 	cases := []struct {
 		name      string

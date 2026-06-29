@@ -20,6 +20,9 @@ func RequireOpenAIAgentFunctionToolChoice(rawJSON []byte) []byte {
 	}
 
 	toolChoice := gjson.GetBytes(rawJSON, "tool_choice")
+	if lastInputIsOpenAIToolOutput(rawJSON) {
+		return rawJSON
+	}
 	if toolChoice.Exists() && toolChoice.IsObject() && !isAutoOpenAIToolChoice(toolChoice) {
 		return rawJSON
 	}
@@ -103,4 +106,21 @@ func isAutoOpenAIToolChoice(toolChoice gjson.Result) bool {
 		return strings.EqualFold(strings.TrimSpace(toolChoice.Get("type").String()), "auto")
 	}
 	return false
+}
+
+func lastInputIsOpenAIToolOutput(rawJSON []byte) bool {
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return false
+	}
+	items := input.Array()
+	if len(items) == 0 {
+		return false
+	}
+	switch strings.TrimSpace(items[len(items)-1].Get("type").String()) {
+	case "function_call_output", "custom_tool_call_output":
+		return true
+	default:
+		return false
+	}
 }
