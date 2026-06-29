@@ -33,6 +33,7 @@ type Release struct {
 }
 
 type ReleaseAsset struct {
+	APIURL             string `json:"url"`
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
@@ -114,10 +115,14 @@ func ReleaseVersion(release Release) (string, error) {
 }
 
 func (c Client) DownloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, error) {
-	if strings.TrimSpace(asset.BrowserDownloadURL) == "" {
-		return nil, fmt.Errorf("asset %q missing browser_download_url", asset.Name)
+	downloadURL := strings.TrimSpace(asset.APIURL)
+	if downloadURL == "" {
+		downloadURL = strings.TrimSpace(asset.BrowserDownloadURL)
 	}
-	return c.get(ctx, asset.BrowserDownloadURL, "application/octet-stream", RequestKindArtifact, 0)
+	if downloadURL == "" {
+		return nil, fmt.Errorf("asset %q missing download url", asset.Name)
+	}
+	return c.get(ctx, downloadURL, "application/octet-stream", RequestKindArtifact, 0)
 }
 
 func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
