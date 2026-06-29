@@ -2067,12 +2067,50 @@ func codexWebsocketStatuslessErrorEvent(payload []byte) (error, bool) {
 	if status := int(gjson.GetBytes(payload, "status_code").Int()); status > 0 {
 		return nil, false
 	}
-	status := http.StatusInternalServerError
+	status := codexWebsocketStatuslessErrorStatus(payload)
 	out := buildCodexWebsocketErrorPayload(payload, status)
+	statusError := statusErr{code: status, msg: string(out)}
+	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
+		statusError.retryAfter = retryAfter
+	} else if isCodexWebsocketConnectionLimitError(payload) {
+		retryAfter := time.Duration(0)
+		statusError.retryAfter = &retryAfter
+	}
 	return statusErrWithHeaders{
-		statusErr: statusErr{code: status, msg: string(out)},
+		statusErr: statusError,
 		headers:   parseCodexWebsocketErrorHeaders(payload),
 	}, true
+}
+
+func codexWebsocketStatuslessErrorStatus(payload []byte) int {
+	if isCodexWebsocketConnectionLimitError(payload) {
+		return http.StatusTooManyRequests
+	}
+	code := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
+	if code == "" {
+		code = strings.TrimSpace(gjson.GetBytes(payload, "body.error.code").String())
+	}
+	if code == "" {
+		code = strings.TrimSpace(gjson.GetBytes(payload, "code").String())
+	}
+	errType := strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
+	if errType == "" {
+		errType = strings.TrimSpace(gjson.GetBytes(payload, "body.error.type").String())
+	}
+	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "error.message").String()))
+	if message == "" {
+		message = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "body.error.message").String()))
+	}
+	if message == "" {
+		message = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "message").String()))
+	}
+	if strings.EqualFold(code, "previous_response_not_found") ||
+		strings.EqualFold(errType, "invalid_request_error") ||
+		strings.Contains(message, "previous_response_not_found") ||
+		strings.Contains(message, "previous_response_id") && strings.Contains(message, "not found") {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
 
 func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
@@ -2092,9 +2130,48 @@ func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
 		return out
 	}
 
+	if topLevelErr, ok := buildCodexTopLevelWebsocketErrorPayload(out, payload, status); ok {
+		return topLevelErr
+	}
+
 	out, _ = sjson.SetBytes(out, "error.type", "server_error")
 	out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
 	return out
+}
+
+func buildCodexTopLevelWebsocketErrorPayload(out []byte, payload []byte, status int) ([]byte, bool) {
+	code := strings.TrimSpace(gjson.GetBytes(payload, "code").String())
+	message := strings.TrimSpace(gjson.GetBytes(payload, "message").String())
+	param := strings.TrimSpace(gjson.GetBytes(payload, "param").String())
+	errType := strings.TrimSpace(gjson.GetBytes(payload, "error_type").String())
+	if code == "" && message == "" && param == "" && errType == "" {
+		return out, false
+	}
+	if errType == "" {
+		eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+		if !strings.EqualFold(eventType, "error") {
+			errType = eventType
+		}
+	}
+	if errType == "" {
+		if strings.EqualFold(code, "previous_response_not_found") || status == http.StatusBadRequest {
+			errType = "invalid_request_error"
+		} else {
+			errType = "server_error"
+		}
+	}
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	out, _ = sjson.SetBytes(out, "error.type", errType)
+	out, _ = sjson.SetBytes(out, "error.message", message)
+	if code != "" {
+		out, _ = sjson.SetBytes(out, "error.code", code)
+	}
+	if param != "" {
+		out, _ = sjson.SetBytes(out, "error.param", param)
+	}
+	return out, true
 }
 
 func isCodexWebsocketConnectionLimitError(payload []byte) bool {
