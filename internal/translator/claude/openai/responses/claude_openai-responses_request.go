@@ -50,7 +50,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
 
 	// Base Claude message payload
-	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"},"cache_control":{"type":"ephemeral"}}`, userID))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -473,6 +473,11 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
+	out = normalizeMessageContent(out)
+	out = stripModelSwitchPrompt(out)
+	out = truncateLargeToolResults(out)
+	out = stripOldImages(out)
+
 	return out
 }
 
@@ -773,4 +778,188 @@ func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {
 	default:
 		return false
 	}
+}
+
+// maxRetainedUserImageTurns controls how many recent user turns keep their
+// images. Older user turns have images replaced with a placeholder. This
+// balances cache stability (fewer replacements = fewer cache rebuilds) against
+// request size growth (more images = larger payload).
+const maxRetainedUserImageTurns = 6
+
+// stripOldImages keeps images only in the most recent N user turns (counted by
+// role:"user" messages). All earlier user turn images are replaced with
+// [image omitted]. A hard 28MB byte cap acts as a safety net for extreme cases.
+func stripOldImages(out []byte) []byte {
+	placeholder := []byte(`{"type":"text","text":"[image omitted]"}`)
+
+	// Collect indices of all user messages.
+	var userTurnIndices []int64
+	gjson.GetBytes(out, "messages").ForEach(func(mi, msg gjson.Result) bool {
+		if msg.Get("role").String() == "user" {
+			userTurnIndices = append(userTurnIndices, mi.Int())
+		}
+		return true
+	})
+
+	// Determine cutoff: keep the last maxRetainedUserImageTurns user turns.
+	cutoff := len(userTurnIndices) - maxRetainedUserImageTurns
+	if cutoff <= 0 {
+		// Fewer than N user turns total; nothing to strip.
+		cutoff = 0
+	}
+	cutoffMsgIdx := int64(-1)
+	if cutoff > 0 {
+		cutoffMsgIdx = userTurnIndices[cutoff]
+	}
+
+	// Replace images in messages before the cutoff.
+	if cutoffMsgIdx > 0 {
+		for {
+			path := firstImagePathBefore(out, cutoffMsgIdx)
+			if path == "" {
+				break
+			}
+			nb, err := sjson.SetRawBytes(out, path, placeholder)
+			if err != nil {
+				break
+			}
+			out = nb
+		}
+	}
+
+	// Hard 28MB cap as safety net.
+	const limit = 28 * 1024 * 1024
+	for len(out) > limit {
+		path := firstImagePathBefore(out, -1)
+		if path == "" {
+			break
+		}
+		nb, err := sjson.SetRawBytes(out, path, placeholder)
+		if err != nil {
+			break
+		}
+		out = nb
+	}
+	return out
+}
+
+// firstImagePathBefore returns the sjson path of the first image block in
+// messages with index < beforeIdx. Pass beforeIdx == -1 to match all messages.
+func firstImagePathBefore(out []byte, beforeIdx int64) string {
+	found := ""
+	gjson.GetBytes(out, "messages").ForEach(func(mi, msg gjson.Result) bool {
+		if beforeIdx >= 0 && mi.Int() >= beforeIdx {
+			return false // stop: reached the protected turn
+		}
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(ci, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "image":
+				found = fmt.Sprintf("messages.%d.content.%d", mi.Int(), ci.Int())
+				return false
+			case "tool_result":
+				inner := part.Get("content")
+				if inner.IsArray() {
+					inner.ForEach(func(ii, ipart gjson.Result) bool {
+						if ipart.Get("type").String() == "image" {
+							found = fmt.Sprintf("messages.%d.content.%d.content.%d", mi.Int(), ci.Int(), ii.Int())
+							return false
+						}
+						return true
+					})
+				}
+				if found != "" {
+					return false
+				}
+			}
+			return true
+		})
+		return found == ""
+	})
+	return found
+}
+
+// normalizeMessageContent ensures every message's content field is an array of
+// typed blocks, never a bare string. This stabilizes the JSON byte sequence
+// across turns so Anthropic prompt caching can match longer prefixes.
+func normalizeMessageContent(out []byte) []byte {
+	msgs := gjson.GetBytes(out, "messages")
+	if !msgs.Exists() || !msgs.IsArray() {
+		return out
+	}
+	msgs.ForEach(func(mi, msg gjson.Result) bool {
+		c := msg.Get("content")
+		if c.Type == gjson.String {
+			block := []byte(`{"type":"text","text":""}`)
+			block, _ = sjson.SetBytes(block, "text", c.String())
+			arr := []byte(`[]`)
+			arr, _ = sjson.SetRawBytes(arr, "-1", block)
+			path := fmt.Sprintf("messages.%d.content", mi.Int())
+			out, _ = sjson.SetRawBytes(out, path, arr)
+		}
+		return true
+	})
+	return out
+}
+
+// stripModelSwitchPrompt detects <model_switch> blocks that contain a full
+// duplicate of the system prompt and replaces them with a short summary.
+// This saves ~5,700 tokens per occurrence (typically 3x in a long session).
+func stripModelSwitchPrompt(out []byte) []byte {
+	const tag = "<model_switch>"
+	const replacement = "<model_switch>\nThe user switched models. Continue the conversation following the system instructions from the first message.\n</model_switch>"
+
+	gjson.GetBytes(out, "messages").ForEach(func(mi, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(ci, part gjson.Result) bool {
+			if part.Get("type").String() != "text" {
+				return true
+			}
+			text := part.Get("text").String()
+			if len(text) > 1000 && strings.Contains(text, tag) {
+				path := fmt.Sprintf("messages.%d.content.%d.text", mi.Int(), ci.Int())
+				out, _ = sjson.SetBytes(out, path, replacement)
+			}
+			return true
+		})
+		return true
+	})
+	return out
+}
+
+// truncateLargeToolResults truncates tool_result content strings that exceed
+// a threshold, keeping the head and tail to preserve useful context while
+// cutting out the middle bulk. This targets cases like large log dumps that
+// bloat the payload without adding value to later turns.
+func truncateLargeToolResults(out []byte) []byte {
+	const maxLen = 8192
+	const keepEach = 2048
+
+	gjson.GetBytes(out, "messages").ForEach(func(mi, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(ci, part gjson.Result) bool {
+			if part.Get("type").String() != "tool_result" {
+				return true
+			}
+			inner := part.Get("content")
+			if inner.Type == gjson.String && len(inner.String()) > maxLen {
+				text := inner.String()
+				truncated := text[:keepEach] + "\n\n[...truncated " + fmt.Sprintf("%d", len(text)-2*keepEach) + " chars...]\n\n" + text[len(text)-keepEach:]
+				path := fmt.Sprintf("messages.%d.content.%d.content", mi.Int(), ci.Int())
+				out, _ = sjson.SetBytes(out, path, truncated)
+			}
+			return true
+		})
+		return true
+	})
+	return out
 }

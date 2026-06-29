@@ -70,7 +70,7 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsReasoningItems(t *testing.T)
 	if got := assistant.Get("role").String(); got != "assistant" {
 		t.Fatalf("first message role = %q, want assistant. Output: %s", got, string(out))
 	}
-	if got := assistant.Get("content").String(); got != "visible answer" {
+	if got := assistant.Get("content.0.text").String(); got != "visible answer" {
 		t.Fatalf("assistant text = %q, want visible answer", got)
 	}
 	if got := root.Get("messages.1.role").String(); got != "user" {
@@ -166,7 +166,7 @@ func TestConvertOpenAIResponsesRequestToClaude_KeepsToolUseAdjacentToToolResult(
 	if got := root.Get("messages.0.role").String(); got != "assistant" {
 		t.Fatalf("first message role = %q, want assistant. Output: %s", got, string(out))
 	}
-	if got := root.Get("messages.0.content").String(); got != "I'll check your Obsidian vault for articles." {
+	if got := root.Get("messages.0.content.0.text").String(); got != "I'll check your Obsidian vault for articles." {
 		t.Fatalf("first message content = %q, want assistant text. Output: %s", got, string(out))
 	}
 	if got := root.Get("messages.1.content.0.type").String(); got != "tool_use" {
