@@ -64,6 +64,17 @@ func TestCursorSessionIDUsesAccessTokenHash(t *testing.T) {
 	}
 }
 
+func TestCursorChecksumAtUsesTimestamp(t *testing.T) {
+	gotA := cursorChecksumAt("identity", 1)
+	gotB := cursorChecksumAt("identity", 2)
+	if gotA == gotB {
+		t.Fatal("cursorChecksumAt() should vary with timestamp")
+	}
+	if gotA == "" || gotB == "" {
+		t.Fatal("cursorChecksumAt() should not return empty output")
+	}
+}
+
 func TestCursorComposerSDKBridgeURLEmptyWhenUnset(t *testing.T) {
 	got := cursorComposerSDKBridgeURL(&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "crsr_test"}})
 	if got != "" {

@@ -763,8 +763,11 @@ func cursorInternalHeaders(token, identity, requestID, clientVersion string) map
 }
 
 func cursorChecksum(identity string) string {
+	return cursorChecksumAt(identity, uint64(time.Now().UnixMilli()))
+}
+
+func cursorChecksumAt(identity string, timestamp uint64) string {
 	machineID := sha256Hex("composer-api:cursor-machine:" + identity)
-	timestamp := uint64(time.Now().Unix() / 1_000_000)
 	raw := []byte{byte(timestamp >> 40), byte(timestamp >> 32), byte(timestamp >> 24), byte(timestamp >> 16), byte(timestamp >> 8), byte(timestamp)}
 	t := byte(165)
 	for i := range raw {
