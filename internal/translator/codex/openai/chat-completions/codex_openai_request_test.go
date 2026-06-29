@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -840,5 +841,55 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_AddsAgentToolUseInstruction(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role":"user","content":"edit the file"}],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "edit_file",
+					"description": "Edit a file",
+					"parameters": {"type": "object"}
+				}
+			}
+		],
+		"tool_choice": "auto"
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	instructions := gjson.GetBytes(out, "instructions").String()
+
+	if !strings.Contains(instructions, "Do not end a turn by only saying") {
+		t.Fatalf("expected agent tool-use instruction, got %q; output=%s", instructions, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_SkipsAgentToolUseInstructionWhenToolChoiceNone(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role":"user","content":"answer only"}],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "edit_file",
+					"description": "Edit a file",
+					"parameters": {"type": "object"}
+				}
+			}
+		],
+		"tool_choice": "none"
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	instructions := gjson.GetBytes(out, "instructions").String()
+
+	if strings.Contains(instructions, "Do not end a turn by only saying") {
+		t.Fatalf("agent tool-use instruction should be skipped for tool_choice none; output=%s", string(out))
 	}
 }

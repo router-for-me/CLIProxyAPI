@@ -401,6 +401,56 @@ func TestConvertOpenAIResponsesRequestToCodex_ShortensLongCallIDs(t *testing.T) 
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_AddsAgentToolUseInstruction(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.5",
+		"instructions": "Keep answers concise.",
+		"input": [{"role":"user","content":"edit the file"}],
+		"tools": [
+			{
+				"type": "function",
+				"name": "edit_file",
+				"description": "Edit a file",
+				"parameters": {"type": "object"}
+			}
+		],
+		"tool_choice": "auto"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.5", inputJSON, false)
+	instructions := gjson.GetBytes(output, "instructions").String()
+
+	if !strings.Contains(instructions, "Keep answers concise.") {
+		t.Fatalf("existing instructions were not preserved: %q; output=%s", instructions, string(output))
+	}
+	if !strings.Contains(instructions, "Do not end a turn by only saying") {
+		t.Fatalf("expected agent tool-use instruction, got %q; output=%s", instructions, string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_SkipsAgentToolUseInstructionWhenToolChoiceNone(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.5",
+		"input": [{"role":"user","content":"answer only"}],
+		"tools": [
+			{
+				"type": "function",
+				"name": "edit_file",
+				"description": "Edit a file",
+				"parameters": {"type": "object"}
+			}
+		],
+		"tool_choice": "none"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.5", inputJSON, false)
+	instructions := gjson.GetBytes(output, "instructions").String()
+
+	if strings.Contains(instructions, "Do not end a turn by only saying") {
+		t.Fatalf("agent tool-use instruction should be skipped for tool_choice none; output=%s", string(output))
+	}
+}
+
 func BenchmarkConvertSystemRoleToDeveloperLargeInput(b *testing.B) {
 	cases := []struct {
 		name      string
