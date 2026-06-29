@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sys/cpu"
 )
 
 type InstallOptions struct {
@@ -38,6 +37,8 @@ var ErrLoadedPluginLocked = errors.New("loaded plugin library cannot be overwrit
 type InstallResult struct {
 	ID          string `json:"id"`
 	Version     string `json:"version"`
+	ReleaseTag  string `json:"release_tag,omitempty"`
+	InstallType string `json:"install_type,omitempty"`
 	Path        string `json:"path"`
 	Overwritten bool   `json:"overwritten"`
 	Skipped     bool   `json:"skipped"`
@@ -48,6 +49,10 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
+	if PluginInstallType(plugin) == InstallTypeDirect {
+		plugin.Version = normalizeVersion(plugin.Version)
+		return c.InstallDirect(ctx, plugin, plugin.Install, options)
+	}
 	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
 		return InstallResult{}, errRelease
@@ -58,6 +63,25 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 	}
 	plugin.Version = latestVersion
 	return c.installRelease(ctx, plugin, release, latestVersion, options)
+}
+
+func (c Client) InstallManifest(ctx context.Context, manifest Manifest, options InstallOptions) (InstallResult, error) {
+	if errValidate := manifest.Validate(); errValidate != nil {
+		return InstallResult{}, errValidate
+	}
+	options = normalizeInstallOptions(options)
+	switch manifest.InstallType() {
+	case InstallTypeDirect:
+		plugin, errPlugin := c.directPluginFromManifest(ctx, manifest)
+		if errPlugin != nil {
+			return InstallResult{}, errPlugin
+		}
+		return c.InstallDirect(ctx, plugin, plugin.Install, options)
+	case InstallTypeGitHubRelease:
+		return c.InstallVersion(ctx, manifest.Plugin(), manifest.ReleaseTag, manifest.Version, options)
+	default:
+		return InstallResult{}, fmt.Errorf("unsupported install type %q", manifest.Install.Type)
+	}
 }
 
 // InstallVersion installs a plugin artifact from a fixed release tag/version.
@@ -110,7 +134,110 @@ func (c Client) installRelease(ctx context.Context, plugin Plugin, release Relea
 		return InstallResult{}, errVerify
 	}
 	plugin.Version = version
-	return InstallArchive(archiveData, plugin, options)
+	result, errInstall := InstallArchive(archiveData, plugin, options)
+	if errInstall != nil {
+		return InstallResult{}, errInstall
+	}
+	result.InstallType = InstallTypeGitHubRelease
+	result.ReleaseTag = strings.TrimSpace(release.TagName)
+	return result, nil
+}
+
+func (c Client) InstallDirect(ctx context.Context, plugin Plugin, plan InstallPlan, options InstallOptions) (InstallResult, error) {
+	plugin.ID = strings.TrimSpace(plugin.ID)
+	plugin.Version = normalizeVersion(plugin.Version)
+	if !validPluginID(plugin.ID) {
+		return InstallResult{}, fmt.Errorf("invalid plugin id %q", plugin.ID)
+	}
+	if !validPluginVersion(plugin.Version) {
+		return InstallResult{}, fmt.Errorf("invalid plugin version %q", plugin.Version)
+	}
+	plan = NormalizeInstallPlan(plan)
+	plan.Type = InstallTypeDirect
+	if errValidate := ValidateInstallPlan(plan); errValidate != nil {
+		return InstallResult{}, errValidate
+	}
+	options = normalizeInstallOptions(options)
+	artifact, errSelect := SelectArtifact(plan, options.GOOS, options.GOARCH)
+	if errSelect != nil {
+		return InstallResult{}, errSelect
+	}
+	archiveData, errDownload := c.DownloadArtifact(ctx, artifact)
+	if errDownload != nil {
+		return InstallResult{}, fmt.Errorf("download artifact: %w", errDownload)
+	}
+	if errVerify := VerifyArtifactChecksum(artifact, archiveData); errVerify != nil {
+		return InstallResult{}, errVerify
+	}
+	result, errInstall := InstallArchive(archiveData, plugin, options)
+	if errInstall != nil {
+		return InstallResult{}, errInstall
+	}
+	result.InstallType = InstallTypeDirect
+	return result, nil
+}
+
+func (c Client) directPluginFromManifest(ctx context.Context, manifest Manifest) (Plugin, error) {
+	plugin := manifest.Plugin()
+	plugin.Version = normalizeVersion(manifest.Version)
+	plugin.Install = NormalizeInstallPlan(plugin.Install)
+	plugin.Install.Type = InstallTypeDirect
+	if len(plugin.Install.Artifacts) > 0 {
+		return plugin, nil
+	}
+	sourceURL := strings.TrimSpace(manifest.SourceURL)
+	if sourceURL == "" {
+		sourceURL = strings.TrimSpace(c.RegistryURL)
+	}
+	if sourceURL == "" {
+		return Plugin{}, fmt.Errorf("direct install manifest missing source-url")
+	}
+	sourceClient := c
+	sourceClient.RegistryURL = sourceURL
+	registry, errRegistry := sourceClient.FetchRegistry(ctx)
+	if errRegistry != nil {
+		return Plugin{}, fmt.Errorf("fetch direct install source: %w", errRegistry)
+	}
+	resolved, okPlugin := registry.PluginByID(manifest.ID)
+	if !okPlugin {
+		return Plugin{}, fmt.Errorf("direct install plugin %q not found in source", strings.TrimSpace(manifest.ID))
+	}
+	if PluginInstallType(resolved) != InstallTypeDirect {
+		return Plugin{}, fmt.Errorf("direct install plugin %q resolved as %q", strings.TrimSpace(manifest.ID), PluginInstallType(resolved))
+	}
+	return directPluginVersion(resolved, manifest.ID, manifest.Version)
+}
+
+func directPluginVersion(plugin Plugin, id string, version string) (Plugin, error) {
+	id = strings.TrimSpace(id)
+	version = normalizeVersion(version)
+	if normalizeVersion(plugin.Version) == version {
+		plugin.Version = version
+		plugin.Install = NormalizeInstallPlan(plugin.Install)
+		plugin.Install.Type = InstallTypeDirect
+		if errPlan := ValidateInstallPlan(plugin.Install); errPlan != nil {
+			return Plugin{}, fmt.Errorf("direct install plugin %q version %q: %w", id, version, errPlan)
+		}
+		return plugin, nil
+	}
+	for _, candidate := range plugin.Versions {
+		if normalizeVersion(candidate.Version) != version {
+			continue
+		}
+		plugin.Version = version
+		plugin.Install = NormalizeInstallPlan(candidate.Install)
+		if plugin.Install.Type == "" {
+			plugin.Install.Type = InstallTypeDirect
+		}
+		if plugin.Install.Type != InstallTypeDirect {
+			return Plugin{}, fmt.Errorf("direct install plugin %q version %q resolved as %q", id, version, plugin.Install.Type)
+		}
+		if errPlan := ValidateInstallPlan(plugin.Install); errPlan != nil {
+			return Plugin{}, fmt.Errorf("direct install plugin %q version %q: %w", id, version, errPlan)
+		}
+		return plugin, nil
+	}
+	return Plugin{}, fmt.Errorf("direct install plugin %q version %q not found in source", id, version)
 }
 
 func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (InstallResult, error) {
@@ -283,7 +410,7 @@ func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
 	if root == "" {
 		root = "plugins"
 	}
-	candidates := pluginCandidateDirs(root, runtime.GOOS, runtime.GOARCH, cpuVariant())
+	candidates := pluginCandidateDirs(root, runtime.GOOS, runtime.GOARCH)
 	extension := pluginExtension(runtime.GOOS)
 	selected := make([]pluginFileInfo, 0)
 	seen := make(map[string]struct{})
@@ -320,11 +447,8 @@ func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
 	return selected, nil
 }
 
-func pluginCandidateDirs(root string, goos string, goarch string, variant string) []string {
-	dirs := make([]string, 0, 3)
-	if variant != "" {
-		dirs = append(dirs, filepath.Join(root, goos, goarch+"-"+variant))
-	}
+func pluginCandidateDirs(root string, goos string, goarch string) []string {
+	dirs := make([]string, 0, 2)
 	dirs = append(dirs, filepath.Join(root, goos, goarch))
 	dirs = append(dirs, root)
 	return dirs
@@ -390,22 +514,6 @@ func pluginExtension(goos string) string {
 	default:
 		return ".so"
 	}
-}
-
-func cpuVariant() string {
-	if runtime.GOARCH != "amd64" {
-		return ""
-	}
-	if cpu.X86.HasAVX512F && cpu.X86.HasAVX512BW && cpu.X86.HasAVX512CD && cpu.X86.HasAVX512DQ && cpu.X86.HasAVX512VL {
-		return "v4"
-	}
-	if cpu.X86.HasAVX && cpu.X86.HasAVX2 && cpu.X86.HasBMI1 && cpu.X86.HasBMI2 && cpu.X86.HasFMA {
-		return "v3"
-	}
-	if cpu.X86.HasSSE3 && cpu.X86.HasSSSE3 && cpu.X86.HasSSE41 && cpu.X86.HasSSE42 && cpu.X86.HasPOPCNT {
-		return "v2"
-	}
-	return "v1"
 }
 
 func writeFileAtomic(targetPath string, data []byte, mode os.FileMode) error {
@@ -482,5 +590,7 @@ func normalizeInstallOptions(options InstallOptions) InstallOptions {
 	if options.GOARCH == "" {
 		options.GOARCH = runtime.GOARCH
 	}
+	options.GOOS = normalizeGOOS(options.GOOS)
+	options.GOARCH = normalizeGOARCH(options.GOARCH)
 	return options
 }

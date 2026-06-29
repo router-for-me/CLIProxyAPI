@@ -127,7 +127,6 @@ Linux、FreeBSD 或 Windows 使用相同源码目录，平台扩展名以 `examp
 宿主搜索：
 
 ```text
-plugins/<GOOS>/<GOARCH>-<variant>
 plugins/<GOOS>/<GOARCH>
 plugins
 ```

@@ -292,12 +292,13 @@ func (m *xaiWebsocketRequestIDMapper) downstreamIDForUpstreamResponse(upstreamRe
 	defer m.state.mu.Unlock()
 	m.upstreamResponseID = upstreamResponseID
 	m.downstreamResponseID = upstreamResponseID
-	if m.downstreamPreviousID != "" && m.upstreamPreviousID != "" && upstreamResponseID == m.upstreamPreviousID {
-		m.state.sequence++
-		m.downstreamResponseID = fmt.Sprintf("%s-xai-%d", upstreamResponseID, m.state.sequence)
-	}
 	if m.state.downstreamToUpstream == nil {
 		m.state.downstreamToUpstream = make(map[string]string)
+	}
+	_, upstreamResponseIDSeen := m.state.downstreamToUpstream[upstreamResponseID]
+	if (m.downstreamPreviousID != "" && m.upstreamPreviousID != "" && upstreamResponseID == m.upstreamPreviousID) || upstreamResponseIDSeen {
+		m.state.sequence++
+		m.downstreamResponseID = fmt.Sprintf("%s-xai-%d", upstreamResponseID, m.state.sequence)
 	}
 	m.state.downstreamToUpstream[upstreamResponseID] = upstreamResponseID
 	m.state.downstreamToUpstream[m.downstreamResponseID] = upstreamResponseID

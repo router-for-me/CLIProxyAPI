@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"bytes"
+
+	"github.com/tidwall/gjson"
 	"strings"
 	"testing"
 
@@ -202,5 +205,103 @@ func TestRewriteForceMappedStreamChunk_NoRewriteWhenRewriterNil(t *testing.T) {
 	got := rewriteForceMappedStreamChunk(nil, chunk)
 	if string(got) != string(chunk) {
 		t.Fatalf("chunk = %q, want unchanged upstream payload", got)
+	}
+}
+
+func TestNormalizeGluedSSEEvents_SplitsValidGlueOnly(t *testing.T) {
+	glued := []byte("event: response.created\ndata: {\"type\":\"response.created\"}event: response.completed\ndata: {\"type\":\"response.completed\"}")
+	got := normalizeGluedSSEEvents(glued)
+	if !bytes.Contains(got, []byte("}\n\nevent:")) {
+		t.Fatalf("expected glued frame split, got %q", got)
+	}
+
+	inside := []byte("event: response.output_text.delta\ndata: {\"type\":\"delta\",\"text\":\"literal }event: inside string\"}")
+	gotInside := string(normalizeGluedSSEEvents(inside))
+	if strings.Contains(gotInside, "}\n\nevent:") {
+		t.Fatalf("should not split inside JSON string, got %q", gotInside)
+	}
+	for _, line := range bytes.Split(inside, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("data:")) {
+			_, jd, ok := extractSSEDataLine(line)
+			if !ok || !gjson.ValidBytes(jd) {
+				t.Fatalf("baseline invalid")
+			}
+		}
+	}
+	for _, line := range bytes.Split([]byte(gotInside), []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("data:")) {
+			_, jd, ok := extractSSEDataLine(line)
+			if !ok || !gjson.ValidBytes(jd) {
+				t.Fatalf("corrupted JSON after normalize: %q", gotInside)
+			}
+		}
+	}
+}
+
+func TestNormalizeGluedSSEEvents_SplitsCodexDataGlueOnly(t *testing.T) {
+	glued := []byte(`data: {"type":"response.created"}data: {"type":"response.completed"}`)
+	got := normalizeGluedSSEEvents(glued)
+	if !bytes.Contains(got, []byte("}\ndata:")) {
+		t.Fatalf("expected codex glued split, got %q", got)
+	}
+	inside := []byte(`data: {"type":"delta","text":"literal }data: inside"}`)
+	gotInside := string(normalizeGluedSSEEvents(inside))
+	if strings.Contains(gotInside, "}\ndata:") && !bytes.Equal([]byte(gotInside), inside) {
+		// Only fail if we actually inserted a split (unchanged is OK)
+		for _, line := range bytes.Split([]byte(gotInside), []byte("\n")) {
+			if bytes.HasPrefix(line, []byte("data:")) {
+				_, jd, ok := extractSSEDataLine(line)
+				if !ok || !gjson.ValidBytes(jd) {
+					t.Fatalf("corrupted JSON: %q", gotInside)
+				}
+			}
+		}
+	}
+}
+
+func parseResponsesWSDataEventTypes(payload []byte) []string {
+	lines := bytes.Split(payload, []byte("\n"))
+	var types []string
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || bytes.HasPrefix(line, []byte("event:")) {
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			line = bytes.TrimSpace(line[len("data:"):])
+		}
+		if len(line) == 0 || !gjson.ValidBytes(line) {
+			continue
+		}
+		types = append(types, gjson.GetBytes(line, "type").String())
+	}
+	return types
+}
+
+func TestRewriteForceMappedStreamChunk_CodexDataLinesWithoutNewlines_FinishParsesCompleted(t *testing.T) {
+	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "gpt-5.4-fast"})
+	lines := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"model":"gpt-5.4"}}`),
+		[]byte(`data: {"type":"response.in_progress","response":{"model":"gpt-5.4"}}`),
+		[]byte(`data: {"type":"response.completed","response":{"model":"gpt-5.4","output":[]}}`),
+	}
+	var types []string
+	for _, ln := range lines {
+		if out := rewriteForceMappedStreamChunk(rewriter, ln); len(out) > 0 {
+			types = append(types, parseResponsesWSDataEventTypes(out)...)
+		}
+	}
+	if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
+		types = append(types, parseResponsesWSDataEventTypes(tail)...)
+	}
+	found := false
+	for _, typ := range types {
+		if typ == "response.completed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing response.completed; types=%v", types)
 	}
 }
