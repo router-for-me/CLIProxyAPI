@@ -44,6 +44,24 @@ func TestPluginStoreAuthMatchesURLHostAndPathBoundaries(t *testing.T) {
 	}
 }
 
+func TestPluginStoreGitHubTokenUsesExplicitTokenEnv(t *testing.T) {
+	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
+	headers := http.Header{}
+	auth := []AuthConfig{{
+		Match:    "https://api.github.com/repos/author-name/sample-provider/releases/",
+		ApplyTo:  []string{RequestKindArtifact},
+		Type:     AuthTypeGitHubToken,
+		TokenEnv: "PLUGIN_STORE_TOKEN",
+	}}
+
+	if errAuth := applyPluginStoreAuth(headers, auth, "https://api.github.com/repos/author-name/sample-provider/releases/assets/1", RequestKindArtifact); errAuth != nil {
+		t.Fatalf("applyPluginStoreAuth() error = %v", errAuth)
+	}
+	if gotAuth := headers.Get("Authorization"); gotAuth != "Bearer secret-token" {
+		t.Fatalf("Authorization = %q, want Bearer secret-token", gotAuth)
+	}
+}
+
 func TestPluginAuthConfiguredCoversInstallRequestKinds(t *testing.T) {
 	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
 

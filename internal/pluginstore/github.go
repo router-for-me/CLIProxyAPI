@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
@@ -115,14 +114,25 @@ func ReleaseVersion(release Release) (string, error) {
 }
 
 func (c Client) DownloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, error) {
-	downloadURL := strings.TrimSpace(asset.APIURL)
-	if downloadURL == "" {
-		downloadURL = strings.TrimSpace(asset.BrowserDownloadURL)
+	downloadURL := strings.TrimSpace(asset.BrowserDownloadURL)
+	apiURL := strings.TrimSpace(asset.APIURL)
+	if downloadURL == "" || c.releaseAssetAPIAuthenticated(apiURL) {
+		if apiURL != "" {
+			downloadURL = apiURL
+		}
 	}
 	if downloadURL == "" {
 		return nil, fmt.Errorf("asset %q missing download url", asset.Name)
 	}
 	return c.get(ctx, downloadURL, "application/octet-stream", RequestKindArtifact, 0)
+}
+
+func (c Client) releaseAssetAPIAuthenticated(apiURL string) bool {
+	apiURL = strings.TrimSpace(apiURL)
+	if apiURL == "" {
+		return false
+	}
+	return AuthConfigured(c.Auth, apiURL, RequestKindArtifact)
 }
 
 func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
@@ -137,11 +147,6 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 		}
 		if errAuth := applyPluginStoreAuth(headers, c.Auth, currentURL, kind); errAuth != nil {
 			return nil, errAuth
-		}
-		if headers.Get("Authorization") == "" {
-			if token := gitHubAPIToken(currentURL); token != "" {
-				headers.Set("Authorization", "Bearer "+token)
-			}
 		}
 		resp, errDo := pluginStoreGetNoRedirect(ctx, c.httpClient(), currentURL, headers)
 		if errDo != nil {
@@ -163,20 +168,6 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 		}
 		return readPluginStoreResponse(resp, maxSize)
 	}
-}
-
-// gitHubAPIToken returns the optional GitHub token for GitHub API requests to
-// raise the unauthenticated rate limit, mirroring the management asset updater.
-func gitHubAPIToken(requestURL string) string {
-	parsed, errParse := url.Parse(requestURL)
-	if errParse != nil || !strings.EqualFold(parsed.Host, "api.github.com") {
-		return ""
-	}
-	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
-	if !strings.Contains(gitURL, "github.com") {
-		return ""
-	}
-	return strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN"))
 }
 
 func (c Client) httpClient() HTTPDoer {

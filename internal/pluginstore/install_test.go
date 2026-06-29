@@ -347,9 +347,7 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 	}
 }
 
-func TestInstallDownloadsReleaseAssetsViaAPIURL(t *testing.T) {
-	t.Parallel()
-
+func TestInstallDownloadsReleaseAssetsViaBrowserDownloadURL(t *testing.T) {
 	root := t.TempDir()
 	archiveData := makeZip(t, map[string]string{"sample-provider.dylib": "library-data"})
 	archiveName := "sample-provider_0.2.0_darwin_arm64.zip"
@@ -367,6 +365,49 @@ func TestInstallDownloadsReleaseAssetsViaAPIURL(t *testing.T) {
 					"name": "checksums.txt",
 					"url": "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/2",
 					"browser_download_url": "https://downloads.example/missing-checksums.txt"
+				}
+			]
+		}`),
+		"https://downloads.example/missing.zip":           archiveData,
+		"https://downloads.example/missing-checksums.txt": []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}}
+
+	result, errInstall := client.Install(context.Background(), testPlugin(), InstallOptions{
+		PluginsDir: root,
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
+	})
+	if errInstall != nil {
+		t.Fatalf("Install() error = %v", errInstall)
+	}
+	if result.Version != "0.2.0" {
+		t.Fatalf("Version = %q, want 0.2.0 from latest release tag", result.Version)
+	}
+	data, errRead := os.ReadFile(filepath.Join(root, "darwin", "arm64", "sample-provider-v0.2.0.dylib"))
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "library-data" {
+		t.Fatalf("installed data = %q, want library-data", data)
+	}
+}
+
+func TestInstallFallsBackToReleaseAssetAPIURLWhenBrowserDownloadURLEmpty(t *testing.T) {
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.dylib": "library-data"})
+	archiveName := "sample-provider_0.2.0_darwin_arm64.zip"
+	checksum := sha256.Sum256(archiveData)
+	client := Client{HTTPClient: mapHTTPDoer{
+		"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+			"tag_name": "v0.2.0",
+			"assets": [
+				{
+					"name": "` + archiveName + `",
+					"url": "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1"
+				},
+				{
+					"name": "checksums.txt",
+					"url": "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/2"
 				}
 			]
 		}`),
@@ -391,6 +432,64 @@ func TestInstallDownloadsReleaseAssetsViaAPIURL(t *testing.T) {
 	}
 	if string(data) != "library-data" {
 		t.Fatalf("installed data = %q, want library-data", data)
+	}
+}
+
+func TestDownloadAssetUsesAPIURLWhenAuthMatchesArtifact(t *testing.T) {
+	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
+	apiURL := "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1"
+	client := Client{
+		HTTPClient: authCheckingHTTPDoer{
+			url:           apiURL,
+			wantAuth:      "Bearer secret-token",
+			responseBytes: []byte("artifact-data"),
+		},
+		Auth: []AuthConfig{{
+			Match:    "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/",
+			ApplyTo:  []string{RequestKindArtifact},
+			Type:     AuthTypeBearer,
+			TokenEnv: "PLUGIN_STORE_TOKEN",
+		}},
+	}
+
+	data, errDownload := client.DownloadAsset(context.Background(), ReleaseAsset{
+		Name:               "sample-provider_0.2.0_darwin_arm64.zip",
+		APIURL:             apiURL,
+		BrowserDownloadURL: "https://downloads.example/sample-provider.zip",
+	})
+	if errDownload != nil {
+		t.Fatalf("DownloadAsset() error = %v", errDownload)
+	}
+	if string(data) != "artifact-data" {
+		t.Fatalf("DownloadAsset() = %q, want artifact-data", data)
+	}
+}
+
+func TestDownloadAssetUsesBrowserDownloadURLWithUnrelatedAuth(t *testing.T) {
+	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
+	browserURL := "https://downloads.example/sample-provider.zip"
+	client := Client{
+		HTTPClient: mapHTTPDoer{
+			browserURL: []byte("artifact-data"),
+		},
+		Auth: []AuthConfig{{
+			Match:    "https://registry.example/",
+			ApplyTo:  []string{RequestKindRegistry},
+			Type:     AuthTypeBearer,
+			TokenEnv: "PLUGIN_STORE_TOKEN",
+		}},
+	}
+
+	data, errDownload := client.DownloadAsset(context.Background(), ReleaseAsset{
+		Name:               "sample-provider_0.2.0_darwin_arm64.zip",
+		APIURL:             "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1",
+		BrowserDownloadURL: browserURL,
+	})
+	if errDownload != nil {
+		t.Fatalf("DownloadAsset() error = %v", errDownload)
+	}
+	if string(data) != "artifact-data" {
+		t.Fatalf("DownloadAsset() = %q, want artifact-data", data)
 	}
 }
 
