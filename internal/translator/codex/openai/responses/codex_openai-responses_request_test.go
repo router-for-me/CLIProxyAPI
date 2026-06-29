@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -368,6 +369,35 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 
 	if gjson.Get(outputStr, "truncation").Exists() {
 		t.Fatalf("truncation should be removed for Codex compatibility")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_ShortensLongCallIDs(t *testing.T) {
+	longCallID := "call_" + strings.Repeat("x", 78)
+	if len(longCallID) != 83 {
+		t.Fatalf("test setup call_id length = %d, want 83", len(longCallID))
+	}
+	inputJSON := []byte(`{
+		"model": "gpt-5.5",
+		"input": [
+			{"type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{}"},
+			{"type":"function_call_output","call_id":"` + longCallID + `","output":"ok"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.5", inputJSON, false)
+
+	gotCallID := gjson.GetBytes(output, "input.0.call_id").String()
+	gotOutputID := gjson.GetBytes(output, "input.1.call_id").String()
+	want := util.ShortenOpenAIResponsesCallIDIfNeeded(longCallID)
+	if len(gotCallID) > 64 {
+		t.Fatalf("function_call call_id length = %d, want <= 64: %q", len(gotCallID), gotCallID)
+	}
+	if gotCallID != want {
+		t.Fatalf("function_call call_id = %q, want %q; output=%s", gotCallID, want, string(output))
+	}
+	if gotOutputID != want {
+		t.Fatalf("function_call_output call_id = %q, want %q; output=%s", gotOutputID, want, string(output))
 	}
 }
 

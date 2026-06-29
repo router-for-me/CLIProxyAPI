@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -38,6 +39,10 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+
+	// Cursor can send long Responses call_id values from tool-use turns. Codex
+	// upstream enforces OpenAI's 64 byte call_id limit.
+	rawJSON = util.NormalizeOpenAIResponsesInputCallIDs(rawJSON)
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
