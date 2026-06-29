@@ -352,6 +352,39 @@ func TestToolCallOutputWithNonStringJSONContent(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToCodexPreservesInputAudio(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Transcribe this audio verbatim."},
+					{"type": "input_audio", "input_audio": {"data": "SUQzBA==", "format": "mp3"}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	parts := gjson.GetBytes(out, "input.0.content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 content parts, got %d: %s", len(parts), gjson.GetBytes(out, "input.0.content").Raw)
+	}
+	if parts[0].Get("type").String() != "input_text" || parts[0].Get("text").String() != "Transcribe this audio verbatim." {
+		t.Fatalf("part 0: expected input_text with prompt text, got %s", parts[0].Raw)
+	}
+	if parts[1].Get("type").String() != "input_audio" {
+		t.Fatalf("part 1: expected input_audio, got %s", parts[1].Raw)
+	}
+	if parts[1].Get("data").String() != "SUQzBA==" {
+		t.Fatalf("part 1: expected audio data to be preserved, got %s", parts[1].Get("data").String())
+	}
+	if parts[1].Get("format").String() != "mp3" {
+		t.Fatalf("part 1: expected audio format mp3, got %s", parts[1].Get("format").String())
+	}
+}
+
 // Parallel tool calls: assistant invokes 3 tools at once, all call_ids
 // and outputs must be translated and paired correctly.
 func TestMultipleToolCalls(t *testing.T) {

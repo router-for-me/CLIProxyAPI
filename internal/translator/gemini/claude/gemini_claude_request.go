@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -19,7 +20,7 @@ import (
 const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 
 // ConvertClaudeRequestToGemini parses a Claude API request and returns a complete
-// Gemini CLI request body (as JSON bytes) ready to be sent via SendRawMessageStream.
+// Gemini request body (as JSON bytes) ready to be sent via SendRawMessageStream.
 // All JSON transformations are performed using gjson/sjson.
 //
 // Parameters:
@@ -28,10 +29,10 @@ const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 //   - stream: A boolean indicating if the request is for a streaming response.
 //
 // Returns:
-//   - []byte: The transformed request in Gemini CLI format.
+//   - []byte: The transformed request in Gemini format.
 func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
-	// Build output Gemini CLI request JSON
+	// Build output Gemini request JSON
 	out := []byte(`{"contents":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
@@ -79,6 +80,15 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			contentJSON, _ = sjson.SetBytes(contentJSON, "role", role)
 
 			contentsResult := messageResult.Get("content")
+			if roleResult.String() == "system" {
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
+					part := []byte(`{"text":""}`)
+					part, _ = sjson.SetBytes(part, "text", reminderText)
+					contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+					out, _ = sjson.SetRawBytes(out, "contents.-1", contentJSON)
+				}
+				return true
+			}
 			if contentsResult.IsArray() {
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {

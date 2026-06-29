@@ -307,13 +307,14 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey         *string               `json:"api-key"`
-		Prefix         *string               `json:"prefix"`
-		BaseURL        *string               `json:"base-url"`
-		ProxyURL       *string               `json:"proxy-url"`
-		Models         *[]config.ClaudeModel `json:"models"`
-		Headers        *map[string]string    `json:"headers"`
-		ExcludedModels *[]string             `json:"excluded-models"`
+		APIKey                  *string               `json:"api-key"`
+		Prefix                  *string               `json:"prefix"`
+		BaseURL                 *string               `json:"base-url"`
+		ProxyURL                *string               `json:"proxy-url"`
+		Models                  *[]config.ClaudeModel `json:"models"`
+		Headers                 *map[string]string    `json:"headers"`
+		ExcludedModels          *[]string             `json:"excluded-models"`
+		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -366,6 +367,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.RebuildMidSystemMessage != nil {
+		entry.RebuildMidSystemMessage = *body.Value.RebuildMidSystemMessage
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
@@ -462,13 +466,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name          *string                             `json:"name"`
-		Prefix        *string                             `json:"prefix"`
-		Disabled      *bool                               `json:"disabled"`
-		BaseURL       *string                             `json:"base-url"`
-		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers       *map[string]string                  `json:"headers"`
+		Name           *string                             `json:"name"`
+		Prefix         *string                             `json:"prefix"`
+		Disabled       *bool                               `json:"disabled"`
+		DisableCooling *bool                               `json:"disable-cooling"`
+		BaseURL        *string                             `json:"base-url"`
+		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers        *map[string]string                  `json:"headers"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -509,6 +514,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Disabled != nil {
 		entry.Disabled = *body.Value.Disabled
+	}
+	if body.Value.DisableCooling != nil {
+		entry.DisableCooling = *body.Value.DisableCooling
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)

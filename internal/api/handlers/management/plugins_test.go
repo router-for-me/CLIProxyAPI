@@ -122,6 +122,7 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 			Enabled          bool   `json:"enabled"`
 			EffectiveEnabled bool   `json:"effective_enabled"`
 			SupportsOAuth    bool   `json:"supports_oauth"`
+			OAuthProvider    string `json:"oauth_provider"`
 			Logo             string `json:"logo"`
 			ConfigFields     []any  `json:"config_fields"`
 			Menus            []any  `json:"menus"`
@@ -154,7 +155,12 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 			EffectiveEnabled: item.EffectiveEnabled,
 			Path:             item.Path,
 		}
-		if item.Registered || item.SupportsOAuth || item.Logo != "" || len(item.ConfigFields) != 0 || len(item.Menus) != 0 {
+		if item.Registered ||
+			item.SupportsOAuth ||
+			item.OAuthProvider != "" ||
+			item.Logo != "" ||
+			len(item.ConfigFields) != 0 ||
+			len(item.Menus) != 0 {
 			t.Fatalf("unregistered plugin entry has runtime fields: %#v", item)
 		}
 	}
@@ -164,6 +170,60 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	if got, ok := entries["configured-only"]; !ok || !got.Configured || got.Enabled || got.EffectiveEnabled || got.Path != "" {
 		t.Fatalf("configured-only entry = %#v, exists=%v", got, ok)
 	}
+}
+
+func TestListPluginsUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
+	t.Parallel()
+
+	pluginsDir := t.TempDir()
+	archDir := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", archDir, errMkdirAll)
+	}
+	extension := managementPluginExtension(runtime.GOOS)
+	pinnedPath := filepath.Join(archDir, "sample-provider-v0.1.0"+extension)
+	newerPath := filepath.Join(archDir, "sample-provider-v0.2.0"+extension)
+	for _, path := range []string{pinnedPath, newerPath} {
+		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+		}
+	}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: true\nstore:\n  version: 0.1.0\n"),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
+
+	h.ListPlugins(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body pluginListResponse
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("decode response: %v; body=%s", errDecode, rec.Body.String())
+	}
+	for _, entry := range body.Plugins {
+		if entry.ID != "sample-provider" {
+			continue
+		}
+		if entry.Path != pinnedPath || !entry.Configured || !entry.Enabled {
+			t.Fatalf("plugin entry = %#v, want pinned path %s", entry, pinnedPath)
+		}
+		return
+	}
+	t.Fatalf("sample-provider entry missing: %#v", body.Plugins)
 }
 
 func TestGetPluginConfigReturnsPreservedRawConfig(t *testing.T) {
@@ -466,16 +526,21 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	t.Parallel()
 
 	pluginsDir := writeManagementPluginFile(t, "sample")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte("plugins:\n  configs:\n    sample:\n      enabled: true\n      mode: safe\n    keep:\n      enabled: true\n      mode: retained\n"), 0o600); errWrite != nil {
+		t.Fatalf("failed to write test config: %v", errWrite)
+	}
 	h := &Handler{
 		cfg: &config.Config{
 			Plugins: config.PluginsConfig{
 				Dir: pluginsDir,
 				Configs: map[string]config.PluginInstanceConfig{
 					"sample": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
+					"keep":   pluginConfigFromYAML(t, "enabled: true\nmode: retained\n"),
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configFilePath: configPath,
 	}
 	reloads := make(chan *config.Config, 1)
 	releaseReload := make(chan struct{})
@@ -517,6 +582,20 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	if _, ok := h.cfg.Plugins.Configs["sample"]; ok {
 		t.Fatal("plugin config still exists after delete")
 	}
+	if _, ok := h.cfg.Plugins.Configs["keep"]; !ok {
+		t.Fatal("retained plugin config was removed")
+	}
+	data, errReadConfig := os.ReadFile(configPath)
+	if errReadConfig != nil {
+		t.Fatalf("failed to read saved config: %v", errReadConfig)
+	}
+	text := string(data)
+	if strings.Contains(text, "sample:") || strings.Contains(text, "mode: safe") {
+		t.Fatalf("saved config still contains removed plugin:\n%s", text)
+	}
+	if !strings.Contains(text, "keep:") || !strings.Contains(text, "mode: retained") {
+		t.Fatalf("saved config lost retained plugin:\n%s", text)
+	}
 	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
 		t.Fatalf("plugin file stat error = %v, want not exist", errStat)
 	}
@@ -533,6 +612,55 @@ func TestDeletePluginRemovesDiscoveredFileAndConfig(t *testing.T) {
 	}
 	close(releaseReload)
 	waitForReloadDone(t, reloadDone)
+}
+
+func TestDeletePluginUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
+	t.Parallel()
+
+	pluginsDir := t.TempDir()
+	archDir := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", archDir, errMkdirAll)
+	}
+	extension := managementPluginExtension(runtime.GOOS)
+	pinnedPath := filepath.Join(archDir, "sample-provider-v0.1.0"+extension)
+	newerPath := filepath.Join(archDir, "sample-provider-v0.2.0"+extension)
+	for _, path := range []string{pinnedPath, newerPath} {
+		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+		}
+	}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Dir: pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: true\nstore:\n  version: 0.1.0\n"),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample-provider", nil)
+
+	h.DeletePlugin(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if _, ok := h.cfg.Plugins.Configs["sample-provider"]; ok {
+		t.Fatal("plugin config still exists after delete")
+	}
+	if _, errStat := os.Stat(pinnedPath); !os.IsNotExist(errStat) {
+		t.Fatalf("pinned plugin stat error = %v, want not exist", errStat)
+	}
+	if _, errStat := os.Stat(newerPath); errStat != nil {
+		t.Fatalf("newer plugin stat error = %v, want still exists", errStat)
+	}
 }
 
 func TestDeletePluginReturnsNotFoundForUnknownPlugin(t *testing.T) {

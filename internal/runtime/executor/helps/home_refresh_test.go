@@ -92,4 +92,7 @@ func TestRefreshAuthViaHomeAcceptsAuthEnvelope(t *testing.T) {
 	if got := updated.Metadata["access_token"]; got != "new-access-token" {
 		t.Fatalf("updated access_token = %q, want new-access-token", got)
 	}
+	if updated.Index != "home-index-1" {
+		t.Fatalf("updated auth_index = %q, want home-index-1", updated.Index)
+	}
 }

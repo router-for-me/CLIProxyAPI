@@ -343,8 +343,7 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
-	accountType, _ := auth.AccountInfo()
-	if accountType == "api_key" {
+	if auth.AuthKind() == AuthKindAPIKey {
 		return time.Time{}, false
 	}
 

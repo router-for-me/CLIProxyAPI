@@ -9,26 +9,9 @@ import (
 )
 
 func TestCandidateDirs(t *testing.T) {
-	got := candidateDirs("plugins", "darwin", "arm64", "v3")
+	got := candidateDirs("plugins", "darwin", "arm64")
 	want := []string{
-		filepath.Join("plugins", "darwin", "arm64-v3"),
 		filepath.Join("plugins", "darwin", "arm64"),
-		"plugins",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("len(candidateDirs) = %d, want %d", len(got), len(want))
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("candidateDirs[%d] = %q, want %q", index, got[index], want[index])
-		}
-	}
-}
-
-func TestCandidateDirsOmitsEmptyVariant(t *testing.T) {
-	got := candidateDirs("plugins", "linux", "arm64", "")
-	want := []string{
-		filepath.Join("plugins", "linux", "arm64"),
 		"plugins",
 	}
 	if len(got) != len(want) {
@@ -159,24 +142,45 @@ func TestDiscoverPluginFilesReturnsSelectedPluginFiles(t *testing.T) {
 	}
 }
 
-func TestSelectPluginFilesPrefersCPUVariantOverGenericArchDir(t *testing.T) {
-	variant := cpuVariant()
-	if variant == "" {
-		t.Skip("current GOARCH has no plugin CPU variant")
-	}
+func TestSelectPluginFilesPrefersConfiguredVersionOverHigherVersion(t *testing.T) {
 	root := t.TempDir()
 	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
-	variantDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH+"-"+variant)
-	for _, dir := range []string{archDir, variantDir} {
-		if errMkdirAll := os.MkdirAll(dir, 0o755); errMkdirAll != nil {
-			t.Fatalf("MkdirAll(%s) error = %v", dir, errMkdirAll)
-		}
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
 	}
 
 	extension := pluginExtension(runtime.GOOS)
-	genericPath := filepath.Join(archDir, "alpha"+extension)
-	variantPath := filepath.Join(variantDir, "alpha"+extension)
-	for _, path := range []string{genericPath, variantPath} {
+	olderPath := filepath.Join(archDir, "alpha-v1.0.3"+extension)
+	newerPath := filepath.Join(archDir, "alpha-v1.0.4"+extension)
+	for _, path := range []string{olderPath, newerPath} {
+		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+		}
+	}
+
+	files, errSelect := selectPluginFiles(root, map[string]string{"alpha": "1.0.3"})
+	if errSelect != nil {
+		t.Fatalf("selectPluginFiles() error = %v", errSelect)
+	}
+	if len(files) != 1 {
+		t.Fatalf("selectPluginFiles() = %v, want exactly one alpha plugin", files)
+	}
+	if files[0] != (pluginFile{ID: "alpha", Path: olderPath, Version: "1.0.3"}) {
+		t.Fatalf("selectPluginFiles()[0] = %v, want configured plugin %s", files[0], olderPath)
+	}
+}
+
+func TestSelectPluginFilesFallsBackToHighestVersionWithoutConfiguredVersion(t *testing.T) {
+	root := t.TempDir()
+	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
+	}
+
+	extension := pluginExtension(runtime.GOOS)
+	olderPath := filepath.Join(archDir, "alpha-v1.0.3"+extension)
+	newerPath := filepath.Join(archDir, "alpha-v1.0.4"+extension)
+	for _, path := range []string{olderPath, newerPath} {
 		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
 			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
 		}
@@ -189,7 +193,29 @@ func TestSelectPluginFilesPrefersCPUVariantOverGenericArchDir(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("selectPluginFiles() = %v, want exactly one alpha plugin", files)
 	}
-	if files[0] != (pluginFile{ID: "alpha", Path: variantPath}) {
-		t.Fatalf("selectPluginFiles()[0] = %v, want CPU variant plugin %s", files[0], variantPath)
+	if files[0] != (pluginFile{ID: "alpha", Path: newerPath, Version: "1.0.4"}) {
+		t.Fatalf("selectPluginFiles()[0] = %v, want highest plugin %s", files[0], newerPath)
+	}
+}
+
+func TestSelectPluginFilesSkipsPluginWhenConfiguredVersionIsMissing(t *testing.T) {
+	root := t.TempDir()
+	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
+	}
+
+	extension := pluginExtension(runtime.GOOS)
+	path := filepath.Join(archDir, "alpha-v1.0.4"+extension)
+	if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+	}
+
+	files, errSelect := selectPluginFiles(root, map[string]string{"alpha": "1.0.3"})
+	if errSelect != nil {
+		t.Fatalf("selectPluginFiles() error = %v", errSelect)
+	}
+	if len(files) != 0 {
+		t.Fatalf("selectPluginFiles() = %v, want no selected alpha plugin", files)
 	}
 }

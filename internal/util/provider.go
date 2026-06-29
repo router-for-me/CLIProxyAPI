@@ -12,6 +12,20 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const openAICompatibleProviderPrefix = "openai-compatible-"
+
+// OpenAICompatibleProviderKey returns the internal provider key for an OpenAI-compatible provider.
+func OpenAICompatibleProviderKey(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "openai-compatibility" || strings.HasPrefix(name, openAICompatibleProviderPrefix) {
+		if name == "" {
+			return "openai-compatibility"
+		}
+		return name
+	}
+	return openAICompatibleProviderPrefix + name
+}
+
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
 // When the model has not been registered yet, it falls back to legacy string heuristics to infer

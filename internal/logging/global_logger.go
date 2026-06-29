@@ -30,7 +30,14 @@ var (
 type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
-var logFieldOrder = []string{"provider", "model", "version", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error"}
+var logFieldOrder = []string{
+	"provider", "model",
+	"plugin_id", "plugin_name", "source_id",
+	"version", "active_version", "retired_version", "overwritten",
+	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
+}
+
+var pluginPathFieldOrder = []string{"path", "active_path", "retired_path"}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
@@ -62,6 +69,13 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 		for _, k := range logFieldOrder {
 			if v, ok := entry.Data[k]; ok {
 				fields = append(fields, fmt.Sprintf("%s=%v", k, v))
+			}
+		}
+		if pluginID, ok := entry.Data["plugin_id"]; ok && strings.TrimSpace(fmt.Sprint(pluginID)) != "" {
+			for _, k := range pluginPathFieldOrder {
+				if v, ok := entry.Data[k]; ok {
+					fields = append(fields, fmt.Sprintf("%s=%v", k, v))
+				}
 			}
 		}
 		if len(fields) > 0 {

@@ -531,6 +531,62 @@ func TestConvertCodexResponseToClaude_StreamTextBeforeToolCallsDoesNotEmitGhostS
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamFunctionCallDefersStartUntilDoneName(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"web_search","description":"search"}]}`)
+	var param any
+
+	_ = ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`), &param)
+	addedOutputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1"},"output_index":1}`), &param)
+	argumentsOutputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"query\":\"example\"}","output_index":1}`), &param)
+	doneOutputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"web_search","arguments":"{\"query\":\"example\"}"},"output_index":1}`), &param)
+
+	if bytes.Contains(bytes.Join(addedOutputs, nil), []byte(`"content_block_start"`)) {
+		t.Fatalf("function_call without name must not emit content_block_start: %q", addedOutputs)
+	}
+	if bytes.Contains(bytes.Join(argumentsOutputs, nil), []byte(`"input_json_delta"`)) {
+		t.Fatalf("arguments must be buffered until the tool name is available: %q", argumentsOutputs)
+	}
+
+	var toolStartCount int
+	var toolStopCount int
+	var argumentDeltas []string
+	for _, out := range doneOutputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if data.Get("content_block.type").String() != "tool_use" {
+					continue
+				}
+				toolStartCount++
+				if got := data.Get("content_block.name").String(); got != "web_search" {
+					t.Fatalf("unexpected tool_use name %q in %s", got, data.Raw)
+				}
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" {
+					argumentDeltas = append(argumentDeltas, data.Get("delta.partial_json").String())
+				}
+			case "content_block_stop":
+				toolStopCount++
+			}
+		}
+	}
+
+	if toolStartCount != 1 {
+		t.Fatalf("expected one deferred tool_use start, got %d in %q", toolStartCount, doneOutputs)
+	}
+	if len(argumentDeltas) != 1 || argumentDeltas[0] != `{"query":"example"}` {
+		t.Fatalf("unexpected buffered argument deltas: %v", argumentDeltas)
+	}
+	if toolStopCount != 1 {
+		t.Fatalf("expected one deferred tool_use stop, got %d in %q", toolStopCount, doneOutputs)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessageFallback(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"tools":[]}`)

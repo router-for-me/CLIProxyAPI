@@ -13,9 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -49,6 +51,7 @@ const (
 	xaiVideosExtensionsPath     = "/videos/extensions"
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
+	xaiComposerModelPrefix      = "grok-composer-"
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -179,6 +182,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
+			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
@@ -662,6 +666,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 						}
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
+						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
 						normalizedEventName = gjson.GetBytes(eventData, "type").String()
 					}
 
@@ -797,6 +802,7 @@ type xaiPreparedRequest struct {
 	originalPayload []byte
 	body            []byte
 	sessionID       string
+	replayScope     xaiReasoningReplayScope
 }
 
 func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
@@ -832,11 +838,20 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
 	body = normalizeXAIToolChoiceForTools(body)
+	var replayScope xaiReasoningReplayScope
+	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	if err != nil {
+		return nil, err
+	}
 	body = normalizeXAIInputReasoningItems(body)
+	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 
-	sessionID := xaiExecutionSessionID(req, opts)
+	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
+	if errSession != nil {
+		return nil, errSession
+	}
 	if sessionID != "" {
 		body, _ = sjson.SetBytes(body, "prompt_cache_key", sessionID)
 	}
@@ -849,6 +864,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		originalPayload: originalPayload,
 		body:            body,
 		sessionID:       sessionID,
+		replayScope:     replayScope,
 	}, nil
 }
 
@@ -912,6 +928,23 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
+func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
+	if sessionID := xaiExecutionSessionID(req, opts); sessionID != "" {
+		return sessionID, nil
+	}
+	if !xaiRequiresIsolatedConversation(baseModel) {
+		return "", nil
+	}
+	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, req.Model, req.Payload, opts.Headers)
+	if errCache != nil {
+		return "", errCache
+	}
+	if ok {
+		return cached.ID, nil
+	}
+	return uuid.NewString(), nil
+}
+
 func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
 	if value := xaiMetadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return value
@@ -923,6 +956,10 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		return strings.TrimSpace(promptCacheKey.String())
 	}
 	return ""
+}
+
+func xaiRequiresIsolatedConversation(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), xaiComposerModelPrefix)
 }
 
 func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
@@ -983,6 +1020,9 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
 		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "reasoning")
+		}
 	}
 	return body
 }
@@ -1100,6 +1140,88 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		changed = true
 	}
 	return raw, changed, true
+}
+
+func sanitizeXAIInputEncryptedContent(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	changed := false
+	dropCount := 0
+	firstReason := ""
+	firstItemType := ""
+	for _, item := range input.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "reasoning" && itemType != "compaction" {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		encryptedContent := item.Get("encrypted_content")
+		if !encryptedContent.Exists() {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		reason := ""
+		switch encryptedContent.Type {
+		case gjson.String:
+			if _, err := signature.InspectGrokEncryptedContent(encryptedContent.String()); err != nil {
+				reason = err.Error()
+			}
+		case gjson.Null:
+			reason = "encrypted_content is null"
+		default:
+			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
+		}
+		if reason == "" {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+
+		if itemType == "compaction" {
+			changed = true
+			dropCount++
+			if firstReason == "" {
+				firstReason = reason
+				firstItemType = itemType
+			}
+			continue
+		}
+
+		next, err := sjson.DeleteBytes([]byte(item.Raw), "encrypted_content")
+		if err != nil {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		items = append(items, json.RawMessage(next))
+		changed = true
+		dropCount++
+		if firstReason == "" {
+			firstReason = reason
+			firstItemType = itemType
+		}
+	}
+	if !changed {
+		return body
+	}
+	rawInput, err := json.Marshal(items)
+	if err != nil {
+		return body
+	}
+	updated, err := sjson.SetRawBytes(body, "input", rawInput)
+	if err != nil {
+		return body
+	}
+	if dropCount > 0 {
+		log.WithFields(log.Fields{
+			"component":       "xai_encrypted_content_sanitizer",
+			"dropped":         dropCount,
+			"first_item_type": firstItemType,
+			"first_reason":    firstReason,
+		}).Debug("xai executor: removed invalid encrypted_content before upstream")
+	}
+	return mergeAdjacentXAIInputReasoningSummaries(updated)
 }
 
 func normalizeXAIInputReasoningItems(body []byte) []byte {

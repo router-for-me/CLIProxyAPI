@@ -175,10 +175,11 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 		Config: &config.Config{
 			ClaudeKey: []config.ClaudeKey{
 				{
-					APIKey:         "sk-ant-api-xxx",
-					Prefix:         "main",
-					BaseURL:        "https://api.anthropic.com",
-					DisableCooling: true,
+					APIKey:                  "sk-ant-api-xxx",
+					Prefix:                  "main",
+					BaseURL:                 "https://api.anthropic.com",
+					DisableCooling:          true,
+					RebuildMidSystemMessage: true,
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -212,6 +213,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")
+	}
+	if got := auths[0].Attributes["rebuild_mid_system_message"]; got != "true" {
+		t.Errorf("expected rebuild_mid_system_message=true, got %s", got)
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
@@ -397,6 +401,43 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "kimi",
+					BaseURL: "https://kimi-compatible.example.com/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "test-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "openai-compatible-kimi" {
+		t.Fatalf("provider = %q, want openai-compatible-kimi", auth.Provider)
+	}
+	if auth.Attributes["provider_key"] != "openai-compatible-kimi" {
+		t.Fatalf("provider_key = %q, want openai-compatible-kimi", auth.Attributes["provider_key"])
+	}
+	if auth.Attributes["compat_name"] != "kimi" {
+		t.Fatalf("compat_name = %q, want kimi", auth.Attributes["compat_name"])
 	}
 }
 
@@ -639,7 +680,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

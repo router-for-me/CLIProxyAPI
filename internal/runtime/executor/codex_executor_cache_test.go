@@ -3,12 +3,14 @@ package executor
 import (
 	"context"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -257,5 +259,51 @@ func TestCodexIdentityConfuseKeepsClientBodySeparateFromUpstreamBody(t *testing.
 	}
 	if gotKey := gjson.GetBytes(clientBody, "prompt_cache_key").String(); gotKey != "cache-1" {
 		t.Fatalf("client prompt_cache_key = %q, want cache-1", gotKey)
+	}
+}
+
+func TestCodexExecutorCacheHelper_ClaudeUsesSessionHeader(t *testing.T) {
+	executor := &CodexExecutor{}
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ginCtx.Request.Header.Set(helps.ClaudeCodeSessionHeader, "cache-session-header")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	firstReq := cliproxyexecutor.Request{
+		Model:   "gpt-5.4-claude-cache-header",
+		Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":[{"type":"text","text":"first"}]}]}`),
+	}
+	secondReq := cliproxyexecutor.Request{
+		Model:   "gpt-5.4-claude-cache-header",
+		Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.4","stream":true}`)
+	url := "https://example.com/responses"
+
+	firstHTTPReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("claude"), url, nil, firstReq, firstReq.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper first error: %v", err)
+	}
+	secondHTTPReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("claude"), url, nil, secondReq, secondReq.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper second error: %v", err)
+	}
+
+	firstBody, errRead := io.ReadAll(firstHTTPReq.Body)
+	if errRead != nil {
+		t.Fatalf("read first request body: %v", errRead)
+	}
+	secondBody, errRead := io.ReadAll(secondHTTPReq.Body)
+	if errRead != nil {
+		t.Fatalf("read second request body: %v", errRead)
+	}
+	firstKey := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondKey := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	if firstKey == "" {
+		t.Fatalf("first prompt_cache_key is empty; body=%s", string(firstBody))
+	}
+	if secondKey != firstKey {
+		t.Fatalf("same Claude Code session header produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
 }

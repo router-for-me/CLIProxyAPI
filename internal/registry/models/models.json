@@ -46,7 +46,8 @@
         "levels": [
           "low",
           "medium",
-          "high"
+          "high",
+          "max"
         ]
       }
     },
@@ -1784,7 +1785,12 @@
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     },
     {
@@ -1794,14 +1800,19 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K2.5",
-      "description": "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
-      "context_length": 131072,
+      "description": "Kimi K2.5 - Native multimodal agentic model with text, image, and video input; supports thinking and non-thinking modes",
+      "context_length": 262144,
       "max_completion_tokens": 32768,
       "thinking": {
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     },
     {
@@ -1811,14 +1822,19 @@
       "owned_by": "moonshot",
       "type": "kimi",
       "display_name": "Kimi K2.6",
-      "description": "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+      "description": "Kimi K2.6 - Native multimodal agentic model with stronger long-horizon agentic coding, long-context reasoning, and preserved thinking support",
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
         "min": 1024,
         "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     },
     {
@@ -1835,7 +1851,34 @@
         "min": 1024,
         "max": 32000,
         "zero_allowed": false,
-        "dynamic_allowed": true
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k2.7-code-highspeed",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.7 Code HighSpeed",
+      "description": "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with higher output speed (~180 tokens/s)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     }
   ],
@@ -1901,9 +1944,9 @@
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Gemini 3.5 Flash",
+      "display_name": "Gemini 3.5 Flash (High)",
       "name": "gemini-3-flash-agent",
-      "description": "Gemini 3.5 Flash",
+      "description": "Gemini 3.5 Flash (High)",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
@@ -1914,46 +1957,6 @@
           "minimal",
           "low",
           "medium",
-          "high"
-        ]
-      }
-    },
-    {
-      "id": "gemini-3-pro-high",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3 Pro (High)",
-      "name": "gemini-3-pro-high",
-      "description": "Gemini 3 Pro (High)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "high"
-        ]
-      }
-    },
-    {
-      "id": "gemini-3-pro-low",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3 Pro (Low)",
-      "name": "gemini-3-pro-low",
-      "description": "Gemini 3 Pro (Low)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
           "high"
         ]
       }
@@ -2057,8 +2060,29 @@
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Gemini 3.5 Flash (Low)",
+      "display_name": "Gemini 3.5 Flash (Medium)",
       "name": "gemini-3.5-flash-low",
+      "description": "Gemini 3.5 Flash (Medium)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-extra-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.5 Flash (Low)",
+      "name": "gemini-3.5-flash-extra-low",
       "description": "Gemini 3.5 Flash (Low)",
       "context_length": 1048576,
       "max_completion_tokens": 65535,
@@ -2073,7 +2097,6 @@
         ]
       }
     }
-
   ],
   "xai": [
     {
@@ -2086,16 +2109,7 @@
       "name": "grok-build-0.1",
       "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
       "context_length": 256000,
-      "max_completion_tokens": 256000,
-      "thinking": {
-        "zero_allowed": true,
-        "levels": [
-          "none",
-          "low",
-          "medium",
-          "high"
-        ]
-      }
+      "max_completion_tokens": 256000
     },
     {
       "id": "grok-4.3",
@@ -2209,14 +2223,7 @@
       "name": "grok-composer-2.5-fast",
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
-      "max_completion_tokens": 32768,
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
+      "max_completion_tokens": 32768
     }
   ]
 }

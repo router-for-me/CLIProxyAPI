@@ -64,6 +64,13 @@ plugins:
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:
   #   - "https://example.com/cliproxy-plugins/registry.json"
+  # Optional plugin store auth rules. Values are read from environment variables;
+  # tokens are not written into plugin manifests or node status.
+  # store-auth:
+  #   - match: "https://example.com/cliproxy-plugins/"
+  #     apply-to: ["registry", "artifact"]
+  #     type: bearer
+  #     token-env: "CLIPROXY_PLUGIN_STORE_TOKEN"
   configs:
     example:
       enabled: true
@@ -119,6 +126,14 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# When true, persist per-auth cooldown status as .cds files next to auth files.
+# Default is false; when false, cooldown status is kept in memory only.
+save-cooldown-status: false
+
+# Cooldown duration in seconds for transient upstream errors (408/500/502/503/504).
+# Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
+transient-error-cooldown-seconds: 0
+
 # When true, globally disable Claude request cloaking (the Claude Code CLI disguise and
 # system prompt replacement), so the original system prompt is passed through to Claude as-is.
 # Individual credentials can still override this: a claude-api-key entry via its "cloak.mode",
@@ -132,7 +147,7 @@ disable-claude-cloak-mode: false
 # - "passthrough": never inject or strip image_generation on non-images endpoints (forward the client payload unchanged); behaves like "chat" on /v1/images/* endpoints.
 disable-image-generation: false
 
-# Base model used when proxying gpt-image-2 via the hosted image_generation tool (Responses API).
+# Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
 # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
 # gpt-image-2-base-model: "gpt-5.4-mini"
 
@@ -172,10 +187,6 @@ codex:
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
-
-# When true, enable Gemini CLI internal endpoints (/v1internal:*).
-# Default is false for safety.
-enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
@@ -227,6 +238,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
+#         force-mapping: true    # optional: rewrite response model fields back to the alias
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
@@ -247,11 +259,13 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
+#         force-mapping: true                 # optional: rewrite response model fields back to the alias
 #     excluded-models:
 #       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
 #       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
+#     rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
 #     cloak:                         # optional: request cloaking for non-Claude-Code clients
 #       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
 #                                    # "always": always apply cloaking
@@ -344,17 +358,27 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
+# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
+# Optional per-entry flags:
+#   fork: true          # keep the upstream model and also expose the alias as a separate client-visible model
+#   force-mapping: true # optional: rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
+# Per-auth OAuth aliases can also be stored in an OAuth auth JSON file as "model-aliases".
+# They apply only to that selected auth and take precedence over global aliases for the same client-visible alias.
+# Example auth JSON:
+# {
+#   "type": "codex",
+#   "email": "user@example.com",
+#   "model-aliases": [
+#     {"name": "gpt-5.3-codex-spark", "alias": "gpt-5.5"},
+#     {"name": "gpt-5.3-codex-spark", "alias": "gpt-5.4"}
+#   ]
+# }
 # oauth-model-alias:
-#   gemini-cli:
-#     - name: "gemini-2.5-pro"          # original model name under this channel
-#       alias: "g2.5p"                  # client-visible alias
-#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
@@ -362,8 +386,10 @@ nonstream-keepalive-interval: 0
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
 #   antigravity:
-#     - name: "gemini-3-pro-high"
-#       alias: "gemini-3-pro-preview"
+#     - name: "gemini-pro-agent"          # upstream Antigravity model id
+#       alias: "gemini-3.1-pro-preview"   # client-visible id (Gemini 3.1 Pro Preview)
+#       fork: true
+#       force-mapping: true
 #   claude:
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"
@@ -382,11 +408,6 @@ nonstream-keepalive-interval: 0
 
 # OAuth provider excluded models
 # oauth-excluded-models:
-#   gemini-cli:
-#     - "gemini-2.5-pro"     # exclude specific models (exact match)
-#     - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#     - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#     - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   vertex:
 #     - "gemini-3-pro-preview"
 #   aistudio:
@@ -428,6 +449,13 @@ nonstream-keepalive-interval: 0
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
 #   override: # Override rules always set parameters, overwriting any existing values.
+#     - models:
+#         - name: "gpt-5.4-fast"
+#           protocol: "codex"
+#         - name: "gpt-5.5-fast"
+#           protocol: "codex"
+#       params:
+#         service_tier: priority
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity

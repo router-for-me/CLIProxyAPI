@@ -87,7 +87,7 @@ All three implementations parse incoming JSON requests for the methods where req
 
 Build from the repository root.
 
-Build all plugin examples, including all three `simple` variants:
+Build all plugin examples:
 
 ```bash
 make -C examples/plugin build
@@ -129,7 +129,6 @@ The plugin ID is the dynamic library basename without the platform extension. Ma
 The host searches:
 
 ```text
-plugins/<GOOS>/<GOARCH>-<variant>
 plugins/<GOOS>/<GOARCH>
 plugins
 ```

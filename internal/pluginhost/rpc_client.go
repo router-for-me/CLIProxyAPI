@@ -35,6 +35,19 @@ type rpcThinkingApplier struct {
 	*rpcPluginAdapter
 }
 
+type rpcPluginError struct {
+	message    string
+	statusCode int
+}
+
+func (e rpcPluginError) Error() string {
+	return e.message
+}
+
+func (e rpcPluginError) StatusCode() int {
+	return e.statusCode
+}
+
 type rpcResponseNormalizer struct {
 	*rpcPluginAdapter
 	method string
@@ -140,6 +153,9 @@ func callPlugin[T any](ctx context.Context, client pluginClient, method string, 
 	}
 	out, errDecode := decodeEnvelopeResult[T](envelope)
 	if errDecode != nil {
+		if !envelope.OK {
+			return zero, errDecode
+		}
 		return zero, fmt.Errorf("decode plugin result %s: %w", method, errDecode)
 	}
 	return out, nil
@@ -260,11 +276,26 @@ func decodeRPCEnvelope[T any](raw []byte) (T, error) {
 	return decodeEnvelopeResult[T](envelope)
 }
 
+func isPluginErrorEnvelope(raw []byte) bool {
+	var envelope pluginabi.Envelope
+	if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
+		return false
+	}
+	return !envelope.OK && envelope.Error != nil
+}
+
 func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 	var zero T
 	if !envelope.OK {
 		if envelope.Error != nil {
-			return zero, fmt.Errorf("%s", envelope.Error.Message)
+			message := strings.TrimSpace(envelope.Error.Message)
+			if message == "" {
+				message = "plugin call failed"
+			}
+			if envelope.Error.HTTPStatus > 0 {
+				return zero, rpcPluginError{message: message, statusCode: envelope.Error.HTTPStatus}
+			}
+			return zero, fmt.Errorf("%s", message)
 		}
 		return zero, fmt.Errorf("plugin call failed")
 	}

@@ -43,7 +43,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 			wantTexts:        []string{"Be helpful"},
 		},
 		{
-			name: "System role in messages",
+			name: "Message system role does not become developer",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [
@@ -51,8 +51,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 					{"role": "user", "content": "hello"}
 				]
 			}`,
-			wantHasDeveloper: true,
-			wantTexts:        []string{"Follow the project instructions"},
+			wantHasDeveloper: false,
 		},
 		{
 			name: "Array system field with filtered billing header",
@@ -102,6 +101,41 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_MessageSystemRoleWrapsAsUserReminder(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"system": [{"type": "text", "text": "Top-level rules"}],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{"role": "system", "content": "Follow the project instructions"},
+			{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+			{"role": "system", "content": [{"type": "text", "text": "Use the current repo"}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+	if len(inputs) != 5 {
+		t.Fatalf("got %d input items, want 5: %s", len(inputs), gjson.GetBytes(result, "input").Raw)
+	}
+
+	if got := inputs[0].Get("role").String(); got != "developer" {
+		t.Fatalf("top-level system role = %q, want developer", got)
+	}
+	if got := inputs[2].Get("role").String(); got != "user" {
+		t.Fatalf("message-level system role = %q, want user", got)
+	}
+	if got := inputs[2].Get("content.0.text").String(); got != "<system-reminder>\nFollow the project instructions\n</system-reminder>" {
+		t.Fatalf("unexpected first reminder text: %q", got)
+	}
+	if got := inputs[4].Get("role").String(); got != "user" {
+		t.Fatalf("array message-level system role = %q, want user", got)
+	}
+	if got := inputs[4].Get("content.0.text").String(); got != "<system-reminder>\nUse the current repo\n</system-reminder>" {
+		t.Fatalf("unexpected second reminder text: %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	tests := []struct {
 		name                  string
@@ -143,6 +177,58 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 
 			if got := resultJSON.Get("parallel_tool_calls").Bool(); got != tt.wantParallelToolCalls {
 				t.Fatalf("parallel_tool_calls = %v, want %v. Output: %s", got, tt.wantParallelToolCalls, string(result))
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
+	tests := []struct {
+		name            string
+		serviceTierJSON string
+		want            string
+		wantExists      bool
+	}{
+		{
+			name:            "Priority passes through",
+			serviceTierJSON: `"priority"`,
+			want:            "priority",
+			wantExists:      true,
+		},
+		{
+			name:            "Fast normalizes to priority",
+			serviceTierJSON: `"fast"`,
+			want:            "priority",
+			wantExists:      true,
+		},
+		{
+			name:            "Unsupported tier is omitted",
+			serviceTierJSON: `"default"`,
+		},
+		{
+			name:            "Non-string tier is omitted",
+			serviceTierJSON: `true`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := `{
+				"model": "gpt-5.4",
+				"service_tier": ` + tt.serviceTierJSON + `,
+				"messages": [{"role": "user", "content": "Reply with OK"}]
+			}`
+
+			result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+			serviceTierResult := gjson.GetBytes(result, "service_tier")
+			if serviceTierResult.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists = %v, want %v. Output: %s", serviceTierResult.Exists(), tt.wantExists, string(result))
+			}
+			if !tt.wantExists {
+				return
+			}
+			if got := serviceTierResult.String(); got != tt.want {
+				t.Fatalf("service_tier = %q, want %q. Output: %s", got, tt.want, string(result))
 			}
 		})
 	}

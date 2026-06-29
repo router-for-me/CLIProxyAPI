@@ -141,6 +141,7 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 
 func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDownstreamWebsocket(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
 	delta := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
 	completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,10 +152,12 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 		}
 		defer func() { _ = conn.Close() }()
 
-		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
 			t.Errorf("read upstream websocket message: %v", errRead)
 			return
 		}
+		capturedPayload <- bytes.Clone(payload)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, delta); errWrite != nil {
 			t.Errorf("write delta websocket message: %v", errWrite)
 			return
@@ -170,7 +173,7 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
-		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+		Payload: []byte(`{"model":"prolite/gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
 	}
 	opts := cliproxyexecutor.Options{
 		SourceFormat:   sdktranslator.FromString("openai-response"),
@@ -196,6 +199,15 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for first stream chunk")
+	}
+
+	select {
+	case payload := <-capturedPayload:
+		if got := gjson.GetBytes(payload, "model").String(); got != "gpt-5-codex" {
+			t.Fatalf("upstream model = %s, want gpt-5-codex; payload=%s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 }
 

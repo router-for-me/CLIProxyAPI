@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -70,7 +71,6 @@ func main() {
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 
 	// Command-line flags to control the application's behavior.
-	var login bool
 	var codexLogin bool
 	var codexDeviceLogin bool
 	var claudeLogin bool
@@ -79,7 +79,6 @@ func main() {
 	var antigravityLogin bool
 	var kimiLogin bool
 	var xaiLogin bool
-	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -91,7 +90,6 @@ func main() {
 	var localModel bool
 
 	// Define command-line flags for different operation modes.
-	flag.BoolVar(&login, "login", false, "Login Google Account")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
@@ -100,7 +98,6 @@ func main() {
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
-	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -152,6 +149,8 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var configLoadedFromHome bool
+	var homeClient *home.Client
+	var homePluginSyncReport homeplugins.SyncReport
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -281,7 +280,7 @@ func main() {
 		if homeDisableClusterDiscovery {
 			homeCfg.DisableClusterDiscovery = true
 		}
-		homeClient := home.New(homeCfg)
+		homeClient = home.New(homeCfg)
 		defer homeClient.Close()
 
 		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
@@ -303,6 +302,20 @@ func main() {
 		parsed.Home = homeCfg
 		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
 		parsed.UsageStatisticsEnabled = true
+		ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
+		var errHomePlugins error
+		homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginHost)
+		cancelHomePlugins()
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
+		if errHomePlugins != nil {
+			log.Errorf("failed to fetch plugins from home: %v", errHomePlugins)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+		}
+		if errHomePlugins != nil {
+			return
+		}
 		cfg = parsed
 
 		// Keep a non-empty config path for downstream components (log paths, management assets, etc),
@@ -505,6 +518,7 @@ func main() {
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
@@ -530,7 +544,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || login || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode) {
@@ -554,6 +568,19 @@ func main() {
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 	pluginHost.ApplyConfig(context.Background(), cfg)
+	if configLoadedFromHome {
+		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
+		if errHomePluginLoad != nil {
+			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin load status: %v", errReportPlugins)
+		}
+		if errHomePluginLoad != nil {
+			return
+		}
+	}
 	if pluginHost.HasTriggeredCommandLineFlags() {
 		if exitCode, handled := pluginHost.ExecuteCommandLine(context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine); handled {
 			if exitCode != 0 {
@@ -568,9 +595,6 @@ func main() {
 	if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
-	} else if login {
-		// Handle Google/Gemini login
-		cmd.DoLogin(cfg, projectID, options)
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)

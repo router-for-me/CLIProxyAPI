@@ -502,3 +502,94 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_OmitsTop
 		t.Fatalf("output text = %q, want %q; response=%s", got, "ping", resp)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"deepseek-v4-flash",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__test_mcp__",
+				"tools":[{"type":"function","name":"add_numbers","parameters":{"type":"object","properties":{}}}]
+			}
+		]
+	}`)
+	chunks := []string{
+		`data: {"id":"chatcmpl_namespace_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ns","type":"function","function":{"name":"mcp__test_mcp__add_numbers","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_namespace_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":3,\"b\":5}"}}]},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var added gjson.Result
+	var done gjson.Result
+	var completed gjson.Result
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "function_call" {
+					added = data
+				}
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "function_call" {
+					done = data
+				}
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		label string
+		got   gjson.Result
+	}{
+		{"added", added},
+		{"done", done},
+	} {
+		if !tc.got.Exists() {
+			t.Fatalf("expected function_call %s event", tc.label)
+		}
+		if got := tc.got.Get("item.name").String(); got != "add_numbers" {
+			t.Fatalf("%s item.name = %q, want add_numbers", tc.label, got)
+		}
+		if got := tc.got.Get("item.namespace").String(); got != "mcp__test_mcp__" {
+			t.Fatalf("%s item.namespace = %q, want mcp__test_mcp__", tc.label, got)
+		}
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("response.output.0.name").String(); got != "add_numbers" {
+		t.Fatalf("completed output name = %q, want add_numbers", got)
+	}
+	if got := completed.Get("response.output.0.namespace").String(); got != "mcp__test_mcp__" {
+		t.Fatalf("completed output namespace = %q, want mcp__test_mcp__", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_RestoresNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"deepseek-v4-flash",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__test_mcp__",
+				"tools":[{"type":"function","name":"add_numbers","parameters":{"type":"object","properties":{}}}]
+			}
+		]
+	}`)
+	raw := []byte(`{"id":"chatcmpl_namespace_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_ns","type":"function","function":{"name":"mcp__test_mcp__add_numbers","arguments":"{\"a\":3,\"b\":5}"}}]},"finish_reason":"tool_calls"}]}`)
+
+	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
+	data := gjson.ParseBytes(resp)
+
+	if got := data.Get("output.0.name").String(); got != "add_numbers" {
+		t.Fatalf("non-stream output name = %q, want add_numbers; response=%s", got, resp)
+	}
+	if got := data.Get("output.0.namespace").String(); got != "mcp__test_mcp__" {
+		t.Fatalf("non-stream output namespace = %q, want mcp__test_mcp__; response=%s", got, resp)
+	}
+}
