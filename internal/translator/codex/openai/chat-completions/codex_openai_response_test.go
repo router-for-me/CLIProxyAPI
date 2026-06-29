@@ -91,6 +91,39 @@ func TestConvertCodexResponseToOpenAI_ToolCallArgumentsDeltaOmitsNullContentFiel
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_LegacyFunctionsEmitFunctionCall(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	original := []byte(`{"model":"gpt-4o","functions":[{"name":"Edit","parameters":{"type":"object"}}],"function_call":"auto"}`)
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", original, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_123","name":"Edit"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 function_call chunk, got %d", len(out))
+	}
+	if gjson.GetBytes(out[0], "choices.0.delta.tool_calls").Exists() {
+		t.Fatalf("legacy functions response should not emit tool_calls: %s", string(out[0]))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.function_call.name").String(); got != "Edit" {
+		t.Fatalf("function_call.name = %q, want Edit; chunk=%s", got, string(out[0]))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", original, nil, []byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"file\":\"App.tsx\"}"}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 arguments chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.function_call.arguments").String(); got != `{"file":"App.tsx"}` {
+		t.Fatalf("function_call.arguments = %q; chunk=%s", got, string(out[0]))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", original, nil, []byte(`data: {"type":"response.completed","response":{"status":"completed"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 completed chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != "function_call" {
+		t.Fatalf("finish_reason = %q, want function_call; chunk=%s", got, string(out[0]))
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamPartialImageEmitsDeltaImages(t *testing.T) {
 	ctx := context.Background()
 	var param any

@@ -29,6 +29,7 @@ import (
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
+	rawJSON = normalizeLegacyOpenAIChatFunctions(rawJSON)
 	// Start with empty JSON object
 	out := []byte(`{"instructions":""}`)
 
@@ -112,6 +113,8 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Build input from messages, handling all message types including tool calls
 	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
+	legacyFunctionCallIDsByName := map[string]string{}
+	legacyFunctionCallIndex := 0
 	if messages.IsArray() {
 		arr := messages.Array()
 		for i := 0; i < len(arr); i++ {
@@ -119,6 +122,22 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			role := m.Get("role").String()
 
 			switch role {
+			case "function":
+				name := m.Get("name").String()
+				toolCallID := legacyFunctionCallIDsByName[name]
+				if toolCallID == "" {
+					toolCallID = legacyFunctionCallID(legacyFunctionCallIndex)
+					legacyFunctionCallIndex++
+					legacyFunctionCallIDsByName[name] = toolCallID
+				}
+				content := m.Get("content")
+
+				funcOutput := []byte(`{}`)
+				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
+				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
+				funcOutput = setToolCallOutputContent(funcOutput, content)
+				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)
+
 			case "tool":
 				// Handle tool response messages as top-level function_call_output objects
 				toolCallID := m.Get("tool_call_id").String()
@@ -244,6 +263,26 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								out, _ = sjson.SetRawBytes(out, "input.-1", funcCall)
 							}
 						}
+					}
+					legacyFunctionCall := m.Get("function_call")
+					if legacyFunctionCall.Exists() && legacyFunctionCall.IsObject() {
+						funcCall := []byte(`{}`)
+						funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
+						callID := legacyFunctionCallID(legacyFunctionCallIndex)
+						legacyFunctionCallIndex++
+						funcCall, _ = sjson.SetBytes(funcCall, "call_id", callID)
+						{
+							name := legacyFunctionCall.Get("name").String()
+							legacyFunctionCallIDsByName[name] = callID
+							if short, ok := originalToolNameMap[name]; ok {
+								name = short
+							} else {
+								name = shortenNameIfNeeded(name)
+							}
+							funcCall, _ = sjson.SetBytes(funcCall, "name", name)
+						}
+						funcCall, _ = sjson.SetBytes(funcCall, "arguments", legacyFunctionCall.Get("arguments").String())
+						out, _ = sjson.SetRawBytes(out, "input.-1", funcCall)
 					}
 				}
 			}
@@ -374,6 +413,57 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	out = util.AddOpenAIAgentToolUseInstruction(out)
 	out, _ = sjson.SetBytes(out, "store", false)
 	return out
+}
+
+func normalizeLegacyOpenAIChatFunctions(rawJSON []byte) []byte {
+	functions := gjson.GetBytes(rawJSON, "functions")
+	if functions.IsArray() && len(functions.Array()) > 0 {
+		tools := gjson.GetBytes(rawJSON, "tools")
+		if !tools.IsArray() {
+			rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools", []byte(`[]`))
+		}
+		for _, fn := range functions.Array() {
+			if !fn.IsObject() {
+				continue
+			}
+			tool := []byte(`{"type":"function","function":{}}`)
+			if v := fn.Get("name"); v.Exists() {
+				tool, _ = sjson.SetBytes(tool, "function.name", v.String())
+			}
+			if v := fn.Get("description"); v.Exists() {
+				tool, _ = sjson.SetBytes(tool, "function.description", v.String())
+			}
+			if v := fn.Get("parameters"); v.Exists() {
+				tool, _ = sjson.SetRawBytes(tool, "function.parameters", []byte(v.Raw))
+			}
+			if v := fn.Get("strict"); v.Exists() {
+				tool, _ = sjson.SetBytes(tool, "function.strict", v.Bool())
+			}
+			rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools.-1", tool)
+		}
+	}
+
+	if !gjson.GetBytes(rawJSON, "tool_choice").Exists() {
+		if functionCall := gjson.GetBytes(rawJSON, "function_call"); functionCall.Exists() {
+			switch {
+			case functionCall.Type == gjson.String:
+				rawJSON, _ = sjson.SetBytes(rawJSON, "tool_choice", functionCall.String())
+			case functionCall.IsObject():
+				name := functionCall.Get("name").String()
+				if name != "" {
+					choice := []byte(`{"type":"function","function":{"name":""}}`)
+					choice, _ = sjson.SetBytes(choice, "function.name", name)
+					rawJSON, _ = sjson.SetRawBytes(rawJSON, "tool_choice", choice)
+				}
+			}
+		}
+	}
+
+	return rawJSON
+}
+
+func legacyFunctionCallID(index int) string {
+	return "call_legacy_" + strconv.Itoa(index)
 }
 
 func setToolCallOutputContent(funcOutput []byte, content gjson.Result) []byte {

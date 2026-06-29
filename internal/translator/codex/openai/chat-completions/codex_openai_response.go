@@ -28,6 +28,7 @@ type ConvertCliToOpenAIParams struct {
 	FunctionCallIndex         int
 	HasReceivedArgumentsDelta bool
 	HasToolCallAnnounced      bool
+	UseLegacyFunctionCall     bool
 	LastImageHashByItemID     map[string][32]byte
 }
 
@@ -54,6 +55,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			FunctionCallIndex:         -1,
 			HasReceivedArgumentsDelta: false,
 			HasToolCallAnnounced:      false,
+			UseLegacyFunctionCall:     useLegacyOpenAIFunctionCall(originalRequestRawJSON),
 			LastImageHashByItemID:     make(map[string][32]byte),
 		}
 	}
@@ -164,6 +166,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		finishReason := "stop"
 		if (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex != -1 {
 			finishReason = "tool_calls"
+			if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
+				finishReason = "function_call"
+			}
 		}
 		template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
 		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
@@ -188,9 +193,15 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		if orig, ok := rev[name]; ok {
 			name = orig
 		}
+		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
+			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.name", name)
+			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", "")
+			return [][]byte{template}
+		}
+
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.name", name)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", "")
-
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
@@ -199,6 +210,11 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta = true
 
 		deltaValue := rootResult.Get("delta").String()
+		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
+			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", deltaValue)
+			return [][]byte{template}
+		}
+
 		functionCallItemTemplate := []byte(`{"index":0,"function":{"arguments":""}}`)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", deltaValue)
@@ -214,6 +230,11 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 		// Fallback: no delta events were received, emit the full arguments as a single chunk.
 		fullArgs := rootResult.Get("arguments").String()
+		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
+			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", fullArgs)
+			return [][]byte{template}
+		}
+
 		functionCallItemTemplate := []byte(`{"index":0,"function":{"arguments":""}}`)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", fullArgs)
@@ -286,6 +307,12 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
 		if orig, ok := rev[name]; ok {
 			name = orig
+		}
+		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
+			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.name", name)
+			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", itemResult.Get("arguments").String())
+			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+			return [][]byte{template}
 		}
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.name", name)
 
@@ -364,7 +391,9 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 	// Process the output array for content and function calls
 	var toolCalls [][]byte
+	var legacyFunctionCall []byte
 	var images [][]byte
+	useLegacyFunctionCall := useLegacyOpenAIFunctionCall(originalRequestRawJSON)
 	outputResult := responseResult.Get("output")
 	if outputResult.IsArray() {
 		outputArray := outputResult.Array()
@@ -423,6 +452,9 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 				}
 
 				toolCalls = append(toolCalls, functionCallTemplate)
+				if useLegacyFunctionCall && len(legacyFunctionCall) == 0 {
+					legacyFunctionCall = functionCallTemplate
+				}
 			case "image_generation_call":
 				b64 := outputItem.Get("result").String()
 				if b64 == "" {
@@ -452,9 +484,14 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 		// Add tool calls if any
 		if len(toolCalls) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
-			for _, toolCall := range toolCalls {
-				template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", toolCall)
+			if useLegacyFunctionCall && len(legacyFunctionCall) > 0 {
+				template, _ = sjson.SetBytes(template, "choices.0.message.function_call.name", gjson.GetBytes(legacyFunctionCall, "function.name").String())
+				template, _ = sjson.SetBytes(template, "choices.0.message.function_call.arguments", gjson.GetBytes(legacyFunctionCall, "function.arguments").String())
+			} else {
+				template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
+				for _, toolCall := range toolCalls {
+					template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", toolCall)
+				}
 			}
 			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
 		}
@@ -476,6 +513,9 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 			finishReason := "stop"
 			if len(toolCalls) > 0 {
 				finishReason = "tool_calls"
+				if useLegacyFunctionCall {
+					finishReason = "function_call"
+				}
 			}
 			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
 			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
@@ -485,13 +525,22 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	return template
 }
 
+func useLegacyOpenAIFunctionCall(original []byte) bool {
+	functions := gjson.GetBytes(original, "functions")
+	if !functions.IsArray() || len(functions.Array()) == 0 {
+		return false
+	}
+	tools := gjson.GetBytes(original, "tools")
+	return !tools.IsArray() || len(tools.Array()) == 0
+}
+
 // buildReverseMapFromOriginalOpenAI builds a map of shortened tool name -> original tool name
 // from the original OpenAI-style request JSON using the same shortening logic.
 func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
 	rev := map[string]string{}
+	var names []string
+	tools := gjson.GetBytes(original, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
-		var names []string
 		arr := tools.Array()
 		for i := 0; i < len(arr); i++ {
 			t := arr[i]
@@ -506,11 +555,17 @@ func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 				names = append(names, v.String())
 			}
 		}
-		if len(names) > 0 {
-			m := buildShortNameMap(names)
-			for orig, short := range m {
-				rev[short] = orig
+	} else if functions := gjson.GetBytes(original, "functions"); functions.IsArray() {
+		for _, fn := range functions.Array() {
+			if v := fn.Get("name"); v.Exists() {
+				names = append(names, v.String())
 			}
+		}
+	}
+	if len(names) > 0 {
+		m := buildShortNameMap(names)
+		for orig, short := range m {
+			rev[short] = orig
 		}
 	}
 	return rev

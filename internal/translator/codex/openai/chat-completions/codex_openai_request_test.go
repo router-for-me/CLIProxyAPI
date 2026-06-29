@@ -926,3 +926,52 @@ func TestConvertOpenAIRequestToCodex_PreservesSpecificFunctionToolChoice(t *test
 		t.Fatalf("tool_choice.name = %q, want edit_file; output=%s", got, string(out))
 	}
 }
+
+func TestConvertOpenAIRequestToCodex_LegacyFunctionsAndFunctionMessages(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role":"user","content":"read then edit"},
+			{"role":"assistant","content":null,"function_call":{"name":"Read","arguments":"{\"file\":\"App.tsx\"}"}},
+			{"role":"function","name":"Read","content":"const width = 'clamp(420px, 24vw, 500px)';"}
+		],
+		"functions": [
+			{
+				"name": "Read",
+				"description": "Read a file",
+				"parameters": {"type": "object"}
+			},
+			{
+				"name": "Edit",
+				"description": "Edit a file",
+				"parameters": {"type": "object"}
+			}
+		],
+		"function_call": "auto"
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Read" {
+		t.Fatalf("tools.0.name = %q, want Read; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "required" {
+		t.Fatalf("tool_choice = %q, want required; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call" {
+		t.Fatalf("input.1.type = %q, want function_call; output=%s", got, string(out))
+	}
+	callID := gjson.GetBytes(out, "input.1.call_id").String()
+	if callID == "" {
+		t.Fatalf("legacy function_call did not get call_id; output=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.type").String(); got != "function_call_output" {
+		t.Fatalf("input.2.type = %q, want function_call_output; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.call_id").String(); got != callID {
+		t.Fatalf("function output call_id = %q, want %q; output=%s", got, callID, string(out))
+	}
+}
