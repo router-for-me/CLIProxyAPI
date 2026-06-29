@@ -13,11 +13,13 @@ import (
 func ConvertCodexResponseToOpenAIResponses(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
+		traceOpenAIResponsesResponse(rawJSON)
 		out := make([]byte, 0, len(rawJSON)+len("data: "))
 		out = append(out, []byte("data: ")...)
 		out = append(out, rawJSON...)
 		return [][]byte{out}
 	}
+	traceOpenAIResponsesResponse(rawJSON)
 	return [][]byte{rawJSON}
 }
 
@@ -29,6 +31,7 @@ func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, _ string,
 	if rootResult.Get("type").String() != "response.completed" {
 		return []byte{}
 	}
+	traceOpenAIResponsesResponse(rawJSON)
 	responseResult := rootResult.Get("response")
 	return []byte(responseResult.Raw)
 }

@@ -49,6 +49,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 	rawJSON = util.RequireOpenAIAgentFunctionToolChoice(rawJSON)
 	rawJSON = util.AddOpenAIAgentToolUseInstruction(rawJSON)
+	traceOpenAIResponsesRequest(inputRawJSON, rawJSON)
 
 	return rawJSON
 }

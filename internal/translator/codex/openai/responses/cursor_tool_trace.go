@@ -1,0 +1,156 @@
+package responses
+
+import (
+	"os"
+	"strings"
+
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+)
+
+func cursorToolTraceEnabled() bool {
+	value := strings.TrimSpace(os.Getenv("CLIPROXY_CURSOR_TOOL_TRACE"))
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
+}
+
+func traceOpenAIResponsesRequest(original []byte, converted []byte) {
+	if !cursorToolTraceEnabled() {
+		return
+	}
+
+	fields := log.Fields{
+		"orig_tools":             countArray(original, "tools"),
+		"orig_tool_choice":       summarizeJSONField(original, "tool_choice"),
+		"orig_input":             countArray(original, "input"),
+		"orig_last_input_type":   lastInputType(original),
+		"orig_last_call_id":      lastInputCallID(original),
+		"converted_tools":        countArray(converted, "tools"),
+		"converted_tool_choice":  summarizeJSONField(converted, "tool_choice"),
+		"converted_input":        countArray(converted, "input"),
+		"converted_last_call_id": lastInputCallID(converted),
+	}
+	log.WithFields(fields).Info("cursor tool trace: responses request")
+}
+
+func traceOpenAIResponsesResponse(rawJSON []byte) {
+	if !cursorToolTraceEnabled() {
+		return
+	}
+
+	dataType := gjson.GetBytes(rawJSON, "type").String()
+	if dataType != "response.output_item.added" &&
+		dataType != "response.function_call_arguments.delta" &&
+		dataType != "response.output_text.delta" &&
+		dataType != "response.completed" {
+		return
+	}
+
+	fields := log.Fields{
+		"event": dataType,
+	}
+	switch dataType {
+	case "response.output_item.added":
+		fields["item_type"] = gjson.GetBytes(rawJSON, "item.type").String()
+		fields["item_name"] = gjson.GetBytes(rawJSON, "item.name").String()
+	case "response.function_call_arguments.delta":
+		fields["arguments_delta"] = true
+	case "response.output_text.delta":
+		fields["text_delta"] = true
+	case "response.completed":
+		fields["response_status"] = gjson.GetBytes(rawJSON, "response.status").String()
+		fields["output_types"] = responseOutputTypes(rawJSON)
+	}
+	log.WithFields(fields).Info("cursor tool trace: responses response")
+}
+
+func countArray(raw []byte, path string) int {
+	result := gjson.GetBytes(raw, path)
+	if !result.IsArray() {
+		return 0
+	}
+	return len(result.Array())
+}
+
+func summarizeJSONField(raw []byte, path string) string {
+	result := gjson.GetBytes(raw, path)
+	if !result.Exists() {
+		return "<missing>"
+	}
+	if result.Type == gjson.String {
+		return result.String()
+	}
+	if result.IsObject() {
+		fieldType := result.Get("type").String()
+		name := result.Get("name").String()
+		if name == "" {
+			name = result.Get("function.name").String()
+		}
+		if fieldType != "" || name != "" {
+			return strings.TrimSpace(fieldType + ":" + name)
+		}
+		return "<object>"
+	}
+	return result.Type.String()
+}
+
+func lastInputType(raw []byte) string {
+	input := gjson.GetBytes(raw, "input")
+	if !input.IsArray() {
+		return ""
+	}
+	items := input.Array()
+	if len(items) == 0 {
+		return ""
+	}
+	return items[len(items)-1].Get("type").String()
+}
+
+func lastInputCallID(raw []byte) string {
+	input := gjson.GetBytes(raw, "input")
+	if !input.IsArray() {
+		return ""
+	}
+	items := input.Array()
+	for i := len(items) - 1; i >= 0; i-- {
+		if callID := items[i].Get("call_id").String(); callID != "" {
+			return lengthBucket(callID)
+		}
+	}
+	return ""
+}
+
+func lengthBucket(value string) string {
+	if value == "" {
+		return ""
+	}
+	return "len=" + stringInt(len(value))
+}
+
+func stringInt(value int) string {
+	const digits = "0123456789"
+	if value == 0 {
+		return "0"
+	}
+	buf := make([]byte, 0, 8)
+	for value > 0 {
+		buf = append(buf, digits[value%10])
+		value /= 10
+	}
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func responseOutputTypes(raw []byte) []string {
+	output := gjson.GetBytes(raw, "response.output")
+	if !output.IsArray() {
+		return nil
+	}
+	items := output.Array()
+	types := make([]string, 0, len(items))
+	for _, item := range items {
+		types = append(types, item.Get("type").String())
+	}
+	return types
+}
