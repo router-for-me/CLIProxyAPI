@@ -1,7 +1,9 @@
 package responses
 
 import (
+	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -29,7 +31,7 @@ func traceOpenAIResponsesRequest(original []byte, converted []byte) {
 		"converted_input":        countArray(converted, "input"),
 		"converted_last_call_id": lastInputCallID(converted),
 	}
-	log.WithFields(fields).Info("cursor tool trace: responses request")
+	log.Infof("cursor tool trace: responses request %s", formatTraceFields(fields))
 }
 
 func traceOpenAIResponsesResponse(rawJSON []byte) {
@@ -60,7 +62,21 @@ func traceOpenAIResponsesResponse(rawJSON []byte) {
 		fields["response_status"] = gjson.GetBytes(rawJSON, "response.status").String()
 		fields["output_types"] = responseOutputTypes(rawJSON)
 	}
-	log.WithFields(fields).Info("cursor tool trace: responses response")
+	log.Infof("cursor tool trace: responses response %s", formatTraceFields(fields))
+}
+
+func formatTraceFields(fields log.Fields) string {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", key, fields[key]))
+	}
+	return strings.Join(parts, " ")
 }
 
 func countArray(raw []byte, path string) int {

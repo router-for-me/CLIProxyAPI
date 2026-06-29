@@ -1,7 +1,9 @@
 package chat_completions
 
 import (
+	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -32,7 +34,7 @@ func traceOpenAIChatRequest(original []byte, converted []byte) {
 		"converted_tool_choice":    summarizeJSONField(converted, "tool_choice"),
 		"converted_input":          countArray(converted, "input"),
 	}
-	log.WithFields(fields).Info("cursor tool trace: chat request")
+	log.Infof("cursor tool trace: chat request %s", formatTraceFields(fields))
 }
 
 func traceOpenAIChatResponse(dataType string, useLegacy bool, rawJSON []byte, out [][]byte) {
@@ -63,7 +65,21 @@ func traceOpenAIChatResponse(dataType string, useLegacy bool, rawJSON []byte, ou
 		fields["response_status"] = gjson.GetBytes(rawJSON, "response.status").String()
 		fields["output_types"] = responseOutputTypes(rawJSON)
 	}
-	log.WithFields(fields).Info("cursor tool trace: codex response")
+	log.Infof("cursor tool trace: codex response %s", formatTraceFields(fields))
+}
+
+func formatTraceFields(fields log.Fields) string {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", key, fields[key]))
+	}
+	return strings.Join(parts, " ")
 }
 
 func countArray(raw []byte, path string) int {
