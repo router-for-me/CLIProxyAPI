@@ -717,12 +717,14 @@ type CursorComposerKey struct {
 
 // CursorComposerModel represents a Cursor Composer model alias.
 type CursorComposerModel struct {
-	Name  string `yaml:"name" json:"name"`
-	Alias string `yaml:"alias" json:"alias"`
+	Name         string `yaml:"name" json:"name"`
+	Alias        string `yaml:"alias" json:"alias"`
+	ForceMapping bool   `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
 
-func (m CursorComposerModel) GetName() string  { return m.Name }
-func (m CursorComposerModel) GetAlias() string { return m.Alias }
+func (m CursorComposerModel) GetName() string       { return m.Name }
+func (m CursorComposerModel) GetAlias() string      { return m.Alias }
+func (m CursorComposerModel) GetForceMapping() bool { return m.ForceMapping }
 
 func (k CursorComposerKey) GetAPIKey() string  { return k.APIKey }
 func (k CursorComposerKey) GetBaseURL() string { return k.BaseURL }
