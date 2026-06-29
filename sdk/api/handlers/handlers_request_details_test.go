@@ -137,3 +137,40 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		t.Fatalf("unexpected error message: %q", msg)
 	}
 }
+
+func TestGetRequestDetails_UnknownModelSuggestsClosest(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	modelRegistry.RegisterClient("test-suggest-closest", "gemini", []*registry.ModelInfo{
+		{ID: "gemini-2.5-pro", Created: now + 30},
+		{ID: "gemini-2.5-flash", Created: now + 25},
+	})
+	t.Cleanup(func() { modelRegistry.UnregisterClient("test-suggest-closest") })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	// Near-miss of a registered model: the error should suggest the close match.
+	_, _, errMsg := handler.getRequestDetails("gemini-2.5-proo")
+	if errMsg == nil || errMsg.Error == nil {
+		t.Fatalf("expected unknown-provider error for gemini-2.5-proo, got: %v", errMsg)
+	}
+	msg := errMsg.Error.Error()
+	if !strings.Contains(msg, "did you mean gemini-2.5-pro") {
+		t.Fatalf("expected a closest-match suggestion in error, got %q", msg)
+	}
+
+	// Totally unknown model: no close match, so the error should point to /v1/models
+	// instead of offering a misleading suggestion.
+	_, _, errMsg2 := handler.getRequestDetails("totally-bogus-xyz-12345")
+	if errMsg2 == nil || errMsg2.Error == nil {
+		t.Fatalf("expected unknown-provider error for totally-bogus-xyz-12345, got: %v", errMsg2)
+	}
+	msg2 := errMsg2.Error.Error()
+	if !strings.Contains(msg2, "/v1/models") {
+		t.Fatalf("expected /v1/models hint in error, got %q", msg2)
+	}
+	if strings.Contains(msg2, "did you mean") {
+		t.Fatalf("did not expect a suggestion for a bogus model, got %q", msg2)
+	}
+}
