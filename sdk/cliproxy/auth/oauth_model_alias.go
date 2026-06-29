@@ -18,9 +18,10 @@ type modelAliasEntry interface {
 
 // oauthModelAliasEntry stores the upstream model name and mapping flags for an alias.
 type oauthModelAliasEntry struct {
-	upstreamModel string
-	configAlias   string
-	forceMapping  bool
+	upstreamModel   string
+	configAlias     string
+	reasoningEffort string
+	forceMapping    bool
 }
 
 type oauthModelAliasTable struct {
@@ -62,9 +63,10 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 				continue
 			}
 			rev[aliasKey] = oauthModelAliasEntry{
-				upstreamModel: name,
-				configAlias:   alias,
-				forceMapping:  entry.ForceMapping,
+				upstreamModel:   name,
+				configAlias:     alias,
+				reasoningEffort: strings.ToLower(strings.TrimSpace(entry.ReasoningEffort)),
+				forceMapping:    entry.ForceMapping,
 			}
 		}
 		if len(rev) > 0 {
@@ -120,12 +122,20 @@ func modelAliasLookupCandidates(requestedModel string) (thinking.SuffixResult, [
 }
 
 func preserveResolvedModelSuffix(resolved string, requestResult thinking.SuffixResult) string {
+	return preserveResolvedModelSuffixWithEffort(resolved, requestResult, "")
+}
+
+func preserveResolvedModelSuffixWithEffort(resolved string, requestResult thinking.SuffixResult, reasoningEffort string) string {
 	resolved = strings.TrimSpace(resolved)
 	if resolved == "" {
 		return ""
 	}
 	if thinking.ParseSuffix(resolved).HasSuffix {
 		return resolved
+	}
+	reasoningEffort = strings.ToLower(strings.TrimSpace(reasoningEffort))
+	if reasoningEffort != "" {
+		return resolved + "(" + reasoningEffort + ")"
 	}
 	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
 		return resolved + "(" + requestResult.RawSuffix + ")"
@@ -359,7 +369,7 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 					return OAuthModelAliasResult{}
 				}
 				return OAuthModelAliasResult{
-					UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
+					UpstreamModel: preserveResolvedModelSuffixWithEffort(original, requestResult, entry.ReasoningEffort),
 					ForceMapping:  entry.ForceMapping,
 					OriginalAlias: oauthModelAliasForceMappingResponseModel(alias),
 				}
@@ -369,7 +379,7 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 				originalAlias = oauthModelAliasForceMappingResponseModel(alias)
 			}
 			return OAuthModelAliasResult{
-				UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
+				UpstreamModel: preserveResolvedModelSuffixWithEffort(original, requestResult, entry.ReasoningEffort),
 				ForceMapping:  entry.ForceMapping,
 				OriginalAlias: originalAlias,
 			}
@@ -432,20 +442,13 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 				return OAuthModelAliasResult{}
 			}
 			return OAuthModelAliasResult{
-				UpstreamModel: preserveResolvedModelSuffix(targetModel, requestResult),
+				UpstreamModel: preserveResolvedModelSuffixWithEffort(targetModel, requestResult, entry.reasoningEffort),
 				ForceMapping:  entry.forceMapping,
 				OriginalAlias: oauthModelAliasForceMappingResponseModel(entry.configAlias),
 			}
 		}
 
-		var upstreamModel string
-		if thinking.ParseSuffix(targetModel).HasSuffix {
-			upstreamModel = targetModel
-		} else if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			upstreamModel = targetModel + "(" + requestResult.RawSuffix + ")"
-		} else {
-			upstreamModel = targetModel
-		}
+		upstreamModel := preserveResolvedModelSuffixWithEffort(targetModel, requestResult, entry.reasoningEffort)
 
 		originalAlias := requestedModel
 		if entry.forceMapping {

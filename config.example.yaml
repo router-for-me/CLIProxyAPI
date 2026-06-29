@@ -396,6 +396,9 @@ nonstream-keepalive-interval: 0
 #   codex:
 #     - name: "gpt-5"
 #       alias: "g5"
+#     - name: "gpt-5.5"
+#       alias: "gpt-5.5-high"
+#       reasoning-effort: "high" # optional: applies fixed thinking level when alias is used
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
