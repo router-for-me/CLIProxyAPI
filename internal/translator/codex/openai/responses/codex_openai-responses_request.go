@@ -47,6 +47,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
+	rawJSON = util.RequireOpenAIAgentFunctionToolChoice(rawJSON)
 	rawJSON = util.AddOpenAIAgentToolUseInstruction(rawJSON)
 
 	return rawJSON

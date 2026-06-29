@@ -867,6 +867,9 @@ func TestConvertOpenAIRequestToCodex_AddsAgentToolUseInstruction(t *testing.T) {
 	if !strings.Contains(instructions, "Do not end a turn by only saying") {
 		t.Fatalf("expected agent tool-use instruction, got %q; output=%s", instructions, string(out))
 	}
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "required" {
+		t.Fatalf("tool_choice = %q, want required; output=%s", got, string(out))
+	}
 }
 
 func TestConvertOpenAIRequestToCodex_SkipsAgentToolUseInstructionWhenToolChoiceNone(t *testing.T) {
@@ -891,5 +894,35 @@ func TestConvertOpenAIRequestToCodex_SkipsAgentToolUseInstructionWhenToolChoiceN
 
 	if strings.Contains(instructions, "Do not end a turn by only saying") {
 		t.Fatalf("agent tool-use instruction should be skipped for tool_choice none; output=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "none" {
+		t.Fatalf("tool_choice = %q, want none; output=%s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_PreservesSpecificFunctionToolChoice(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role":"user","content":"edit the file"}],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "edit_file",
+					"description": "Edit a file",
+					"parameters": {"type": "object"}
+				}
+			}
+		],
+		"tool_choice": {"type":"function","function":{"name":"edit_file"}}
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "edit_file" {
+		t.Fatalf("tool_choice.name = %q, want edit_file; output=%s", got, string(out))
 	}
 }

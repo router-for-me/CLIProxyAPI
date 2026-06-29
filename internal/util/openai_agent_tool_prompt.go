@@ -9,6 +9,28 @@ import (
 
 const openAIAgentToolUseInstruction = "Agent tool-use compatibility: When function tools are available and the next step requires inspecting files, editing files, running commands, or otherwise acting outside the conversation, call the appropriate tool in this response. Do not end a turn by only saying that you will use a tool or make a change."
 
+// RequireOpenAIAgentFunctionToolChoice makes OpenAI-compatible agent tool turns
+// deterministic for Codex upstream. Cursor often sends function tools with
+// tool_choice=auto, but Codex may answer with promise-only text instead of a
+// tool call. Requiring a function tool keeps those turns in Cursor's expected
+// tool-call loop while preserving explicit "none" and specific function choices.
+func RequireOpenAIAgentFunctionToolChoice(rawJSON []byte) []byte {
+	if !hasOpenAIFunctionTools(rawJSON) || isOpenAIToolChoiceNone(rawJSON) || hasSpecificOpenAIFunctionToolChoice(rawJSON) {
+		return rawJSON
+	}
+
+	toolChoice := gjson.GetBytes(rawJSON, "tool_choice")
+	if toolChoice.Exists() && toolChoice.IsObject() && !isAutoOpenAIToolChoice(toolChoice) {
+		return rawJSON
+	}
+
+	updated, err := sjson.SetBytes(rawJSON, "tool_choice", "required")
+	if err != nil {
+		return rawJSON
+	}
+	return updated
+}
+
 // AddOpenAIAgentToolUseInstruction appends a Codex-facing tool-use hint for
 // OpenAI-compatible agent clients. It keeps final answer turns free to answer
 // normally, while nudging action turns away from promise-only text.
@@ -57,6 +79,28 @@ func isOpenAIToolChoiceNone(rawJSON []byte) bool {
 	}
 	if toolChoice.IsObject() {
 		return strings.EqualFold(strings.TrimSpace(toolChoice.Get("type").String()), "none")
+	}
+	return false
+}
+
+func hasSpecificOpenAIFunctionToolChoice(rawJSON []byte) bool {
+	toolChoice := gjson.GetBytes(rawJSON, "tool_choice")
+	if !toolChoice.IsObject() {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(toolChoice.Get("type").String()), "function") {
+		return false
+	}
+	return strings.TrimSpace(toolChoice.Get("name").String()) != "" ||
+		strings.TrimSpace(toolChoice.Get("function.name").String()) != ""
+}
+
+func isAutoOpenAIToolChoice(toolChoice gjson.Result) bool {
+	if toolChoice.Type == gjson.String {
+		return strings.EqualFold(strings.TrimSpace(toolChoice.String()), "auto")
+	}
+	if toolChoice.IsObject() {
+		return strings.EqualFold(strings.TrimSpace(toolChoice.Get("type").String()), "auto")
 	}
 	return false
 }
