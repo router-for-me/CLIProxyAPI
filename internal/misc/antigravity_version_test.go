@@ -49,8 +49,8 @@ func TestAntigravityLatestVersionUsesCurrentCLIFallback(t *testing.T) {
 	defer restore()
 
 	version := AntigravityLatestVersion()
-	if version != "1.0.8" {
-		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "1.0.8")
+	if version != "1.0.13" {
+		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "1.0.13")
 	}
 }
 
@@ -58,7 +58,7 @@ func TestAntigravityUserAgentUsesCLIFamily(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "1.0.8", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/cli/1.0.8 darwin/arm64"
+	want := "antigravity/cli/1.0.8 (aidev_client; os_type=darwin; arch=arm64)"
 	if got := AntigravityUserAgent(); got != want {
 		t.Fatalf("AntigravityUserAgent() = %q, want %q", got, want)
 	}
@@ -67,6 +67,26 @@ func TestAntigravityUserAgentUsesCLIFamily(t *testing.T) {
 func TestAntigravityVersionFromUserAgentParsesCLIFamily(t *testing.T) {
 	if got := AntigravityVersionFromUserAgent("antigravity/cli/1.0.8 darwin/arm64"); got != "1.0.8" {
 		t.Fatalf("AntigravityVersionFromUserAgent() = %q, want %q", got, "1.0.8")
+	}
+}
+
+func TestAntigravityVersionFromUserAgentParsesAidevClientSuffix(t *testing.T) {
+	ua := "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+	if got := AntigravityVersionFromUserAgent(ua); got != "1.0.13" {
+		t.Fatalf("AntigravityVersionFromUserAgent() = %q, want %q", got, "1.0.13")
+	}
+}
+
+func TestAntigravityLoadCodeAssistUserAgentUsesShortUA(t *testing.T) {
+	restore := overrideAntigravityVersionCacheForTest(t, "1.0.13", time.Now().Add(time.Hour))
+	defer restore()
+
+	want := "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)"
+	if got := AntigravityLoadCodeAssistUserAgent(""); got != want {
+		t.Fatalf("AntigravityLoadCodeAssistUserAgent() = %q, want %q", got, want)
+	}
+	if got := AntigravityLoadCodeAssistUserAgent(want); got != want {
+		t.Fatalf("AntigravityLoadCodeAssistUserAgent(configured) = %q, want %q", got, want)
 	}
 }
 

@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	antigravityFallbackVersion = "1.0.8"
+	antigravityFallbackVersion = "1.0.13"
 	antigravityCLIPlatform     = "darwin/arm64"
+	antigravityCLIClientName   = "aidev_client"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
@@ -129,7 +130,22 @@ func AntigravityLatestVersion() string {
 
 // AntigravityUserAgent returns the User-Agent string used by the agy CLI family.
 func AntigravityUserAgent() string {
-	return fmt.Sprintf("antigravity/cli/%s %s", AntigravityLatestVersion(), antigravityCLIPlatform)
+	return fmt.Sprintf("antigravity/cli/%s %s", AntigravityLatestVersion(), antigravityCLIUserAgentDetails())
+}
+
+func antigravityCLIUserAgentDetails() string {
+	osType, arch := "darwin", "arm64"
+	if platform := strings.TrimSpace(antigravityCLIPlatform); platform != "" {
+		if parts := strings.SplitN(platform, "/", 2); len(parts) == 2 {
+			if trimmedOS := strings.TrimSpace(parts[0]); trimmedOS != "" {
+				osType = trimmedOS
+			}
+			if trimmedArch := strings.TrimSpace(parts[1]); trimmedArch != "" {
+				arch = trimmedArch
+			}
+		}
+	}
+	return fmt.Sprintf("(%s; os_type=%s; arch=%s)", antigravityCLIClientName, osType, arch)
 }
 
 func isAntigravityFamilyUserAgent(lower string) bool {
@@ -159,9 +175,15 @@ func AntigravityRequestUserAgent(userAgent string) string {
 	return antigravityBaseUserAgent(userAgent)
 }
 
-// AntigravityLoadCodeAssistUserAgent returns the long Antigravity control-plane
-// UA used by loadCodeAssist requests.
+// AntigravityLoadCodeAssistUserAgent returns the short Antigravity UA used by
+// loadCodeAssist requests.
 func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
+	return AntigravityRequestUserAgent(userAgent)
+}
+
+// AntigravityOnboardUserUserAgent returns the long Antigravity control-plane UA
+// used by onboardUser requests.
+func AntigravityOnboardUserUserAgent(userAgent string) string {
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
 		return AntigravityUserAgent() + " " + AntigravityNodeAPIClientUA
