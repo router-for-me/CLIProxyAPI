@@ -9,15 +9,90 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestOpenAICompatExecutorPrepareRequestUsesClineProviderSettingsToken(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "providers.json")
+	raw := []byte(`{
+		"providers": {
+			"cline-pass": {
+				"settings": {
+					"provider": "cline-pass",
+					"auth": {"accessToken": "cline-access-token"}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(settingsPath, raw, 0600); err != nil {
+		t.Fatalf("failed to write Cline provider settings: %v", err)
+	}
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: settingsPath,
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest error: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer cline-access-token" {
+		t.Fatalf("Authorization = %q, want bearer token from Cline provider settings", got)
+	}
+}
+
+func TestOpenAICompatExecutorPrepareRequestDoesNotUseClineTokenForOtherBaseURL(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "providers.json")
+	raw := []byte(`{
+		"providers": {
+			"cline-pass": {
+				"settings": {
+					"provider": "cline-pass",
+					"auth": {"accessToken": "cline-access-token"}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(settingsPath, raw, 0600); err != nil {
+		t.Fatalf("failed to write Cline provider settings: %v", err)
+	}
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 "https://example.com/v1",
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: settingsPath,
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest error: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty header for non-Cline base URL", got)
+	}
+}
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	var gotPath string

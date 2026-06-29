@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -740,7 +741,41 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
+	if apiKey == "" {
+		apiKey = e.resolveClineProviderSettingsToken(auth)
+	}
 	return
+}
+
+func (e *OpenAICompatExecutor) resolveClineProviderSettingsToken(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	if strings.TrimSpace(auth.Attributes["credential_source"]) != clineauth.CredentialSourceProviderSettings {
+		return ""
+	}
+	providerID := strings.TrimSpace(auth.Attributes["cline_provider"])
+	if providerID == "" {
+		providerID = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	if !strings.EqualFold(providerID, clineauth.ProviderClinePass) {
+		return ""
+	}
+	providerID = clineauth.ProviderClinePass
+	baseURL := strings.TrimRight(strings.TrimSpace(auth.Attributes["base_url"]), "/")
+	if !strings.EqualFold(baseURL, strings.TrimRight(clineauth.APIBaseURL, "/")) {
+		return ""
+	}
+	path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath])
+	if path == "" {
+		path = strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource])
+	}
+	token, err := clineauth.ReadProviderAccessToken(path, providerID)
+	if err != nil {
+		log.Warnf("openai compat executor: failed to read Cline provider access token from %q: %v", path, err)
+		return ""
+	}
+	return token
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -2014,6 +2015,21 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
 	default:
+		if compatDetected && strings.EqualFold(compatDisplayName, clineauth.ProviderClinePass) {
+			providerKey := compatProviderKey
+			if providerKey == "" {
+				providerKey = util.OpenAICompatibleProviderKey(clineauth.ProviderClinePass)
+			}
+			models = registry.GetClinePassModels()
+			models = applyExcludedModels(models, excluded)
+			models = s.appendPluginModels(providerKey, models)
+			if len(models) > 0 {
+				s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+			} else {
+				GlobalModelRegistry().UnregisterClient(a.ID)
+			}
+			return
+		}
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
 			providerKey := provider

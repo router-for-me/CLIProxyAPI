@@ -136,6 +136,64 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 }
 
+func TestRegisterModelsForAuth_ClinePassCompatAuth(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-cline-pass",
+		Provider: "openai-compatible-cline-pass",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":    "oauth",
+			"compat_name":  "cline-pass",
+			"provider_key": "openai-compatible-cline-pass",
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected Cline Pass models to be registered")
+	}
+	var glm *internalregistry.ModelInfo
+	for _, model := range models {
+		if model != nil && model.ID == "cline-pass/glm-5.2" {
+			glm = model
+			break
+		}
+	}
+	if glm == nil {
+		t.Fatal("expected cline-pass/glm-5.2 to be registered")
+	}
+	if glm.OwnedBy != "cline-pass" {
+		t.Fatalf("owned_by = %q, want cline-pass", glm.OwnedBy)
+	}
+	if glm.Type != "openai-compatibility" {
+		t.Fatalf("type = %q, want openai-compatibility", glm.Type)
+	}
+	if glm.Thinking == nil {
+		t.Fatal("expected Cline Pass model to include thinking levels")
+	}
+	hasXHigh := false
+	for _, level := range glm.Thinking.Levels {
+		if level == "xhigh" {
+			hasXHigh = true
+			break
+		}
+	}
+	if !hasXHigh {
+		t.Fatalf("thinking levels = %#v, want xhigh support", glm.Thinking.Levels)
+	}
+}
+
 func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
 	var sawFetch bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
