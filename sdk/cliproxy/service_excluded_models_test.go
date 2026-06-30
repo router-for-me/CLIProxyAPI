@@ -194,6 +194,61 @@ func TestRegisterModelsForAuth_ClinePassCompatAuth(t *testing.T) {
 	}
 }
 
+func TestRegisterModelsForAuth_ClinePassUsesResolvedProviderControls(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			OAuthExcludedModels: map[string][]string{
+				"openai-compatible-cline-pass": {"cline-pass/glm-5.2"},
+			},
+			OAuthModelAlias: map[string][]config.OAuthModelAlias{
+				"openai-compatible-cline-pass": {
+					{Name: "cline-pass/qwen3.7-max", Alias: "cline-pass/qwen3.7-max-alias"},
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-cline-pass-controls",
+		Provider: "openai-compatible-cline-pass",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":    "oauth",
+			"compat_name":  "cline-pass",
+			"provider_key": "openai-compatible-cline-pass",
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected Cline Pass models to be registered")
+	}
+	var sawAlias bool
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch model.ID {
+		case "cline-pass/glm-5.2":
+			t.Fatal("expected cline-pass/glm-5.2 to be excluded by resolved Cline Pass provider key")
+		case "cline-pass/qwen3.7-max":
+			t.Fatal("expected original qwen model to be renamed by resolved Cline Pass alias")
+		case "cline-pass/qwen3.7-max-alias":
+			sawAlias = true
+		}
+	}
+	if !sawAlias {
+		t.Fatal("expected alias model registered through resolved Cline Pass provider key")
+	}
+}
+
 func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
 	var sawFetch bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

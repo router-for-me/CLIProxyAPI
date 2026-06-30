@@ -2020,8 +2020,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			if providerKey == "" {
 				providerKey = util.OpenAICompatibleProviderKey(clineauth.ProviderClinePass)
 			}
+			clineExcluded := s.oauthExcludedModels(providerKey, authKind)
+			if a.Attributes != nil {
+				if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
+					clineExcluded = strings.Split(val, ",")
+				}
+			}
 			models = registry.GetClinePassModels()
-			models = applyExcludedModels(models, excluded)
+			models = applyExcludedModels(models, clineExcluded)
+			models = applyOAuthModelAliasForAuth(s.cfg, providerKey, authKind, a.Attributes, models)
 			models = s.appendPluginModels(providerKey, models)
 			if len(models) > 0 {
 				s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))

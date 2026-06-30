@@ -405,6 +405,83 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(
 	}
 }
 
+func TestReadProviderAccessTokenRefreshUsesRawProviderKey(t *testing.T) {
+	resetProviderAccessTokenCache(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"success": true,
+			"data": {
+				"accessToken": "new-access-token",
+				"refreshToken": "new-refresh-token",
+				"expiresAt": 1782800000000
+			}
+		}`))
+	}))
+	defer server.Close()
+	oldBaseURL := clineAPIBaseURL
+	clineAPIBaseURL = server.URL
+	t.Cleanup(func() {
+		clineAPIBaseURL = oldBaseURL
+	})
+
+	path := filepath.Join(t.TempDir(), "providers.json")
+	raw := []byte(`{
+		"providers": {
+			" CLINE-PASS ": {
+				"settings": {
+					"provider": "cline-pass",
+					"model": "cline-pass/glm-5.2"
+				}
+			},
+			" CLINE ": {
+				"settings": {
+					"provider": "cline",
+					"auth": {
+						"accessToken": "workos:old-access-token",
+						"refreshToken": "old-refresh-token",
+						"expiresAt": 1700000000000
+					}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatalf("failed to write providers.json: %v", err)
+	}
+
+	token, err := ReadProviderAccessToken(path, ProviderClinePass)
+	if err != nil {
+		t.Fatalf("ReadProviderAccessToken error: %v", err)
+	}
+	if token != "workos:new-access-token" {
+		t.Fatalf("token = %q, want refreshed token", token)
+	}
+
+	var updated map[string]any
+	updatedData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read providers.json: %v", err)
+	}
+	if err := json.Unmarshal(updatedData, &updated); err != nil {
+		t.Fatalf("failed to parse updated providers.json: %v", err)
+	}
+	providers := updated["providers"].(map[string]any)
+	if _, ok := providers["cline"]; ok {
+		t.Fatal("refresh write-back created a normalized cline key instead of using the raw key")
+	}
+	clineEntry := providers[" CLINE "].(map[string]any)
+	clineSettings := clineEntry["settings"].(map[string]any)
+	auth := clineSettings["auth"].(map[string]any)
+	if auth["accessToken"] != "workos:new-access-token" {
+		t.Fatalf("stored accessToken = %#v, want refreshed token", auth["accessToken"])
+	}
+	if auth["refreshToken"] != "new-refresh-token" {
+		t.Fatalf("stored refreshToken = %#v, want new-refresh-token", auth["refreshToken"])
+	}
+}
+
 func TestReadProviderAccessTokenUsesCurrentFileWhenRefreshTokenChanged(t *testing.T) {
 	resetProviderAccessTokenCache(t)
 

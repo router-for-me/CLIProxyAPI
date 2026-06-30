@@ -26,7 +26,8 @@ const (
 )
 
 type ProviderSettingsFile struct {
-	Providers map[string]ProviderEntry `json:"providers"`
+	Providers       map[string]ProviderEntry `json:"providers"`
+	providerRawKeys map[string]string
 }
 
 type ProviderEntry struct {
@@ -109,6 +110,7 @@ func ParseProviderSettings(data []byte) (*ProviderSettingsFile, error) {
 		return nil, fmt.Errorf("cline provider settings: no providers")
 	}
 	normalized := make(map[string]ProviderEntry, len(settings.Providers))
+	rawKeys := make(map[string]string, len(settings.Providers))
 	for rawKey, entry := range settings.Providers {
 		key := strings.ToLower(strings.TrimSpace(rawKey))
 		if key == "" {
@@ -118,8 +120,10 @@ func ParseProviderSettings(data []byte) (*ProviderSettingsFile, error) {
 			return nil, fmt.Errorf("cline provider settings: duplicate provider key %q", key)
 		}
 		normalized[key] = entry
+		rawKeys[key] = rawKey
 	}
 	settings.Providers = normalized
+	settings.providerRawKeys = rawKeys
 	return &settings, nil
 }
 
@@ -151,7 +155,7 @@ func findProvider(settings *ProviderSettingsFile, providerIDs ...string) (provid
 		if entry, ok := settings.Providers[expectedProviderID]; ok {
 			provider := providerSettingsForEntry(expectedProviderID, entry)
 			if providerIDForEntry(expectedProviderID, provider) == expectedProviderID {
-				return providerMatch{key: expectedProviderID, provider: provider}, true
+				return providerMatch{key: settings.rawProviderKey(expectedProviderID), provider: provider}, true
 			}
 		}
 		for _, key := range sortedProviderKeys(settings.Providers) {
@@ -160,7 +164,7 @@ func findProvider(settings *ProviderSettingsFile, providerIDs ...string) (provid
 			}
 			provider := providerSettingsForEntry(key, settings.Providers[key])
 			if providerIDForEntry(key, provider) == expectedProviderID {
-				return providerMatch{key: key, provider: provider}, true
+				return providerMatch{key: settings.rawProviderKey(key), provider: provider}, true
 			}
 		}
 	}
@@ -193,7 +197,7 @@ func providerMatches(settings *ProviderSettingsFile, expectedProviderID string) 
 	if entry, ok := settings.Providers[expectedProviderID]; ok {
 		provider := providerSettingsForEntry(expectedProviderID, entry)
 		if providerIDForEntry(expectedProviderID, provider) == expectedProviderID {
-			matches = append(matches, providerMatch{key: expectedProviderID, provider: provider})
+			matches = append(matches, providerMatch{key: settings.rawProviderKey(expectedProviderID), provider: provider})
 		}
 	}
 	for _, key := range sortedProviderKeys(settings.Providers) {
@@ -202,10 +206,19 @@ func providerMatches(settings *ProviderSettingsFile, expectedProviderID string) 
 		}
 		provider := providerSettingsForEntry(key, settings.Providers[key])
 		if providerIDForEntry(key, provider) == expectedProviderID {
-			matches = append(matches, providerMatch{key: key, provider: provider})
+			matches = append(matches, providerMatch{key: settings.rawProviderKey(key), provider: provider})
 		}
 	}
 	return matches
+}
+
+func (settings *ProviderSettingsFile) rawProviderKey(normalizedKey string) string {
+	if settings != nil && settings.providerRawKeys != nil {
+		if rawKey := settings.providerRawKeys[normalizedKey]; strings.TrimSpace(rawKey) != "" {
+			return rawKey
+		}
+	}
+	return normalizedKey
 }
 
 func normalizeProviderIDs(providerIDs ...string) []string {
