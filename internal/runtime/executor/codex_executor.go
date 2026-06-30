@@ -884,6 +884,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if eventType != "response.completed" {
 			continue
 		}
+		reporter.ensurePublished(ctx)
 
 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
 			reporter.Publish(ctx, detail)
@@ -1199,6 +1200,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			case <-ctx.Done():
 			}
 		}
+		reporter.ensurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
