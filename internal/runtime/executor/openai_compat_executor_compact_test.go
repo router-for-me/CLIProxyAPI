@@ -136,6 +136,32 @@ func TestOpenAICompatExecutorPrepareRequestDoesNotUseClineTokenForOtherBaseURL(t
 	}
 }
 
+func TestOpenAICompatExecutorPrepareRequestErrorsWhenClineTokenUnavailable(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: filepath.Join(t.TempDir(), "missing-providers.json"),
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	err = executor.PrepareRequest(req, auth)
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", err, err)
+	}
+	if status.code != http.StatusFailedDependency {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusFailedDependency)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want no header when token is unavailable", got)
+	}
+}
+
 func TestOpenAICompatExecutorUnwrapsClineProviderSettingsEnvelope(t *testing.T) {
 	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
@@ -361,6 +387,78 @@ func TestOpenAICompatExecutorExecuteForcesClineProviderSettingsNonStream(t *test
 	stream := gjson.GetBytes(gotBody, "stream")
 	if !stream.Exists() || stream.Bool() {
 		t.Fatalf("stream = %s, want explicit false; body=%s", stream.Raw, string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorExecuteDoesNotCallUpstreamWhenClineTokenUnavailable(t *testing.T) {
+	called := false
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		t.Fatalf("upstream should not be called when Cline provider settings token is unavailable")
+		return nil, nil
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: filepath.Join(t.TempDir(), "missing-providers.json"),
+	}}
+	payload := []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", err, err)
+	}
+	if status.code != http.StatusFailedDependency {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusFailedDependency)
+	}
+	if called {
+		t.Fatal("upstream was called despite missing Cline provider settings token")
+	}
+}
+
+func TestOpenAICompatExecutorExecuteStreamDoesNotCallUpstreamWhenClineTokenUnavailable(t *testing.T) {
+	called := false
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		t.Fatalf("upstream should not be called when Cline provider settings token is unavailable")
+		return nil, nil
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: filepath.Join(t.TempDir(), "missing-providers.json"),
+	}}
+	payload := []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	_, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", err, err)
+	}
+	if status.code != http.StatusFailedDependency {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusFailedDependency)
+	}
+	if called {
+		t.Fatal("upstream was called despite missing Cline provider settings token")
 	}
 }
 

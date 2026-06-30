@@ -290,6 +290,7 @@ func TestReadProviderAccessTokenFallsBackToClineAccountForClinePass(t *testing.T
 func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(t *testing.T) {
 	resetProviderAccessTokenCache(t)
 
+	futureExpiry := futureProviderExpiryJSON()
 	var sawRefresh bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/auth/refresh" {
@@ -312,7 +313,7 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(
 			"data": {
 				"accessToken": "new-access-token",
 				"refreshToken": "new-refresh-token",
-				"expiresAt": 1782800000000,
+				"expiresAt": ` + futureExpiry + `,
 				"userInfo": {"clineUserId": "acct_new"}
 			}
 		}`))
@@ -408,6 +409,7 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(
 func TestReadProviderAccessTokenRefreshUsesRawProviderKey(t *testing.T) {
 	resetProviderAccessTokenCache(t)
 
+	futureExpiry := futureProviderExpiryJSON()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -415,7 +417,7 @@ func TestReadProviderAccessTokenRefreshUsesRawProviderKey(t *testing.T) {
 			"data": {
 				"accessToken": "new-access-token",
 				"refreshToken": "new-refresh-token",
-				"expiresAt": 1782800000000
+				"expiresAt": ` + futureExpiry + `
 			}
 		}`))
 	}))
@@ -488,17 +490,19 @@ func TestReadProviderAccessTokenUsesCurrentFileWhenRefreshTokenChanged(t *testin
 	targetPath := filepath.Join(t.TempDir(), "providers.json")
 	writeProvidersJSON(t, targetPath, "workos:old-access-token", "old-refresh-token", 1700000000000)
 
+	futureExpiry := futureProviderExpiryMillis()
+	futureExpiryJSON := strconv.FormatInt(futureExpiry, 10)
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
-		writeProvidersJSON(t, targetPath, "external-access-token", "external-refresh-token", 1782800000000)
+		writeProvidersJSON(t, targetPath, "external-access-token", "external-refresh-token", futureExpiry)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"success": true,
 			"data": {
 				"accessToken": "stale-refresh-result",
 				"refreshToken": "stale-refresh-token",
-				"expiresAt": 1782800000000
+				"expiresAt": ` + futureExpiryJSON + `
 			}
 		}`))
 	}))
@@ -534,6 +538,7 @@ func TestReadProviderAccessTokenDeduplicatesConcurrentRefresh(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "providers.json")
 	writeProvidersJSON(t, path, "workos:old-access-token", "shared-refresh-token", 1700000000000)
 
+	futureExpiry := futureProviderExpiryJSON()
 	var calls int32
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -548,7 +553,7 @@ func TestReadProviderAccessTokenDeduplicatesConcurrentRefresh(t *testing.T) {
 			"data": {
 				"accessToken": "new-access-token",
 				"refreshToken": "new-refresh-token",
-				"expiresAt": 1782800000000
+				"expiresAt": ` + futureExpiry + `
 			}
 		}`))
 	}))
@@ -642,6 +647,14 @@ func resetProviderAccessTokenCache(t *testing.T) {
 	providerAccessTokenCache.entries = make(map[string]providerAccessTokenCacheEntry)
 	providerAccessTokenCache.Unlock()
 	providerAccessTokenRefreshGroup = singleflight.Group{}
+}
+
+func futureProviderExpiryMillis() int64 {
+	return time.Now().Add(24 * time.Hour).UnixMilli()
+}
+
+func futureProviderExpiryJSON() string {
+	return strconv.FormatInt(futureProviderExpiryMillis(), 10)
 }
 
 func writeProvidersJSON(t *testing.T, path string, accessToken string, refreshToken string, expiresAt int64) {

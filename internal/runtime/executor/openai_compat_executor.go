@@ -55,7 +55,10 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if req == nil {
 		return nil
 	}
-	_, apiKey := e.resolveCredentials(auth)
+	_, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -93,7 +96,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return resp, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return
@@ -278,7 +284,10 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return resp, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return resp, err
@@ -371,7 +380,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return nil, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return nil, err
@@ -553,7 +565,10 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return nil, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return nil, err
@@ -821,34 +836,51 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 	return body.Bytes(), writer.FormDataContentType(), nil
 }
 
-func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {
+func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string, err error) {
 	if auth == nil {
-		return "", ""
+		return "", "", nil
 	}
 	if auth.Attributes != nil {
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	if apiKey == "" {
-		apiKey = e.resolveClineProviderSettingsToken(auth)
+		apiKey, err = e.resolveClineProviderSettingsToken(auth)
+		if err != nil {
+			return baseURL, "", err
+		}
 	}
 	return
 }
 
-func (e *OpenAICompatExecutor) resolveClineProviderSettingsToken(auth *cliproxyauth.Auth) string {
+func (e *OpenAICompatExecutor) resolveClineProviderSettingsToken(auth *cliproxyauth.Auth) (string, error) {
 	if !isClineProviderSettingsAuth(auth) {
-		return ""
+		return "", nil
 	}
 	path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath])
 	if path == "" {
 		path = strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource])
 	}
+	if path == "" {
+		return "", clineProviderSettingsCredentialError("missing provider settings path")
+	}
 	token, err := clineauth.ReadProviderAccessToken(path, clineauth.ProviderClinePass)
 	if err != nil {
 		log.Warnf("openai compat executor: failed to read Cline provider access token from %q: %v", path, err)
-		return ""
+		return "", clineProviderSettingsCredentialError("access token unavailable")
 	}
-	return token
+	if strings.TrimSpace(token) == "" {
+		return "", clineProviderSettingsCredentialError("access token unavailable")
+	}
+	return token, nil
+}
+
+func clineProviderSettingsCredentialError(reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "access token unavailable"
+	}
+	return statusErr{code: http.StatusFailedDependency, msg: "cline provider settings credential error: " + reason}
 }
 
 func isClineProviderSettingsAuth(auth *cliproxyauth.Auth) bool {

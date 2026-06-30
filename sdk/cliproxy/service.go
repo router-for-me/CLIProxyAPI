@@ -824,6 +824,24 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 	return "", "", false
 }
 
+func isClineProviderSettingsCompatAuth(a *coreauth.Auth) bool {
+	if a == nil || a.Attributes == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Attributes["credential_source"]) != clineauth.CredentialSourceProviderSettings {
+		return false
+	}
+	providerID := strings.TrimSpace(a.Attributes["cline_provider"])
+	if providerID == "" {
+		providerID = strings.TrimSpace(a.Attributes["compat_name"])
+	}
+	if !strings.EqualFold(providerID, clineauth.ProviderClinePass) {
+		return false
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(a.Attributes["base_url"]), "/")
+	return strings.EqualFold(baseURL, strings.TrimRight(clineauth.APIBaseURL, "/"))
+}
+
 type openAICompatibilityRegistrationCache struct {
 	byName map[string]*openAICompatibilityRegistrationEntry
 }
@@ -2015,7 +2033,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
 	default:
-		if compatDetected && strings.EqualFold(compatDisplayName, clineauth.ProviderClinePass) {
+		if compatDetected && strings.EqualFold(compatDisplayName, clineauth.ProviderClinePass) && isClineProviderSettingsCompatAuth(a) {
 			providerKey := compatProviderKey
 			if providerKey == "" {
 				providerKey = util.OpenAICompatibleProviderKey(clineauth.ProviderClinePass)
