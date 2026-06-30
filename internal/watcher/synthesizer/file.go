@@ -221,7 +221,10 @@ func synthesizeClineProviderSettingsAuths(ctx *SynthesisContext, fullPath string
 	if err != nil {
 		return nil
 	}
-	if _, ok := clineauth.ProviderAuth(settings, clineauth.ProviderClinePass); !ok {
+	if _, ok := clineauth.FindProvider(settings, clineauth.ProviderClinePass); !ok {
+		return nil
+	}
+	if _, ok := clineauth.ProviderAuth(settings, clineauth.ProviderCline, clineauth.ProviderClinePass); !ok {
 		return nil
 	}
 

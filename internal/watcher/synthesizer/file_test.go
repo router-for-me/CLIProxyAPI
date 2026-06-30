@@ -229,6 +229,66 @@ func TestFileSynthesizer_Synthesize_ClinePassProviderSettings(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_ClinePassWithClineAccountAuth(t *testing.T) {
+	tempDir := t.TempDir()
+	raw := []byte(`{
+		"version": 1,
+		"lastUsedProvider": "cline",
+		"providers": {
+			"cline-pass": {
+				"settings": {
+					"provider": "cline-pass",
+					"model": "cline-pass/glm-5.2"
+				},
+				"tokenSource": "manual"
+			},
+			"cline": {
+				"settings": {
+					"provider": "cline",
+					"model": "account-default-model",
+					"auth": {
+						"accessToken": "account-token",
+						"refreshToken": "refresh-token",
+						"expiresAt": 1782754552000,
+						"accountId": "acct_123"
+					}
+				},
+				"tokenSource": "oauth"
+			}
+		}
+	}`)
+	path := filepath.Join(tempDir, "providers.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatalf("failed to write providers.json: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "openai-compatible-cline-pass" {
+		t.Fatalf("provider = %q, want openai-compatible-cline-pass", auth.Provider)
+	}
+	if got := auth.Attributes["credential_source"]; got != "cline-provider-settings" {
+		t.Fatalf("credential_source = %q, want cline-provider-settings", got)
+	}
+	if _, ok := auth.Attributes["api_key"]; ok {
+		t.Fatal("expected synthesized auth not to persist Cline access token as api_key")
+	}
+}
+
 func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	tempDir := t.TempDir()
 	fullPath := filepath.Join(tempDir, "geminicli.json")

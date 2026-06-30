@@ -190,6 +190,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	body, err = e.handleClineProviderSettingsEnvelope(auth, body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -198,6 +203,59 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func (e *OpenAICompatExecutor) handleClineProviderSettingsEnvelope(auth *cliproxyauth.Auth, body []byte) ([]byte, error) {
+	if !isClineProviderSettingsAuth(auth) {
+		return body, nil
+	}
+	var envelope struct {
+		Success *bool           `json:"success"`
+		Data    json.RawMessage `json:"data"`
+		Code    string          `json:"code"`
+		Error   string          `json:"error"`
+		Message string          `json:"message"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body, nil
+	}
+	if envelope.Success == nil {
+		return body, nil
+	}
+	if !*envelope.Success {
+		return nil, statusErr{code: http.StatusBadGateway, msg: clineProviderSettingsEnvelopeError(envelope.Code, envelope.Error, envelope.Message)}
+	}
+	if len(envelope.Data) == 0 {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "cline provider settings upstream error: missing data"}
+	}
+	data := bytes.TrimSpace(envelope.Data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) || !json.Valid(data) {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "cline provider settings upstream error: invalid data"}
+	}
+	return data, nil
+}
+
+func clineProviderSettingsEnvelopeError(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if isSafeClineEnvelopeError(value) {
+			return fmt.Sprintf("cline provider settings upstream error: %s", value)
+		}
+	}
+	return "cline provider settings upstream error"
+}
+
+func isSafeClineEnvelopeError(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
@@ -748,34 +806,40 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 }
 
 func (e *OpenAICompatExecutor) resolveClineProviderSettingsToken(auth *cliproxyauth.Auth) string {
-	if auth == nil || auth.Attributes == nil {
-		return ""
-	}
-	if strings.TrimSpace(auth.Attributes["credential_source"]) != clineauth.CredentialSourceProviderSettings {
-		return ""
-	}
-	providerID := strings.TrimSpace(auth.Attributes["cline_provider"])
-	if providerID == "" {
-		providerID = strings.TrimSpace(auth.Attributes["compat_name"])
-	}
-	if !strings.EqualFold(providerID, clineauth.ProviderClinePass) {
-		return ""
-	}
-	providerID = clineauth.ProviderClinePass
-	baseURL := strings.TrimRight(strings.TrimSpace(auth.Attributes["base_url"]), "/")
-	if !strings.EqualFold(baseURL, strings.TrimRight(clineauth.APIBaseURL, "/")) {
+	if !isClineProviderSettingsAuth(auth) {
 		return ""
 	}
 	path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath])
 	if path == "" {
 		path = strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource])
 	}
-	token, err := clineauth.ReadProviderAccessToken(path, providerID)
+	token, err := clineauth.ReadProviderAccessToken(path, clineauth.ProviderClinePass)
 	if err != nil {
 		log.Warnf("openai compat executor: failed to read Cline provider access token from %q: %v", path, err)
 		return ""
 	}
 	return token
+}
+
+func isClineProviderSettingsAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	if strings.TrimSpace(auth.Attributes["credential_source"]) != clineauth.CredentialSourceProviderSettings {
+		return false
+	}
+	providerID := strings.TrimSpace(auth.Attributes["cline_provider"])
+	if providerID == "" {
+		providerID = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	if !strings.EqualFold(providerID, clineauth.ProviderClinePass) {
+		return false
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(auth.Attributes["base_url"]), "/")
+	if !strings.EqualFold(baseURL, strings.TrimRight(clineauth.APIBaseURL, "/")) {
+		return false
+	}
+	return true
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
