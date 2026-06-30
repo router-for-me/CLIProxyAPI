@@ -670,14 +670,14 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
 			if sess != nil {
-				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+				e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
 			}
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 			return resp, wsErr
 		}
 		if wsErr, ok := codexWebsocketStatuslessErrorEvent(payload); ok {
 			if sess != nil {
-				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+				e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
 			}
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 			return resp, wsErr
@@ -1251,7 +1251,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
 				}
 				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
 				return
@@ -1284,7 +1284,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					e.clearUpstreamConn(sess, conn, "upstream_error", wsErr, codexWebsocketShouldNotifyUpstreamDisconnect(ctx, wsErr))
 				}
 				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
 				return
