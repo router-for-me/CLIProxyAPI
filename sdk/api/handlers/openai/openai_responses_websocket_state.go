@@ -43,6 +43,26 @@ func (s responsesWebsocketTranscriptState) valid() bool {
 	return len(s.lastRequest) != 0
 }
 
+func (s responsesWebsocketTranscriptState) equal(other responsesWebsocketTranscriptState) bool {
+	return bytes.Equal(s.lastRequest, other.lastRequest) &&
+		bytes.Equal(s.lastResponseOutput, other.lastResponseOutput) &&
+		strings.TrimSpace(s.lastResponseID) == strings.TrimSpace(other.lastResponseID) &&
+		stringSlicesEqual(s.lastResponsePendingToolCallIDs, other.lastResponsePendingToolCallIDs) &&
+		strings.TrimSpace(s.passthroughModelName) == strings.TrimSpace(other.passthroughModelName)
+}
+
+func stringSlicesEqual(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.TrimSpace(a[i]) != strings.TrimSpace(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 type responsesWebsocketTranscriptStateCache struct {
 	mu          sync.Mutex
 	ttl         time.Duration

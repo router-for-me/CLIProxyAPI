@@ -322,6 +322,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		wsTimelineLog.BeginRequest()
 		wsTimelineLog.Append("request", payload, time.Now())
 
+		if state, ok := restoreResponsesWebsocketTranscriptState(downstreamSessionKey); ok {
+			currentState := responsesWebsocketTranscriptState{
+				lastRequest:                    lastRequest,
+				lastResponseOutput:             lastResponseOutput,
+				lastResponseID:                 lastResponseID,
+				lastResponsePendingToolCallIDs: lastResponsePendingToolCallIDs,
+				passthroughModelName:           passthroughModelName,
+			}
+			if !currentState.equal(state) {
+				lastRequest = state.lastRequest
+				lastResponseOutput = state.lastResponseOutput
+				lastResponseID = state.lastResponseID
+				lastResponsePendingToolCallIDs = state.lastResponsePendingToolCallIDs
+				passthroughModelName = state.passthroughModelName
+				restoredTranscriptState = true
+			}
+		}
+
 		stateLossReplayAttempted := false
 	retryCurrentPayloadAfterStateLoss:
 		requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())

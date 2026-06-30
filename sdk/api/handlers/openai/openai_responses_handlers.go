@@ -431,6 +431,9 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		cliCancel(errMsg.Error)
 		return
 	}
+	if h.websocketUpstreamSupportsCompactionReplayForModel(modelName) {
+		recordResponsesWebsocketCompactTranscriptState(c, rawJSON, resp)
+	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
