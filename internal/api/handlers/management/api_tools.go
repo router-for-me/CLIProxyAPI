@@ -310,7 +310,7 @@ func (h *Handler) commandAuthForAPICallURL(target *url.URL) *coreauth.Auth {
 	}
 	var matched *coreauth.Auth
 	for _, auth := range h.authManager.List() {
-		if !coreauth.IsCommandAuth(auth) || !authBaseURLMatches(target, auth) {
+		if !coreauth.IsCommandAuth(auth) || !commandAuthAvailableForAPICall(auth) || !authBaseURLMatches(target, auth) {
 			continue
 		}
 		if matched != nil {
@@ -319,6 +319,20 @@ func (h *Handler) commandAuthForAPICallURL(target *url.URL) *coreauth.Auth {
 		matched = auth
 	}
 	return matched
+}
+
+func commandAuthAvailableForAPICall(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return false
+	}
+	if auth.Attributes != nil {
+		for _, item := range strings.Split(auth.Attributes["excluded_models"], ",") {
+			if strings.TrimSpace(item) == configAPIKeyDisablePattern {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func authBaseURLMatches(target *url.URL, auth *coreauth.Auth) bool {

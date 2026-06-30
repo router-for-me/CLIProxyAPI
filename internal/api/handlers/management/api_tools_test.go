@@ -546,6 +546,41 @@ func TestCommandAuthForAPICallURLReturnsNilWhenAmbiguous(t *testing.T) {
 	}
 }
 
+func TestCommandAuthForAPICallURLSkipsDisabledAuths(t *testing.T) {
+	t.Parallel()
+
+	script := writeAPICallTokenScript(t, "Bearer inferred-token")
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor.NewCodexAutoExecutor(nil))
+
+	disabled := commandAPICallAuth("disabled-command-auth", "https://aiden-aiproxy.bytedance.net/v2", script)
+	disabled.Disabled = true
+	statusDisabled := commandAPICallAuth("status-disabled-command-auth", "https://aiden-aiproxy.bytedance.net/v2", script)
+	statusDisabled.Status = coreauth.StatusDisabled
+	excludedAll := commandAPICallAuth("excluded-all-command-auth", "https://aiden-aiproxy.bytedance.net/v2", script)
+	excludedAll.Attributes["excluded_models"] = "gpt-5, *"
+	active := commandAPICallAuth("active-command-auth", "https://aiden-aiproxy.bytedance.net/v2", script)
+
+	for _, auth := range []*coreauth.Auth{disabled, statusDisabled, excludedAll, active} {
+		if _, errRegister := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	target, errParse := url.Parse("https://aiden-aiproxy.bytedance.net/v2/models")
+	if errParse != nil {
+		t.Fatalf("parse url: %v", errParse)
+	}
+
+	auth := (&Handler{authManager: manager}).commandAuthForAPICallURL(target)
+	if auth == nil {
+		t.Fatal("commandAuthForAPICallURL returned nil, want active command auth")
+	}
+	if auth.ID != active.ID {
+		t.Fatalf("commandAuthForAPICallURL returned %q, want %q", auth.ID, active.ID)
+	}
+}
+
 func commandAPICallAuth(id, baseURL, script string) *coreauth.Auth {
 	return &coreauth.Auth{
 		ID:       id,
