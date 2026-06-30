@@ -327,3 +327,62 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesInputImag
 		t.Fatalf("messages.0.content.0.image_url.detail = %q, want high; output=%s", got, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_InputImageURLObject(t *testing.T) {
+	// image_url as an object {"url": "data:...", "detail": "low"} — the Codex Desktop format.
+	// Before the fix this produced a raw-JSON string as the URL, causing downstream
+	// "first path segment in URL cannot contain colon" errors.
+	raw := []byte(`{
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_image",
+						"image_url": {
+							"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+							"detail": "low"
+						}
+					}
+				]
+			}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	wantURL := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.url").String(); got != wantURL {
+		t.Fatalf("messages.0.content.0.image_url.url = %q, want data URI; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.detail").String(); got != "low" {
+		t.Fatalf("messages.0.content.0.image_url.detail = %q, want low; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_InputImageDataURIString(t *testing.T) {
+	// image_url as a plain data URI string (no wrapping object).
+	raw := []byte(`{
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_image",
+						"image_url": "data:image/jpeg;base64,/9j/4AAQSkZJRgAB"
+					}
+				]
+			}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.url").String(); got != "data:image/jpeg;base64,/9j/4AAQSkZJRgAB" {
+		t.Fatalf("messages.0.content.0.image_url.url = %q, want data URI; output=%s", got, out)
+	}
+}
