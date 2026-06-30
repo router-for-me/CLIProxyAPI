@@ -1,19 +1,12 @@
 package cline
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 func TestParseProviderSettingsNormalizesProviderKeys(t *testing.T) {
@@ -287,42 +280,8 @@ func TestReadProviderAccessTokenFallsBackToClineAccountForClinePass(t *testing.T
 	}
 }
 
-func TestReadProviderAccessTokenRefreshesExpiredClineAccountWithoutWriteBack(t *testing.T) {
+func TestReadProviderAccessTokenRejectsExpiredClineAccountWithoutWriteBack(t *testing.T) {
 	resetProviderAccessTokenCache(t)
-
-	futureExpiry := futureProviderExpiryJSON()
-	var sawRefresh bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/auth/refresh" {
-			t.Fatalf("refresh path = %q, want /auth/refresh", r.URL.Path)
-		}
-		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("failed to decode refresh body: %v", err)
-		}
-		if body["grantType"] != "refresh_token" {
-			t.Fatalf("grantType = %q, want refresh_token", body["grantType"])
-		}
-		if body["refreshToken"] != "old-refresh-token" {
-			t.Fatalf("refreshToken = %q, want old-refresh-token", body["refreshToken"])
-		}
-		sawRefresh = true
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"success": true,
-			"data": {
-				"accessToken": "new-access-token",
-				"refreshToken": "new-refresh-token",
-				"expiresAt": ` + futureExpiry + `
-			}
-		}`))
-	}))
-	defer server.Close()
-	oldBaseURL := clineAPIBaseURL
-	clineAPIBaseURL = server.URL
-	t.Cleanup(func() {
-		clineAPIBaseURL = oldBaseURL
-	})
 
 	targetPath := filepath.Join(t.TempDir(), "providers.json")
 	raw := []byte(`{
@@ -359,14 +318,11 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountWithoutWriteBack(t *
 	}
 
 	token, err := ReadProviderAccessToken(linkPath, ProviderClinePass)
-	if err != nil {
-		t.Fatalf("ReadProviderAccessToken error: %v", err)
+	if err == nil {
+		t.Fatalf("expected expired token error, got token %q", token)
 	}
-	if !sawRefresh {
-		t.Fatal("expected refresh endpoint to be called")
-	}
-	if token != "workos:new-access-token" {
-		t.Fatalf("token = %q, want refreshed account token", token)
+	if !strings.Contains(err.Error(), "access token expired") {
+		t.Fatalf("error = %v, want expired token error", err)
 	}
 	if info, err := os.Lstat(linkPath); err != nil {
 		t.Fatalf("failed to stat symlink: %v", err)
@@ -378,135 +334,21 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountWithoutWriteBack(t *
 		t.Fatalf("failed to read providers.json: %v", err)
 	}
 	if string(updated) != string(raw) {
-		t.Fatalf("providers.json changed during refresh:\n%s", string(updated))
+		t.Fatalf("providers.json changed during read:\n%s", string(updated))
 	}
 }
 
-func TestReadProviderAccessTokenUsesCurrentFileWhenRefreshTokenChanged(t *testing.T) {
-	resetProviderAccessTokenCache(t)
-
-	targetPath := filepath.Join(t.TempDir(), "providers.json")
-	writeProvidersJSON(t, targetPath, "workos:old-access-token", "old-refresh-token", 1700000000000)
-	fixedTime := time.Unix(1700000000, 0)
-	if err := os.Chtimes(targetPath, fixedTime, fixedTime); err != nil {
-		t.Fatalf("failed to set provider settings mtime: %v", err)
-	}
-
-	futureExpiry := futureProviderExpiryMillis()
-	futureExpiryJSON := strconv.FormatInt(futureExpiry, 10)
-	var calls int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		writeProvidersJSON(t, targetPath, "external-access-token", "external-refresh-token", futureExpiry)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"success": true,
-			"data": {
-				"accessToken": "stale-refresh-result",
-				"refreshToken": "stale-refresh-token",
-				"expiresAt": ` + futureExpiryJSON + `
-			}
-		}`))
-	}))
-	defer server.Close()
-	oldBaseURL := clineAPIBaseURL
-	clineAPIBaseURL = server.URL
-	t.Cleanup(func() {
-		clineAPIBaseURL = oldBaseURL
-	})
-
-	token, err := ReadProviderAccessToken(targetPath, ProviderClinePass)
-	if err != nil {
-		t.Fatalf("ReadProviderAccessToken error: %v", err)
-	}
-	if token != "external-access-token" {
-		t.Fatalf("token = %q, want current file token", token)
-	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("refresh calls = %d, want 1", got)
-	}
-	data, err := os.ReadFile(targetPath)
-	if err != nil {
-		t.Fatalf("failed to read providers.json: %v", err)
-	}
-	if strings.Contains(string(data), "stale-refresh-result") {
-		t.Fatalf("stale refresh result was written to providers.json: %s", string(data))
-	}
-}
-
-func TestReadProviderAccessTokenDeduplicatesConcurrentRefresh(t *testing.T) {
+func TestReadProviderAccessTokenReturnsFutureExpiringToken(t *testing.T) {
 	resetProviderAccessTokenCache(t)
 
 	path := filepath.Join(t.TempDir(), "providers.json")
-	writeProvidersJSON(t, path, "workos:old-access-token", "shared-refresh-token", 1700000000000)
-	original, err := os.ReadFile(path)
+	writeProvidersJSON(t, path, "workos:fresh-access-token", futureProviderExpiryMillis())
+	token, err := ReadProviderAccessToken(path, ProviderClinePass)
 	if err != nil {
-		t.Fatalf("failed to read providers.json: %v", err)
+		t.Fatalf("ReadProviderAccessToken error: %v", err)
 	}
-
-	futureExpiry := futureProviderExpiryJSON()
-	var calls int32
-	started := make(chan struct{})
-	release := make(chan struct{})
-	var once sync.Once
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		once.Do(func() { close(started) })
-		<-release
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"success": true,
-			"data": {
-				"accessToken": "new-access-token",
-				"refreshToken": "new-refresh-token",
-				"expiresAt": ` + futureExpiry + `
-			}
-		}`))
-	}))
-	defer server.Close()
-	oldBaseURL := clineAPIBaseURL
-	clineAPIBaseURL = server.URL
-	t.Cleanup(func() {
-		clineAPIBaseURL = oldBaseURL
-	})
-
-	const workers = 8
-	begin := make(chan struct{})
-	type result struct {
-		token string
-		err   error
-	}
-	results := make(chan result, workers)
-	for i := 0; i < workers; i++ {
-		go func() {
-			<-begin
-			token, err := ReadProviderAccessToken(path, ProviderClinePass)
-			results <- result{token: token, err: err}
-		}()
-	}
-	close(begin)
-	<-started
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-
-	for i := 0; i < workers; i++ {
-		res := <-results
-		if res.err != nil {
-			t.Fatalf("ReadProviderAccessToken error: %v", res.err)
-		}
-		if res.token != "workos:new-access-token" {
-			t.Fatalf("token = %q, want refreshed token", res.token)
-		}
-	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("refresh calls = %d, want 1", got)
-	}
-	updated, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read providers.json: %v", err)
-	}
-	if string(updated) != string(original) {
-		t.Fatalf("providers.json changed during refresh:\n%s", string(updated))
+	if token != "workos:fresh-access-token" {
+		t.Fatalf("token = %q, want fresh token", token)
 	}
 }
 
@@ -559,18 +401,13 @@ func resetProviderAccessTokenCache(t *testing.T) {
 	providerAccessTokenCache.Lock()
 	providerAccessTokenCache.entries = make(map[string]providerAccessTokenCacheEntry)
 	providerAccessTokenCache.Unlock()
-	providerAccessTokenRefreshGroup = singleflight.Group{}
 }
 
 func futureProviderExpiryMillis() int64 {
 	return time.Now().Add(24 * time.Hour).UnixMilli()
 }
 
-func futureProviderExpiryJSON() string {
-	return strconv.FormatInt(futureProviderExpiryMillis(), 10)
-}
-
-func writeProvidersJSON(t *testing.T, path string, accessToken string, refreshToken string, expiresAt int64) {
+func writeProvidersJSON(t *testing.T, path string, accessToken string, expiresAt int64) {
 	t.Helper()
 	raw := []byte(`{
 		"providers": {
@@ -585,7 +422,6 @@ func writeProvidersJSON(t *testing.T, path string, accessToken string, refreshTo
 					"provider": "cline",
 					"auth": {
 						"accessToken": "` + accessToken + `",
-						"refreshToken": "` + refreshToken + `",
 						"expiresAt": ` + strconv.FormatInt(expiresAt, 10) + `
 					}
 				}

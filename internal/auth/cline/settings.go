@@ -1,20 +1,15 @@
 package cline
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -42,9 +37,8 @@ type ProviderSettings struct {
 }
 
 type AuthSettings struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	ExpiresAt    any    `json:"expiresAt"`
+	AccessToken string `json:"accessToken"`
+	ExpiresAt   any    `json:"expiresAt"`
 }
 
 type providerAccessTokenCacheEntry struct {
@@ -60,31 +54,8 @@ var providerAccessTokenCache = struct {
 	entries: make(map[string]providerAccessTokenCacheEntry),
 }
 
-var (
-	clineAPIBaseURL                 = APIBaseURL
-	providerAccessTokenRefreshGroup singleflight.Group
-)
-
 type providerMatch struct {
 	provider ProviderSettings
-}
-
-type providerAccessTokenSnapshot struct {
-	providerAccessTokenCacheEntry
-	auth AuthSettings
-}
-
-type refreshResponse struct {
-	Success *bool `json:"success"`
-	Data    struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ExpiresAt    any    `json:"expiresAt"`
-	} `json:"data"`
-	Code      string `json:"code"`
-	ErrorCode string `json:"errorCode"`
-	Error     string `json:"error"`
-	Message   string `json:"message"`
 }
 
 func ParseProviderSettings(data []byte) (*ProviderSettingsFile, error) {
@@ -271,40 +242,25 @@ func ReadProviderAccessToken(path string, providerID string) (string, error) {
 		return cached.token, nil
 	}
 
-	snapshot, err := readProviderAccessTokenSnapshot(path, providerID)
+	entry, err := readProviderAccessTokenCacheEntry(path, providerID, modTime)
 	if err != nil {
 		return "", err
 	}
-	if tokenExpiresSoon(snapshot.expiresAt, time.Now()) && strings.TrimSpace(snapshot.auth.RefreshToken) != "" {
-		value, errRefresh, _ := providerAccessTokenRefreshGroup.Do(cacheKey, func() (any, error) {
-			return refreshProviderAccessToken(path, providerID)
-		})
-		if errRefresh != nil {
-			return "", errRefresh
-		}
-		refreshed, ok := value.(providerAccessTokenCacheEntry)
-		if !ok {
-			return "", fmt.Errorf("cline provider settings: invalid refresh result")
-		}
-		return refreshed.token, nil
+	if tokenExpiresSoon(entry.expiresAt, time.Now()) {
+		return "", fmt.Errorf("cline provider settings: provider %q access token expired", providerID)
 	}
-	cacheProviderAccessToken(cacheKey, snapshot.providerAccessTokenCacheEntry)
-	return snapshot.token, nil
+	cacheProviderAccessToken(cacheKey, entry)
+	return entry.token, nil
 }
 
-func readProviderAccessTokenSnapshot(path string, providerID string) (providerAccessTokenSnapshot, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return providerAccessTokenSnapshot{}, err
-	}
-	modTime := info.ModTime()
+func readProviderAccessTokenCacheEntry(path string, providerID string, modTime time.Time) (providerAccessTokenCacheEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return providerAccessTokenSnapshot{}, err
+		return providerAccessTokenCacheEntry{}, err
 	}
 	settings, err := ParseProviderSettings(data)
 	if err != nil {
-		return providerAccessTokenSnapshot{}, err
+		return providerAccessTokenCacheEntry{}, err
 	}
 	providerIDs := []string{providerID}
 	if providerID == ProviderClinePass {
@@ -312,67 +268,14 @@ func readProviderAccessTokenSnapshot(path string, providerID string) (providerAc
 	}
 	match, ok := findProviderAuth(settings, providerIDs...)
 	if !ok {
-		return providerAccessTokenSnapshot{}, fmt.Errorf("cline provider settings: provider %q missing access token", providerID)
+		return providerAccessTokenCacheEntry{}, fmt.Errorf("cline provider settings: provider %q missing access token", providerID)
 	}
 	token := strings.TrimSpace(match.provider.Auth.AccessToken)
-	return providerAccessTokenSnapshot{
-		providerAccessTokenCacheEntry: providerAccessTokenCacheEntry{
-			token:     token,
-			modTime:   modTime,
-			expiresAt: authExpiryTime(match.provider.Auth, token),
-		},
-		auth: match.provider.Auth,
-	}, nil
-}
-
-func refreshProviderAccessToken(path string, providerID string) (providerAccessTokenCacheEntry, error) {
-	snapshot, err := readProviderAccessTokenSnapshot(path, providerID)
-	if err != nil {
-		return providerAccessTokenCacheEntry{}, err
-	}
-	if !tokenExpiresSoon(snapshot.expiresAt, time.Now()) || strings.TrimSpace(snapshot.auth.RefreshToken) == "" {
-		cacheProviderAccessToken(path+"|"+providerID, snapshot.providerAccessTokenCacheEntry)
-		return snapshot.providerAccessTokenCacheEntry, nil
-	}
-	refreshed, err := refreshProviderAuth(snapshot.auth.RefreshToken)
-	if err != nil {
-		return providerAccessTokenCacheEntry{}, err
-	}
-	if current, changed, err := readCurrentProviderAccessTokenIfRefreshTokenChanged(path, providerID, snapshot); err != nil {
-		return providerAccessTokenCacheEntry{}, err
-	} else if changed {
-		cacheProviderAccessToken(path+"|"+providerID, current)
-		return current, nil
-	}
-	token := strings.TrimSpace(refreshed.AccessToken)
-	result := providerAccessTokenCacheEntry{
+	return providerAccessTokenCacheEntry{
 		token:     token,
-		modTime:   snapshot.modTime,
-		expiresAt: authExpiryTime(refreshed, token),
-	}
-	cacheProviderAccessToken(path+"|"+providerID, result)
-	return result, nil
-}
-
-func readCurrentProviderAccessTokenIfRefreshTokenChanged(path string, providerID string, previous providerAccessTokenSnapshot) (providerAccessTokenCacheEntry, bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return providerAccessTokenCacheEntry{}, false, err
-	}
-	if info.ModTime().Equal(previous.modTime) {
-		return providerAccessTokenCacheEntry{}, false, nil
-	}
-	current, err := readProviderAccessTokenSnapshot(path, providerID)
-	if err != nil {
-		return providerAccessTokenCacheEntry{}, false, err
-	}
-	if strings.TrimSpace(current.auth.RefreshToken) == strings.TrimSpace(previous.auth.RefreshToken) {
-		return providerAccessTokenCacheEntry{}, false, nil
-	}
-	if tokenExpiresSoon(current.expiresAt, time.Now()) {
-		return providerAccessTokenCacheEntry{}, false, fmt.Errorf("cline provider settings: provider auth changed during refresh")
-	}
-	return current.providerAccessTokenCacheEntry, true, nil
+		modTime:   modTime,
+		expiresAt: authExpiryTime(match.provider.Auth, token),
+	}, nil
 }
 
 func cacheProviderAccessToken(cacheKey string, entry providerAccessTokenCacheEntry) {
@@ -466,80 +369,4 @@ func stripClineAccountAccessTokenPrefix(token string) string {
 		return token[len("workos:"):]
 	}
 	return token
-}
-
-func formatClineAccountAccessToken(token string) string {
-	token = strings.TrimSpace(token)
-	if token == "" || strings.HasPrefix(strings.ToLower(token), "workos:") {
-		return token
-	}
-	return "workos:" + token
-}
-
-func refreshProviderAuth(refreshToken string) (AuthSettings, error) {
-	refreshToken = strings.TrimSpace(refreshToken)
-	if refreshToken == "" {
-		return AuthSettings{}, fmt.Errorf("cline provider settings: missing refresh token")
-	}
-	body, err := json.Marshal(map[string]string{
-		"grantType":    "refresh_token",
-		"refreshToken": refreshToken,
-	})
-	if err != nil {
-		return AuthSettings{}, err
-	}
-	url := strings.TrimRight(clineAPIBaseURL, "/") + "/auth/refresh"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return AuthSettings{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return AuthSettings{}, fmt.Errorf("cline provider settings: refresh token request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var payload refreshResponse
-	_ = json.Unmarshal(respBody, &payload)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (payload.Success != nil && !*payload.Success) {
-		return AuthSettings{}, fmt.Errorf("cline provider settings: refresh token request failed: %s", safeRefreshErrorDetail(resp.StatusCode, payload))
-	}
-	accessToken := strings.TrimSpace(payload.Data.AccessToken)
-	if accessToken == "" {
-		return AuthSettings{}, fmt.Errorf("cline provider settings: refresh token response missing access token")
-	}
-	refreshed := AuthSettings{
-		AccessToken:  formatClineAccountAccessToken(accessToken),
-		RefreshToken: strings.TrimSpace(payload.Data.RefreshToken),
-		ExpiresAt:    payload.Data.ExpiresAt,
-	}
-	if refreshed.RefreshToken == "" {
-		refreshed.RefreshToken = refreshToken
-	}
-	return refreshed, nil
-}
-
-func safeRefreshErrorDetail(status int, payload refreshResponse) string {
-	for _, value := range []string{payload.Code, payload.ErrorCode, payload.Error, payload.Message} {
-		value = strings.TrimSpace(value)
-		if isSafeErrorCode(value) {
-			return value
-		}
-	}
-	return fmt.Sprintf("HTTP %d", status)
-}
-
-func isSafeErrorCode(value string) bool {
-	if len(value) == 0 || len(value) > 64 {
-		return false
-	}
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
-			continue
-		}
-		return false
-	}
-	return true
 }

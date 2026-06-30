@@ -481,9 +481,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
 			trimmedLine := bytes.TrimSpace(line)
 			if len(trimmedLine) == 0 {
 				continue
@@ -507,8 +504,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				continue
 			}
 
+			streamLine, errUnwrap := e.handleClineProviderSettingsStreamDataLine(auth, trimmedLine)
+			if errUnwrap != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errUnwrap)
+				reporter.PublishFailure(ctx, errUnwrap)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errUnwrap}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if detail, ok := helps.ParseOpenAIStreamUsage(streamLine); ok {
+				reporter.Publish(ctx, detail)
+			}
 			// OpenAI-compatible streams must use SSE data lines.
-			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(streamLine), &param)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -541,6 +551,30 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *OpenAICompatExecutor) handleClineProviderSettingsStreamDataLine(auth *cliproxyauth.Auth, line []byte) ([]byte, error) {
+	if !isClineProviderSettingsAuth(auth) || !bytes.HasPrefix(line, []byte("data:")) {
+		return line, nil
+	}
+	payload := bytes.TrimSpace(line[len("data:"):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !bytes.HasPrefix(payload, []byte("{")) {
+		return line, nil
+	}
+	var envelope struct {
+		Success *bool `json:"success"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Success == nil {
+		return line, nil
+	}
+	unwrapped, err := e.handleClineProviderSettingsEnvelope(auth, payload)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len("data: ")+len(unwrapped))
+	out = append(out, "data: "...)
+	out = append(out, unwrapped...)
+	return out, nil
 }
 
 func (e *OpenAICompatExecutor) openAICompatNonSSEStreamError(auth *cliproxyauth.Auth, body []byte) error {
