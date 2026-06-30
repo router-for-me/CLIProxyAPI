@@ -6,7 +6,7 @@ A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API inte
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
-So you can use local or multi-account CLI access with OpenAI(including responses)/Gemini/Claude-compatible clients and SDKs.
+So you can use local or multi-account CLI access with OpenAI (including responses)/Gemini/Claude-compatible clients and SDKs.
 
 ## Sponsor
 
