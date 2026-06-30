@@ -2803,6 +2803,62 @@ func TestReverseRemapOAuthToolNamesFromStreamLine_HonorsPerRequestMap(t *testing
 	}
 }
 
+// TestRemapOAuthToolNames_McpSingleUnderscore_NormalizedAndReversed guards the
+// fix for third-party clients (e.g. BoltAI) that name MCP tools with a single
+// underscore `mcp_<tool>` prefix. Anthropic's overage gate fingerprints that
+// prefix as a user-installed MCP extension and rejects OAuth requests with a 400
+// ("third-party apps now draw from your extra usage"). Claude Code's own
+// convention is the double-underscore `mcp__` prefix, which is accepted as
+// first-party, so we normalize `mcp_` -> `mcp__` upstream and restore the
+// client's original single-underscore name on the response.
+func TestRemapOAuthToolNames_McpSingleUnderscore_NormalizedAndReversed(t *testing.T) {
+	body := []byte(`{"tools":[` +
+		`{"name":"mcp_search_youtube_z50gm8","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}},` +
+		`{"name":"mcp__already__ok","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}` +
+		`],"tool_choice":{"type":"tool","name":"mcp_search_youtube_z50gm8"},` +
+		`"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"mcp_search_youtube_z50gm8","input":{"query":"go"}}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+
+	// Forward: single-underscore mcp_ prefix is doubled upstream.
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "mcp__search_youtube_z50gm8" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "mcp__search_youtube_z50gm8")
+	}
+	// Forward: an already double-underscore name must pass through unchanged.
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "mcp__already__ok" {
+		t.Fatalf("tools.1.name = %q, want unchanged %q", got, "mcp__already__ok")
+	}
+	// Forward: tool_choice.name is normalized too (else Anthropic 400s on mismatch).
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "mcp__search_youtube_z50gm8" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "mcp__search_youtube_z50gm8")
+	}
+	// Forward: tool_use in message history is normalized.
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "mcp__search_youtube_z50gm8" {
+		t.Fatalf("history tool_use name = %q, want %q", got, "mcp__search_youtube_z50gm8")
+	}
+	// Reverse map records ONLY the renamed tool, not the already-correct one.
+	if reverseMap["mcp__search_youtube_z50gm8"] != "mcp_search_youtube_z50gm8" {
+		t.Fatalf("reverseMap = %v, want entry mcp__search_youtube_z50gm8 -> mcp_search_youtube_z50gm8", reverseMap)
+	}
+	if _, exists := reverseMap["mcp__already__ok"]; exists {
+		t.Fatalf("reverseMap must not contain already-double-underscore name: %v", reverseMap)
+	}
+
+	// Reverse (buffered): response tool_use restored to client's single-underscore name.
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_02","name":"mcp__search_youtube_z50gm8","input":{"query":"go"}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "mcp_search_youtube_z50gm8" {
+		t.Fatalf("content.0.name = %q, want restored %q", got, "mcp_search_youtube_z50gm8")
+	}
+
+	// Reverse (streaming): same restoration on the SSE content_block.
+	line := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_02","name":"mcp__search_youtube_z50gm8","input":{}}}`)
+	outLine := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if !bytes.Contains(outLine, []byte(`"name":"mcp_search_youtube_z50gm8"`)) {
+		t.Fatalf("stream reverse failed, got: %s", string(outLine))
+	}
+}
+
 func TestPrepareClaudeOAuthToolNamesForUpstream_MixedCaseWithPrefix(t *testing.T) {
 	body := []byte(`{"tools":[` +
 		`{"name":"Bash","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},` +
