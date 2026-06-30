@@ -825,21 +825,10 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 }
 
 func isClineProviderSettingsCompatAuth(a *coreauth.Auth) bool {
-	if a == nil || a.Attributes == nil {
+	if a == nil {
 		return false
 	}
-	if strings.TrimSpace(a.Attributes["credential_source"]) != clineauth.CredentialSourceProviderSettings {
-		return false
-	}
-	providerID := strings.TrimSpace(a.Attributes["cline_provider"])
-	if providerID == "" {
-		providerID = strings.TrimSpace(a.Attributes["compat_name"])
-	}
-	if !strings.EqualFold(providerID, clineauth.ProviderClinePass) {
-		return false
-	}
-	baseURL := strings.TrimRight(strings.TrimSpace(a.Attributes["base_url"]), "/")
-	return strings.EqualFold(baseURL, strings.TrimRight(clineauth.APIBaseURL, "/"))
+	return clineauth.IsProviderSettingsClinePassAttributes(a.Attributes)
 }
 
 type openAICompatibilityRegistrationCache struct {

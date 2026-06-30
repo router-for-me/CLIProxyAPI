@@ -918,24 +918,10 @@ func clineProviderSettingsCredentialError(reason string) error {
 }
 
 func isClineProviderSettingsAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
+	if auth == nil {
 		return false
 	}
-	if strings.TrimSpace(auth.Attributes["credential_source"]) != clineauth.CredentialSourceProviderSettings {
-		return false
-	}
-	providerID := strings.TrimSpace(auth.Attributes["cline_provider"])
-	if providerID == "" {
-		providerID = strings.TrimSpace(auth.Attributes["compat_name"])
-	}
-	if !strings.EqualFold(providerID, clineauth.ProviderClinePass) {
-		return false
-	}
-	baseURL := strings.TrimRight(strings.TrimSpace(auth.Attributes["base_url"]), "/")
-	if !strings.EqualFold(baseURL, strings.TrimRight(clineauth.APIBaseURL, "/")) {
-		return false
-	}
-	return true
+	return clineauth.IsProviderSettingsClinePassAttributes(auth.Attributes)
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

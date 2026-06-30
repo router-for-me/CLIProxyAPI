@@ -19,6 +19,24 @@ const (
 	CredentialSourceProviderSettings = "cline-provider-settings"
 )
 
+func IsProviderSettingsClinePassAttributes(attrs map[string]string) bool {
+	if attrs == nil {
+		return false
+	}
+	if strings.TrimSpace(attrs["credential_source"]) != CredentialSourceProviderSettings {
+		return false
+	}
+	providerID := strings.TrimSpace(attrs["cline_provider"])
+	if providerID == "" {
+		providerID = strings.TrimSpace(attrs["compat_name"])
+	}
+	if !strings.EqualFold(providerID, ProviderClinePass) {
+		return false
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(attrs["base_url"]), "/")
+	return strings.EqualFold(baseURL, strings.TrimRight(APIBaseURL, "/"))
+}
+
 type ProviderSettingsFile struct {
 	Providers map[string]ProviderEntry `json:"providers"`
 }
