@@ -128,6 +128,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			translated = updated
 		}
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+	} else if !opts.Stream {
+		translated = forceClineProviderSettingsNonStreamChatPayload(auth, translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -233,6 +235,18 @@ func (e *OpenAICompatExecutor) handleClineProviderSettingsEnvelope(auth *cliprox
 		return nil, statusErr{code: http.StatusBadGateway, msg: "cline provider settings upstream error: invalid data"}
 	}
 	return data, nil
+}
+
+func forceClineProviderSettingsNonStreamChatPayload(auth *cliproxyauth.Auth, body []byte) []byte {
+	if !isClineProviderSettingsAuth(auth) {
+		return body
+	}
+	updated, err := sjson.SetBytes(body, "stream", false)
+	if err != nil {
+		log.Warnf("openai compat executor: failed to force Cline provider settings stream=false: %v", err)
+		return body
+	}
+	return updated
 }
 
 func clineProviderSettingsEnvelopeError(values ...string) string {
