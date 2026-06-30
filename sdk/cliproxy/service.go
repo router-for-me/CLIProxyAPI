@@ -695,7 +695,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
-			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			if coreauth.ShouldInheritModelStates(existing, auth) {
 				auth.ModelStates = existing.ModelStates
 			}
 		}
