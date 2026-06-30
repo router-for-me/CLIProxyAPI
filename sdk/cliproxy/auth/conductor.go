@@ -3583,13 +3583,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 							}
 						case 402, 403:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
-								suspendReason = "payment_required"
-								shouldSuspendModel = true
+							{
+								cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+								if cfg != nil && cfg.QuotaExceeded.OnPaymentRequired == "disable" {
+									auth.Disabled = true
+									auth.Status = StatusDisabled
+									auth.StatusMessage = "payment_required_disabled"
+									state.NextRetryAfter = time.Time{}
+									state.Unavailable = true
+									state.Status = StatusDisabled
+									suspendReason = "payment_required_disabled"
+								} else if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(30 * time.Minute)
+									state.NextRetryAfter = next
+									suspendReason = "payment_required"
+									shouldSuspendModel = true
+								}
 							}
 						case 404:
 							if disableCooling {
@@ -4105,11 +4116,19 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = now.Add(30 * time.Minute)
 		}
 	case 402, 403:
-		auth.StatusMessage = "payment_required"
-		if disableCooling {
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		if cfg != nil && cfg.QuotaExceeded.OnPaymentRequired == "disable" {
+			auth.Disabled = true
+			auth.Status = StatusDisabled
+			auth.StatusMessage = "payment_required_disabled"
 			auth.NextRetryAfter = time.Time{}
 		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
+			auth.StatusMessage = "payment_required"
+			if disableCooling {
+				auth.NextRetryAfter = time.Time{}
+			} else {
+				auth.NextRetryAfter = now.Add(30 * time.Minute)
+			}
 		}
 	case 404:
 		auth.StatusMessage = "not_found"
