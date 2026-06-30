@@ -6,7 +6,7 @@ A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API inte
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
-So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and SDKs.
+So you can use local or multi-account CLI access with OpenAI(including responses)/Gemini/Claude-compatible clients and SDKs.
 
 ## Sponsor
 
@@ -144,11 +144,11 @@ VSCode extension for quick switching between Claude Code models, featuring integ
 
 ### [ZeroLimit](https://github.com/0xtbug/zero-limit)
 
-Windows desktop app built with Tauri + React for monitoring AI coding assistant quotas via CLIProxyAPI. Track usage across Gemini, Claude, OpenAI Codex, and Antigravity accounts with real-time dashboard, system tray integration, and one-click proxy control - no API keys needed.
+Windows desktop app built with Tauri + React for monitoring AI coding assistant quotas via CLIProxyAPI. Track usage across Gemini, Claude, OpenAI Codex, and Antigravity accounts with a real-time dashboard, system tray integration, and one-click proxy control - no API keys needed.
 
 ### [CPA-XXX Panel](https://github.com/ferretgeek/CPA-X)
 
-A lightweight web admin panel for CLIProxyAPI with health checks, resource monitoring, real-time logs, auto-update, request statistics and pricing display. Supports one-click installation and systemd service.
+A lightweight web admin panel for CLIProxyAPI with health checks, resource monitoring, real-time logs, auto-update, request statistics, and pricing display. Supports one-click installation and systemd service.
 
 ### [CLIProxyAPI Tray](https://github.com/kitephp/CLIProxyAPI_Tray)
 
@@ -160,7 +160,7 @@ A Windows tray application implemented using PowerShell scripts, without relying
 
 ### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
 
-A modern web-based management dashboard for CLIProxyAPI built with Next.js, React, and PostgreSQL. Features real-time log streaming, structured configuration editing, API key management, OAuth provider integration for Claude/Gemini/Codex, usage analytics, container management, and config sync with OpenCode via companion plugin - no manual YAML editing needed.
+A modern web-based management dashboard for CLIProxyAPI built with Next.js, React, and PostgreSQL. Features real-time log streaming, structured configuration editing, API key management, OAuth provider integration for Claude/Gemini/Codex, usage analytics, container management, and config sync with OpenCode via a companion plugin - no manual YAML editing needed.
 
 ### [All API Hub](https://github.com/qixing-jk/all-api-hub)
 
@@ -195,7 +195,7 @@ Windows desktop UI that manages CLIProxyAPI and Perplexity WebUI Scraper from a 
 
 ### [Quotio Desktop](https://github.com/xiaocoss/quotio-desktop)
 
-Cross-platform (Tauri) port of Quotio for Windows, macOS and Linux. Manages a pool of AI accounts (Codex, Claude Code, GitHub Copilot, Gemini, Antigravity, Kiro, Cursor, Trae, GLM) through CLIProxyAPI, with per-account 5-hour/weekly quota bars, Codex rate-limit reset credits with one-click reset, smart scheduling, usage statistics, and multi-instance Codex — no API keys needed.
+Cross-platform (Tauri) port of Quotio for Windows, macOS, and Linux. Manages a pool of AI accounts (Codex, Claude Code, GitHub Copilot, Gemini, Antigravity, Kiro, Cursor, Trae, GLM) through CLIProxyAPI, with per-account 5-hour/weekly quota bars, Codex rate-limit reset credits with one-click reset, smart scheduling, usage statistics, and multi-instance Codex — no API keys needed.
 
 ### [Universal Chat Provider](https://github.com/maxdewald/vscode-universal-chat-provider)
 
