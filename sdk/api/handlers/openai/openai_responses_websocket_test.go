@@ -1982,6 +1982,88 @@ func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithou
 	}
 }
 
+func TestResponsesWebsocketRestoresPassthroughModelAfterFailedTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{done: make(chan struct{}), active: true, errorOnRequest: 2}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-ws-model-rollback",
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "good-model"}, {ID: "bad-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	firstRequest := []byte(`{"type":"response.create","model":"good-model","input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, firstRequest); errWrite != nil {
+		t.Fatalf("write first websocket message: %v", errWrite)
+	}
+	if _, payload, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read first websocket response: %v", errRead)
+	} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("first response type = %s, want %s: %s", got, wsEventTypeCompleted, payload)
+	}
+
+	failedRequest := []byte(`{"type":"response.create","model":"bad-model","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, failedRequest); errWrite != nil {
+		t.Fatalf("write failed websocket message: %v", errWrite)
+	}
+	if _, payload, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read failed websocket response: %v", errRead)
+	} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("failed response type = %s, want %s: %s", got, wsEventTypeError, payload)
+	}
+
+	nextRequest := []byte(`{"type":"response.create","input":[{"type":"message","id":"msg-3","role":"user","content":"third"}]}`)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, nextRequest); errWrite != nil {
+		t.Fatalf("write next websocket message: %v", errWrite)
+	}
+	if _, payload, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read next websocket response: %v", errRead)
+	} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("next response type = %s, want %s: %s", got, wsEventTypeCompleted, payload)
+	}
+
+	select {
+	case <-executor.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket requests")
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 3 {
+		t.Fatalf("passthrough payload count = %d, want 3", len(payloads))
+	}
+	if got := gjson.GetBytes(payloads[2], "model").String(); got != "good-model" {
+		t.Fatalf("third passthrough model = %s, want good-model; payload=%s", got, payloads[2])
+	}
+	if bytes.Contains(payloads[2], []byte(`"content":"second"`)) || bytes.Contains(payloads[2], []byte(`"id":"out-2"`)) {
+		t.Fatalf("third passthrough payload contains failed turn state: %s", payloads[2])
+	}
+}
+
 func TestResponsesWebsocketCodexPassthroughReplaysWhenUpstreamSessionInactive(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
