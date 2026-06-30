@@ -289,6 +289,46 @@ func TestFileSynthesizer_Synthesize_ClinePassWithClineAccountAuth(t *testing.T) 
 	}
 }
 
+func TestFileSynthesizer_Synthesize_ClinePassProviderSettingsIgnoresTypedAuthFile(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "claude-auth.json")
+	raw := []byte(`{
+		"type": "claude",
+		"email": "typed@example.com",
+		"providers": {
+			"cline-pass": {
+				"settings": {
+					"provider": "cline-pass",
+					"model": "cline-pass/glm-5.2",
+					"auth": {"accessToken": "access-token"}
+				}
+			}
+		}
+	}`)
+
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	if clineAuths := synthesizeClineProviderSettingsAuths(ctx, path, raw); len(clineAuths) != 0 {
+		t.Fatalf("expected typed auth file not to synthesize Cline provider settings auths, got %d", len(clineAuths))
+	}
+
+	auths := SynthesizeAuthFile(ctx, path, raw)
+	if len(auths) != 1 {
+		t.Fatalf("expected typed auth file to remain on regular synthesis path, got %d auths", len(auths))
+	}
+	if auths[0].Provider != "claude" {
+		t.Fatalf("provider = %q, want claude", auths[0].Provider)
+	}
+	if auths[0].Provider == "openai-compatible-cline-pass" {
+		t.Fatalf("typed auth file was misclassified as Cline provider settings: %#v", auths[0])
+	}
+}
+
 func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	tempDir := t.TempDir()
 	fullPath := filepath.Join(tempDir, "geminicli.json")

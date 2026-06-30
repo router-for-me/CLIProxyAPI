@@ -469,7 +469,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					continue
 				}
 				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+					streamErr := e.openAICompatNonSSEStreamError(auth, trimmedLine)
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
@@ -515,6 +515,22 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *OpenAICompatExecutor) openAICompatNonSSEStreamError(auth *cliproxyauth.Auth, body []byte) error {
+	if !isClineProviderSettingsAuth(auth) {
+		return statusErr{code: http.StatusBadGateway, msg: string(body)}
+	}
+	var envelope struct {
+		Success *bool `json:"success"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Success == nil {
+		return statusErr{code: http.StatusBadGateway, msg: string(body)}
+	}
+	if _, err := e.handleClineProviderSettingsEnvelope(auth, body); err != nil {
+		return err
+	}
+	return statusErr{code: http.StatusBadGateway, msg: "cline provider settings upstream returned non-SSE JSON"}
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {

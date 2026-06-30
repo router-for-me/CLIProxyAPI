@@ -217,6 +217,12 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 }
 
 func synthesizeClineProviderSettingsAuths(ctx *SynthesisContext, fullPath string, data []byte) []*coreauth.Auth {
+	var typed struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &typed); err == nil && strings.TrimSpace(typed.Type) != "" {
+		return nil
+	}
 	settings, err := clineauth.ParseProviderSettings(data)
 	if err != nil {
 		return nil

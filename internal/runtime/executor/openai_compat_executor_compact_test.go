@@ -211,6 +211,53 @@ func TestOpenAICompatExecutorErrorsOnClineProviderSettingsFailureEnvelope(t *tes
 	}
 }
 
+func TestOpenAICompatExecutorSanitizesClineProviderSettingsStreamJSONEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{"success":false,"code":"invalid_auth","message":"token expired"}`)
+
+	err := executor.openAICompatNonSSEStreamError(auth, body)
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if status.code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusBadGateway)
+	}
+	if !strings.Contains(status.msg, "invalid_auth") {
+		t.Fatalf("status message = %q, want safe upstream code", status.msg)
+	}
+	if strings.Contains(status.msg, "token expired") || strings.Contains(status.msg, `"success"`) {
+		t.Fatalf("status message used unsanitized upstream JSON: %q", status.msg)
+	}
+}
+
+func TestOpenAICompatExecutorKeepsRawClineStreamJSONWithoutEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{"error":{"message":"plain upstream JSON"}}`)
+
+	err := executor.openAICompatNonSSEStreamError(auth, body)
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if status.code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusBadGateway)
+	}
+	if status.msg != string(body) {
+		t.Fatalf("status message = %q, want raw JSON %q", status.msg, string(body))
+	}
+}
+
 func TestOpenAICompatExecutorErrorsOnMalformedClineProviderSettingsEnvelope(t *testing.T) {
 	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
