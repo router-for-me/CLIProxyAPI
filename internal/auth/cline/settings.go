@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,8 +25,7 @@ const (
 )
 
 type ProviderSettingsFile struct {
-	Providers       map[string]ProviderEntry `json:"providers"`
-	providerRawKeys map[string]string
+	Providers map[string]ProviderEntry `json:"providers"`
 }
 
 type ProviderEntry struct {
@@ -47,7 +45,6 @@ type AuthSettings struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 	ExpiresAt    any    `json:"expiresAt"`
-	AccountID    string `json:"accountId"`
 }
 
 type providerAccessTokenCacheEntry struct {
@@ -69,15 +66,12 @@ var (
 )
 
 type providerMatch struct {
-	key      string
 	provider ProviderSettings
 }
 
 type providerAccessTokenSnapshot struct {
 	providerAccessTokenCacheEntry
-	resolvedPath string
-	matchKey     string
-	auth         AuthSettings
+	auth AuthSettings
 }
 
 type refreshResponse struct {
@@ -86,11 +80,6 @@ type refreshResponse struct {
 		AccessToken  string `json:"accessToken"`
 		RefreshToken string `json:"refreshToken"`
 		ExpiresAt    any    `json:"expiresAt"`
-		AccountID    string `json:"accountId"`
-		UserInfo     struct {
-			ClineUserID string `json:"clineUserId"`
-			AccountID   string `json:"accountId"`
-		} `json:"userInfo"`
 	} `json:"data"`
 	Code      string `json:"code"`
 	ErrorCode string `json:"errorCode"`
@@ -110,7 +99,6 @@ func ParseProviderSettings(data []byte) (*ProviderSettingsFile, error) {
 		return nil, fmt.Errorf("cline provider settings: no providers")
 	}
 	normalized := make(map[string]ProviderEntry, len(settings.Providers))
-	rawKeys := make(map[string]string, len(settings.Providers))
 	for rawKey, entry := range settings.Providers {
 		key := strings.ToLower(strings.TrimSpace(rawKey))
 		if key == "" {
@@ -120,10 +108,8 @@ func ParseProviderSettings(data []byte) (*ProviderSettingsFile, error) {
 			return nil, fmt.Errorf("cline provider settings: duplicate provider key %q", key)
 		}
 		normalized[key] = entry
-		rawKeys[key] = rawKey
 	}
 	settings.Providers = normalized
-	settings.providerRawKeys = rawKeys
 	return &settings, nil
 }
 
@@ -155,7 +141,7 @@ func findProvider(settings *ProviderSettingsFile, providerIDs ...string) (provid
 		if entry, ok := settings.Providers[expectedProviderID]; ok {
 			provider := providerSettingsForEntry(expectedProviderID, entry)
 			if providerIDForEntry(expectedProviderID, provider) == expectedProviderID {
-				return providerMatch{key: settings.rawProviderKey(expectedProviderID), provider: provider}, true
+				return providerMatch{provider: provider}, true
 			}
 		}
 		for _, key := range sortedProviderKeys(settings.Providers) {
@@ -164,7 +150,7 @@ func findProvider(settings *ProviderSettingsFile, providerIDs ...string) (provid
 			}
 			provider := providerSettingsForEntry(key, settings.Providers[key])
 			if providerIDForEntry(key, provider) == expectedProviderID {
-				return providerMatch{key: settings.rawProviderKey(key), provider: provider}, true
+				return providerMatch{provider: provider}, true
 			}
 		}
 	}
@@ -197,7 +183,7 @@ func providerMatches(settings *ProviderSettingsFile, expectedProviderID string) 
 	if entry, ok := settings.Providers[expectedProviderID]; ok {
 		provider := providerSettingsForEntry(expectedProviderID, entry)
 		if providerIDForEntry(expectedProviderID, provider) == expectedProviderID {
-			matches = append(matches, providerMatch{key: settings.rawProviderKey(expectedProviderID), provider: provider})
+			matches = append(matches, providerMatch{provider: provider})
 		}
 	}
 	for _, key := range sortedProviderKeys(settings.Providers) {
@@ -206,19 +192,10 @@ func providerMatches(settings *ProviderSettingsFile, expectedProviderID string) 
 		}
 		provider := providerSettingsForEntry(key, settings.Providers[key])
 		if providerIDForEntry(key, provider) == expectedProviderID {
-			matches = append(matches, providerMatch{key: settings.rawProviderKey(key), provider: provider})
+			matches = append(matches, providerMatch{provider: provider})
 		}
 	}
 	return matches
-}
-
-func (settings *ProviderSettingsFile) rawProviderKey(normalizedKey string) string {
-	if settings != nil && settings.providerRawKeys != nil {
-		if rawKey := settings.providerRawKeys[normalizedKey]; strings.TrimSpace(rawKey) != "" {
-			return rawKey
-		}
-	}
-	return normalizedKey
 }
 
 func normalizeProviderIDs(providerIDs ...string) []string {
@@ -321,11 +298,7 @@ func readProviderAccessTokenSnapshot(path string, providerID string) (providerAc
 		return providerAccessTokenSnapshot{}, err
 	}
 	modTime := info.ModTime()
-	resolvedPath := path
-	if evaluated, errEval := filepath.EvalSymlinks(path); errEval == nil && strings.TrimSpace(evaluated) != "" {
-		resolvedPath = evaluated
-	}
-	data, err := os.ReadFile(resolvedPath)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return providerAccessTokenSnapshot{}, err
 	}
@@ -341,18 +314,14 @@ func readProviderAccessTokenSnapshot(path string, providerID string) (providerAc
 	if !ok {
 		return providerAccessTokenSnapshot{}, fmt.Errorf("cline provider settings: provider %q missing access token", providerID)
 	}
-	provider := match.provider
-	token := strings.TrimSpace(provider.Auth.AccessToken)
-	expiresAt := authExpiryTime(provider.Auth, token)
+	token := strings.TrimSpace(match.provider.Auth.AccessToken)
 	return providerAccessTokenSnapshot{
 		providerAccessTokenCacheEntry: providerAccessTokenCacheEntry{
 			token:     token,
 			modTime:   modTime,
-			expiresAt: expiresAt,
+			expiresAt: authExpiryTime(match.provider.Auth, token),
 		},
-		resolvedPath: resolvedPath,
-		matchKey:     match.key,
-		auth:         provider.Auth,
+		auth: match.provider.Auth,
 	}, nil
 }
 
@@ -369,30 +338,41 @@ func refreshProviderAccessToken(path string, providerID string) (providerAccessT
 	if err != nil {
 		return providerAccessTokenCacheEntry{}, err
 	}
-	updated, err := updateStoredProviderAuth(snapshot.resolvedPath, snapshot.matchKey, snapshot.auth.RefreshToken, refreshed)
-	if err != nil {
+	if current, changed, err := readCurrentProviderAccessTokenIfRefreshTokenChanged(path, providerID, snapshot); err != nil {
 		return providerAccessTokenCacheEntry{}, err
-	}
-	if !updated {
-		current, errCurrent := readProviderAccessTokenSnapshot(path, providerID)
-		if errCurrent != nil {
-			return providerAccessTokenCacheEntry{}, errCurrent
-		}
-		if tokenExpiresSoon(current.expiresAt, time.Now()) {
-			return providerAccessTokenCacheEntry{}, fmt.Errorf("cline provider settings: provider auth changed during refresh")
-		}
-		cacheProviderAccessToken(path+"|"+providerID, current.providerAccessTokenCacheEntry)
-		return current.providerAccessTokenCacheEntry, nil
+	} else if changed {
+		cacheProviderAccessToken(path+"|"+providerID, current)
+		return current, nil
 	}
 	token := strings.TrimSpace(refreshed.AccessToken)
-	expiresAt := authExpiryTime(refreshed, token)
-	modTime := snapshot.modTime
-	if refreshedInfo, errStat := os.Stat(path); errStat == nil {
-		modTime = refreshedInfo.ModTime()
+	result := providerAccessTokenCacheEntry{
+		token:     token,
+		modTime:   snapshot.modTime,
+		expiresAt: authExpiryTime(refreshed, token),
 	}
-	result := providerAccessTokenCacheEntry{token: token, modTime: modTime, expiresAt: expiresAt}
 	cacheProviderAccessToken(path+"|"+providerID, result)
 	return result, nil
+}
+
+func readCurrentProviderAccessTokenIfRefreshTokenChanged(path string, providerID string, previous providerAccessTokenSnapshot) (providerAccessTokenCacheEntry, bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return providerAccessTokenCacheEntry{}, false, err
+	}
+	if info.ModTime().Equal(previous.modTime) {
+		return providerAccessTokenCacheEntry{}, false, nil
+	}
+	current, err := readProviderAccessTokenSnapshot(path, providerID)
+	if err != nil {
+		return providerAccessTokenCacheEntry{}, false, err
+	}
+	if strings.TrimSpace(current.auth.RefreshToken) == strings.TrimSpace(previous.auth.RefreshToken) {
+		return providerAccessTokenCacheEntry{}, false, nil
+	}
+	if tokenExpiresSoon(current.expiresAt, time.Now()) {
+		return providerAccessTokenCacheEntry{}, false, fmt.Errorf("cline provider settings: provider auth changed during refresh")
+	}
+	return current.providerAccessTokenCacheEntry, true, nil
 }
 
 func cacheProviderAccessToken(cacheKey string, entry providerAccessTokenCacheEntry) {
@@ -530,18 +510,10 @@ func refreshProviderAuth(refreshToken string) (AuthSettings, error) {
 	if accessToken == "" {
 		return AuthSettings{}, fmt.Errorf("cline provider settings: refresh token response missing access token")
 	}
-	accountID := strings.TrimSpace(payload.Data.AccountID)
-	if accountID == "" {
-		accountID = strings.TrimSpace(payload.Data.UserInfo.ClineUserID)
-	}
-	if accountID == "" {
-		accountID = strings.TrimSpace(payload.Data.UserInfo.AccountID)
-	}
 	refreshed := AuthSettings{
 		AccessToken:  formatClineAccountAccessToken(accessToken),
 		RefreshToken: strings.TrimSpace(payload.Data.RefreshToken),
 		ExpiresAt:    payload.Data.ExpiresAt,
-		AccountID:    accountID,
 	}
 	if refreshed.RefreshToken == "" {
 		refreshed.RefreshToken = refreshToken
@@ -570,72 +542,4 @@ func isSafeErrorCode(value string) bool {
 		return false
 	}
 	return true
-}
-
-func updateStoredProviderAuth(path string, providerKey string, expectedRefreshToken string, refreshed AuthSettings) (bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false, err
-	}
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		return false, err
-	}
-	providers, ok := root["providers"].(map[string]any)
-	if !ok {
-		return false, fmt.Errorf("cline provider settings: providers object missing")
-	}
-	entry, ok := providers[providerKey].(map[string]any)
-	if !ok {
-		return false, fmt.Errorf("cline provider settings: provider %q missing during refresh", providerKey)
-	}
-	authTarget := providerAuthTarget(entry)
-	if authTarget == nil {
-		settings, _ := entry["settings"].(map[string]any)
-		if settings == nil {
-			settings = map[string]any{}
-			entry["settings"] = settings
-		}
-		authTarget = map[string]any{}
-		settings["auth"] = authTarget
-	}
-	if currentRefresh, _ := authTarget["refreshToken"].(string); strings.TrimSpace(currentRefresh) != "" && strings.TrimSpace(currentRefresh) != expectedRefreshToken {
-		return false, nil
-	}
-	authTarget["accessToken"] = refreshed.AccessToken
-	authTarget["refreshToken"] = refreshed.RefreshToken
-	authTarget["expiresAt"] = refreshed.ExpiresAt
-	if strings.TrimSpace(refreshed.AccountID) != "" {
-		authTarget["accountId"] = refreshed.AccountID
-	}
-	updated, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		return false, err
-	}
-	updated = append(updated, '\n')
-	info, err := os.Stat(path)
-	if err != nil {
-		return false, err
-	}
-	tmpPath := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tmpPath, updated, info.Mode().Perm()); err != nil {
-		return false, err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return false, err
-	}
-	return true, nil
-}
-
-func providerAuthTarget(entry map[string]any) map[string]any {
-	if settings, _ := entry["settings"].(map[string]any); settings != nil {
-		if auth, _ := settings["auth"].(map[string]any); auth != nil {
-			return auth
-		}
-	}
-	if auth, _ := entry["auth"].(map[string]any); auth != nil {
-		return auth
-	}
-	return nil
 }

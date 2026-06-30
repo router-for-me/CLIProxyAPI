@@ -287,7 +287,7 @@ func TestReadProviderAccessTokenFallsBackToClineAccountForClinePass(t *testing.T
 	}
 }
 
-func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(t *testing.T) {
+func TestReadProviderAccessTokenRefreshesExpiredClineAccountWithoutWriteBack(t *testing.T) {
 	resetProviderAccessTokenCache(t)
 
 	futureExpiry := futureProviderExpiryJSON()
@@ -313,8 +313,7 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(
 			"data": {
 				"accessToken": "new-access-token",
 				"refreshToken": "new-refresh-token",
-				"expiresAt": ` + futureExpiry + `,
-				"userInfo": {"clineUserId": "acct_new"}
+				"expiresAt": ` + futureExpiry + `
 			}
 		}`))
 	}))
@@ -325,8 +324,7 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(
 		clineAPIBaseURL = oldBaseURL
 	})
 
-	targetDir := t.TempDir()
-	targetPath := filepath.Join(targetDir, "providers.json")
+	targetPath := filepath.Join(t.TempDir(), "providers.json")
 	raw := []byte(`{
 		"lastUsedProvider": "cline",
 		"providers": {
@@ -355,8 +353,7 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(
 	if err := os.WriteFile(targetPath, raw, 0600); err != nil {
 		t.Fatalf("failed to write providers.json: %v", err)
 	}
-	authDir := t.TempDir()
-	linkPath := filepath.Join(authDir, "cline-providers.json")
+	linkPath := filepath.Join(t.TempDir(), "cline-providers.json")
 	if err := os.Symlink(targetPath, linkPath); err != nil {
 		t.Fatalf("failed to create providers symlink: %v", err)
 	}
@@ -376,111 +373,12 @@ func TestReadProviderAccessTokenRefreshesExpiredClineAccountAndPreservesSymlink(
 	} else if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("%s was replaced instead of preserving symlink", linkPath)
 	}
-
-	var updated map[string]any
-	updatedData, err := os.ReadFile(targetPath)
-	if err != nil {
-		t.Fatalf("failed to read updated providers.json: %v", err)
-	}
-	if err := json.Unmarshal(updatedData, &updated); err != nil {
-		t.Fatalf("failed to parse updated providers.json: %v", err)
-	}
-	if updated["lastUsedProvider"] != "cline" {
-		t.Fatalf("lastUsedProvider = %#v, want cline", updated["lastUsedProvider"])
-	}
-	providers := updated["providers"].(map[string]any)
-	clineEntry := providers["cline"].(map[string]any)
-	if clineEntry["tokenSource"] != "oauth" {
-		t.Fatalf("cline tokenSource = %#v, want oauth", clineEntry["tokenSource"])
-	}
-	clineSettings := clineEntry["settings"].(map[string]any)
-	auth := clineSettings["auth"].(map[string]any)
-	if auth["accessToken"] != "workos:new-access-token" {
-		t.Fatalf("stored accessToken = %#v, want refreshed token", auth["accessToken"])
-	}
-	if auth["refreshToken"] != "new-refresh-token" {
-		t.Fatalf("stored refreshToken = %#v, want new-refresh-token", auth["refreshToken"])
-	}
-	if auth["accountId"] != "acct_new" {
-		t.Fatalf("stored accountId = %#v, want acct_new", auth["accountId"])
-	}
-}
-
-func TestReadProviderAccessTokenRefreshUsesRawProviderKey(t *testing.T) {
-	resetProviderAccessTokenCache(t)
-
-	futureExpiry := futureProviderExpiryJSON()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"success": true,
-			"data": {
-				"accessToken": "new-access-token",
-				"refreshToken": "new-refresh-token",
-				"expiresAt": ` + futureExpiry + `
-			}
-		}`))
-	}))
-	defer server.Close()
-	oldBaseURL := clineAPIBaseURL
-	clineAPIBaseURL = server.URL
-	t.Cleanup(func() {
-		clineAPIBaseURL = oldBaseURL
-	})
-
-	path := filepath.Join(t.TempDir(), "providers.json")
-	raw := []byte(`{
-		"providers": {
-			" CLINE-PASS ": {
-				"settings": {
-					"provider": "cline-pass",
-					"model": "cline-pass/glm-5.2"
-				}
-			},
-			" CLINE ": {
-				"settings": {
-					"provider": "cline",
-					"auth": {
-						"accessToken": "workos:old-access-token",
-						"refreshToken": "old-refresh-token",
-						"expiresAt": 1700000000000
-					}
-				}
-			}
-		}
-	}`)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatalf("failed to write providers.json: %v", err)
-	}
-
-	token, err := ReadProviderAccessToken(path, ProviderClinePass)
-	if err != nil {
-		t.Fatalf("ReadProviderAccessToken error: %v", err)
-	}
-	if token != "workos:new-access-token" {
-		t.Fatalf("token = %q, want refreshed token", token)
-	}
-
-	var updated map[string]any
-	updatedData, err := os.ReadFile(path)
+	updated, err := os.ReadFile(targetPath)
 	if err != nil {
 		t.Fatalf("failed to read providers.json: %v", err)
 	}
-	if err := json.Unmarshal(updatedData, &updated); err != nil {
-		t.Fatalf("failed to parse updated providers.json: %v", err)
-	}
-	providers := updated["providers"].(map[string]any)
-	if _, ok := providers["cline"]; ok {
-		t.Fatal("refresh write-back created a normalized cline key instead of using the raw key")
-	}
-	clineEntry := providers[" CLINE "].(map[string]any)
-	clineSettings := clineEntry["settings"].(map[string]any)
-	auth := clineSettings["auth"].(map[string]any)
-	if auth["accessToken"] != "workos:new-access-token" {
-		t.Fatalf("stored accessToken = %#v, want refreshed token", auth["accessToken"])
-	}
-	if auth["refreshToken"] != "new-refresh-token" {
-		t.Fatalf("stored refreshToken = %#v, want new-refresh-token", auth["refreshToken"])
+	if string(updated) != string(raw) {
+		t.Fatalf("providers.json changed during refresh:\n%s", string(updated))
 	}
 }
 
@@ -489,6 +387,10 @@ func TestReadProviderAccessTokenUsesCurrentFileWhenRefreshTokenChanged(t *testin
 
 	targetPath := filepath.Join(t.TempDir(), "providers.json")
 	writeProvidersJSON(t, targetPath, "workos:old-access-token", "old-refresh-token", 1700000000000)
+	fixedTime := time.Unix(1700000000, 0)
+	if err := os.Chtimes(targetPath, fixedTime, fixedTime); err != nil {
+		t.Fatalf("failed to set provider settings mtime: %v", err)
+	}
 
 	futureExpiry := futureProviderExpiryMillis()
 	futureExpiryJSON := strconv.FormatInt(futureExpiry, 10)
@@ -537,6 +439,10 @@ func TestReadProviderAccessTokenDeduplicatesConcurrentRefresh(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "providers.json")
 	writeProvidersJSON(t, path, "workos:old-access-token", "shared-refresh-token", 1700000000000)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read providers.json: %v", err)
+	}
 
 	futureExpiry := futureProviderExpiryJSON()
 	var calls int32
@@ -594,6 +500,13 @@ func TestReadProviderAccessTokenDeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read providers.json: %v", err)
+	}
+	if string(updated) != string(original) {
+		t.Fatalf("providers.json changed during refresh:\n%s", string(updated))
 	}
 }
 
