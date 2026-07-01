@@ -272,14 +272,19 @@ nonstream-keepalive-interval: 0
 #                                    # "never": never apply cloaking
 #       # This "cloak" block applies to this claude-api-key entry only. For Claude OAuth
 #       # credentials, set the same options in the auth/token JSON file via "cloak_mode" /
-#       # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id". The top-level
-#       # "disable-claude-cloak-mode: true" disables cloaking for all Claude credentials at once.
+#       # "cloak_strict_mode" / "cloak_sensitive_words" / "cloak_cache_user_id" /
+#       # "cloak_preserve_system_prompt". The top-level "disable-claude-cloak-mode: true"
+#       # disables cloaking for all Claude credentials at once.
 #       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
 #                                    # true: strip all user system messages, keep only Claude Code prompt
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
+#       preserve-system-prompt: false # optional: default is false; only applies when strict-mode is false and cloaking is active for OAuth (Claude Code login) credentials
+#                                    # false (default): the forwarded system prompt is reduced to a neutral reminder so the request looks like native Claude Code traffic
+#                                    # true: keep the original system prompt and move it into the first user message instead of replacing it
+#                                    # note: keeping the original prompt makes requests more recognizable as third-party traffic, which may affect Anthropic plan-vs-extra-usage metering
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
