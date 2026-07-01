@@ -105,7 +105,10 @@ var nodeSignatureAlgorithms = []tls.SignatureScheme{
 
 // nodeClientHelloSpec builds the Node.js 24.x / Claude Code ClientHello.
 // Extension order matches the captured fingerprint and must not be reordered.
-// Node/OpenSSL does not send GREASE, so none is added.
+// No classic GREASE (0x0a0a cipher/curve/extension padding) is sent, matching
+// JA3 44f88fca…. The GREASEEncryptedClientHelloExtension below is NOT classic
+// GREASE — it is the genuine ECH-GREASE (ext 65037) that Node 24 / OpenSSL 3
+// emits by default; do not remove it.
 func nodeClientHelloSpec() *tls.ClientHelloSpec {
 	curves := []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}
 	return &tls.ClientHelloSpec{

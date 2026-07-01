@@ -11,9 +11,7 @@ func TestIsOfficialCodexUserAgent(t *testing.T) {
 	official := []string{
 		"codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)",
 		"codex_cli_rs/0.1.0",
-		"codex-cli/1.0",
 		"codex-exec/2.3",
-		"OpenCode/2.0", // case-insensitive
 	}
 	foreign := []string{
 		"",
@@ -22,6 +20,8 @@ func TestIsOfficialCodexUserAgent(t *testing.T) {
 		"Go-http-client/2.0",
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
 		"my-codex-client/1.0", // not a first-party prefix; only honored via config
+		"codex-cli/1.0",       // not a confirmed first-party token → normalized
+		"opencode/2.0",        // third-party agent → normalized to official UA
 	}
 	for _, ua := range official {
 		if !isOfficialCodexUserAgent(ua) {

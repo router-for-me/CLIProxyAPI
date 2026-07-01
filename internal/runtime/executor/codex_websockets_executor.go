@@ -1151,15 +1151,15 @@ func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, ke
 }
 
 // officialCodexUserAgentPrefixes are the User-Agent prefixes of first-party
-// Codex-family CLIs. Only these are trusted to be forwarded verbatim to the
-// ChatGPT OAuth backend.
+// OpenAI Codex CLIs. Only these are forwarded verbatim to the ChatGPT OAuth
+// backend; any other (or absent) UA is replaced with the canonical Codex UA.
+// Kept intentionally strict: a too-broad prefix such as bare "codex/" would let
+// a foreign UA like "codex/evil" through, and third-party agents (e.g. opencode)
+// are deliberately excluded so their UA is normalized to the official one.
 var officialCodexUserAgentPrefixes = []string{
 	"codex-tui/",
 	"codex_cli_rs/",
-	"codex-cli/",
 	"codex-exec/",
-	"codex/",
-	"opencode/",
 }
 
 // isOfficialCodexUserAgent reports whether ua looks like a first-party Codex CLI.

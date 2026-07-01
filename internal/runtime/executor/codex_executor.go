@@ -1607,7 +1607,21 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	isAPIKey := false
+	if auth != nil && auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+			isAPIKey = true
+		}
+	}
+	if isAPIKey {
+		// BYOK/API-key requests hit the user's own OpenAI-compatible endpoint;
+		// forward the client User-Agent as-is (config/default fill in when absent).
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	} else {
+		// OAuth requests impersonate the official Codex CLI to the ChatGPT backend;
+		// never forward a foreign downstream User-Agent (see ensureCodexUserAgent).
+		ensureCodexUserAgent(r.Header, ginHeaders, cfgUserAgent, codexUserAgent)
+	}
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
 		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
@@ -1619,13 +1633,6 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		r.Header.Set("Accept", "application/json")
 	}
 	r.Header.Set("Connection", "Keep-Alive")
-
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
