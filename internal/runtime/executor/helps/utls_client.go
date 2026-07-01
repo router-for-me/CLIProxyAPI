@@ -17,29 +17,53 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
-// to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
+// utlsProtectedHosts are the upstream hosts served with a client-matched uTLS
+// fingerprint instead of Go's default TLS stack, to bypass TLS fingerprinting
+// and to keep the TLS fingerprint consistent with the client User-Agent.
+var utlsProtectedHosts = []string{"api.anthropic.com", "chatgpt.com"}
+
+// utlsSessionCache is a shared TLS session cache enabling realistic session
+// resumption for built-in (Chrome) profiles. Custom HelloCustom specs (Node)
+// intentionally skip it to keep their ClientHello byte-stable across handshakes.
+var utlsSessionCache = tls.NewLRUClientSessionCache(256)
+
+// utlsHandshake wraps an already-established TCP conn in a uTLS client using the
+// given profile and completes the handshake. It returns the TLS conn and the
+// negotiated ALPN protocol ("h2", "http/1.1", or "").
+func utlsHandshake(conn net.Conn, serverName string, p tlsProfile) (net.Conn, string, error) {
+	cfg := &tls.Config{ServerName: serverName}
+	var uconn *tls.UConn
+	if p.spec != nil {
+		uconn = tls.UClient(conn, cfg, tls.HelloCustom)
+		if err := uconn.ApplyPreset(p.spec()); err != nil {
+			return nil, "", err
+		}
+	} else {
+		cfg.ClientSessionCache = utlsSessionCache
+		uconn = tls.UClient(conn, cfg, p.helloID)
+	}
+	if err := uconn.Handshake(); err != nil {
+		return nil, "", err
+	}
+	return uconn, uconn.ConnectionState().NegotiatedProtocol, nil
+}
+
+// utlsRoundTripper implements http.RoundTripper for HTTP/2 uTLS profiles by
+// pooling one multiplexed http2 client connection per host.
 type utlsRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*http2.ClientConn
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
+	profile     tlsProfile
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
-	var dialer proxy.Dialer = proxy.Direct
-	if proxyURL != "" {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
-		if errBuild != nil {
-			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
-		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
-			dialer = proxyDialer
-		}
-	}
+func newUtlsRoundTripper(dialer proxy.Dialer, p tlsProfile) *utlsRoundTripper {
 	return &utlsRoundTripper{
 		connections: make(map[string]*http2.ClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
+		profile:     p,
 	}
 }
 
@@ -85,10 +109,8 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
-	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
-
-	if err := tlsConn.Handshake(); err != nil {
+	tlsConn, _, err := utlsHandshake(conn, host, t.profile)
+	if err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -129,32 +151,57 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// utlsProtectedHosts contains the hosts that should use utls Chrome TLS fingerprint
-// to bypass Cloudflare's TLS fingerprinting.
-var utlsProtectedHosts = map[string]struct{}{
-	"api.anthropic.com": {},
-	"chatgpt.com":       {},
+// newUtlsH1Transport builds a standard http.Transport whose TLS is performed by
+// uTLS with the given HTTP/1.1 profile. net/http provides connection pooling and
+// keep-alive; the profile offers ALPN "http/1.1" only, matching Node.js/undici
+// clients such as Claude Code. No response-phase timeouts are set, per the
+// project rule that established upstream connections must not carry timeouts.
+func newUtlsH1Transport(dialer proxy.Dialer, p tlsProfile) *http.Transport {
+	return &http.Transport{
+		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dialer.Dial("tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			serverName := addr
+			if host, _, errSplit := net.SplitHostPort(addr); errSplit == nil {
+				serverName = host
+			}
+			tlsConn, _, errHS := utlsHandshake(conn, serverName, p)
+			if errHS != nil {
+				_ = conn.Close()
+				return nil, errHS
+			}
+			return tlsConn, nil
+		},
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
 
-// fallbackRoundTripper uses utls for protected HTTPS hosts and falls back to
-// standard transport for all other requests.
-type fallbackRoundTripper struct {
-	utls     http.RoundTripper
+// utlsDispatchRoundTripper routes protected hosts to their per-host uTLS
+// round-tripper (h1 transport or pooled h2), and everything else to a standard
+// fallback transport.
+type utlsDispatchRoundTripper struct {
+	perHost  map[string]http.RoundTripper
 	fallback http.RoundTripper
 }
 
-func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+func (d *utlsDispatchRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme == "https" {
-		if _, ok := utlsProtectedHosts[strings.ToLower(req.URL.Hostname())]; ok {
-			return f.utls.RoundTrip(req)
+		if rt, ok := d.perHost[strings.ToLower(req.URL.Hostname())]; ok {
+			return rt.RoundTrip(req)
 		}
 	}
-	return f.fallback.RoundTrip(req)
+	return d.fallback.RoundTrip(req)
 }
 
-// NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
-// Use this for provider requests that need a Chrome-like TLS fingerprint.
-// Falls back to standard transport for non-HTTPS requests.
+// NewUtlsHTTPClient creates an HTTP client that presents a client-matched uTLS
+// fingerprint per protected host (Anthropic → Node.js/HTTP-1.1, chatgpt → Chrome/
+// HTTP-2) and falls back to the standard transport for all other requests.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	var proxyURL string
 	if auth != nil {
@@ -169,22 +216,52 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	// Test/override hook: with no proxy and an injected round-tripper, route all
+	// traffic (including protected hosts) through it.
+	if proxyURL == "" && ctxRoundTripper != nil {
+		client := &http.Client{Transport: ctxRoundTripper}
+		if timeout > 0 {
+			client.Timeout = timeout
+		}
+		return client
+	}
+
+	// Base dialer: direct, or through the configured proxy.
+	var dialer proxy.Dialer = proxy.Direct
+	if proxyURL != "" {
+		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+		if errBuild != nil {
+			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
+			dialer = proxyDialer
+		}
+	}
+
+	// Fallback transport for non-protected hosts.
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
 		}
-	} else if ctxRoundTripper != nil {
-		utlsRT = ctxRoundTripper
-		standardTransport = ctxRoundTripper
+	}
+
+	// Per-host uTLS round-trippers.
+	disableNode := cfg != nil && cfg.DisableNodeTLSFingerprint
+	perHost := make(map[string]http.RoundTripper, len(utlsProtectedHosts))
+	for _, host := range utlsProtectedHosts {
+		p, ok := resolveTLSProfile(host, disableNode)
+		if !ok {
+			continue
+		}
+		if p.http2 {
+			perHost[host] = newUtlsRoundTripper(dialer, p)
+		} else {
+			perHost[host] = newUtlsH1Transport(dialer, p)
+		}
 	}
 
 	client := &http.Client{
-		Transport: &fallbackRoundTripper{
-			utls:     utlsRT,
-			fallback: standardTransport,
-		},
+		Transport: &utlsDispatchRoundTripper{perHost: perHost, fallback: standardTransport},
 	}
 	if timeout > 0 {
 		client.Timeout = timeout

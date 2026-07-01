@@ -154,6 +154,14 @@ type Config struct {
 	// normalization enabled.
 	DisableDatelineNormalization bool `yaml:"disable-dateline-normalization" json:"disable-dateline-normalization"`
 
+	// DisableNodeTLSFingerprint reverts the Anthropic uTLS ClientHello from the
+	// Node.js/Claude-Code profile (JA3 44f88fca…, ALPN http/1.1) back to the
+	// generic Chrome profile when true. The Node profile removes the cross-layer
+	// tell of "User-Agent claims Node but the TLS fingerprint is Chrome". This is
+	// an escape hatch: leave false unless the Node profile causes handshake or
+	// transport problems in your environment. Default false = Node profile on.
+	DisableNodeTLSFingerprint bool `yaml:"disable-node-tls-fingerprint" json:"disable-node-tls-fingerprint"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
