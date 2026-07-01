@@ -271,6 +271,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
+	// Erase the Anthropic "dateline" steganographic fingerprint before signing so
+	// the cch signature is computed over the normalized body (OAuth accounts only).
+	bodyForUpstream = normalizeAnthropicDateline(e.cfg, oauthToken, bodyForUpstream)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -458,6 +461,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
+	// Erase the Anthropic "dateline" steganographic fingerprint before signing so
+	// the cch signature is computed over the normalized body (OAuth accounts only).
+	bodyForUpstream = normalizeAnthropicDateline(e.cfg, oauthToken, bodyForUpstream)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
@@ -2074,6 +2080,27 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	}
 
 	return payload, nil
+}
+
+// normalizeAnthropicDateline erases the Anthropic "dateline" steganographic
+// fingerprint — apostrophe-glyph and date-separator variants in the
+// "Today's date is ..." sentence — that Claude Code embeds when it detects a
+// non-official base URL. It runs only for OAuth/setup-token accounts and can be
+// disabled globally via disable-dateline-normalization. API-key accounts are
+// never touched, so their byte stream is preserved exactly. It must run before
+// cch signing so the signature is computed over the normalized body.
+func normalizeAnthropicDateline(cfg *config.Config, oauthToken bool, payload []byte) []byte {
+	if !oauthToken {
+		return payload
+	}
+	if cfg != nil && cfg.DisableDatelineNormalization {
+		return payload
+	}
+	out, _, changed := helps.NormalizeDateline(payload)
+	if !changed {
+		return payload
+	}
+	return out
 }
 
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.

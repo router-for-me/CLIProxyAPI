@@ -144,6 +144,16 @@ type Config struct {
 	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
+	// DisableDatelineNormalization globally disables Anthropic "dateline"
+	// fingerprint normalization when true. Claude Code embeds a small
+	// steganographic signal in the "Today's date is YYYY-MM-DD." sentence
+	// (apostrophe-glyph and date-separator variants) when it detects a
+	// non-official base URL; normalization rewrites that sentence back to a
+	// canonical ASCII form, erasing the signal. Only OAuth/setup-token accounts
+	// are affected; API-key accounts are never touched. Default false keeps
+	// normalization enabled.
+	DisableDatelineNormalization bool `yaml:"disable-dateline-normalization" json:"disable-dateline-normalization"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
