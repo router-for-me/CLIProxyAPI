@@ -151,37 +151,6 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// newUtlsH1Transport builds a standard http.Transport whose TLS is performed by
-// uTLS with the given HTTP/1.1 profile. net/http provides connection pooling and
-// keep-alive; the profile offers ALPN "http/1.1" only, matching Node.js/undici
-// clients such as Claude Code. No response-phase timeouts are set, per the
-// project rule that established upstream connections must not carry timeouts.
-func newUtlsH1Transport(dialer proxy.Dialer, p tlsProfile) *http.Transport {
-	return &http.Transport{
-		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
-			conn, err := dialer.Dial("tcp", addr)
-			if err != nil {
-				return nil, err
-			}
-			serverName := addr
-			if host, _, errSplit := net.SplitHostPort(addr); errSplit == nil {
-				serverName = host
-			}
-			tlsConn, _, errHS := utlsHandshake(conn, serverName, p)
-			if errHS != nil {
-				_ = conn.Close()
-				return nil, errHS
-			}
-			return tlsConn, nil
-		},
-		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,
-		IdleConnTimeout:       90 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-}
-
 // utlsDispatchRoundTripper routes protected hosts to their per-host uTLS
 // round-tripper (h1 transport or pooled h2), and everything else to a standard
 // fallback transport.
@@ -256,7 +225,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		if p.http2 {
 			perHost[host] = newUtlsRoundTripper(dialer, p)
 		} else {
-			perHost[host] = newUtlsH1Transport(dialer, p)
+			perHost[host] = newUtlsH1RoundTripper(dialer, p, claudeHeaderOrder)
 		}
 	}
 
