@@ -203,13 +203,19 @@ func (t *utlsH1RoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	addr := net.JoinHostPort(host, port)
 
-	// Try a pooled connection first; a stale keep-alive conn (server-closed) is
-	// transparently retried once on a fresh connection.
+	// Try a pooled keep-alive connection first. A stale one (server-closed) is
+	// retried once on a fresh connection, but only when the request body can be
+	// rewound (GetBody) or there is none — otherwise the first attempt has already
+	// consumed req.Body and a retry would send an empty body.
 	if pc := t.getIdle(host); pc != nil {
-		if resp, err := t.roundTripOn(pc, host, req); err == nil {
+		resp, err := t.roundTripOn(pc, host, req)
+		if err == nil {
 			return resp, nil
 		}
 		_ = pc.conn.Close()
+		if !rewindBody(req) {
+			return nil, err
+		}
 	}
 
 	pc, err := t.dial(host, addr)
@@ -217,6 +223,25 @@ func (t *utlsH1RoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		return nil, err
 	}
 	return t.roundTripOn(pc, host, req)
+}
+
+// rewindBody restores req.Body so the request can be re-sent on a fresh
+// connection. It returns true when a retry is safe: no body, or a rewindable
+// body exposed via req.GetBody (set automatically by net/http for in-memory
+// bodies such as bytes.Reader/strings.Reader, which the executors use).
+func rewindBody(req *http.Request) bool {
+	if req.Body == nil || req.Body == http.NoBody {
+		return true
+	}
+	if req.GetBody == nil {
+		return false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return false
+	}
+	req.Body = body
+	return true
 }
 
 func (t *utlsH1RoundTripper) roundTripOn(pc *utlsH1Conn, host string, req *http.Request) (*http.Response, error) {

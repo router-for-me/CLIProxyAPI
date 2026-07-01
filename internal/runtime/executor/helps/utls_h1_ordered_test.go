@@ -116,6 +116,33 @@ func TestWriteOrderedRequest_ContentLengthFromRequest(t *testing.T) {
 	}
 }
 
+func TestRewindBody(t *testing.T) {
+	// No body → retry is safe.
+	req, _ := http.NewRequest(http.MethodGet, "https://api.anthropic.com/v1/models", nil)
+	if !rewindBody(req) {
+		t.Fatal("bodyless request should be rewindable")
+	}
+
+	// bytes/strings body → net/http sets GetBody; after consumption it rewinds.
+	req, _ = http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader("payload"))
+	_, _ = io.Copy(io.Discard, req.Body) // simulate writeOrderedRequest consuming it
+	_ = req.Body.Close()
+	if !rewindBody(req) {
+		t.Fatal("in-memory body should be rewindable via GetBody")
+	}
+	data, _ := io.ReadAll(req.Body)
+	if string(data) != "payload" {
+		t.Fatalf("rewound body = %q, want %q", data, "payload")
+	}
+
+	// Streaming body without GetBody → retry must be refused (would send empty body).
+	req, _ = http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", io.NopCloser(strings.NewReader("x")))
+	req.GetBody = nil
+	if rewindBody(req) {
+		t.Fatal("non-rewindable body must not be retried")
+	}
+}
+
 func TestWriteOrderedRequest_NoBody(t *testing.T) {
 	// Arrange: a bodyless GET must still serialize and end cleanly.
 	req, _ := http.NewRequest(http.MethodGet, "https://api.anthropic.com/v1/models", nil)
