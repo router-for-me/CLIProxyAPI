@@ -141,6 +141,21 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
+# [fingerprint-hardening fork] Anthropic "dateline" steganographic-fingerprint suppression.
+# Claude Code embeds a small watermark in the "Today's date is YYYY-MM-DD." sentence
+# (apostrophe-glyph + date-separator variants) when it detects a non-official base URL.
+# When false (default) the proxy normalizes that sentence back to canonical ASCII on
+# OAuth/setup-token accounts (before cch signing); API-key accounts are never touched.
+# Set true to disable the normalization.
+disable-dateline-normalization: false
+
+# [fingerprint-hardening fork] uTLS ClientHello profile for api.anthropic.com.
+# When false (default) the proxy uses a Node.js/Claude-Code TLS fingerprint (JA3 44f88fca…,
+# HTTP/1.1 with undici-ordered request headers) so the TLS layer matches the Claude Code
+# User-Agent. Set true to revert to the generic Chrome/HTTP-2 profile (escape hatch if the
+# Node profile causes handshake or transport issues in your environment).
+disable-node-tls-fingerprint: false
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
