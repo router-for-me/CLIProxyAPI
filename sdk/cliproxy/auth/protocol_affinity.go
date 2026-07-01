@@ -15,6 +15,14 @@ const (
 	protocolAffinityOff    = "off"
 )
 
+const (
+	protocolFamilyOpenAIChat      = "openai-chat"
+	protocolFamilyOpenAIResponses = "openai-responses"
+	protocolFamilyClaude          = "claude"
+	protocolFamilyGemini          = "gemini"
+	protocolFamilyAntigravity     = "antigravity"
+)
+
 func (m *Manager) protocolAffinityMode() string {
 	cfg := &internalconfig.Config{}
 	if m != nil {
@@ -39,46 +47,70 @@ func (m *Manager) protocolAffinityProviderBatches(providers []string, opts clipr
 	if mode == protocolAffinityOff {
 		return nil, false
 	}
-	family := sourceProtocolFamily(opts.SourceFormat)
-	if family == "" {
+	preferences := sourceProtocolPreference(opts.SourceFormat)
+	if len(preferences) == 0 {
 		return nil, false
 	}
 	normalized := normalizeProviderKeys(providers)
-	preferred := make([]string, 0, len(normalized))
-	fallback := make([]string, 0, len(normalized))
+	providerFamilies := make(map[string]string, len(normalized))
 	for _, provider := range normalized {
-		if providerProtocolFamily(provider) == family {
-			preferred = append(preferred, provider)
-		} else {
-			fallback = append(fallback, provider)
+		providerFamilies[provider] = providerProtocolFamily(provider)
+	}
+	used := make(map[string]struct{}, len(normalized))
+	batchForFamily := func(family string) []string {
+		batch := make([]string, 0, len(normalized))
+		for _, provider := range normalized {
+			if _, ok := used[provider]; ok {
+				continue
+			}
+			if providerFamilies[provider] != family {
+				continue
+			}
+			used[provider] = struct{}{}
+			batch = append(batch, provider)
 		}
+		return batch
 	}
 	if mode == protocolAffinityStrict {
-		return [][]string{preferred}, true
+		return [][]string{batchForFamily(preferences[0])}, true
 	}
-	if len(preferred) == 0 {
+
+	batches := make([][]string, 0, len(preferences)+1)
+	for _, family := range preferences {
+		if batch := batchForFamily(family); len(batch) > 0 {
+			batches = append(batches, batch)
+		}
+	}
+	fallback := make([]string, 0, len(normalized))
+	for _, provider := range normalized {
+		if _, ok := used[provider]; ok {
+			continue
+		}
+		fallback = append(fallback, provider)
+	}
+	if len(fallback) > 0 {
+		batches = append(batches, fallback)
+	}
+	if len(batches) == 0 {
 		return nil, false
 	}
-	if len(fallback) == 0 {
-		return [][]string{preferred}, true
-	}
-	return [][]string{preferred, fallback}, true
+	return batches, true
 }
 
-func sourceProtocolFamily(format sdktranslator.Format) string {
+func sourceProtocolPreference(format sdktranslator.Format) []string {
 	switch strings.ToLower(strings.TrimSpace(format.String())) {
-	case "openai", "openai-chat", "chat-completions", "openai-response", "openai-responses", "responses", "openai-image", "openai-video":
-		return "openai"
-	case "codex":
-		return "openai"
+	case "openai", "openai-chat", "chat-completions", "completions", "completion", "openai-image", "openai-video":
+		return []string{protocolFamilyOpenAIChat, protocolFamilyOpenAIResponses}
+	case "openai-response", "openai-responses", "responses", "codex":
+		return []string{protocolFamilyOpenAIResponses, protocolFamilyOpenAIChat}
 	case "claude", "anthropic":
-		return "claude"
+		return []string{protocolFamilyClaude}
 	case "gemini", "google", "vertex", "aistudio":
-		return "gemini"
+		return []string{protocolFamilyGemini}
 	case "antigravity":
-		return "antigravity"
+		return []string{protocolFamilyAntigravity}
 	default:
-		return ""
+		return nil
 	}
 }
 
@@ -86,15 +118,17 @@ func providerProtocolFamily(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch {
 	case provider == "openai", provider == "openai-compatibility", strings.HasPrefix(provider, "openai-compatible-"):
-		return "openai"
-	case provider == "codex", provider == "xai", provider == "kimi":
-		return "openai"
+		return protocolFamilyOpenAIChat
+	case provider == "kimi":
+		return protocolFamilyOpenAIChat
+	case provider == "codex", provider == "xai":
+		return protocolFamilyOpenAIResponses
 	case provider == "claude":
-		return "claude"
+		return protocolFamilyClaude
 	case provider == "gemini", provider == "vertex", provider == "aistudio":
-		return "gemini"
+		return protocolFamilyGemini
 	case provider == "antigravity":
-		return "antigravity"
+		return protocolFamilyAntigravity
 	default:
 		return ""
 	}

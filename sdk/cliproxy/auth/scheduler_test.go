@@ -399,6 +399,77 @@ func TestManagerPickNextMixedProtocolAffinityPrefersSourceProviderForSharedAlias
 	}
 }
 
+func TestManagerPickNextMixedProtocolAffinitySplitsOpenAIChatAndResponses(t *testing.T) {
+	t.Parallel()
+
+	modelAlias := "split-openai-protocol-alias"
+	openAIProvider := "openai-compatible-split"
+	registerSchedulerModels(t, "codex", modelAlias, "codex-split")
+	registerSchedulerModels(t, openAIProvider, modelAlias, "openai-split")
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	manager.executors[openAIProvider] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-split", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(codex-split) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "openai-split", Provider: openAIProvider}); errRegister != nil {
+		t.Fatalf("Register(openai-split) error = %v", errRegister)
+	}
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{openAIProvider, "codex"}, modelAlias, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed(openai-response) error = %v", errPick)
+	}
+	if provider != "codex" {
+		t.Fatalf("pickNextMixed(openai-response) provider = %q, want codex", provider)
+	}
+	if got == nil || got.ID != "codex-split" {
+		t.Fatalf("pickNextMixed(openai-response) auth = %#v, want codex-split", got)
+	}
+
+	got, _, provider, errPick = manager.pickNextMixed(context.Background(), []string{"codex", openAIProvider}, modelAlias, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed(openai-chat) error = %v", errPick)
+	}
+	if provider != openAIProvider {
+		t.Fatalf("pickNextMixed(openai-chat) provider = %q, want %q", provider, openAIProvider)
+	}
+	if got == nil || got.ID != "openai-split" {
+		t.Fatalf("pickNextMixed(openai-chat) auth = %#v, want openai-split", got)
+	}
+}
+
+func TestManagerPickNextMixedProtocolAffinityResponsesFallsBackToOpenAIChatBeforeClaude(t *testing.T) {
+	t.Parallel()
+
+	modelAlias := "responses-chat-fallback-alias"
+	openAIProvider := "openai-compatible-response-fallback"
+	registerSchedulerModels(t, "claude", modelAlias, "claude-response-fallback")
+	registerSchedulerModels(t, openAIProvider, modelAlias, "openai-response-fallback")
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	manager.executors[openAIProvider] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "claude-response-fallback", Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(claude-response-fallback) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "openai-response-fallback", Provider: openAIProvider}); errRegister != nil {
+		t.Fatalf("Register(openai-response-fallback) error = %v", errRegister)
+	}
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"claude", openAIProvider}, modelAlias, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed(openai-response) error = %v", errPick)
+	}
+	if provider != openAIProvider {
+		t.Fatalf("pickNextMixed(openai-response) provider = %q, want %q", provider, openAIProvider)
+	}
+	if got == nil || got.ID != "openai-response-fallback" {
+		t.Fatalf("pickNextMixed(openai-response) auth = %#v, want openai-response-fallback", got)
+	}
+}
+
 func TestManagerPickNextMixedProtocolAffinityFallsBackWhenPreferredUnavailable(t *testing.T) {
 	t.Parallel()
 
