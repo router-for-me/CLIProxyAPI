@@ -916,7 +916,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if isAPIKey {
 		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
 	} else {
-		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+		ensureCodexUserAgent(headers, ginHeaders, cfgUserAgent, codexUserAgent)
 	}
 
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
@@ -1147,6 +1147,60 @@ func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, ke
 	}
 	if val := strings.TrimSpace(fallbackValue); val != "" {
 		target.Set(key, val)
+	}
+}
+
+// officialCodexUserAgentPrefixes are the User-Agent prefixes of first-party
+// Codex-family CLIs. Only these are trusted to be forwarded verbatim to the
+// ChatGPT OAuth backend.
+var officialCodexUserAgentPrefixes = []string{
+	"codex-tui/",
+	"codex_cli_rs/",
+	"codex-cli/",
+	"codex-exec/",
+	"codex/",
+	"opencode/",
+}
+
+// isOfficialCodexUserAgent reports whether ua looks like a first-party Codex CLI.
+func isOfficialCodexUserAgent(ua string) bool {
+	u := strings.ToLower(strings.TrimSpace(ua))
+	if u == "" {
+		return false
+	}
+	for _, prefix := range officialCodexUserAgentPrefixes {
+		if strings.HasPrefix(u, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureCodexUserAgent sets the outbound Codex User-Agent for OAuth traffic with
+// precedence: existing target value > operator config > forwarded client UA (only
+// when it is a recognized Codex CLI) > canonical fallback. This prevents leaking
+// a foreign downstream User-Agent (e.g. an OpenAI SDK's) to the ChatGPT backend,
+// which would be an obvious client-fingerprint mismatch. Operator config is always
+// honored verbatim, so custom clients remain configurable.
+func ensureCodexUserAgent(target, source http.Header, configValue, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(target.Get("User-Agent")) != "" {
+		return
+	}
+	if val := strings.TrimSpace(configValue); val != "" {
+		target.Set("User-Agent", val)
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(source.Get("User-Agent")); val != "" && isOfficialCodexUserAgent(val) {
+			target.Set("User-Agent", val)
+			return
+		}
+	}
+	if val := strings.TrimSpace(fallbackValue); val != "" {
+		target.Set("User-Agent", val)
 	}
 }
 
