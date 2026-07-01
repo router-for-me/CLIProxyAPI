@@ -2659,37 +2659,58 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
-func TestNormalizeClaudeTemperatureForThinking_AdaptiveCoercesToOne(t *testing.T) {
+func TestNormalizeClaudeSamplingForThinking_AdaptiveCoercesTemperatureToOne(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
-	out := normalizeClaudeTemperatureForThinking(payload)
+	out := normalizeClaudeSamplingForThinking(payload)
 
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
 		t.Fatalf("temperature = %v, want 1", got)
 	}
 }
 
-func TestNormalizeClaudeTemperatureForThinking_EnabledCoercesToOne(t *testing.T) {
+func TestNormalizeClaudeSamplingForThinking_EnabledCoercesTemperatureToOne(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
-	out := normalizeClaudeTemperatureForThinking(payload)
+	out := normalizeClaudeSamplingForThinking(payload)
 
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
 		t.Fatalf("temperature = %v, want 1", got)
 	}
 }
 
-func TestNormalizeClaudeTemperatureForThinking_NoThinkingLeavesTemperatureAlone(t *testing.T) {
-	payload := []byte(`{"temperature":0,"messages":[{"role":"user","content":"hi"}]}`)
-	out := normalizeClaudeTemperatureForThinking(payload)
+func TestNormalizeClaudeSamplingForThinking_RemovesTopPAndTopK(t *testing.T) {
+	payload := []byte(`{"temperature":0.2,"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
+	out := normalizeClaudeSamplingForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1", got)
+	}
+	if gjson.GetBytes(out, "top_p").Exists() {
+		t.Fatalf("top_p should be removed when thinking is active")
+	}
+	if gjson.GetBytes(out, "top_k").Exists() {
+		t.Fatalf("top_k should be removed when thinking is active")
+	}
+}
+
+func TestNormalizeClaudeSamplingForThinking_NoThinkingLeavesTemperatureAlone(t *testing.T) {
+	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
+	out := normalizeClaudeSamplingForThinking(payload)
 
 	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
 		t.Fatalf("temperature = %v, want 0", got)
 	}
+	if got := gjson.GetBytes(out, "top_p").Float(); got != 0.9 {
+		t.Fatalf("top_p = %v, want 0.9", got)
+	}
+	if got := gjson.GetBytes(out, "top_k").Int(); got != 40 {
+		t.Fatalf("top_k = %v, want 40", got)
+	}
 }
 
-func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOriginalTemperature(t *testing.T) {
+func TestNormalizeClaudeSamplingForThinking_AfterForcedToolChoiceKeepsOriginalTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
 	out := disableThinkingIfToolChoiceForced(payload)
-	out = normalizeClaudeTemperatureForThinking(out)
+	out = normalizeClaudeSamplingForThinking(out)
 
 	if gjson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed when tool_choice forces tool use")
