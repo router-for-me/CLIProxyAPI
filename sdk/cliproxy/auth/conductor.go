@@ -4544,6 +4544,37 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
+	if batches, ok := m.protocolAffinityProviderBatches(providers, opts); ok {
+		var firstErr error
+		for _, batch := range batches {
+			if len(batch) == 0 {
+				errBatch := &Error{Code: "provider_not_found", Message: "no protocol-compatible provider supplied"}
+				if firstErr == nil {
+					firstErr = errBatch
+				}
+				continue
+			}
+			auth, executor, provider, errPick := m.pickNextMixedWithoutProtocolAffinity(ctx, batch, model, opts, tried)
+			if errPick == nil {
+				return auth, executor, provider, nil
+			}
+			if firstErr == nil {
+				firstErr = errPick
+			}
+			if !shouldFallbackProtocolAffinityPick(errPick) {
+				return nil, nil, "", errPick
+			}
+		}
+		if firstErr != nil {
+			return nil, nil, "", firstErr
+		}
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+
+	return m.pickNextMixedWithoutProtocolAffinity(ctx, providers, model, opts, tried)
+}
+
+func (m *Manager) pickNextMixedWithoutProtocolAffinity(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}

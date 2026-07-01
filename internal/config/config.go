@@ -334,6 +334,11 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// ProtocolAffinity controls mixed-provider routing when the same visible
+	// model is available through different upstream protocol families.
+	// Supported values: "prefer" (default), "strict", "off".
+	ProtocolAffinity string `yaml:"protocol-affinity,omitempty" json:"protocol-affinity,omitempty"`
+
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Session IDs are extracted from multiple sources:
 	// metadata.user_id (Claude Code session format), X-Session-ID, Session_id (Codex),
