@@ -932,11 +932,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		sessionFallback = uuid.NewString()
 	}
 	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		headers.Set("Originator", originator)
-	} else if !isAPIKey {
-		headers.Set("Originator", codexOriginator)
-	}
+	setCodexOriginator(headers, ginHeaders.Get("Originator"), isAPIKey)
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
@@ -1202,6 +1198,31 @@ func ensureCodexUserAgent(target, source http.Header, configValue, fallbackValue
 	if val := strings.TrimSpace(fallbackValue); val != "" {
 		target.Set("User-Agent", val)
 	}
+}
+
+// isOfficialCodexOriginator reports whether an Originator value belongs to a
+// Codex-family client (codex_cli_rs, codex-tui, codex_exec, …).
+func isOfficialCodexOriginator(originator string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(originator)), "codex")
+}
+
+// setCodexOriginator sets the Originator header. API-key traffic forwards the
+// client value as-is; OAuth traffic (ChatGPT backend) forwards it only when it
+// is a recognized Codex originator, otherwise it is normalized to the canonical
+// codexOriginator so a foreign value never leaks upstream.
+func setCodexOriginator(target http.Header, clientOriginator string, isAPIKey bool) {
+	o := strings.TrimSpace(clientOriginator)
+	if isAPIKey {
+		if o != "" {
+			target.Set("Originator", o)
+		}
+		return
+	}
+	if o != "" && isOfficialCodexOriginator(o) {
+		target.Set("Originator", o)
+		return
+	}
+	target.Set("Originator", codexOriginator)
 }
 
 type statusErrWithHeaders struct {

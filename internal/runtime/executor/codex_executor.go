@@ -1633,11 +1633,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		r.Header.Set("Accept", "application/json")
 	}
 	r.Header.Set("Connection", "Keep-Alive")
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		r.Header.Set("Originator", originator)
-	} else if !isAPIKey {
-		r.Header.Set("Originator", codexOriginator)
-	}
+	setCodexOriginator(r.Header, ginHeaders.Get("Originator"), isAPIKey)
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {

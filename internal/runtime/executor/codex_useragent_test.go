@@ -67,3 +67,40 @@ func TestApplyCodexWebsocketHeadersKeepsOfficialClientUA(t *testing.T) {
 		t.Fatalf("User-Agent = %q, want %q", got, "codex_cli_rs/0.1.0")
 	}
 }
+
+func TestIsOfficialCodexOriginator(t *testing.T) {
+	for _, o := range []string{"codex_cli_rs", "codex-tui", "Codex_Exec", "codex_vscode"} {
+		if !isOfficialCodexOriginator(o) {
+			t.Errorf("want official Codex originator: %q", o)
+		}
+	}
+	for _, o := range []string{"", "python", "vscode", "my-app"} {
+		if isOfficialCodexOriginator(o) {
+			t.Errorf("want foreign originator: %q", o)
+		}
+	}
+}
+
+func TestSetCodexOriginator(t *testing.T) {
+	cases := []struct {
+		name      string
+		client    string
+		isAPIKey  bool
+		wantValue string
+	}{
+		{"oauth_foreign_normalized", "python-sdk", false, codexOriginator},
+		{"oauth_official_forwarded", "codex_cli_rs", false, "codex_cli_rs"},
+		{"oauth_empty_canonical", "", false, codexOriginator},
+		{"apikey_forwarded_verbatim", "python-sdk", true, "python-sdk"},
+		{"apikey_empty_unset", "", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			setCodexOriginator(h, tc.client, tc.isAPIKey)
+			if got := h.Get("Originator"); got != tc.wantValue {
+				t.Fatalf("Originator = %q, want %q", got, tc.wantValue)
+			}
+		})
+	}
+}
