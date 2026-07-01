@@ -18,7 +18,45 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+func TestCodexRequestIsCompaction(t *testing.T) {
+	const manualMeta = `{"installation_id":"xx","turn_id":"t1","request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested"}}`
+	const autoMeta = `{"installation_id":"xx","turn_id":"t2","request_kind":"compaction","compaction":{"trigger":"auto","reason":"context_limit"}}`
+	const normalMeta = `{"installation_id":"xx","turn_id":"t3","request_kind":"turn"}`
+
+	// payload embeds the per-turn metadata as a JSON string at
+	// client_metadata.x-codex-turn-metadata, matching the real codex websocket body.
+	payloadWithMeta := func(meta string, set bool) []byte {
+		base := []byte(`{"model":"gpt-5.5","input":[]}`)
+		if !set {
+			return base
+		}
+		out, _ := sjson.SetBytes(base, "client_metadata.x-codex-turn-metadata", meta)
+		return out
+	}
+
+	cases := []struct {
+		name    string
+		payload []byte
+		want    bool
+	}{
+		{name: "manual compaction", payload: payloadWithMeta(manualMeta, true), want: true},
+		{name: "auto compaction", payload: payloadWithMeta(autoMeta, true), want: true},
+		{name: "normal turn", payload: payloadWithMeta(normalMeta, true), want: false},
+		{name: "missing client_metadata", payload: payloadWithMeta("", false), want: false},
+		{name: "empty metadata", payload: payloadWithMeta("", true), want: false},
+		{name: "empty payload", payload: nil, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexRequestIsCompaction(tc.payload); got != tc.want {
+				t.Fatalf("codexRequestIsCompaction = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
