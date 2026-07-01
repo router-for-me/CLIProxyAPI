@@ -22,6 +22,38 @@ func TestUltracodeNormalizesToXHigh(t *testing.T) {
 	}
 }
 
+func TestExtractReasoningEffortInfersGPTEffortAliases(t *testing.T) {
+	tests := []struct {
+		model string
+		want  ThinkingLevel
+	}{
+		{model: "gpt-5.5-extra", want: LevelXHigh},
+		{model: "gpt-5.5-high", want: LevelHigh},
+		{model: "gpt-5.5-medium", want: LevelMedium},
+		{model: "gpt-5.5-low", want: LevelLow},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			got := ExtractReasoningEffort([]byte(`{"model":"`+tt.model+`"}`), "openai", "gpt-5.5")
+			if got != string(tt.want) {
+				t.Fatalf("ExtractReasoningEffort(%s) = %q, want %q", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractReasoningEffortKeepsExplicitBodyOverExtraAlias(t *testing.T) {
+	got := ExtractReasoningEffort(
+		[]byte(`{"model":"gpt-5.5-extra","reasoning_effort":"low"}`),
+		"openai",
+		"gpt-5.5",
+	)
+	if got != string(LevelLow) {
+		t.Fatalf("ExtractReasoningEffort(explicit low) = %q, want %q", got, LevelLow)
+	}
+}
+
 func TestMapToClaudeEffortKeepsXHighWhenSupported(t *testing.T) {
 	levels := []string{"low", "medium", "high", "xhigh", "max"}
 

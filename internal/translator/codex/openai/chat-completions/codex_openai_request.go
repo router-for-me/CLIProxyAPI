@@ -63,6 +63,8 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		} else {
 			out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
 		}
+	} else if effort := thinking.ExtractReasoningEffort(rawJSON, "openai", modelName); effort != "" {
+		out, _ = sjson.SetBytes(out, "reasoning.effort", effort)
 	} else {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}

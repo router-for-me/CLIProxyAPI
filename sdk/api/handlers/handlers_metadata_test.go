@@ -39,6 +39,30 @@ func TestSetReasoningEffortMetadataSupportsOpenAIResponses(t *testing.T) {
 	}
 }
 
+func TestSetReasoningEffortMetadataInfersGPTEffortAliases(t *testing.T) {
+	tests := []struct {
+		model string
+		want  string
+	}{
+		{model: "gpt-5.5-extra", want: "xhigh"},
+		{model: "gpt-5.5-high", want: "high"},
+		{model: "gpt-5.5-medium", want: "medium"},
+		{model: "gpt-5.5-low", want: "low"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			meta := make(map[string]any)
+
+			setReasoningEffortMetadata(meta, "openai", "gpt-5.5", []byte(`{"model":"`+tt.model+`"}`))
+
+			if got := meta[coreexecutor.ReasoningEffortMetadataKey]; got != tt.want {
+				t.Fatalf("ReasoningEffortMetadataKey = %v, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSetServiceTierMetadataExtractsValue(t *testing.T) {
 	meta := make(map[string]any)
 

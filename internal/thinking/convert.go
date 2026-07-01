@@ -34,6 +34,41 @@ func NormalizeLevelAlias(level string) string {
 	}
 }
 
+// InferReasoningEffortFromModelAlias returns the implicit reasoning effort
+// encoded in client-facing GPT aliases such as "gpt-5.5-extra".
+// Explicit request fields and parenthesized suffixes should be checked before
+// this helper; aliases are a compatibility fallback for clients that encode
+// "extra high" in the model name only.
+func InferReasoningEffortFromModelAlias(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	model = strings.TrimSpace(ParseSuffix(model).ModelName)
+	if slash := strings.LastIndex(model, "/"); slash >= 0 && slash < len(model)-1 {
+		model = strings.TrimSpace(model[slash+1:])
+	}
+	normalized := strings.ToLower(model)
+	normalized = strings.NewReplacer("_", "-", " ", "-").Replace(normalized)
+	if !strings.HasPrefix(normalized, "gpt-") {
+		return ""
+	}
+	switch {
+	case strings.HasSuffix(normalized, "-extra"),
+		strings.HasSuffix(normalized, "-xhigh"),
+		strings.Contains(normalized, "-extra-high"):
+		return string(LevelXHigh)
+	case strings.HasSuffix(normalized, "-high"):
+		return string(LevelHigh)
+	case strings.HasSuffix(normalized, "-medium"):
+		return string(LevelMedium)
+	case strings.HasSuffix(normalized, "-low"):
+		return string(LevelLow)
+	default:
+		return ""
+	}
+}
+
 // ConvertLevelToBudget converts a thinking level to a budget value.
 //
 // This is a semantic conversion that maps discrete levels to numeric budgets.

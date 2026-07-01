@@ -448,7 +448,17 @@ func ExtractReasoningEffort(body []byte, provider, model string) string {
 			config = extractCodexConfig(body)
 		}
 	}
-	return reasoningEffortFromConfig(config)
+	if effort := reasoningEffortFromConfig(config); effort != "" {
+		return effort
+	}
+	if len(body) > 0 && gjson.ValidBytes(body) {
+		for _, path := range []string{"model", "request.model", "response.model"} {
+			if effort := InferReasoningEffortFromModelAlias(gjson.GetBytes(body, path).String()); effort != "" {
+				return effort
+			}
+		}
+	}
+	return InferReasoningEffortFromModelAlias(model)
 }
 
 // ExtractTranslatedReasoningEffort returns the final provider payload's thinking

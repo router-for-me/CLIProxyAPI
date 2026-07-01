@@ -112,6 +112,47 @@ func TestConvertOpenAIRequestToCodex_NormalizesUltracodeReasoningEffort(t *testi
 	}
 }
 
+func TestConvertOpenAIRequestToCodexInfersEffortFromGPTAliases(t *testing.T) {
+	tests := []struct {
+		model string
+		want  string
+	}{
+		{model: "gpt-5.5-extra", want: "xhigh"},
+		{model: "gpt-5.5-high", want: "high"},
+		{model: "gpt-5.5-medium", want: "medium"},
+		{model: "gpt-5.5-low", want: "low"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			input := []byte(`{
+				"model": "` + tt.model + `",
+				"messages": [{"role":"user","content":"hi"}]
+			}`)
+
+			out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+
+			if got := gjson.GetBytes(out, "reasoning.effort").String(); got != tt.want {
+				t.Fatalf("reasoning.effort = %q, want %q. Output: %s", got, tt.want, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToCodexKeepsExplicitReasoningOverGPTExtraAlias(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5-extra",
+		"reasoning_effort": "high",
+		"messages": [{"role":"user","content":"hi"}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want high. Output: %s", got, string(out))
+	}
+}
+
 // Assistant has both text content and tool_calls — the message should
 // be emitted (non-empty content), followed by function_call items.
 func TestToolCallWithContent(t *testing.T) {

@@ -576,3 +576,104 @@ docker rm -f cli-proxy-api
 docker rename cli-proxy-api.before-thinking-monitor-20260701093600 cli-proxy-api
 docker start cli-proxy-api
 ```
+
+### 2026-07-01 10:12 GPT effort 别名推断与 CPAM 展示补充
+
+用户反馈每次在 Cursor 里选择的都是 xhigh，但请求监控有时只显示 `gpt-5.5` 或 `gpt-5.5-extra`，实际调用行没有显示 thinking 强度。
+
+本次重新查线上请求后确认：
+
+- Cursor 原始 Chat Completions 请求没有单独携带 `reasoning_effort` 字段。
+- xhigh 是通过模型别名表达的：`orig_model=gpt-5.5-extra`。
+- 旧逻辑只在显式 `reasoning_effort` / `reasoning.effort` / suffix 中取值，缺字段时回落到默认 `medium`，导致 usage 和 trace 有时显示不一致。
+
+本次源码修复：
+
+- `internal/thinking` 新增 GPT 模型别名推断：
+  - `gpt-5.5-extra` -> `xhigh`
+  - `gpt-5.5-high` -> `high`
+  - `gpt-5.5-medium` -> `medium`
+  - `gpt-5.5-low` -> `low`
+- 显式请求字段仍优先于模型别名，例如 `model=gpt-5.5-extra` 且 `reasoning_effort=low` 时按 `low`。
+- Codex OpenAI Chat Completions translator 在请求体缺失 effort 时从原始 model alias 推断，避免再默认成 `medium`。
+- handler metadata 也使用同一套推断结果，保证 usage 上下文和实际转换一致。
+
+本地 Docker 化回归：
+
+```text
+docker run --rm -v "${PWD}:/app" -w /app golang:1.26-alpine go test ./internal/thinking ./sdk/api/handlers ./internal/translator/codex/openai/chat-completions
+```
+
+结果：
+
+```text
+ok ./internal/thinking
+ok ./sdk/api/handlers
+ok ./internal/translator/codex/openai/chat-completions
+```
+
+构建与部署：
+
+- 二进制：`dist/CLIProxyAPI`
+- 二进制 SHA256：`6A9A20A1AF64EE7A327C66A8B86E85431D5F6497A9E361E9D759C49393C44552`
+- 镜像：`cli-proxy-api:cursor-xhigh-monitor-20260701-1006`
+- 镜像 ID：`sha256:055734c74f5a779ecf231f36f293df6e05efbffcb83f508ee573ce0dc6e7520c`
+- 当前容器：`cli-proxy-api`
+- 当前容器 ID：`64967b775d0e89f2970e0dae24960f892f7ef41396bf18b657447ec39429c6af`
+- 服务器：`67.230.184.248`
+- 端口、网络和挂载沿用旧容器。
+- trace 冒烟后已重启为 `CLIPROXY_CURSOR_TOOL_TRACE=0`，避免继续刷日志。
+
+线上 trace 冒烟结果：
+
+```text
+orig_model=gpt-5.5-extra
+orig_reasoning_effort=<missing>
+converted_model=gpt-5.5
+converted_reasoning_effort=xhigh
+```
+
+Cursor 搜索工具冒烟：
+
+```text
+item_name=rg item_type=function_call item_arg_hint=path=...,pattern=...,glob=**/*.{ts,tsx,json}
+orig_last_tool_class=empty-glob
+converted_output_matched=true
+converted_reasoning_effort=xhigh
+```
+
+说明 `rg` 工具调用、空 Glob 结果回传、工具输出配对和 xhigh 推断都在同一轮 trace 中正常工作。`empty-glob` 表示 Cursor 本地工具确实执行并返回空结果，不是代理丢失工具结果。
+
+CPAM 同步部署：
+
+- 镜像：`cpa-manager:reasoning-effort-display-20260701-1008`
+- 镜像 ID：`sha256:bb14a662ca0ea83938e1859f34161227d0f1de3ba009967dce94f6afa00e6db0`
+- 当前容器：`cpa-manager`
+- 当前容器 ID：`54cd5cfe3c20a744f27b8f3aa4f2a522a86d2860327abac8602ef356a4fe93e7`
+- API 验证：`/v0/management/usage/realtime` 最新记录已返回 `reasoning_effort=xhigh`，`resolved_model=gpt-5.5 (xhigh)`。
+- 页面展示逻辑会对已经带 `(xhigh)` 的 resolved model 去重，因此显示为一次：`实际调用：gpt-5.5 (xhigh)`。
+
+延迟结论：
+
+- 截图中的 20 秒到 1 分钟级延迟来自完整请求耗时，不是监控页渲染耗时。
+- 线上最新多条 xhigh 请求输入量约 `46K` 到 `177K` tokens，延迟约 `32s` 到 `66s`，主要受超大上下文、工具往返和上游生成耗时影响。
+- xhigh 会增加推理工作量，不能用来降低延迟；它只是提高 thinking 强度。
+
+回滚点：
+
+- 代理当前 trace-off 前一版：`cli-proxy-api.rollback-trace-20260701-1012`，镜像同为 `cli-proxy-api:cursor-xhigh-monitor-20260701-1006`，但 trace 开启。
+- 代理上一版业务镜像：`cli-proxy-api.rollback-20260701-1006`，镜像 `cli-proxy-api:cursor-search-thinking-monitor-20260701-0936`。
+- CPAM 当前上一版：`cpa-manager.rollback-20260701-1008`，镜像 `cpa-manager:reasoning-effort-display-20260701-1006`。
+- CPAM 原始上一版：`cpa-manager.rollback-20260701-1006`，镜像 `seakee/cpa-manager:latest`。
+
+回滚命令示例：
+
+```text
+docker rm -f cli-proxy-api
+docker rename cli-proxy-api.rollback-20260701-1006 cli-proxy-api
+docker start cli-proxy-api
+
+docker rm -f cpa-manager
+docker rename cpa-manager.rollback-20260701-1008 cpa-manager
+docker start cpa-manager
+```
