@@ -10,7 +10,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -168,6 +170,46 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// input array processing
+	var pendingReasoningParts []string
+	type pendingToolUseMessage struct {
+		callID string
+		raw    []byte
+	}
+	var pendingToolUseMessages []pendingToolUseMessage
+	appendMessage := func(msg []byte) {
+		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+	}
+	flushPendingReasoning := func() {
+		if len(pendingReasoningParts) == 0 {
+			return
+		}
+		asst := []byte(`{"role":"assistant","content":[]}`)
+		for _, partJSON := range pendingReasoningParts {
+			asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+		}
+		appendMessage(asst)
+		pendingReasoningParts = nil
+	}
+	flushPendingToolUses := func() {
+		for _, pending := range pendingToolUseMessages {
+			appendMessage(pending.raw)
+		}
+		pendingToolUseMessages = nil
+	}
+	flushPendingToolUseFor := func(callID string) {
+		if len(pendingToolUseMessages) == 0 {
+			return
+		}
+		for i, pending := range pendingToolUseMessages {
+			if pending.callID == callID {
+				appendMessage(pending.raw)
+				pendingToolUseMessages = append(pendingToolUseMessages[:i], pendingToolUseMessages[i+1:]...)
+				return
+			}
+		}
+		flushPendingToolUses()
+	}
+
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			if extractedFromSystem && strings.EqualFold(item.Get("role").String(), "system") {
@@ -279,10 +321,29 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 				}
 
+				hasReasoningParts := false
+				if role != "assistant" {
+					flushPendingToolUses()
+				}
+				if len(pendingReasoningParts) > 0 {
+					if role == "assistant" {
+						if len(partsJSON) == 0 && textAggregate.Len() > 0 {
+							contentPart := []byte(`{"type":"text","text":""}`)
+							contentPart, _ = sjson.SetBytes(contentPart, "text", textAggregate.String())
+							partsJSON = append(partsJSON, string(contentPart))
+						}
+						partsJSON = append(append([]string{}, pendingReasoningParts...), partsJSON...)
+						pendingReasoningParts = nil
+						hasReasoningParts = true
+					} else {
+						flushPendingReasoning()
+					}
+				}
+
 				if len(partsJSON) > 0 {
 					msg := []byte(`{"role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile {
+					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasReasoningParts {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.DeleteBytes(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])
@@ -292,12 +353,17 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
 						}
 					}
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					appendMessage(msg)
 				} else if textAggregate.Len() > 0 || role == "system" {
 					msg := []byte(`{"role":"","content":""}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
 					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					appendMessage(msg)
+				}
+
+			case "reasoning":
+				if thinkingPart := convertResponsesReasoningToClaudeThinking(item); len(thinkingPart) > 0 {
+					pendingReasoningParts = append(pendingReasoningParts, string(thinkingPart))
 				}
 
 			case "function_call":
@@ -306,6 +372,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if callID == "" {
 					callID = genToolCallID()
 				}
+				callID = util.SanitizeClaudeToolID(callID)
 				name := item.Get("name").String()
 				argsStr := item.Get("arguments").String()
 
@@ -320,12 +387,22 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 				asst := []byte(`{"role":"assistant","content":[]}`)
+				for _, partJSON := range pendingReasoningParts {
+					asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
+				}
+				pendingReasoningParts = nil
 				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				pendingToolUseMessages = append(pendingToolUseMessages, pendingToolUseMessage{
+					callID: callID,
+					raw:    asst,
+				})
 
 			case "function_call_output":
+				flushPendingReasoning()
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
+				callID = util.SanitizeClaudeToolID(callID)
+				flushPendingToolUseFor(callID)
 				outputStr := item.Get("output").String()
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
@@ -333,11 +410,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+				appendMessage(usr)
 			}
 			return true
 		})
 	}
+	flushPendingReasoning()
+	flushPendingToolUses()
 
 	includedToolNames := map[string]struct{}{}
 	toolNameMap := map[string]string{}
@@ -398,6 +477,34 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	return out
 }
 
+func convertResponsesReasoningToClaudeThinking(item gjson.Result) []byte {
+	signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderClaude, item.Get("encrypted_content").String())
+	if !ok {
+		return nil
+	}
+
+	thinkingText := responsesReasoningSummaryText(item)
+	thinkingPart := []byte(`{"type":"thinking","thinking":"","signature":""}`)
+	thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", thinkingText)
+	thinkingPart, _ = sjson.SetBytes(thinkingPart, "signature", signature)
+	return thinkingPart
+}
+
+func responsesReasoningSummaryText(item gjson.Result) string {
+	var builder strings.Builder
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+		summary.ForEach(func(_, part gjson.Result) bool {
+			if text := part.Get("text"); text.Exists() {
+				builder.WriteString(text.String())
+			} else if part.Type == gjson.String {
+				builder.WriteString(part.String())
+			}
+			return true
+		})
+	}
+	return builder.String()
+}
+
 func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {
 	toolType := strings.TrimSpace(tool.Get("type").String())
 	switch toolType {
@@ -415,6 +522,9 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 			return [][]byte{tJSON}
 		}
 	default:
+		if isOpenAIResponsesApplyPatchCustomTool(toolType, tool) {
+			return nil
+		}
 		if isUnsupportedOpenAIBuiltinToolType(toolType) {
 			return nil
 		}
@@ -423,6 +533,10 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 		}
 	}
 	return nil
+}
+
+func isOpenAIResponsesApplyPatchCustomTool(toolType string, tool gjson.Result) bool {
+	return toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
 }
 
 func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[string]string) [][]byte {
@@ -551,6 +665,51 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 		return namespaceName + childName
 	}
 	return namespaceName + "__" + childName
+}
+
+func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
+	qualifiedName = strings.TrimSpace(qualifiedName)
+	if qualifiedName == "" {
+		return "", ""
+	}
+
+	tools := gjson.GetBytes(requestRawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return qualifiedName, ""
+	}
+
+	var bestNamespace string
+	var bestChild string
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if strings.TrimSpace(tool.Get("type").String()) != "namespace" {
+			return true
+		}
+		namespaceName := strings.TrimSpace(tool.Get("name").String())
+		if namespaceName == "" {
+			return true
+		}
+		children := tool.Get("tools")
+		if !children.Exists() || !children.IsArray() {
+			return true
+		}
+		children.ForEach(func(_, child gjson.Result) bool {
+			childName := responsesToolName(child)
+			if childName == "" {
+				return true
+			}
+			if qualifyResponsesNamespaceToolName(namespaceName, childName) == qualifiedName {
+				bestNamespace = namespaceName
+				bestChild = childName
+			}
+			return true
+		})
+		return true
+	})
+
+	if bestNamespace == "" || bestChild == "" {
+		return qualifiedName, ""
+	}
+	return bestChild, bestNamespace
 }
 
 func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {

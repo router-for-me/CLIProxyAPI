@@ -58,6 +58,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
+		attachRequestLogSources(c, logger, loggerEnabled)
 
 		// Process the request
 		c.Next()
@@ -67,6 +68,35 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			// Log error but don't interrupt the response
 			// In a real implementation, you might want to use a proper logger here
 		}
+	}
+}
+
+type fileBodySourceFactory interface {
+	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
+}
+
+func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool) {
+	if c == nil || !loggerEnabled {
+		return
+	}
+	factory, ok := logger.(fileBodySourceFactory)
+	if !ok || factory == nil {
+		return
+	}
+	if source, errSource := factory.NewFileBodySource("api-request"); errSource == nil {
+		c.Set(logging.APIRequestSourceContextKey, source)
+	}
+	if source, errSource := factory.NewFileBodySource("api-response"); errSource == nil {
+		c.Set(logging.APIResponseSourceContextKey, source)
+	}
+	if !isResponsesWebsocketUpgrade(c.Request) {
+		return
+	}
+	if source, errSource := factory.NewFileBodySource("websocket-timeline"); errSource == nil {
+		c.Set(logging.WebsocketTimelineSourceContextKey, source)
+	}
+	if source, errSource := factory.NewFileBodySource("api-websocket-timeline"); errSource == nil {
+		c.Set(logging.APIWebsocketTimelineSourceContextKey, source)
 	}
 }
 
@@ -209,10 +239,6 @@ func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
 func shouldLogRequest(path string) bool {
 	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
 		return false
-	}
-
-	if strings.HasPrefix(path, "/api") {
-		return strings.HasPrefix(path, "/api/provider")
 	}
 
 	return true

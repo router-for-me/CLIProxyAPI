@@ -4,9 +4,12 @@ package misc
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,17 +18,38 @@ import (
 )
 
 const (
-	antigravityReleasesURL     = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
-	antigravityFallbackVersion = "1.21.9"
+	antigravityFallbackVersion = "1.0.13"
+	antigravityCLIPlatform     = "darwin/arm64"
+	antigravityCLIClientName   = "aidev_client"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
 	AntigravityGoogAPIClientUA = "gl-node/22.21.1"
 )
 
-type antigravityRelease struct {
-	Version     string `json:"version"`
-	ExecutionID string `json:"execution_id"`
+var (
+	antigravityCLIUpdaterBaseURL = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"
+	antigravityCLILatestURL      = "https://storage.googleapis.com/antigravity-public/antigravity-cli/latest"
+	antigravityCLIGCSListURL     = "https://storage.googleapis.com/antigravity-public/?prefix=antigravity-cli/&delimiter=/"
+)
+
+type antigravityCLIUpdaterManifest struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
+	SHA512  string `json:"sha512"`
+}
+
+type antigravityGCSList struct {
+	CommonPrefixes []antigravityGCSPrefix `xml:"CommonPrefixes"`
+}
+
+type antigravityGCSPrefix struct {
+	Prefix string `xml:"Prefix"`
+}
+
+type antigravitySemVersion struct {
+	raw   string
+	parts [3]int
 }
 
 var (
@@ -104,10 +128,28 @@ func AntigravityLatestVersion() string {
 	return antigravityFallbackVersion
 }
 
-// AntigravityUserAgent returns the User-Agent string for antigravity requests
-// using the latest version fetched from the releases API.
+// AntigravityUserAgent returns the User-Agent string used by the agy CLI family.
 func AntigravityUserAgent() string {
-	return fmt.Sprintf("antigravity/%s darwin/arm64", AntigravityLatestVersion())
+	return fmt.Sprintf("antigravity/cli/%s %s", AntigravityLatestVersion(), antigravityCLIUserAgentDetails())
+}
+
+func antigravityCLIUserAgentDetails() string {
+	osType, arch := "darwin", "arm64"
+	if platform := strings.TrimSpace(antigravityCLIPlatform); platform != "" {
+		if parts := strings.SplitN(platform, "/", 2); len(parts) == 2 {
+			if trimmedOS := strings.TrimSpace(parts[0]); trimmedOS != "" {
+				osType = trimmedOS
+			}
+			if trimmedArch := strings.TrimSpace(parts[1]); trimmedArch != "" {
+				arch = trimmedArch
+			}
+		}
+	}
+	return fmt.Sprintf("(%s; os_type=%s; arch=%s)", antigravityCLIClientName, osType, arch)
+}
+
+func isAntigravityFamilyUserAgent(lower string) bool {
+	return strings.HasPrefix(lower, "antigravity/cli/") || strings.HasPrefix(lower, "antigravity/")
 }
 
 func antigravityBaseUserAgent(userAgent string) string {
@@ -116,7 +158,7 @@ func antigravityBaseUserAgent(userAgent string) string {
 		return AntigravityUserAgent()
 	}
 	lower := strings.ToLower(userAgent)
-	if strings.HasPrefix(lower, "antigravity/") {
+	if isAntigravityFamilyUserAgent(lower) {
 		if idx := strings.Index(lower, " google-api-nodejs-client/"); idx >= 0 {
 			trimmed := strings.TrimSpace(userAgent[:idx])
 			if trimmed != "" {
@@ -133,15 +175,21 @@ func AntigravityRequestUserAgent(userAgent string) string {
 	return antigravityBaseUserAgent(userAgent)
 }
 
-// AntigravityLoadCodeAssistUserAgent returns the long Antigravity control-plane
-// UA used by loadCodeAssist requests.
+// AntigravityLoadCodeAssistUserAgent returns the short Antigravity UA used by
+// loadCodeAssist requests.
 func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
+	return AntigravityRequestUserAgent(userAgent)
+}
+
+// AntigravityOnboardUserUserAgent returns the long Antigravity control-plane UA
+// used by onboardUser requests.
+func AntigravityOnboardUserUserAgent(userAgent string) string {
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
 		return AntigravityUserAgent() + " " + AntigravityNodeAPIClientUA
 	}
 	lower := strings.ToLower(userAgent)
-	if !strings.HasPrefix(lower, "antigravity/") {
+	if !isAntigravityFamilyUserAgent(lower) {
 		return userAgent
 	}
 	if strings.Contains(lower, "google-api-nodejs-client/") {
@@ -155,10 +203,24 @@ func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
 func AntigravityVersionFromUserAgent(userAgent string) string {
 	base := antigravityBaseUserAgent(userAgent)
 	lower := strings.ToLower(base)
-	if !strings.HasPrefix(lower, "antigravity/") {
+	for _, familyPrefix := range []string{"antigravity/cli/", "antigravity/hub/"} {
+		if strings.HasPrefix(lower, familyPrefix) {
+			rest := base[len(familyPrefix):]
+			if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+				rest = rest[:idx]
+			}
+			rest = strings.TrimSpace(rest)
+			if rest == "" {
+				return AntigravityLatestVersion()
+			}
+			return rest
+		}
+	}
+	const legacyPrefix = "antigravity/"
+	if !strings.HasPrefix(lower, legacyPrefix) {
 		return AntigravityLatestVersion()
 	}
-	rest := base[len("antigravity/"):]
+	rest := base[len(legacyPrefix):]
 	if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
 		rest = rest[:idx]
 	}
@@ -169,6 +231,10 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 	return rest
 }
 
+func antigravityCLIUpdaterManifestName() string {
+	return strings.ReplaceAll(antigravityCLIPlatform, "/", "_")
+}
+
 func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -176,38 +242,240 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 
 	client := &http.Client{Timeout: antigravityFetchTimeout}
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityReleasesURL, nil)
+	version, errManifest := fetchAntigravityCLIUpdaterManifestVersion(ctx, client)
+	if errManifest == nil {
+		return version, nil
+	}
+
+	log.WithError(errManifest).Debug("failed to fetch antigravity CLI updater manifest, trying CLI latest pointer")
+
+	version, errLatest := fetchAntigravityCLILatestVersion(ctx, client)
+	if errLatest == nil {
+		return version, nil
+	}
+
+	log.WithError(errLatest).Debug("failed to fetch antigravity CLI latest version, trying CLI GCS prefix list")
+
+	version, errList := fetchAntigravityCLIGCSLatestVersion(ctx, client)
+	if errList == nil {
+		return version, nil
+	}
+
+	return "", fmt.Errorf("fetch antigravity CLI updater manifest: %v; fetch antigravity CLI latest: %v; fetch antigravity CLI GCS version: %w", errManifest, errLatest, errList)
+}
+
+func fetchAntigravityCLIUpdaterManifestVersion(ctx context.Context, client *http.Client) (string, error) {
+	manifestURL := fmt.Sprintf("%s/%s.json", strings.TrimSuffix(antigravityCLIUpdaterBaseURL, "/"), antigravityCLIUpdaterManifestName())
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
 	if errReq != nil {
-		return "", fmt.Errorf("build antigravity releases request: %w", errReq)
+		return "", fmt.Errorf("build antigravity CLI updater manifest request: %w", errReq)
 	}
 
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
-		return "", fmt.Errorf("fetch antigravity releases: %w", errDo)
+		return "", fmt.Errorf("fetch antigravity CLI updater manifest: %w", errDo)
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.WithError(errClose).Warn("antigravity releases response body close error")
+			log.WithError(errClose).Warn("antigravity CLI updater manifest response body close error")
 		}
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("antigravity releases API returned status %d", resp.StatusCode)
+		return "", fmt.Errorf("antigravity CLI updater manifest returned status %d", resp.StatusCode)
 	}
 
-	var releases []antigravityRelease
-	if errDecode := json.NewDecoder(resp.Body).Decode(&releases); errDecode != nil {
-		return "", fmt.Errorf("decode antigravity releases response: %w", errDecode)
+	raw, errRead := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if errRead != nil {
+		return "", fmt.Errorf("read antigravity CLI updater manifest: %w", errRead)
 	}
 
-	if len(releases) == 0 {
-		return "", errors.New("antigravity releases API returned empty list")
+	var manifest antigravityCLIUpdaterManifest
+	if errDecode := json.Unmarshal(raw, &manifest); errDecode != nil {
+		return "", fmt.Errorf("decode antigravity CLI updater manifest: %w", errDecode)
 	}
 
-	version := releases[0].Version
+	version := strings.TrimSpace(manifest.Version)
 	if version == "" {
-		return "", errors.New("antigravity releases API returned empty version")
+		return "", errors.New("antigravity CLI updater manifest returned empty version")
+	}
+	if _, ok := parseAntigravitySemVersion(version); !ok {
+		return "", fmt.Errorf("antigravity CLI updater manifest returned invalid version %q", version)
+	}
+	return version, nil
+}
+
+func fetchAntigravityCLILatestVersion(ctx context.Context, client *http.Client) (string, error) {
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityCLILatestURL, nil)
+	if errReq != nil {
+		return "", fmt.Errorf("build antigravity CLI latest request: %w", errReq)
 	}
 
-	return version, nil
+	resp, errDo := client.Do(httpReq)
+	if errDo != nil {
+		return "", fmt.Errorf("fetch antigravity CLI latest: %w", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Warn("antigravity CLI latest response body close error")
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("antigravity CLI latest returned status %d", resp.StatusCode)
+	}
+
+	raw, errRead := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if errRead != nil {
+		return "", fmt.Errorf("read antigravity CLI latest: %w", errRead)
+	}
+	version := strings.TrimSpace(string(raw))
+	if version == "" {
+		return "", errors.New("antigravity CLI latest returned empty version")
+	}
+	semVersion, ok := parseAntigravitySemVersion(version)
+	if !ok {
+		return "", fmt.Errorf("antigravity CLI latest returned invalid version %q", version)
+	}
+	return semVersion.raw, nil
+}
+
+func fetchAntigravityCLIGCSLatestVersion(ctx context.Context, client *http.Client) (string, error) {
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityCLIGCSListURL, nil)
+	if errReq != nil {
+		return "", fmt.Errorf("build antigravity CLI GCS request: %w", errReq)
+	}
+
+	resp, errDo := client.Do(httpReq)
+	if errDo != nil {
+		return "", fmt.Errorf("fetch antigravity CLI GCS list: %w", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Warn("antigravity CLI GCS response body close error")
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("antigravity CLI GCS list returned status %d", resp.StatusCode)
+	}
+
+	var list antigravityGCSList
+	if errDecode := xml.NewDecoder(resp.Body).Decode(&list); errDecode != nil {
+		return "", fmt.Errorf("decode antigravity CLI GCS list: %w", errDecode)
+	}
+
+	prefixes := make([]string, 0, len(list.CommonPrefixes))
+	for _, commonPrefix := range list.CommonPrefixes {
+		prefixes = append(prefixes, commonPrefix.Prefix)
+	}
+
+	return latestAntigravityCLIVersionFromPrefixes(prefixes)
+}
+
+func latestAntigravityCLIVersionFromPrefixes(prefixes []string) (string, error) {
+	var best antigravitySemVersion
+	found := false
+
+	for _, prefix := range prefixes {
+		version, ok := antigravityCLIVersionFromPrefix(prefix)
+		if !ok {
+			continue
+		}
+		semVersion, ok := parseAntigravitySemVersion(version)
+		if !ok {
+			continue
+		}
+		if !found || compareAntigravitySemVersion(semVersion, best) > 0 {
+			best = semVersion
+			found = true
+		}
+	}
+
+	if !found {
+		return "", errors.New("antigravity-cli GCS list contained no version prefixes")
+	}
+
+	return best.raw, nil
+}
+
+func antigravityCLIVersionFromPrefix(prefix string) (string, bool) {
+	const cliPrefix = "antigravity-cli/"
+	prefix = strings.TrimSpace(prefix)
+	prefix = strings.TrimSuffix(prefix, "/")
+	if !strings.HasPrefix(prefix, cliPrefix) {
+		return "", false
+	}
+
+	name := strings.TrimPrefix(prefix, cliPrefix)
+	if name == "latest" || name == "test" || name == "tools" || strings.HasPrefix(name, "v") {
+		return "", false
+	}
+
+	separator := strings.LastIndex(name, "-")
+	if separator > 0 && separator < len(name)-1 {
+		version := strings.TrimSpace(name[:separator])
+		executionID := name[separator+1:]
+		if version != "" && executionID != "" {
+			allDigits := true
+			for _, ch := range executionID {
+				if ch < '0' || ch > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if allDigits {
+				if _, ok := parseAntigravitySemVersion(version); ok {
+					return version, true
+				}
+			}
+		}
+	}
+
+	version := strings.TrimSpace(name)
+	if version == "" {
+		return "", false
+	}
+	if _, ok := parseAntigravitySemVersion(version); !ok {
+		return "", false
+	}
+	return version, true
+}
+
+func parseAntigravitySemVersion(version string) (antigravitySemVersion, bool) {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return antigravitySemVersion{}, false
+	}
+
+	semVersion := antigravitySemVersion{raw: version}
+	for i, part := range parts {
+		if part == "" {
+			return antigravitySemVersion{}, false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return antigravitySemVersion{}, false
+			}
+		}
+		value, errParse := strconv.Atoi(part)
+		if errParse != nil {
+			return antigravitySemVersion{}, false
+		}
+		semVersion.parts[i] = value
+	}
+
+	return semVersion, true
+}
+
+func compareAntigravitySemVersion(left antigravitySemVersion, right antigravitySemVersion) int {
+	for i := range left.parts {
+		if left.parts[i] > right.parts[i] {
+			return 1
+		}
+		if left.parts[i] < right.parts[i] {
+			return -1
+		}
+	}
+	return 0
 }

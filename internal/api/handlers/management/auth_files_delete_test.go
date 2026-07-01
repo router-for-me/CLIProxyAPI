@@ -17,7 +17,6 @@ import (
 
 func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	tempDir := t.TempDir()
 	authDir := filepath.Join(tempDir, "auth")
@@ -101,7 +100,6 @@ func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 
 func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
 	fileName := "fallback-user.json"
@@ -125,5 +123,50 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 	}
 	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
+	}
+}
+
+func TestDeleteAuthFile_RemovesRuntimeAuth(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	fileName := "runtime-remove-user.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"runtime@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "runtime-remove-auth",
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"type":  "codex",
+			"email": "runtime@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, ok := manager.GetByID(record.ID); ok {
+		t.Fatalf("expected runtime auth %q to be removed", record.ID)
 	}
 }

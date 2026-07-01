@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // TokenClientProvider loads clients backed by stored authentication tokens.
@@ -80,6 +81,17 @@ type APIKeyClientResult struct {
 //   - error: An error if watcher creation fails
 type WatcherFactory func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error)
 
+// PluginAuthParser parses auth JSON owned by plugin providers.
+type PluginAuthParser interface {
+	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
+}
+
+// PluginMultiAuthParser expands one auth JSON payload into multiple plugin auth records.
+// Returning handled=true with an empty slice means the plugin intentionally suppresses built-in parsing.
+type PluginMultiAuthParser interface {
+	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error)
+}
+
 // WatcherWrapper exposes the subset of watcher methods required by the SDK.
 type WatcherWrapper struct {
 	start func(ctx context.Context) error
@@ -89,6 +101,9 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
+	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
+	setPluginAuthParser   func(parser PluginAuthParser)
+	reloadConfigIfChanged func()
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -115,6 +130,23 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 	w.setConfig(cfg)
 }
 
+// ReloadConfigIfChanged asks the underlying watcher to reload config from disk.
+func (w *WatcherWrapper) ReloadConfigIfChanged() bool {
+	if w == nil || w.reloadConfigIfChanged == nil {
+		return false
+	}
+	w.reloadConfigIfChanged()
+	return true
+}
+
+// SetPluginAuthParser updates the plugin auth parser used by the watcher.
+func (w *WatcherWrapper) SetPluginAuthParser(parser PluginAuthParser) {
+	if w == nil || w.setPluginAuthParser == nil {
+		return
+	}
+	w.setPluginAuthParser(parser)
+}
+
 // DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., websocket providers)
 // into the watcher-managed auth update queue when available.
 // Returns true if the update was enqueued successfully.
@@ -123,6 +155,14 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 		return false
 	}
 	return w.dispatchRuntimeUpdate(update)
+}
+
+// DispatchPersistedAuthUpdate forwards already-persisted file auth updates.
+func (w *WatcherWrapper) DispatchPersistedAuthUpdate(update watcher.AuthUpdate) bool {
+	if w == nil || w.dispatchPersistedAuth == nil {
+		return false
+	}
+	return w.dispatchPersistedAuth(update)
 }
 
 // SetClients updates the watcher file-backed clients registry.

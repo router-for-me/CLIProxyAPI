@@ -156,6 +156,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 					functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsStr))
 				}
 			}
+			functionCall = setGeminiFunctionCallID(functionCall, itemResult)
 
 			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", functionCall)
 			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
@@ -361,6 +362,7 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 							functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsStr))
 						}
 					}
+					functionCall = setGeminiFunctionCallID(functionCall, value)
 
 					pendingFunctionCalls = append(pendingFunctionCalls, functionCall)
 				}
@@ -408,6 +410,17 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 		}
 	}
 	return rev
+}
+
+func setGeminiFunctionCallID(functionCall []byte, item gjson.Result) []byte {
+	if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+		functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", callID)
+		return functionCall
+	}
+	if id := strings.TrimSpace(item.Get("id").String()); id != "" {
+		functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", id)
+	}
+	return functionCall
 }
 
 func GeminiTokenCount(ctx context.Context, count int64) []byte {

@@ -147,6 +147,9 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 			return sessionID
 		}
 	}
+	if sessionID := strings.TrimSpace(req.Header.Get("Session-Id")); sessionID != "" {
+		return sessionID
+	}
 	if sessionID := strings.TrimSpace(req.Header.Get("Session_id")); sessionID != "" {
 		return sessionID
 	}
@@ -305,6 +308,11 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 				continue
 			}
 
+			if allowOrphanOutputs {
+				filtered = append(filtered, item)
+				continue
+			}
+
 			if callCache != nil {
 				if cached, ok := callCache.get(sessionKey, callID); ok {
 					if _, already := insertedCalls[callID]; !already {
@@ -315,11 +323,6 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 					filtered = append(filtered, item)
 					continue
 				}
-			}
-
-			if allowOrphanOutputs {
-				filtered = append(filtered, item)
-				continue
 			}
 
 			// Drop orphaned function_call_output items; upstream rejects transcripts with missing calls.
@@ -337,6 +340,11 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 		}
 
 		if _, ok := outputPresent[callID]; ok {
+			filtered = append(filtered, item)
+			continue
+		}
+
+		if allowOrphanOutputs {
 			filtered = append(filtered, item)
 			continue
 		}
