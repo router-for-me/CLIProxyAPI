@@ -64,6 +64,32 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginGPTXHighPayloadDisplaysActualEffort(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithEndpoint(context.Background(), "POST /v1/responses")
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:        "codex",
+			Model:           "gpt-5.5",
+			Alias:           "gpt-5.5-extra",
+			ReasoningEffort: "xhigh",
+			RequestedAt:     time.Date(2026, 7, 1, 1, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens: 1,
+				TotalTokens: 1,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "model", "gpt-5.5 (xhigh)")
+		requireStringField(t, payload, "resolved_model", "gpt-5.5 (xhigh)")
+		requireStringField(t, payload, "actual_model", "gpt-5.5")
+		requireStringField(t, payload, "alias", "gpt-5.5-extra")
+		requireStringField(t, payload, "reasoning_effort", "xhigh")
+	})
+}
+
 func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")

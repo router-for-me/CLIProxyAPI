@@ -5,6 +5,14 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
+## Local Handoff Context
+- Reply to this user in Chinese.
+- If launched from `C:\Users\15461\Documents\Github\CLIProxyAPI`, switch into `CLIProxyAPI-local-build/` before source searches, edits, tests, builds, or git commands. The outer directory is a handoff/build wrapper and contains `chat-export-cli-proxy-cursor-2026-06-30.md`.
+- Read `..\chat-export-cli-proxy-cursor-2026-06-30.md` before continuing Cursor/Codex compatibility work. It records the prior fixes, commits, trace fields, server deployment style, and rollback notes.
+- Treat server endpoints in handoff docs as historical unless the latest user message confirms them. Always verify the current SSH target, container image, mounts, config path, and trace env before deployment.
+- The local machine may not have `go` on PATH. If direct `go test` or `go build` is unavailable, use the Docker/Golang build flow from the handoff doc rather than assuming the source tree is wrong.
+- For Claude Code thinking/effort issues, inspect `internal/thinking/`, `internal/translator/claude/`, and `internal/registry/models/models.json` first. UI labels such as `Ultracode` may need normalization in the unified thinking pipeline, not one-off config overrides.
+
 ## Commands
 ```bash
 gofmt -w . # Format (required after Go changes)

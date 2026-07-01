@@ -516,7 +516,7 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 		// We only treat it as a thinking config when effort is explicitly present;
 		// otherwise we passthrough and let upstream defaults apply.
 		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
-			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			value := NormalizeLevelAlias(effort.String())
 			if value == "" {
 				return ThinkingConfig{}
 			}
@@ -576,7 +576,7 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 		level = gjson.GetBytes(body, prefix+".thinking_level")
 	}
 	if level.Exists() {
-		value := level.String()
+		value := NormalizeLevelAlias(level.String())
 		switch value {
 		case "none":
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -618,7 +618,7 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 func extractOpenAIConfig(body []byte) ThinkingConfig {
 	// Check reasoning_effort (OpenAI Chat Completions format)
 	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
-		value := effort.String()
+		value := NormalizeLevelAlias(effort.String())
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
@@ -637,7 +637,7 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 func extractCodexConfig(body []byte) ThinkingConfig {
 	// Check reasoning.effort (Codex / OpenAI Responses API format)
 	if effort := gjson.GetBytes(body, "reasoning.effort"); effort.Exists() {
-		value := effort.String()
+		value := NormalizeLevelAlias(effort.String())
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}

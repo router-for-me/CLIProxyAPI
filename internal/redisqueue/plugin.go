@@ -8,6 +8,7 @@ import (
 	"time"
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -56,6 +57,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
+	displayModelName := usageDisplayModel(modelName, reasoningEffort)
 	serviceTier := strings.TrimSpace(record.ServiceTier)
 	if serviceTier == "" {
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
@@ -99,7 +101,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		requestDetail:   detail,
 		Provider:        provider,
 		ExecutorType:    executorType,
-		Model:           modelName,
+		Model:           displayModelName,
+		ResolvedModel:   displayModelName,
+		ActualModel:     modelName,
 		Alias:           aliasName,
 		Endpoint:        resolveEndpoint(ctx),
 		AuthType:        authType,
@@ -119,6 +123,8 @@ type queuedUsageDetail struct {
 	Provider        string `json:"provider"`
 	ExecutorType    string `json:"executor_type"`
 	Model           string `json:"model"`
+	ResolvedModel   string `json:"resolved_model,omitempty"`
+	ActualModel     string `json:"actual_model,omitempty"`
 	Alias           string `json:"alias"`
 	Endpoint        string `json:"endpoint"`
 	AuthType        string `json:"auth_type"`
@@ -153,6 +159,25 @@ type tokenStats struct {
 type failDetail struct {
 	StatusCode int    `json:"status_code"`
 	Body       string `json:"body"`
+}
+
+func usageDisplayModel(model, reasoningEffort string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return model
+	}
+	effort := strings.TrimSpace(thinking.NormalizeLevelAlias(reasoningEffort))
+	if !strings.EqualFold(effort, string(thinking.LevelXHigh)) {
+		return model
+	}
+	if !strings.HasPrefix(strings.ToLower(model), "gpt-") {
+		return model
+	}
+	suffix := " (" + string(thinking.LevelXHigh) + ")"
+	if strings.HasSuffix(strings.ToLower(model), suffix) {
+		return model
+	}
+	return model + suffix
 }
 
 func resolveFail(ctx context.Context, record coreusage.Record, failed bool) failDetail {

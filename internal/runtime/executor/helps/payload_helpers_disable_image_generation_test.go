@@ -234,6 +234,30 @@ func TestApplyPayloadConfigWithRequest_FromProtocolGateUsesSourceProtocol(t *tes
 	}
 }
 
+func TestApplyPayloadConfigWithRequest_RequestedAliasCanOverrideReasoningEffort(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{
+						{Name: "gpt-5.5-extra", Protocol: "codex"},
+					},
+					Params: map[string]any{
+						"reasoning.effort": "xhigh",
+					},
+				},
+			},
+		},
+	}
+	payload := []byte(`{"model":"gpt-5.5","reasoning":{"effort":"high"}}`)
+
+	out := ApplyPayloadConfigWithRequest(cfg, "gpt-5.5", "codex", "responses", "", payload, payload, "gpt-5.5-extra", "/v1/responses", nil)
+
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning.effort = %q, want xhigh; payload=%s", got, string(out))
+	}
+}
+
 func TestApplyPayloadConfigWithRequest_PayloadConditionsNarrowRule(t *testing.T) {
 	cfg := &config.Config{
 		Payload: config.PayloadConfig{

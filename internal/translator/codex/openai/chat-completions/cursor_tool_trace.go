@@ -21,24 +21,28 @@ func traceOpenAIChatRequest(original []byte, converted []byte) {
 	}
 
 	fields := log.Fields{
-		"orig_tools":               countArray(original, "tools"),
-		"orig_functions":           countArray(original, "functions"),
-		"orig_tool_choice":         summarizeJSONField(original, "tool_choice"),
-		"orig_function_call":       summarizeJSONField(original, "function_call"),
-		"orig_messages":            countArray(original, "messages"),
-		"orig_last_role":           lastMessageRole(original),
-		"orig_last_has_tool_calls": lastMessageHasArray(original, "tool_calls"),
-		"orig_last_has_function":   lastMessageHasObject(original, "function_call"),
-		"orig_last_tool_call_id":   lastToolCallID(original),
-		"orig_last_tool_output":    lastToolOutputSummary(original),
-		"orig_last_tool_class":     lastToolOutputClass(original),
-		"orig_last_tool_failure":   lastToolOutputFailureHint(original),
-		"converted_tools":          countArray(converted, "tools"),
-		"converted_tool_choice":    summarizeJSONField(converted, "tool_choice"),
-		"converted_input":          countArray(converted, "input"),
-		"converted_last_types":     lastInputTypes(converted, 6),
-		"converted_last_output":    lastFunctionOutputSummary(converted),
-		"converted_output_matched": lastFunctionOutputHasMatchingCall(converted),
+		"orig_model":                 summarizeJSONField(original, "model"),
+		"orig_reasoning_effort":      summarizeReasoningEffort(original),
+		"orig_tools":                 countArray(original, "tools"),
+		"orig_functions":             countArray(original, "functions"),
+		"orig_tool_choice":           summarizeJSONField(original, "tool_choice"),
+		"orig_function_call":         summarizeJSONField(original, "function_call"),
+		"orig_messages":              countArray(original, "messages"),
+		"orig_last_role":             lastMessageRole(original),
+		"orig_last_has_tool_calls":   lastMessageHasArray(original, "tool_calls"),
+		"orig_last_has_function":     lastMessageHasObject(original, "function_call"),
+		"orig_last_tool_call_id":     lastToolCallID(original),
+		"orig_last_tool_output":      lastToolOutputSummary(original),
+		"orig_last_tool_class":       lastToolOutputClass(original),
+		"orig_last_tool_failure":     lastToolOutputFailureHint(original),
+		"converted_tools":            countArray(converted, "tools"),
+		"converted_model":            summarizeJSONField(converted, "model"),
+		"converted_reasoning_effort": summarizeReasoningEffort(converted),
+		"converted_tool_choice":      summarizeJSONField(converted, "tool_choice"),
+		"converted_input":            countArray(converted, "input"),
+		"converted_last_types":       lastInputTypes(converted, 6),
+		"converted_last_output":      lastFunctionOutputSummary(converted),
+		"converted_output_matched":   lastFunctionOutputHasMatchingCall(converted),
 	}
 	log.Infof("cursor tool trace: chat request %s", formatTraceFields(fields))
 }
@@ -124,6 +128,13 @@ func summarizeJSONField(raw []byte, path string) string {
 		return "<object>"
 	}
 	return result.Type.String()
+}
+
+func summarizeReasoningEffort(raw []byte) string {
+	if effort := gjson.GetBytes(raw, "reasoning.effort"); effort.Exists() {
+		return summarizeJSONField(raw, "reasoning.effort")
+	}
+	return summarizeJSONField(raw, "reasoning_effort")
 }
 
 func lastMessageRole(raw []byte) string {
@@ -322,30 +333,50 @@ func classifyToolOutput(result gjson.Result) string {
 		text = text[:4096]
 	}
 	lower := strings.ToLower(text)
+	toolFailure := looksLikeCursorToolFailure(lower)
+	workspaceResult := strings.Contains(lower, "<workspace_result")
 	switch {
+	case strings.Contains(lower, "no_matches_found") ||
+		strings.Contains(lower, "no_files_with_matches_found") ||
+		strings.Contains(lower, "no matches found") ||
+		strings.Contains(lower, "no files with matches found"):
+		return "empty-glob"
 	case strings.Contains(lower, "enoent") ||
-		strings.Contains(lower, "not found") ||
-		strings.Contains(lower, "no such file") ||
-		strings.Contains(lower, "does not exist") ||
-		strings.Contains(lower, "cannot find"):
+		strings.Contains(text, "系统找不到指定的路径") ||
+		(toolFailure && (strings.Contains(lower, "not found") ||
+			strings.Contains(lower, "no such file") ||
+			strings.Contains(lower, "does not exist") ||
+			strings.Contains(lower, "cannot find"))):
 		return "not-found"
 	case strings.Contains(lower, "no files") ||
 		strings.Contains(lower, "no matches") ||
 		strings.Contains(lower, "found 0"):
 		return "empty-glob"
-	case strings.Contains(lower, "permission") ||
+	case toolFailure && (strings.Contains(lower, "permission") ||
 		strings.Contains(lower, "access denied") ||
 		strings.Contains(lower, "eperm") ||
-		strings.Contains(lower, "eacces"):
+		strings.Contains(lower, "eacces")):
 		return "permission"
-	case strings.Contains(lower, "outside") && strings.Contains(lower, "workspace"):
+	case (toolFailure || workspaceResult) && strings.Contains(lower, "outside") && strings.Contains(lower, "workspace"):
 		return "outside-workspace"
-	case strings.Contains(lower, "error") ||
-		strings.Contains(lower, "failed"):
+	case toolFailure:
 		return "error"
 	default:
 		return "ok"
 	}
+}
+
+func looksLikeCursorToolFailure(lower string) bool {
+	lower = strings.TrimSpace(lower)
+	return strings.HasPrefix(lower, "error:") ||
+		strings.HasPrefix(lower, "failed:") ||
+		strings.HasPrefix(lower, "error running tool") ||
+		strings.HasPrefix(lower, "<workspace_result") ||
+		strings.Contains(lower, "error running tool") ||
+		strings.Contains(lower, "command failed") ||
+		strings.Contains(lower, "failed to spawn") ||
+		strings.Contains(lower, "exit status") ||
+		strings.Contains(lower, "io error for operation")
 }
 
 func toolOutputText(result gjson.Result) string {
@@ -408,8 +439,29 @@ func summarizeToolArguments(rawJSON []byte) string {
 		"query",
 		"pattern",
 		"glob",
+		"glob_pattern",
+		"globPattern",
+		"filePattern",
 		"cwd",
+		"target_directory",
+		"targetDirectory",
+		"workspace_path",
+		"workspacePath",
 		"relative_workspace_path",
+		"relativeWorkspacePath",
+		"regex",
+		"include_pattern",
+		"includePattern",
+		"exclude_pattern",
+		"excludePattern",
+		"environment",
+		"cloud_base_branch",
+		"subagent_type",
+		"run_in_background",
+		"readonly",
+		"resume",
+		"model",
+		"description",
 	} {
 		value := args.Get(key)
 		if !value.Exists() {

@@ -21,15 +21,19 @@ func traceOpenAIResponsesRequest(original []byte, converted []byte) {
 	}
 
 	fields := log.Fields{
-		"orig_tools":             countArray(original, "tools"),
-		"orig_tool_choice":       summarizeJSONField(original, "tool_choice"),
-		"orig_input":             countArray(original, "input"),
-		"orig_last_input_type":   lastInputType(original),
-		"orig_last_call_id":      lastInputCallID(original),
-		"converted_tools":        countArray(converted, "tools"),
-		"converted_tool_choice":  summarizeJSONField(converted, "tool_choice"),
-		"converted_input":        countArray(converted, "input"),
-		"converted_last_call_id": lastInputCallID(converted),
+		"orig_model":                 summarizeJSONField(original, "model"),
+		"orig_reasoning_effort":      summarizeReasoningEffort(original),
+		"orig_tools":                 countArray(original, "tools"),
+		"orig_tool_choice":           summarizeJSONField(original, "tool_choice"),
+		"orig_input":                 countArray(original, "input"),
+		"orig_last_input_type":       lastInputType(original),
+		"orig_last_call_id":          lastInputCallID(original),
+		"converted_model":            summarizeJSONField(converted, "model"),
+		"converted_reasoning_effort": summarizeReasoningEffort(converted),
+		"converted_tools":            countArray(converted, "tools"),
+		"converted_tool_choice":      summarizeJSONField(converted, "tool_choice"),
+		"converted_input":            countArray(converted, "input"),
+		"converted_last_call_id":     lastInputCallID(converted),
 	}
 	log.Infof("cursor tool trace: responses request %s", formatTraceFields(fields))
 }
@@ -117,6 +121,13 @@ func summarizeJSONField(raw []byte, path string) string {
 	return result.Type.String()
 }
 
+func summarizeReasoningEffort(raw []byte) string {
+	if effort := gjson.GetBytes(raw, "reasoning.effort"); effort.Exists() {
+		return summarizeJSONField(raw, "reasoning.effort")
+	}
+	return summarizeJSONField(raw, "reasoning_effort")
+}
+
 func lastInputType(raw []byte) string {
 	input := gjson.GetBytes(raw, "input")
 	if !input.IsArray() {
@@ -166,8 +177,29 @@ func summarizeToolArguments(rawJSON []byte) string {
 		"query",
 		"pattern",
 		"glob",
+		"glob_pattern",
+		"globPattern",
+		"filePattern",
 		"cwd",
+		"target_directory",
+		"targetDirectory",
+		"workspace_path",
+		"workspacePath",
 		"relative_workspace_path",
+		"relativeWorkspacePath",
+		"regex",
+		"include_pattern",
+		"includePattern",
+		"exclude_pattern",
+		"excludePattern",
+		"environment",
+		"cloud_base_branch",
+		"subagent_type",
+		"run_in_background",
+		"readonly",
+		"resume",
+		"model",
+		"description",
 	} {
 		value := args.Get(key)
 		if !value.Exists() {

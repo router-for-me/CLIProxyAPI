@@ -209,6 +209,24 @@ func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestUsageReporterTranslatedXHighPromotesBaseGPTAlias(t *testing.T) {
+	ctx := usage.WithRequestedModelAlias(context.Background(), "gpt-5.5")
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5.5", nil)
+
+	reporter.SetTranslatedReasoningEffort([]byte(`{"reasoning":{"effort":"xhigh"}}`), "openai-response")
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Model != "gpt-5.5" {
+		t.Fatalf("model = %q, want %q", record.Model, "gpt-5.5")
+	}
+	if record.Alias != "gpt-5.5-extra" {
+		t.Fatalf("alias = %q, want %q", record.Alias, "gpt-5.5-extra")
+	}
+	if record.ReasoningEffort != "xhigh" {
+		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "xhigh")
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "priority")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)

@@ -7,7 +7,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const openAIAgentToolUseInstruction = "Agent tool-use compatibility: When function tools are available and the next step requires inspecting files, editing files, running commands, or otherwise acting outside the conversation, call the appropriate tool in this response. Do not end a turn by only saying that you will use a tool or make a change."
+const openAIAgentToolUseInstruction = "Agent tool-use compatibility: When function tools are available and the next step requires inspecting files, editing files, running commands, or otherwise acting outside the conversation, call the appropriate tool in this response. Do not end a turn by only saying that you will use a tool or make a change. Cursor file/search tools: use only workspace roots or directories already observed from tool results; for Glob provide a real target_directory plus a specific glob_pattern. Never use Glob with **/* alone; use a file-type glob such as **/*.{js,ts,tsx,json,md} or use shell rg --files for broad listing. For rg/search, path must be a verified directory, not a file; use recursive globs such as **/*.tsx to limit files, or ReadFile for a specific file. Avoid inventing Windows absolute paths. Cursor Subagent: include cloud_base_branch only when environment is cloud; omit it for local/default environments."
 
 // RequireOpenAIAgentFunctionToolChoice makes OpenAI-compatible agent tool turns
 // deterministic for Codex upstream. Cursor often sends function tools with

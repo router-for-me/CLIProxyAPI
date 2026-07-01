@@ -259,11 +259,12 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
+	alias := usageAliasForReasoning(model, r.alias, r.reasoning)
 	return usage.Record{
 		Provider:        r.provider,
 		ExecutorType:    r.executorType,
 		Model:           model,
-		Alias:           r.alias,
+		Alias:           alias,
 		Source:          r.source,
 		APIKey:          r.apiKey,
 		AuthID:          r.authID,
@@ -278,6 +279,25 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Fail:            fail,
 		Detail:          detail,
 	}
+}
+
+func usageAliasForReasoning(model, alias, reasoning string) string {
+	model = strings.TrimSpace(model)
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		alias = model
+	}
+	if !strings.EqualFold(thinking.NormalizeLevelAlias(reasoning), string(thinking.LevelXHigh)) {
+		return alias
+	}
+	if !isGPTUsageModel(model) || !strings.EqualFold(alias, model) {
+		return alias
+	}
+	return model + "-extra"
+}
+
+func isGPTUsageModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt-")
 }
 
 func extractServiceTierFromPayload(payload []byte) string {

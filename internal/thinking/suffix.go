@@ -110,6 +110,7 @@ func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
 //
 // This function parses the raw suffix content (from ParseSuffix.RawSuffix) as a level.
 // Only discrete effort levels are valid: minimal, low, medium, high, xhigh, max.
+// Claude Code's "ultracode" UI label is accepted as an xhigh alias.
 // Level matching is case-insensitive.
 //
 // Special values (none, auto) are NOT handled by this function; use ParseSpecialSuffix
@@ -122,14 +123,14 @@ func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
 //   - "none" -> level="", ok=false (special value, use ParseSpecialSuffix)
 //   - "auto" -> level="", ok=false (special value, use ParseSpecialSuffix)
 //   - "8192" -> level="", ok=false (numeric, use ParseNumericSuffix)
-//   - "ultra" -> level="", ok=false (unknown level)
+//   - "ultracode" -> level=LevelXHigh, ok=true (Claude Code alias)
 func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 	if rawSuffix == "" {
 		return "", false
 	}
 
 	// Case-insensitive matching
-	switch strings.ToLower(rawSuffix) {
+	switch NormalizeLevelAlias(rawSuffix) {
 	case "minimal":
 		return LevelMinimal, true
 	case "low":

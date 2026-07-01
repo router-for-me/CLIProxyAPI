@@ -21,6 +21,19 @@ var levelToBudgetMap = map[string]int{
 	"max": 128000,
 }
 
+// NormalizeLevelAlias normalizes externally-visible effort aliases to the
+// canonical level names used by this package.
+func NormalizeLevelAlias(level string) string {
+	level = strings.ToLower(strings.TrimSpace(level))
+	compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(level)
+	switch compact {
+	case "ultracode":
+		return string(LevelXHigh)
+	default:
+		return level
+	}
+}
+
 // ConvertLevelToBudget converts a thinking level to a budget value.
 //
 // This is a semantic conversion that maps discrete levels to numeric budgets.
@@ -40,7 +53,7 @@ var levelToBudgetMap = map[string]int{
 //   - budget: The converted budget value
 //   - ok: true if level is valid, false otherwise
 func ConvertLevelToBudget(level string) (int, bool) {
-	budget, ok := levelToBudgetMap[strings.ToLower(level)]
+	budget, ok := levelToBudgetMap[NormalizeLevelAlias(level)]
 	return budget, ok
 }
 
@@ -108,29 +121,65 @@ func HasLevel(levels []string, target string) bool {
 }
 
 // MapToClaudeEffort maps a generic thinking level string to a Claude adaptive
-// thinking effort value (low/medium/high/max).
+// thinking effort value supported by the target model.
 //
-// supportsMax indicates whether the target model supports "max" effort.
 // Returns the mapped effort and true if the level is valid, or ("", false) otherwise.
-func MapToClaudeEffort(level string, supportsMax bool) (string, bool) {
-	level = strings.ToLower(strings.TrimSpace(level))
+func MapToClaudeEffort(level string, supportedLevels []string) (string, bool) {
+	level = NormalizeLevelAlias(level)
 	switch level {
 	case "":
 		return "", false
 	case "minimal":
-		return "low", true
-	case "low", "medium", "high":
-		return level, true
-	case "xhigh", "max":
-		if supportsMax {
-			return "max", true
-		}
-		return "high", true
+		level = string(LevelLow)
+	case "low", "medium", "high", "xhigh", "max":
 	case "auto":
-		return "high", true
+		level = string(LevelHigh)
 	default:
 		return "", false
 	}
+
+	if len(supportedLevels) == 0 || HasLevel(supportedLevels, level) {
+		return level, true
+	}
+	if clamped, ok := highestSupportedLevelAtOrBelow(level, supportedLevels); ok {
+		return clamped, true
+	}
+	if lowest, ok := lowestSupportedLevel(supportedLevels); ok {
+		return lowest, true
+	}
+	return "", false
+}
+
+func highestSupportedLevelAtOrBelow(level string, supportedLevels []string) (string, bool) {
+	pos := levelIndex(level)
+	if pos == -1 {
+		return "", false
+	}
+	bestIdx := -1
+	for _, supported := range supportedLevels {
+		idx := levelIndex(strings.TrimSpace(supported))
+		if idx != -1 && idx <= pos && idx > bestIdx {
+			bestIdx = idx
+		}
+	}
+	if bestIdx == -1 {
+		return "", false
+	}
+	return string(standardLevelOrder[bestIdx]), true
+}
+
+func lowestSupportedLevel(supportedLevels []string) (string, bool) {
+	bestIdx := len(standardLevelOrder)
+	for _, supported := range supportedLevels {
+		idx := levelIndex(strings.TrimSpace(supported))
+		if idx != -1 && idx < bestIdx {
+			bestIdx = idx
+		}
+	}
+	if bestIdx == len(standardLevelOrder) {
+		return "", false
+	}
+	return string(standardLevelOrder[bestIdx]), true
 }
 
 // ModelCapability describes the thinking format support of a model.

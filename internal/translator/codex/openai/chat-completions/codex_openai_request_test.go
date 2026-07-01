@@ -98,6 +98,20 @@ func TestToolCallSimple(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToCodex_NormalizesUltracodeReasoningEffort(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"reasoning_effort": "ultracode",
+		"messages": [{"role":"user","content":"hi"}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("reasoning.effort = %q, want xhigh. Output: %s", got, string(out))
+	}
+}
+
 // Assistant has both text content and tool_calls — the message should
 // be emitted (non-empty content), followed by function_call items.
 func TestToolCallWithContent(t *testing.T) {

@@ -83,7 +83,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				// Pass through directly; ApplyThinking handles clamping to target model's levels.
 				effort := ""
 				if v := root.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
-					effort = strings.ToLower(strings.TrimSpace(v.String()))
+					effort = thinking.NormalizeLevelAlias(v.String())
 				}
 				if effort != "" {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -30,6 +31,10 @@ type ConvertCliToOpenAIParams struct {
 	HasToolCallAnnounced      bool
 	UseLegacyFunctionCall     bool
 	LastImageHashByItemID     map[string][32]byte
+	CurrentToolName           string
+	SuppressArgumentDeltas    bool
+	SuppressedArguments       string
+	CursorWorkspaceRoot       string
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -57,7 +62,11 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			HasToolCallAnnounced:      false,
 			UseLegacyFunctionCall:     useLegacyOpenAIFunctionCall(originalRequestRawJSON),
 			LastImageHashByItemID:     make(map[string][32]byte),
+			CursorWorkspaceRoot:       util.ExtractCursorWorkspaceRoot(originalRequestRawJSON),
 		}
+	}
+	if root := util.ExtractCursorWorkspaceRoot(originalRequestRawJSON); root != "" {
+		(*param).(*ConvertCliToOpenAIParams).CursorWorkspaceRoot = root
 	}
 
 	if !bytes.HasPrefix(rawJSON, dataTag) {
@@ -188,6 +197,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		(*param).(*ConvertCliToOpenAIParams).FunctionCallIndex++
 		(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta = false
 		(*param).(*ConvertCliToOpenAIParams).HasToolCallAnnounced = true
+		(*param).(*ConvertCliToOpenAIParams).CurrentToolName = ""
+		(*param).(*ConvertCliToOpenAIParams).SuppressArgumentDeltas = false
+		(*param).(*ConvertCliToOpenAIParams).SuppressedArguments = ""
 
 		functionCallItemTemplate := []byte(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
@@ -199,6 +211,8 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		if orig, ok := rev[name]; ok {
 			name = orig
 		}
+		(*param).(*ConvertCliToOpenAIParams).CurrentToolName = name
+		(*param).(*ConvertCliToOpenAIParams).SuppressArgumentDeltas = shouldNormalizeCursorSearchToolArguments(name)
 		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.name", name)
@@ -213,9 +227,13 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
 	} else if dataType == "response.function_call_arguments.delta" || dataType == "response.custom_tool_call_input.delta" {
+		deltaValue := rootResult.Get("delta").String()
+		if (*param).(*ConvertCliToOpenAIParams).SuppressArgumentDeltas {
+			(*param).(*ConvertCliToOpenAIParams).SuppressedArguments += deltaValue
+			return [][]byte{}
+		}
 		(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta = true
 
-		deltaValue := rootResult.Get("delta").String()
 		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", deltaValue)
 			return [][]byte{template}
@@ -238,6 +256,31 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		fullArgs := rootResult.Get("arguments").String()
 		if dataType == "response.custom_tool_call_input.done" {
 			fullArgs = rootResult.Get("input").String()
+		}
+		if (*param).(*ConvertCliToOpenAIParams).SuppressArgumentDeltas {
+			if fullArgs == "" {
+				fullArgs = (*param).(*ConvertCliToOpenAIParams).SuppressedArguments
+			}
+			fullArgs = normalizeCursorSearchToolArgumentsWithWorkspace(
+				(*param).(*ConvertCliToOpenAIParams).CurrentToolName,
+				fullArgs,
+				(*param).(*ConvertCliToOpenAIParams).CursorWorkspaceRoot,
+			)
+			(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta = true
+			(*param).(*ConvertCliToOpenAIParams).SuppressArgumentDeltas = false
+			(*param).(*ConvertCliToOpenAIParams).SuppressedArguments = ""
+			if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
+				template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", fullArgs)
+				return [][]byte{template}
+			}
+
+			functionCallItemTemplate := []byte(`{"index":0,"function":{"arguments":""}}`)
+			functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
+			functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", fullArgs)
+
+			template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
+			template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
+			return [][]byte{template}
 		}
 		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", fullArgs)
@@ -297,6 +340,37 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 
 		if (*param).(*ConvertCliToOpenAIParams).HasToolCallAnnounced {
+			if itemType == "function_call" &&
+				(*param).(*ConvertCliToOpenAIParams).SuppressArgumentDeltas &&
+				!(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta {
+				(*param).(*ConvertCliToOpenAIParams).HasToolCallAnnounced = false
+				fullArgs := itemResult.Get("arguments").String()
+				if fullArgs == "" {
+					fullArgs = (*param).(*ConvertCliToOpenAIParams).SuppressedArguments
+				}
+				fullArgs = normalizeCursorSearchToolArgumentsWithWorkspace(
+					(*param).(*ConvertCliToOpenAIParams).CurrentToolName,
+					fullArgs,
+					(*param).(*ConvertCliToOpenAIParams).CursorWorkspaceRoot,
+				)
+				(*param).(*ConvertCliToOpenAIParams).SuppressArgumentDeltas = false
+				(*param).(*ConvertCliToOpenAIParams).SuppressedArguments = ""
+				if fullArgs == "" {
+					return [][]byte{}
+				}
+				if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
+					template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", fullArgs)
+					return [][]byte{template}
+				}
+
+				functionCallItemTemplate := []byte(`{"index":0,"function":{"arguments":""}}`)
+				functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
+				functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", fullArgs)
+
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
+				return [][]byte{template}
+			}
 			// Custom tool calls may only include their raw input on output_item.done.
 			// Emit it as the Chat Completions arguments delta before suppressing the
 			// duplicate tool-call announcement.
@@ -341,13 +415,17 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		if (*param).(*ConvertCliToOpenAIParams).UseLegacyFunctionCall {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.name", name)
-			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", codexOpenAIToolCallArguments(itemResult))
+			args := codexOpenAIToolCallArguments(itemResult)
+			args = normalizeCursorSearchToolArgumentsWithWorkspace(name, args, (*param).(*ConvertCliToOpenAIParams).CursorWorkspaceRoot)
+			template, _ = sjson.SetBytes(template, "choices.0.delta.function_call.arguments", args)
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			return [][]byte{template}
 		}
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.name", name)
 
-		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", codexOpenAIToolCallArguments(itemResult))
+		args := codexOpenAIToolCallArguments(itemResult)
+		args = normalizeCursorSearchToolArgumentsWithWorkspace(name, args, (*param).(*ConvertCliToOpenAIParams).CursorWorkspaceRoot)
+		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", args)
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
@@ -381,6 +459,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	unixTimestamp := time.Now().Unix()
 
 	responseResult := rootResult.Get("response")
+	cursorWorkspaceRoot := util.ExtractCursorWorkspaceRoot(originalRequestRawJSON)
 
 	template := []byte(`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
 
@@ -479,6 +558,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 				}
 
 				if args := codexOpenAIToolCallArguments(outputItem); args != "" {
+					args = normalizeCursorSearchToolArgumentsWithWorkspace(gjson.GetBytes(functionCallTemplate, "function.name").String(), args, cursorWorkspaceRoot)
 					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", args)
 				}
 

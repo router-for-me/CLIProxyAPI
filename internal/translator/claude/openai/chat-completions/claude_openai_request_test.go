@@ -44,6 +44,42 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_UltracodeMapsToXHighForOpus48(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-opus-4-8",
+		"reasoning_effort": "ultracode",
+		"messages": [{"role":"user","content":"hi"}]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), false)
+	root := gjson.ParseBytes(result)
+
+	if got := root.Get("thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive. Output: %s", got, string(result))
+	}
+	if got := root.Get("output_config.effort").String(); got != "xhigh" {
+		t.Fatalf("output_config.effort = %q, want xhigh. Output: %s", got, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_UltracodeFallsBackToHighWhenXHighUnsupported(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-6",
+		"reasoning_effort": "ultracode",
+		"messages": [{"role":"user","content":"hi"}]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+	root := gjson.ParseBytes(result)
+
+	if got := root.Get("thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive. Output: %s", got, string(result))
+	}
+	if got := root.Get("output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

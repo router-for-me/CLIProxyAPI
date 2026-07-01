@@ -58,7 +58,8 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	// model supports discrete levels. Same-family conversions require strict validation.
 	toCapability := detectModelCapability(modelInfo)
 	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
-	allowClampUnsupported := toHasLevelSupport && !isSameProviderFamily(fromFormat, toFormat)
+	allowClampUnsupported := toHasLevelSupport && (!isSameProviderFamily(fromFormat, toFormat) ||
+		fromSuffix || (toFormat == "claude" && levelIndex(string(config.Level)) != -1))
 
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,

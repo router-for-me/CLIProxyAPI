@@ -23,6 +23,15 @@ func TestAddOpenAIAgentToolUseInstruction_AppendsForFunctionTools(t *testing.T) 
 	if !strings.Contains(instructions, "Do not end a turn by only saying") {
 		t.Fatalf("agent tool-use instruction was not appended: %s", instructions)
 	}
+	if !strings.Contains(instructions, "Cursor file/search tools") {
+		t.Fatalf("Cursor file/search guidance was not appended: %s", instructions)
+	}
+	if !strings.Contains(instructions, "Never use Glob with **/* alone") {
+		t.Fatalf("broad Glob guard was not appended: %s", instructions)
+	}
+	if !strings.Contains(instructions, "cloud_base_branch only when environment is cloud") {
+		t.Fatalf("Cursor Subagent cloud_base_branch guard was not appended: %s", instructions)
+	}
 }
 
 func TestAddOpenAIAgentToolUseInstruction_SkipsToolChoiceNone(t *testing.T) {

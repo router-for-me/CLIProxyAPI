@@ -40,6 +40,24 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_UltracodeMapsToXHighForOpus48(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-opus-4-8",
+		"reasoning":{"effort":"ultracode"},
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-opus-4-8", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive. Output: %s", got, string(out))
+	}
+	if got := root.Get("output_config.effort").String(); got != "xhigh" {
+		t.Fatalf("output_config.effort = %q, want xhigh. Output: %s", got, string(out))
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_ReasoningItemToThinkingBlock(t *testing.T) {
 	rawSignature, expectedSignature := testClaudeResponsesThinkingSignature(t)
 	raw := []byte(`{
