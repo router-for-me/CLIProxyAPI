@@ -1495,7 +1495,11 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	}
 
 	if len(providers) == 0 {
-		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+		msg := fmt.Sprintf("unknown provider for model %s; check available models via GET /v1/models", modelName)
+		if sugg := util.SuggestClosestModels(baseModel, 3); len(sugg) > 0 {
+			msg = fmt.Sprintf("unknown provider for model %s; did you mean %s? check available models via GET /v1/models", modelName, strings.Join(sugg, ", "))
+		}
+		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("%s", msg)}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no
