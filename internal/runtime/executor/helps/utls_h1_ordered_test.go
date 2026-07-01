@@ -3,11 +3,28 @@ package helps
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 )
+
+func TestWriteOrderedRequest_RejectsUnframableBody(t *testing.T) {
+	// Arrange: a body with unknown length (no Content-Length, no chunked) would
+	// corrupt keep-alive framing and must be rejected.
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", io.NopCloser(strings.NewReader("x")))
+	req.ContentLength = -1
+
+	// Act
+	var buf bytes.Buffer
+	err := writeOrderedRequest(bufio.NewWriter(&buf), req, claudeHeaderOrder)
+
+	// Assert
+	if !errors.Is(err, errUnframableBody) {
+		t.Fatalf("err = %v, want errUnframableBody", err)
+	}
+}
 
 // emittedHeaderNames writes req with writeOrderedRequest and returns the header
 // names in wire order (excluding the request line and Host), plus the body.
