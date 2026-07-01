@@ -112,6 +112,15 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+	if !gjson.ValidBytes(rawJSON) {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Invalid request: invalid JSON payload",
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -120,7 +129,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
 	if shouldTreatAsResponsesFormat(rawJSON) {
-		if err := validateOpenAIResponsesToolsForChatTranslation(rawJSON); err != nil {
+		if err := responsesconverter.ValidateOpenAIResponsesToolsForChatTranslation(rawJSON); err != nil {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 				Error: handlers.ErrorDetail{
 					Message: fmt.Sprintf("Invalid request: %v", err),

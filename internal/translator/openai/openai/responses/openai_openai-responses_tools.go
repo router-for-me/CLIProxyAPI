@@ -1,11 +1,119 @@
 package responses
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func ValidateOpenAIResponsesToolsForChatTranslation(requestRawJSON []byte) error {
+	return validateOpenAIResponsesTools(requestRawJSON, true)
+}
+
+func ValidateOpenAIResponsesNamespaceTools(requestRawJSON []byte) error {
+	return validateOpenAIResponsesTools(requestRawJSON, false)
+}
+
+func validateOpenAIResponsesTools(requestRawJSON []byte, strict bool) error {
+	if !gjson.ValidBytes(requestRawJSON) {
+		return fmt.Errorf("invalid JSON payload")
+	}
+
+	tools := gjson.GetBytes(requestRawJSON, "tools")
+	if !tools.Exists() {
+		return nil
+	}
+	if !tools.IsArray() {
+		return fmt.Errorf("tools must be an array")
+	}
+
+	seenNames := map[string]struct{}{}
+	var validationErr error
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		switch toolType {
+		case "", "function":
+			name := responsesToolName(tool)
+			if name == "" {
+				validationErr = fmt.Errorf("function tool name must not be empty")
+				return false
+			}
+			if err := recordResponsesToolName(seenNames, name); err != nil {
+				validationErr = err
+				return false
+			}
+		case "namespace":
+			if err := validateResponsesNamespaceTool(seenNames, tool, strict); err != nil {
+				validationErr = err
+				return false
+			}
+		default:
+			if strict {
+				validationErr = fmt.Errorf("unsupported tool type %q", toolType)
+				return false
+			}
+		}
+		return true
+	})
+	return validationErr
+}
+
+func validateResponsesNamespaceTool(seenNames map[string]struct{}, tool gjson.Result, strict bool) error {
+	namespaceName := strings.TrimSpace(tool.Get("name").String())
+	if namespaceName == "" {
+		return fmt.Errorf("namespace tool name must not be empty")
+	}
+	if !strings.HasPrefix(namespaceName, "mcp__") && strings.Contains(namespaceName, "__") {
+		return fmt.Errorf("namespace tool name must not contain __")
+	}
+	children := tool.Get("tools")
+	if !children.Exists() || !children.IsArray() {
+		return fmt.Errorf("namespace tool %q must contain a tools array", namespaceName)
+	}
+
+	childNames := map[string]struct{}{}
+	var validationErr error
+	children.ForEach(func(_, child gjson.Result) bool {
+		childType := strings.TrimSpace(child.Get("type").String())
+		if childType != "" && childType != "function" {
+			if strict {
+				validationErr = fmt.Errorf("namespace child tool type must be function")
+				return false
+			}
+			return true
+		}
+		childName := responsesToolName(child)
+		if childName == "" {
+			validationErr = fmt.Errorf("namespace child tool name must not be empty")
+			return false
+		}
+		if strings.HasPrefix(childName, namespaceName+"__") {
+			validationErr = fmt.Errorf("namespace child tool name must not be pre-qualified")
+			return false
+		}
+		if err := recordResponsesToolName(childNames, childName); err != nil {
+			validationErr = fmt.Errorf("duplicate namespace child tool name %q", childName)
+			return false
+		}
+		qualifiedName := qualifyResponsesNamespaceToolName(namespaceName, childName)
+		if err := recordResponsesToolName(seenNames, qualifiedName); err != nil {
+			validationErr = err
+			return false
+		}
+		return true
+	})
+	return validationErr
+}
+
+func recordResponsesToolName(seenNames map[string]struct{}, name string) error {
+	if _, exists := seenNames[name]; exists {
+		return fmt.Errorf("duplicate tool name %q", name)
+	}
+	seenNames[name] = struct{}{}
+	return nil
+}
 
 func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 	toolType := strings.TrimSpace(tool.Get("type").String())
@@ -95,7 +203,7 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
 		return childName
 	}
-	if strings.HasPrefix(childName, namespaceName) {
+	if strings.HasPrefix(childName, namespaceName+"__") {
 		return childName
 	}
 	if strings.HasSuffix(namespaceName, "__") {
