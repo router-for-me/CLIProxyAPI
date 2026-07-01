@@ -722,6 +722,14 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 	return nil
 }
 
+func (e *CodexExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	return helps.ShouldPrepareCommandAuth(auth)
+}
+
+func (e *CodexExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return helps.PrepareCommandAuth(ctx, auth)
+}
+
 // HttpRequest injects Codex credentials into the request and executes it.
 func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
@@ -1363,6 +1371,9 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 
 func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("codex executor: refresh called")
+	if helps.ShouldPrepareCommandAuth(auth) {
+		return helps.PrepareCommandAuth(ctx, auth)
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}
@@ -1881,6 +1892,9 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 		entry := &e.cfg.CodexKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if commandAuthMatches(entry.Auth, cfgBase, attrBase, auth) {
+			return entry
+		}
 		if attrKey != "" && attrBase != "" {
 			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
 				return entry

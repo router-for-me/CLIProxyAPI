@@ -46,6 +46,22 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 	}
 
 	apiKey, baseURL := claudeCreds(auth)
+	attrCommandKey := ""
+	if auth.Attributes != nil {
+		attrCommandKey = strings.TrimSpace(auth.Attributes[cliproxyauth.AttrAuthCommandKey])
+	}
+	if attrCommandKey != "" {
+		for i := range cfg.ClaudeKey {
+			entry := &cfg.ClaudeKey[i]
+			cfgCommandKey := config.CommandAuthIdentity(entry.Auth)
+			cfgBase := strings.TrimSpace(entry.BaseURL)
+			if cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
+				if cfgBase == "" || baseURL == "" || strings.EqualFold(cfgBase, baseURL) {
+					return entry
+				}
+			}
+		}
+	}
 	if apiKey == "" {
 		return nil
 	}

@@ -64,9 +64,10 @@ type apiCallResponse struct {
 //   - url (required): Absolute URL including scheme and host, e.g. "https://api.example.com/v1/ping".
 //   - header (optional): Request headers map.
 //     Supports magic variable "$TOKEN$" which is replaced using the selected credential:
-//     1) metadata.access_token
-//     2) attributes.api_key
-//     3) metadata.token / metadata.id_token / metadata.cookie
+//     1) command auth output, when the credential is command-backed
+//     2) metadata.access_token
+//     3) attributes.api_key
+//     4) metadata.token / metadata.id_token / metadata.cookie
 //     Example: {"Authorization":"Bearer $TOKEN$"}.
 //     Note: if you need to override the HTTP Host header, set header["Host"].
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
@@ -148,6 +149,21 @@ func (h *Handler) APICall(c *gin.Context) {
 			continue
 		}
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
+	}
+	if auth == nil && !hasHeader(reqHeaders, "authorization") {
+		if inferredAuth := h.commandAuthForAPICallURL(parsedURL); inferredAuth != nil {
+			inferredToken, errToken := h.resolveTokenForAuth(c.Request.Context(), inferredAuth)
+			if errToken != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
+				return
+			}
+			if inferredToken == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
+				return
+			}
+			auth = inferredAuth
+			reqHeaders["Authorization"] = "Bearer " + inferredToken
+		}
 	}
 
 	var requestBody io.Reader
@@ -234,12 +250,112 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		return "", nil
 	}
 
+	if coreauth.IsCommandAuth(auth) {
+		return h.resolveCommandAuthToken(ctx, auth)
+	}
+
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+func (h *Handler) resolveCommandAuthToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if h == nil || h.authManager == nil {
+		return "", fmt.Errorf("command auth manager unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, "https://cliproxy.local/", nil)
+	if errReq != nil {
+		return "", errReq
+	}
+	if errPrepare := h.authManager.PrepareHttpRequest(ctx, auth, req); errPrepare != nil {
+		return "", errPrepare
+	}
+	if token := bearerTokenFromAuthorization(req.Header.Get("Authorization")); token != "" {
+		return token, nil
+	}
+	if current, ok := h.authManager.GetByID(auth.ID); ok {
+		return tokenValueForAuth(current), nil
+	}
+	return tokenValueForAuth(auth), nil
+}
+
+func bearerTokenFromAuthorization(value string) string {
+	value = strings.TrimSpace(value)
+	const prefix = "Bearer "
+	if len(value) >= len(prefix) && strings.EqualFold(value[:len(prefix)], prefix) {
+		return strings.TrimSpace(value[len(prefix):])
+	}
+	return ""
+}
+
+func hasHeader(headers map[string]string, name string) bool {
+	name = strings.TrimSpace(name)
+	for key := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) commandAuthForAPICallURL(target *url.URL) *coreauth.Auth {
+	if h == nil || h.authManager == nil || target == nil {
+		return nil
+	}
+	var matched *coreauth.Auth
+	for _, auth := range h.authManager.List() {
+		if !coreauth.IsCommandAuth(auth) || !commandAuthAvailableForAPICall(auth) || !authBaseURLMatches(target, auth) {
+			continue
+		}
+		if matched != nil {
+			return nil
+		}
+		matched = auth
+	}
+	return matched
+}
+
+func commandAuthAvailableForAPICall(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return false
+	}
+	if auth.Attributes != nil {
+		for _, item := range strings.Split(auth.Attributes["excluded_models"], ",") {
+			if strings.TrimSpace(item) == configAPIKeyDisablePattern {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func authBaseURLMatches(target *url.URL, auth *coreauth.Auth) bool {
+	if target == nil || auth == nil || auth.Attributes == nil {
+		return false
+	}
+	baseRaw := strings.TrimSpace(auth.Attributes["base_url"])
+	if baseRaw == "" {
+		return false
+	}
+	baseURL, errParse := url.Parse(baseRaw)
+	if errParse != nil || baseURL.Scheme == "" || baseURL.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(baseURL.Scheme, target.Scheme) || !strings.EqualFold(baseURL.Host, target.Host) {
+		return false
+	}
+	basePath := strings.TrimRight(baseURL.EscapedPath(), "/")
+	targetPath := strings.TrimRight(target.EscapedPath(), "/")
+	if basePath == "" {
+		return true
+	}
+	return targetPath == basePath || strings.HasPrefix(targetPath, basePath+"/")
 }
 
 func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
@@ -505,16 +621,30 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 type apiKeyConfigEntry interface {
 	GetAPIKey() string
 	GetBaseURL() string
+	GetCommandAuth() *config.CommandAuthConfig
 }
 
 func resolveAPIKeyConfig[T apiKeyConfigEntry](entries []T, auth *coreauth.Auth) *T {
 	if auth == nil || len(entries) == 0 {
 		return nil
 	}
-	attrKey, attrBase := "", ""
+	attrKey, attrBase, attrCommandKey := "", "", ""
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrCommandKey = strings.TrimSpace(auth.Attributes[coreauth.AttrAuthCommandKey])
+	}
+	if attrCommandKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			cfgCommandKey := config.CommandAuthIdentity((*entry).GetCommandAuth())
+			cfgBase := strings.TrimSpace((*entry).GetBaseURL())
+			if cfgCommandKey != "" && strings.EqualFold(attrCommandKey, cfgCommandKey) {
+				if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+					return entry
+				}
+			}
+		}
 	}
 	for i := range entries {
 		entry := &entries[i]
@@ -551,7 +681,7 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		return ""
 	}
 	authKind, authAccount := auth.AccountInfo()
-	if !strings.EqualFold(strings.TrimSpace(authKind), "api_key") {
+	if !strings.EqualFold(strings.TrimSpace(authKind), "api_key") && !coreauth.IsCommandAuth(auth) {
 		return ""
 	}
 
@@ -563,6 +693,9 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		providerKey = strings.TrimSpace(attrs["provider_key"])
 	}
 	if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+		if coreauth.IsCommandAuth(auth) {
+			return resolveOpenAICompatCommandAuthProxyURL(cfg, auth, providerKey, compatName)
+		}
 		return resolveOpenAICompatAPIKeyProxyURL(cfg, auth, strings.TrimSpace(authAccount), providerKey, compatName)
 	}
 
@@ -579,8 +712,20 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		if entry := resolveAPIKeyConfig(cfg.CodexKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
+	case "vertex":
+		if entry := resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
 	}
 	return ""
+}
+
+func resolveOpenAICompatCommandAuthProxyURL(cfg *config.Config, auth *coreauth.Auth, providerKey, compatName string) string {
+	entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName)
+	if entry == nil {
+		return ""
+	}
+	return strings.TrimSpace(entry.ProxyURL)
 }
 
 func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, apiKey, providerKey, compatName string) string {
@@ -620,6 +765,34 @@ func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, 
 		}
 	}
 	return ""
+}
+
+func resolveOpenAICompatConfigForAuth(cfg *config.Config, auth *coreauth.Auth, providerKey, compatName string) *config.OpenAICompatibility {
+	if cfg == nil || auth == nil {
+		return nil
+	}
+	candidates := make([]string, 0, 3)
+	if v := strings.TrimSpace(compatName); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(providerKey); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(auth.Provider); v != "" {
+		candidates = append(candidates, v)
+	}
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
+		for _, candidate := range candidates {
+			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
+				return compat
+			}
+		}
+	}
+	return nil
 }
 
 func buildProxyTransport(proxyStr string) *http.Transport {

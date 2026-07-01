@@ -86,6 +86,14 @@ func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth)
 	return nil
 }
 
+func (e *XAIExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	return helps.ShouldPrepareCommandAuth(auth)
+}
+
+func (e *XAIExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return helps.PrepareCommandAuth(ctx, auth)
+}
+
 // HttpRequest injects xAI credentials into the request and executes it.
 func (e *XAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
@@ -734,6 +742,9 @@ func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, 
 // Refresh refreshes xAI OAuth credentials using the stored refresh token.
 func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("xai executor: refresh called")
+	if helps.ShouldPrepareCommandAuth(auth) {
+		return helps.PrepareCommandAuth(ctx, auth)
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}

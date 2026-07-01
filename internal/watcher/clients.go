@@ -382,20 +382,40 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	openAICompatCount := 0
 
 	if len(cfg.GeminiKey) > 0 {
-		geminiAPIKeyCount += len(cfg.GeminiKey)
+		for _, entry := range cfg.GeminiKey {
+			if strings.TrimSpace(entry.APIKey) != "" || entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+				geminiAPIKeyCount++
+			}
+		}
 	}
 	if len(cfg.VertexCompatAPIKey) > 0 {
-		vertexCompatAPIKeyCount += len(cfg.VertexCompatAPIKey)
+		for _, entry := range cfg.VertexCompatAPIKey {
+			if strings.TrimSpace(entry.APIKey) != "" || entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+				vertexCompatAPIKeyCount++
+			}
+		}
 	}
 	if len(cfg.ClaudeKey) > 0 {
-		claudeAPIKeyCount += len(cfg.ClaudeKey)
+		for _, entry := range cfg.ClaudeKey {
+			if strings.TrimSpace(entry.APIKey) != "" || entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+				claudeAPIKeyCount++
+			}
+		}
 	}
 	if len(cfg.CodexKey) > 0 {
-		codexAPIKeyCount += len(cfg.CodexKey)
+		for _, entry := range cfg.CodexKey {
+			if strings.TrimSpace(entry.APIKey) != "" || entry.Auth != nil && strings.TrimSpace(entry.Auth.Command) != "" {
+				codexAPIKeyCount++
+			}
+		}
 	}
 	if len(cfg.OpenAICompatibility) > 0 {
 		for _, compatConfig := range cfg.OpenAICompatibility {
 			if compatConfig.Disabled {
+				continue
+			}
+			if compatConfig.Auth != nil && strings.TrimSpace(compatConfig.Auth.Command) != "" {
+				openAICompatCount++
 				continue
 			}
 			openAICompatCount += len(compatConfig.APIKeyEntries)

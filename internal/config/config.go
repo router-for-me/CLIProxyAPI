@@ -438,6 +438,10 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Auth executes a command to obtain a token before upstream requests.
+	// Mutually exclusive with APIKey.
+	Auth *CommandAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -478,6 +482,9 @@ type ClaudeKey struct {
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
+func (k ClaudeKey) GetCommandAuth() *CommandAuthConfig {
+	return k.Auth
+}
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {
@@ -500,6 +507,10 @@ func (m ClaudeModel) GetForceMapping() bool { return m.ForceMapping }
 type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Auth executes a command to obtain a bearer token before upstream requests.
+	// Mutually exclusive with APIKey.
+	Auth *CommandAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -533,6 +544,9 @@ type CodexKey struct {
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
+func (k CodexKey) GetCommandAuth() *CommandAuthConfig {
+	return k.Auth
+}
 
 // CodexModel describes a mapping between an alias and the actual upstream model name.
 type CodexModel struct {
@@ -555,6 +569,10 @@ func (m CodexModel) GetForceMapping() bool { return m.ForceMapping }
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Auth executes a command to obtain a token before upstream requests.
+	// Mutually exclusive with APIKey.
+	Auth *CommandAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -584,6 +602,9 @@ type GeminiKey struct {
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
 func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
+func (k GeminiKey) GetCommandAuth() *CommandAuthConfig {
+	return k.Auth
+}
 
 // GeminiModel describes a mapping between an alias and the actual upstream model name.
 type GeminiModel struct {
@@ -619,6 +640,13 @@ type OpenAICompatibility struct {
 
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// ProxyURL overrides the global proxy setting for command-auth providers if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Auth executes a command to obtain a bearer token before upstream requests.
+	// Mutually exclusive with non-empty APIKeyEntries.
+	Auth *CommandAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
 
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
@@ -806,6 +834,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	if err = cfg.ValidateCommandAuthConfig(); err != nil {
+		return nil, fmt.Errorf("invalid command auth config: %w", err)
+	}
+
 	// Return the populated configuration struct.
 	return &cfg, nil
 }
@@ -966,7 +998,9 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		normalizeCommandAuth(e.Auth)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -985,10 +1019,13 @@ func (cfg *Config) SanitizeCodexKeys() {
 	out := make([]CodexKey, 0, len(cfg.CodexKey))
 	for i := range cfg.CodexKey {
 		e := cfg.CodexKey[i]
+		e.APIKey = strings.TrimSpace(e.APIKey)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		normalizeCommandAuth(e.Auth)
 		if e.BaseURL == "" {
 			continue
 		}
@@ -1004,9 +1041,13 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		normalizeCommandAuth(entry.Auth)
 	}
 }
 
@@ -1022,7 +1063,8 @@ func (cfg *Config) SanitizeGeminiKeys() {
 	for i := range cfg.GeminiKey {
 		entry := cfg.GeminiKey[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
+		normalizeCommandAuth(entry.Auth)
+		if entry.APIKey == "" && (entry.Auth == nil || strings.TrimSpace(entry.Auth.Command) == "") {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
@@ -1031,6 +1073,9 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if entry.APIKey == "" {
+			uniqueKey = CommandAuthIdentity(entry.Auth) + "|" + entry.BaseURL
+		}
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

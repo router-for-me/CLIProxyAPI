@@ -44,10 +44,11 @@ func cloneRuntimeValue(v reflect.Value) reflect.Value {
 		out := reflect.New(v.Type()).Elem()
 		for i := 0; i < v.NumField(); i++ {
 			dst := out.Field(i)
+			src := v.Field(i)
 			if !dst.CanSet() {
-				return v
+				continue
 			}
-			dst.Set(cloneRuntimeValue(v.Field(i)))
+			dst.Set(cloneRuntimeValue(src))
 		}
 		return out
 	case reflect.Slice:

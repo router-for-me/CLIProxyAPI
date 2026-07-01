@@ -1,6 +1,12 @@
 package config
 
-import "strings"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
 
 // VertexCompatKey represents the configuration for Vertex AI-compatible API keys.
 // This supports third-party services that use Vertex AI-style endpoint paths
@@ -12,6 +18,10 @@ type VertexCompatKey struct {
 	// APIKey is the authentication key for accessing the Vertex-compatible API.
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Auth executes a command to obtain a token before upstream requests.
+	// Mutually exclusive with APIKey.
+	Auth *CommandAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -39,8 +49,64 @@ type VertexCompatKey struct {
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
+func (k *VertexCompatKey) UnmarshalYAML(value *yaml.Node) error {
+	if k == nil {
+		return nil
+	}
+	type raw VertexCompatKey
+	var out raw
+	if value != nil {
+		if err := value.Decode(&out); err != nil {
+			return err
+		}
+		decodeYAMLStringAlias(value, "api_key", &out.APIKey)
+		decodeYAMLStringAlias(value, "base_url", &out.BaseURL)
+		decodeYAMLStringAlias(value, "proxy_url", &out.ProxyURL)
+		decodeYAMLStringSliceAlias(value, "excluded_models", &out.ExcludedModels)
+	}
+	*k = VertexCompatKey(out)
+	return nil
+}
+
+func (k *VertexCompatKey) UnmarshalJSON(data []byte) error {
+	if k == nil {
+		return nil
+	}
+	type raw VertexCompatKey
+	var out raw
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	var aliases struct {
+		APIKey         string   `json:"api_key"`
+		BaseURL        string   `json:"base_url"`
+		ProxyURL       string   `json:"proxy_url"`
+		ExcludedModels []string `json:"excluded_models"`
+	}
+	if err := json.Unmarshal(data, &aliases); err != nil {
+		return fmt.Errorf("parse vertex-api-key aliases: %w", err)
+	}
+	if strings.TrimSpace(out.APIKey) == "" {
+		out.APIKey = aliases.APIKey
+	}
+	if strings.TrimSpace(out.BaseURL) == "" {
+		out.BaseURL = aliases.BaseURL
+	}
+	if strings.TrimSpace(out.ProxyURL) == "" {
+		out.ProxyURL = aliases.ProxyURL
+	}
+	if len(out.ExcludedModels) == 0 {
+		out.ExcludedModels = aliases.ExcludedModels
+	}
+	*k = VertexCompatKey(out)
+	return nil
+}
+
 func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }
 func (k VertexCompatKey) GetBaseURL() string { return k.BaseURL }
+func (k VertexCompatKey) GetCommandAuth() *CommandAuthConfig {
+	return k.Auth
+}
 
 // VertexCompatModel represents a model configuration for Vertex compatibility,
 // including the actual model name and its alias for API routing.
@@ -70,7 +136,8 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 	for i := range cfg.VertexCompatAPIKey {
 		entry := cfg.VertexCompatAPIKey[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
+		normalizeCommandAuth(entry.Auth)
+		if entry.APIKey == "" && (entry.Auth == nil || strings.TrimSpace(entry.Auth.Command) == "") {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
@@ -92,6 +159,9 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 
 		// Use API key + base URL as uniqueness key
 		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if entry.APIKey == "" {
+			uniqueKey = CommandAuthIdentity(entry.Auth) + "|" + entry.BaseURL
+		}
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

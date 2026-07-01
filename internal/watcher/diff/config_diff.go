@@ -224,6 +224,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("codex[%d].api-key: updated", i))
 			}
+			if config.CommandAuthIdentity(o.Auth) != config.CommandAuthIdentity(n.Auth) || commandAuthPresence(o.Auth) != commandAuthPresence(n.Auth) {
+				changes = append(changes, fmt.Sprintf("codex[%d].auth: updated", i))
+			}
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("codex[%d].headers: updated", i))
 			}

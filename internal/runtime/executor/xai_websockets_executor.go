@@ -1356,6 +1356,20 @@ func (e *XAIAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.A
 	return e.httpExec.PrepareRequest(req, auth)
 }
 
+func (e *XAIAutoExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if e == nil || e.httpExec == nil {
+		return false
+	}
+	return e.httpExec.ShouldPrepareRequestAuth(auth)
+}
+
+func (e *XAIAutoExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if e == nil || e.httpExec == nil {
+		return auth, nil
+	}
+	return e.httpExec.PrepareRequestAuth(ctx, auth)
+}
+
 func (e *XAIAutoExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if e == nil || e.httpExec == nil {
 		return nil, fmt.Errorf("xai auto executor: http executor is nil")

@@ -223,6 +223,14 @@ nonstream-keepalive-interval: 0
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
 #       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
+#   - auth:                    # command auth is mutually exclusive with api-key
+#       command: "/usr/local/bin/fetch-gemini-token"
+#       args: ["--audience", "gemini"]
+#       timeout-ms: 5000
+#       refresh-interval-ms: 300000
+#     models:
+#       - name: "gemini-2.5-pro"
+#         alias: "gemini-command"
 #   - api-key: "AIzaSy...02"
 
 # Codex API keys
@@ -244,6 +252,15 @@ nonstream-keepalive-interval: 0
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+#   - base-url: "https://proxy.example.com/v1" # command auth is mutually exclusive with api-key
+#     auth:
+#       command: "/usr/local/bin/fetch-codex-token"
+#       args: ["--audience", "codex"]
+#       timeout-ms: 5000
+#       refresh-interval-ms: 300000
+#     models:
+#       - name: "gpt-5-codex"
+#         alias: "codex-command"
 
 # Claude API keys
 # claude-api-key:
@@ -282,6 +299,14 @@ nonstream-keepalive-interval: 0
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+#   - auth:                         # command auth is mutually exclusive with api-key
+#       command: "/usr/local/bin/fetch-claude-token"
+#       args: ["--audience", "claude"]
+#       timeout-ms: 5000
+#       refresh-interval-ms: 300000
+#     models:
+#       - name: "claude-3-5-sonnet-20241022"
+#         alias: "claude-command"
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
@@ -337,6 +362,16 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#   - name: "internal-proxy"
+#     base-url: "https://proxy.example.com/v1" # command auth is mutually exclusive with non-empty api-key-entries
+#     auth:
+#       command: "/usr/local/bin/fetch-codex-token"
+#       args: ["--audience", "codex"]
+#       timeout-ms: 5000
+#       refresh-interval-ms: 300000
+#     models:
+#       - name: "gpt-5"
+#         alias: "gpt-5-internal"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
@@ -355,6 +390,15 @@ nonstream-keepalive-interval: 0
 #     excluded-models:                            # optional: models to exclude from listing
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
+#   - auth:                                      # command auth is mutually exclusive with api-key
+#       command: "/usr/local/bin/fetch-vertex-token"
+#       args: ["--audience", "vertex"]
+#       timeout-ms: 5000
+#       refresh-interval-ms: 300000
+#     base-url: "https://example.com/api"
+#     models:
+#       - name: "gemini-2.5-pro"
+#         alias: "vertex-command"
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.

@@ -139,20 +139,30 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for i := range arr {
+		normalizeGeminiKey(&arr[i])
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
+	old := cloneGeminiKeys(h.cfg.GeminiKey)
+	h.cfg.GeminiKey = cloneGeminiKeys(arr)
 	h.cfg.SanitizeGeminiKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.GeminiKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		APIKey         *string                   `json:"api-key"`
+		Auth           *config.CommandAuthConfig `json:"auth"`
+		Prefix         *string                   `json:"prefix"`
+		BaseURL        *string                   `json:"base-url"`
+		ProxyURL       *string                   `json:"proxy-url"`
+		Headers        *map[string]string        `json:"headers"`
+		ExcludedModels *[]string                 `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -188,14 +198,16 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 
 	entry := h.cfg.GeminiKey[targetIndex]
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.APIKey = trimmed
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Auth != nil {
+		entry.Auth = commandAuthFromPatch(body.Value.Auth)
+	}
+	if body.Value.APIKey != nil && entry.APIKey == "" && entry.Auth == nil {
+		h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
+		h.cfg.SanitizeGeminiKeys()
+		h.persistLocked(c)
+		return
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -212,8 +224,15 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
+	normalizeGeminiKey(&entry)
+	old := cloneGeminiKeys(h.cfg.GeminiKey)
 	h.cfg.GeminiKey[targetIndex] = entry
 	h.cfg.SanitizeGeminiKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.GeminiKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 
@@ -301,20 +320,27 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.cfg.ClaudeKey = arr
+	old := cloneClaudeKeys(h.cfg.ClaudeKey)
+	h.cfg.ClaudeKey = cloneClaudeKeys(arr)
 	h.cfg.SanitizeClaudeKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.ClaudeKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey                  *string               `json:"api-key"`
-		Prefix                  *string               `json:"prefix"`
-		BaseURL                 *string               `json:"base-url"`
-		ProxyURL                *string               `json:"proxy-url"`
-		Models                  *[]config.ClaudeModel `json:"models"`
-		Headers                 *map[string]string    `json:"headers"`
-		ExcludedModels          *[]string             `json:"excluded-models"`
-		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
+		APIKey                  *string                   `json:"api-key"`
+		Auth                    *config.CommandAuthConfig `json:"auth"`
+		Prefix                  *string                   `json:"prefix"`
+		BaseURL                 *string                   `json:"base-url"`
+		ProxyURL                *string                   `json:"proxy-url"`
+		Models                  *[]config.ClaudeModel     `json:"models"`
+		Headers                 *map[string]string        `json:"headers"`
+		ExcludedModels          *[]string                 `json:"excluded-models"`
+		RebuildMidSystemMessage *bool                     `json:"rebuild-mid-system-message"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -350,6 +376,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
+	if body.Value.Auth != nil {
+		entry.Auth = commandAuthFromPatch(body.Value.Auth)
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -372,8 +401,14 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		entry.RebuildMidSystemMessage = *body.Value.RebuildMidSystemMessage
 	}
 	normalizeClaudeKey(&entry)
+	old := cloneClaudeKeys(h.cfg.ClaudeKey)
 	h.cfg.ClaudeKey[targetIndex] = entry
 	h.cfg.SanitizeClaudeKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.ClaudeKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 
@@ -460,8 +495,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	old := cloneOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.OpenAICompatibility = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
@@ -471,6 +512,8 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Disabled       *bool                               `json:"disabled"`
 		DisableCooling *bool                               `json:"disable-cooling"`
 		BaseURL        *string                             `json:"base-url"`
+		ProxyURL       *string                             `json:"proxy-url"`
+		Auth           *config.CommandAuthConfig           `json:"auth"`
 		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers        *map[string]string                  `json:"headers"`
@@ -521,12 +564,24 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
 		if trimmed == "" {
+			old := cloneOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
 			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:targetIndex], h.cfg.OpenAICompatibility[targetIndex+1:]...)
 			h.cfg.SanitizeOpenAICompatibility()
+			if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+				h.cfg.OpenAICompatibility = old
+				c.JSON(400, gin.H{"error": errValidate.Error()})
+				return
+			}
 			h.persistLocked(c)
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Auth != nil {
+		entry.Auth = commandAuthFromPatch(body.Value.Auth)
 	}
 	if body.Value.APIKeyEntries != nil {
 		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
@@ -538,8 +593,14 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
+	old := cloneOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
 	h.cfg.OpenAICompatibility[targetIndex] = entry
 	h.cfg.SanitizeOpenAICompatibility()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.OpenAICompatibility = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 
@@ -594,20 +655,27 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 	}
 	for i := range arr {
 		normalizeVertexCompatKey(&arr[i])
-		if arr[i].APIKey == "" {
+		if arr[i].APIKey == "" && (arr[i].Auth == nil || strings.TrimSpace(arr[i].Auth.Command) == "") {
 			c.JSON(400, gin.H{"error": fmt.Sprintf("vertex-api-key[%d].api-key is required", i)})
 			return
 		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.cfg.VertexCompatAPIKey = append([]config.VertexCompatKey(nil), arr...)
+	old := cloneVertexCompatKeys(h.cfg.VertexCompatAPIKey)
+	h.cfg.VertexCompatAPIKey = cloneVertexCompatKeys(arr)
 	h.cfg.SanitizeVertexCompatKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.VertexCompatAPIKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
+		Auth           *config.CommandAuthConfig   `json:"auth"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
 		ProxyURL       *string                     `json:"proxy-url"`
@@ -649,14 +717,16 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 
 	entry := h.cfg.VertexCompatAPIKey[targetIndex]
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:targetIndex], h.cfg.VertexCompatAPIKey[targetIndex+1:]...)
-			h.cfg.SanitizeVertexCompatKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.APIKey = trimmed
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Auth != nil {
+		entry.Auth = commandAuthFromPatch(body.Value.Auth)
+	}
+	if body.Value.APIKey != nil && entry.APIKey == "" && entry.Auth == nil {
+		h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:targetIndex], h.cfg.VertexCompatAPIKey[targetIndex+1:]...)
+		h.cfg.SanitizeVertexCompatKeys()
+		h.persistLocked(c)
+		return
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -684,8 +754,14 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
 	normalizeVertexCompatKey(&entry)
+	old := cloneVertexCompatKeys(h.cfg.VertexCompatAPIKey)
 	h.cfg.VertexCompatAPIKey[targetIndex] = entry
 	h.cfg.SanitizeVertexCompatKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.VertexCompatAPIKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 
@@ -957,19 +1033,26 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	old := cloneCodexKeys(h.cfg.CodexKey)
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.CodexKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string              `json:"api-key"`
-		Prefix         *string              `json:"prefix"`
-		BaseURL        *string              `json:"base-url"`
-		ProxyURL       *string              `json:"proxy-url"`
-		Models         *[]config.CodexModel `json:"models"`
-		Headers        *map[string]string   `json:"headers"`
-		ExcludedModels *[]string            `json:"excluded-models"`
+		APIKey         *string                   `json:"api-key"`
+		Auth           *config.CommandAuthConfig `json:"auth"`
+		Prefix         *string                   `json:"prefix"`
+		BaseURL        *string                   `json:"base-url"`
+		ProxyURL       *string                   `json:"proxy-url"`
+		Models         *[]config.CodexModel      `json:"models"`
+		Headers        *map[string]string        `json:"headers"`
+		ExcludedModels *[]string                 `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1011,12 +1094,21 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
 		if trimmed == "" {
+			old := cloneCodexKeys(h.cfg.CodexKey)
 			h.cfg.CodexKey = append(h.cfg.CodexKey[:targetIndex], h.cfg.CodexKey[targetIndex+1:]...)
 			h.cfg.SanitizeCodexKeys()
+			if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+				h.cfg.CodexKey = old
+				c.JSON(400, gin.H{"error": errValidate.Error()})
+				return
+			}
 			h.persistLocked(c)
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.Auth != nil {
+		entry.Auth = commandAuthFromPatch(body.Value.Auth)
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
@@ -1031,8 +1123,14 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
 	normalizeCodexKey(&entry)
+	old := cloneCodexKeys(h.cfg.CodexKey)
 	h.cfg.CodexKey[targetIndex] = entry
 	h.cfg.SanitizeCodexKeys()
+	if errValidate := h.cfg.ValidateCommandAuthConfig(); errValidate != nil {
+		h.cfg.CodexKey = old
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
 	h.persistLocked(c)
 }
 
@@ -1095,10 +1193,15 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.Auth = commandAuthFromPatch(entry.Auth)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
+		if entry.Auth != nil && isCommandAuthAPIKey(trimmed) {
+			trimmed = ""
+		}
 		entry.APIKeyEntries[i].APIKey = trimmed
 		if trimmed != "" {
 			existing[trimmed] = struct{}{}
@@ -1110,27 +1213,180 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 	if len(entries) == 0 {
 		return nil
 	}
+	out := cloneOpenAICompatibilityEntries(entries)
+	for i := range out {
+		normalizeOpenAICompatibilityEntry(&out[i])
+	}
+	return out
+}
+
+func cloneOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
+	if len(entries) == 0 {
+		return nil
+	}
 	out := make([]config.OpenAICompatibility, len(entries))
 	for i := range entries {
 		copyEntry := entries[i]
+		if copyEntry.Auth != nil {
+			copyEntry.Auth = cloneCommandAuth(copyEntry.Auth)
+		}
 		if len(copyEntry.APIKeyEntries) > 0 {
 			copyEntry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), copyEntry.APIKeyEntries...)
 		}
-		normalizeOpenAICompatibilityEntry(&copyEntry)
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.OpenAICompatibilityModel(nil), copyEntry.Models...)
+		}
+		if len(copyEntry.Headers) > 0 {
+			copyEntry.Headers = config.NormalizeHeaders(copyEntry.Headers)
+		}
 		out[i] = copyEntry
 	}
 	return out
+}
+
+func cloneCodexKeys(entries []config.CodexKey) []config.CodexKey {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.CodexKey, len(entries))
+	for i := range entries {
+		copyEntry := entries[i]
+		if copyEntry.Auth != nil {
+			copyEntry.Auth = cloneCommandAuth(copyEntry.Auth)
+		}
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.CodexModel(nil), copyEntry.Models...)
+		}
+		if len(copyEntry.Headers) > 0 {
+			copyEntry.Headers = config.NormalizeHeaders(copyEntry.Headers)
+		}
+		if len(copyEntry.ExcludedModels) > 0 {
+			copyEntry.ExcludedModels = append([]string(nil), copyEntry.ExcludedModels...)
+		}
+		out[i] = copyEntry
+	}
+	return out
+}
+
+func cloneGeminiKeys(entries []config.GeminiKey) []config.GeminiKey {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.GeminiKey, len(entries))
+	for i := range entries {
+		copyEntry := entries[i]
+		copyEntry.Auth = cloneCommandAuth(copyEntry.Auth)
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.GeminiModel(nil), copyEntry.Models...)
+		}
+		if len(copyEntry.Headers) > 0 {
+			copyEntry.Headers = config.NormalizeHeaders(copyEntry.Headers)
+		}
+		if len(copyEntry.ExcludedModels) > 0 {
+			copyEntry.ExcludedModels = append([]string(nil), copyEntry.ExcludedModels...)
+		}
+		out[i] = copyEntry
+	}
+	return out
+}
+
+func cloneClaudeKeys(entries []config.ClaudeKey) []config.ClaudeKey {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.ClaudeKey, len(entries))
+	for i := range entries {
+		copyEntry := entries[i]
+		copyEntry.Auth = cloneCommandAuth(copyEntry.Auth)
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.ClaudeModel(nil), copyEntry.Models...)
+		}
+		if len(copyEntry.Headers) > 0 {
+			copyEntry.Headers = config.NormalizeHeaders(copyEntry.Headers)
+		}
+		if len(copyEntry.ExcludedModels) > 0 {
+			copyEntry.ExcludedModels = append([]string(nil), copyEntry.ExcludedModels...)
+		}
+		out[i] = copyEntry
+	}
+	return out
+}
+
+func cloneVertexCompatKeys(entries []config.VertexCompatKey) []config.VertexCompatKey {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.VertexCompatKey, len(entries))
+	for i := range entries {
+		copyEntry := entries[i]
+		copyEntry.Auth = cloneCommandAuth(copyEntry.Auth)
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.VertexCompatModel(nil), copyEntry.Models...)
+		}
+		if len(copyEntry.Headers) > 0 {
+			copyEntry.Headers = config.NormalizeHeaders(copyEntry.Headers)
+		}
+		if len(copyEntry.ExcludedModels) > 0 {
+			copyEntry.ExcludedModels = append([]string(nil), copyEntry.ExcludedModels...)
+		}
+		out[i] = copyEntry
+	}
+	return out
+}
+
+func cloneCommandAuth(auth *config.CommandAuthConfig) *config.CommandAuthConfig {
+	if auth == nil {
+		return nil
+	}
+	copyAuth := *auth
+	copyAuth.Args = append([]string(nil), auth.Args...)
+	return &copyAuth
+}
+
+func commandAuthFromPatch(auth *config.CommandAuthConfig) *config.CommandAuthConfig {
+	if auth == nil || strings.TrimSpace(auth.Command) == "" && len(auth.Args) == 0 && auth.TimeoutMS == 0 && auth.RefreshIntervalMS == 0 {
+		return nil
+	}
+	return cloneCommandAuth(auth)
+}
+
+func normalizeGeminiKey(entry *config.GeminiKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.Auth = commandAuthFromPatch(entry.Auth)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.GeminiModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
 }
 
 func normalizeClaudeKey(entry *config.ClaudeKey) {
 	if entry == nil {
 		return
 	}
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.Auth = commandAuthFromPatch(entry.Auth)
 	if len(entry.Models) == 0 {
 		return
 	}
@@ -1151,12 +1407,13 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	if entry == nil {
 		return
 	}
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.Auth = commandAuthFromPatch(entry.Auth)
 	if len(entry.Models) == 0 {
 		return
 	}
@@ -1177,12 +1434,13 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	if entry == nil {
 		return
 	}
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.APIKey = clearCommandAuthAPIKey(entry.APIKey, entry.Auth)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.Auth = commandAuthFromPatch(entry.Auth)
 	if len(entry.Models) == 0 {
 		return
 	}

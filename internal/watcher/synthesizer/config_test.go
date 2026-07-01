@@ -292,6 +292,117 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_CodexCommandAuth(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CodexKey: []config.CodexKey{
+				{
+					BaseURL: "https://proxy.example.com/v1",
+					Auth: &config.CommandAuthConfig{
+						Command:           "fetch-token",
+						Args:              []string{"--audience", "codex"},
+						TimeoutMS:         5000,
+						RefreshIntervalMS: 300000,
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Label != "codex-auth-command" {
+		t.Fatalf("label = %q, want codex-auth-command", auth.Label)
+	}
+	if _, ok := auth.Attributes["api_key"]; ok {
+		t.Fatal("command auth should not set static api_key")
+	}
+	if got := auth.Attributes[coreauth.AttrAuthSource]; got != coreauth.AttrAuthSourceCommand {
+		t.Fatalf("auth_source = %q, want command", got)
+	}
+	if got := auth.Attributes[coreauth.AttrAuthCommand]; got != "fetch-token" {
+		t.Fatalf("auth_command = %q, want fetch-token", got)
+	}
+	if got := auth.Attributes[coreauth.AttrAuthKind]; got != coreauth.AttrAuthKindAPIKey {
+		t.Fatalf("auth_kind = %q, want apikey", got)
+	}
+}
+
+func TestConfigSynthesizer_CommandAuthProviders(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{{
+				BaseURL: "https://gemini.example.com",
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-gemini-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+			ClaudeKey: []config.ClaudeKey{{
+				BaseURL: "https://claude.example.com",
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-claude-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+			VertexCompatAPIKey: []config.VertexCompatKey{{
+				BaseURL: "https://vertex.example.com",
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-vertex-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths, got %d", len(auths))
+	}
+
+	want := map[string]string{
+		"gemini": "fetch-gemini-token",
+		"claude": "fetch-claude-token",
+		"vertex": "fetch-vertex-token",
+	}
+	for _, auth := range auths {
+		command := want[auth.Provider]
+		if command == "" {
+			t.Fatalf("unexpected provider %q", auth.Provider)
+		}
+		if got := auth.Attributes[coreauth.AttrAuthCommand]; got != command {
+			t.Fatalf("%s auth_command = %q, want %q", auth.Provider, got, command)
+		}
+		if got := auth.Attributes[coreauth.AttrAuthSource]; got != coreauth.AttrAuthSourceCommand {
+			t.Fatalf("%s auth_source = %q, want command", auth.Provider, got)
+		}
+		if _, ok := auth.Attributes["api_key"]; ok {
+			t.Fatalf("%s command auth should not set api_key", auth.Provider)
+		}
+		if auth.Label != auth.Provider+"-auth-command" {
+			t.Fatalf("%s label = %q", auth.Provider, auth.Label)
+		}
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -315,6 +426,81 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	}
 	if auths[0].Attributes["header:Authorization"] != "Bearer xyz" {
 		t.Errorf("expected header:Authorization=Bearer xyz, got %s", auths[0].Attributes["header:Authorization"])
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompatCommandAuth(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:     "proxy",
+					BaseURL:  "https://proxy.example.com/v1",
+					ProxyURL: "http://proxy.local",
+					Auth: &config.CommandAuthConfig{
+						Command:           "fetch-token",
+						Args:              []string{"--audience", "codex"},
+						TimeoutMS:         5000,
+						RefreshIntervalMS: 300000,
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.ProxyURL != "http://proxy.local" {
+		t.Fatalf("proxy_url = %q, want http://proxy.local", auth.ProxyURL)
+	}
+	if _, ok := auth.Attributes["api_key"]; ok {
+		t.Fatal("command auth should not set static api_key")
+	}
+	if got := auth.Attributes[coreauth.AttrAuthSource]; got != coreauth.AttrAuthSourceCommand {
+		t.Fatalf("auth_source = %q, want command", got)
+	}
+	if got := auth.Attributes["provider_key"]; got == "" {
+		t.Fatal("provider_key should be set")
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompatDisabledCommandAuth(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:     "proxy",
+				BaseURL:  "https://proxy.example.com/v1",
+				Disabled: true,
+				Auth: &config.CommandAuthConfig{
+					Command:           "fetch-token",
+					TimeoutMS:         5000,
+					RefreshIntervalMS: 300000,
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 disabled command auth, got %d", len(auths))
+	}
+	if !auths[0].Disabled || auths[0].Status != coreauth.StatusDisabled {
+		t.Fatalf("disabled command auth status = %v/%s, want true/%s", auths[0].Disabled, auths[0].Status, coreauth.StatusDisabled)
 	}
 }
 
@@ -481,8 +667,8 @@ func TestConfigSynthesizer_VertexCompat_SkipsEmptyAndHeaders(t *testing.T) {
 	ctx := &SynthesisContext{
 		Config: &config.Config{
 			VertexCompatAPIKey: []config.VertexCompatKey{
-				{APIKey: "", BaseURL: "https://vertex.api"},   // empty key creates auth without api_key attr
-				{APIKey: "  ", BaseURL: "https://vertex.api"}, // whitespace key creates auth without api_key attr
+				{APIKey: "", BaseURL: "https://vertex.api"},   // empty, should be skipped
+				{APIKey: "  ", BaseURL: "https://vertex.api"}, // whitespace, should be skipped
 				{APIKey: "valid-key", BaseURL: "https://vertex.api", Headers: map[string]string{"X-Vertex": "test"}},
 			},
 		},
@@ -494,20 +680,11 @@ func TestConfigSynthesizer_VertexCompat_SkipsEmptyAndHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Vertex compat doesn't skip empty keys - it creates auths without api_key attribute
-	if len(auths) != 3 {
-		t.Fatalf("expected 3 auths, got %d", len(auths))
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth (empty keys skipped), got %d", len(auths))
 	}
-	// First two should not have api_key attribute
-	if _, ok := auths[0].Attributes["api_key"]; ok {
-		t.Error("expected first auth to not have api_key attribute")
-	}
-	if _, ok := auths[1].Attributes["api_key"]; ok {
-		t.Error("expected second auth to not have api_key attribute")
-	}
-	// Third should have headers
-	if auths[2].Attributes["header:X-Vertex"] != "test" {
-		t.Errorf("expected header:X-Vertex=test, got %s", auths[2].Attributes["header:X-Vertex"])
+	if auths[0].Attributes["header:X-Vertex"] != "test" {
+		t.Errorf("expected header:X-Vertex=test, got %s", auths[0].Attributes["header:X-Vertex"])
 	}
 }
 

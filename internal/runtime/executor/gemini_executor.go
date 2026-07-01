@@ -71,6 +71,14 @@ func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	return nil
 }
 
+func (e *GeminiExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	return helps.ShouldPrepareCommandAuth(auth)
+}
+
+func (e *GeminiExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return helps.PrepareCommandAuth(ctx, auth)
+}
+
 // HttpRequest injects Gemini credentials into the request and executes it.
 func (e *GeminiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
@@ -438,6 +446,9 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 // Refresh refreshes the authentication credentials (no-op for Gemini API key).
 func (e *GeminiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if helps.ShouldPrepareCommandAuth(auth) {
+		return helps.PrepareCommandAuth(ctx, auth)
+	}
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
 	}
@@ -451,6 +462,11 @@ func geminiAPIKey(a *cliproxyauth.Auth) string {
 	if a.Attributes != nil {
 		if v := a.Attributes["api_key"]; v != "" {
 			return v
+		}
+	}
+	if a.Metadata != nil {
+		if v, ok := a.Metadata["access_token"].(string); ok {
+			return strings.TrimSpace(v)
 		}
 	}
 	return ""
@@ -482,6 +498,9 @@ func (e *GeminiExecutor) resolveGeminiConfig(auth *cliproxyauth.Auth) *config.Ge
 		entry := &e.cfg.GeminiKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if commandAuthMatches(entry.Auth, cfgBase, attrBase, auth) {
+			return entry
+		}
 		if attrKey != "" && attrBase != "" {
 			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
 				return entry
