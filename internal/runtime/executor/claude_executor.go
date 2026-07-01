@@ -1889,7 +1889,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
-	// Collect user system instructions and prepend to first user message
+	// Collect user system instructions and prepend to first user message.
+	// In OAuth mode, sanitize only the first forwarded system block and preserve
+	// all subsequent blocks unchanged.
 	if !strictMode {
 		var userSystemParts []string
 		if system.IsArray() {
@@ -1907,9 +1909,11 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		}
 
 		if len(userSystemParts) > 0 {
-			combined := strings.Join(userSystemParts, "\n\n")
+			var combined string
 			if oauthMode {
-				combined = sanitizeForwardedSystemPrompt(combined)
+				combined = sanitizeForwardedSystemPrompt(userSystemParts)
+			} else {
+				combined = strings.Join(userSystemParts, "\n\n")
 			}
 			if strings.TrimSpace(combined) != "" {
 				payload = prependToFirstUserMessage(payload, combined)
@@ -1920,17 +1924,40 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	return payload
 }
 
-// sanitizeForwardedSystemPrompt reduces forwarded third-party system context to a
-// tiny neutral reminder for Claude OAuth cloaking. The goal is to preserve only
-// the minimum tool/task guidance while removing virtually all client-specific
-// prompt structure that Anthropic may classify as third-party agent traffic.
-func sanitizeForwardedSystemPrompt(text string) string {
-	if strings.TrimSpace(text) == "" {
+// sanitizeForwardedSystemPrompt sanitizes the first forwarded system block and
+// preserves all subsequent blocks unchanged: sanitize userSystemParts[0],
+// keep userSystemParts[1:]. It also extracts <available_skills> from block[0]
+// before replacing it, since OpenCode typically sends everything in a single block.
+func sanitizeForwardedSystemPrompt(parts []string) string {
+	if len(parts) == 0 {
 		return ""
 	}
-	return strings.TrimSpace(`Use the available tools when needed to help with software engineering tasks.
+	genericReminder := strings.TrimSpace(`Use the available tools when needed to help with software engineering tasks.
 Keep responses concise and focused on the user's request.
 Prefer acting on the user's task over describing product-specific workflows.`)
+	sanitized := make([]string, 0, len(parts))
+	parts0 := genericReminder
+	if skills := extractAvailableSkillsBlock(parts[0]); skills != "" {
+		parts0 = genericReminder + "\n\n" + skills
+	}
+	sanitized = append(sanitized, parts0)
+	sanitized = append(sanitized, parts[1:]...)
+	return strings.Join(sanitized, "\n\n")
+}
+
+func extractAvailableSkillsBlock(text string) string {
+	const openTag = "<available_skills>"
+	const closeTag = "</available_skills>"
+	start := strings.Index(text, openTag)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(text[start:], closeTag)
+	if end < 0 {
+		return ""
+	}
+	end += start + len(closeTag)
+	return strings.TrimSpace(text[start:end])
 }
 
 // buildTextBlock constructs a JSON text block object with proper escaping.
