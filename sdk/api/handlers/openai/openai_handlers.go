@@ -120,6 +120,15 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
 	if shouldTreatAsResponsesFormat(rawJSON) {
+		if err := validateOpenAIResponsesToolsForChatTranslation(rawJSON); err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
 		modelName := gjson.GetBytes(rawJSON, "model").String()
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
