@@ -27,6 +27,21 @@ func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 	return hashJoined(keys)
 }
 
+// ComputeCursorComposerModelsHash returns a stable hash for Cursor Composer model aliases.
+func ComputeCursorComposerModelsHash(models []config.CursorComposerModel) string {
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+		}
+	})
+	return hashJoined(keys)
+}
+
 // ComputeVertexCompatModelsHash returns a stable hash for Vertex-compatible models.
 func ComputeVertexCompatModelsHash(models []config.VertexCompatModel) string {
 	keys := normalizeModelPairs(func(out func(key string)) {

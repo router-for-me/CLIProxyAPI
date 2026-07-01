@@ -1079,6 +1079,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+	case "cursor-composer":
+		s.coreManager.RegisterExecutor(executor.NewCursorComposerExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -2013,6 +2015,18 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "xai":
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
+	case "cursor-composer":
+		models = defaultCursorComposerModels()
+		if entry := s.resolveConfigCursorComposerKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildCursorComposerConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = mergeCursorComposerDefaultModels(models)
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -2306,6 +2320,35 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	return nil
 }
 
+func (s *Service) resolveConfigCursorComposerKey(auth *coreauth.Auth) *config.CursorComposerKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBackend, attrEndpoint string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBackend = strings.TrimSpace(auth.Attributes["backend_base_url"])
+		attrEndpoint = strings.TrimSpace(auth.Attributes["chat_endpoint"])
+	}
+	for i := range s.cfg.CursorComposerKey {
+		entry := &s.cfg.CursorComposerKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBackend := strings.TrimSpace(entry.BackendBaseURL)
+		cfgEndpoint := strings.TrimSpace(entry.ChatEndpoint)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if (cfgBackend == "" || strings.EqualFold(cfgBackend, attrBackend)) &&
+				(cfgEndpoint == "" || strings.EqualFold(cfgEndpoint, attrEndpoint)) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBackend != "" && strings.EqualFold(cfgBackend, attrBackend) {
+			return entry
+		}
+	}
+	return nil
+}
+
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 	cfg := s.cfg
 	if cfg == nil {
@@ -2553,6 +2596,66 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+}
+
+func buildCursorComposerConfigModels(entry *config.CursorComposerKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "cursor", "cursor-composer")
+}
+
+func defaultCursorComposerModels() []*ModelInfo {
+	now := time.Now().Unix()
+	ids := []string{"composer-2.5", "composer-2.5-fast", "composer-latest"}
+	out := make([]*ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, &ModelInfo{
+			ID:                        id,
+			Object:                    "model",
+			Created:                   now,
+			OwnedBy:                   "cursor",
+			Type:                      "cursor-composer",
+			DisplayName:               id,
+			SupportedInputModalities:  []string{"TEXT"},
+			SupportedOutputModalities: []string{"TEXT"},
+		})
+	}
+	return out
+}
+
+// mergeCursorComposerDefaultModels ensures canonical Composer model IDs remain
+// registered after config reloads or binary upgrades that previously left stale
+// client model sets in memory.
+func mergeCursorComposerDefaultModels(models []*ModelInfo) []*ModelInfo {
+	defaults := defaultCursorComposerModels()
+	if len(models) == 0 {
+		return defaults
+	}
+	seen := make(map[string]struct{}, len(models)+len(defaults))
+	out := make([]*ModelInfo, 0, len(models)+len(defaults))
+	add := func(model *ModelInfo) {
+		if model == nil {
+			return
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			return
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	for _, model := range models {
+		add(model)
+	}
+	for _, model := range defaults {
+		add(model)
+	}
+	return out
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
