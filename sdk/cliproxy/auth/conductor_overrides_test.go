@@ -482,6 +482,145 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 }
 
+func TestManager_ClineProviderSettingsCredentialErrorFallsBackWithoutCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	provider := "openai-compatible-cline-pass"
+	model := "cline-pass/glm-5.2"
+	badAuth := &Auth{ID: "aa-missing-token", Provider: provider}
+	goodAuth := &Auth{ID: "bb-good-token", Provider: provider}
+	executor := &authFallbackExecutor{
+		id: provider,
+		executeErrors: map[string]error{
+			badAuth.ID: &Error{
+				HTTPStatus: http.StatusFailedDependency,
+				Message:    "cline provider settings credential error: access token unavailable",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	state := updatedBad.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected bad auth model state to record the local credential failure")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected no cooldown for local credential dependency error, got %v", state.NextRetryAfter)
+	}
+}
+
+func TestManagerExecuteStream_ClineProviderSettingsCredentialErrorFallsBackWithoutCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	provider := "openai-compatible-cline-pass"
+	model := "cline-pass/glm-5.2"
+	badAuth := &Auth{ID: "aa-missing-token", Provider: provider}
+	goodAuth := &Auth{ID: "bb-good-token", Provider: provider}
+	executor := &authFallbackExecutor{
+		id: provider,
+		streamFirstErrors: map[string]error{
+			badAuth.ID: &Error{
+				HTTPStatus: http.StatusFailedDependency,
+				Message:    "cline provider settings credential error: access token unavailable",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want success", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("execute stream chunk error = %v, want success", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != goodAuth.ID {
+		t.Fatalf("execute stream payload = %q, want %q", string(payload), goodAuth.ID)
+	}
+	got := executor.StreamCalls()
+	want := []string{badAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	state := updatedBad.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected bad auth model state to record the local credential failure")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected no cooldown for local credential dependency error, got %v", state.NextRetryAfter)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

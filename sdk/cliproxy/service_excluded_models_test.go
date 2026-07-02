@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -133,6 +134,237 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 	if chatModel.Thinking == nil {
 		t.Fatal("expected chat model to keep default thinking support")
+	}
+}
+
+func TestRegisterModelsForAuth_ClinePassCompatAuth(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-cline-pass",
+		Provider: "openai-compatible-cline-pass",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":         "oauth",
+			"compat_name":       "cline-pass",
+			"provider_key":      "openai-compatible-cline-pass",
+			"credential_source": clineauth.CredentialSourceProviderSettings,
+			"cline_provider":    clineauth.ProviderClinePass,
+			"base_url":          clineauth.APIBaseURL,
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected Cline Pass models to be registered")
+	}
+	var glm *internalregistry.ModelInfo
+	for _, model := range models {
+		if model != nil && model.ID == "cline-pass/glm-5.2" {
+			glm = model
+			break
+		}
+	}
+	if glm == nil {
+		t.Fatal("expected cline-pass/glm-5.2 to be registered")
+	}
+	if glm.OwnedBy != "cline-pass" {
+		t.Fatalf("owned_by = %q, want cline-pass", glm.OwnedBy)
+	}
+	if glm.Type != "openai-compatibility" {
+		t.Fatalf("type = %q, want openai-compatibility", glm.Type)
+	}
+	if glm.Thinking == nil {
+		t.Fatal("expected Cline Pass model to include thinking levels")
+	}
+	hasXHigh := false
+	for _, level := range glm.Thinking.Levels {
+		if level == "xhigh" {
+			hasXHigh = true
+			break
+		}
+	}
+	if !hasXHigh {
+		t.Fatalf("thinking levels = %#v, want xhigh support", glm.Thinking.Levels)
+	}
+}
+
+func TestRegisterModelsForAuth_ClinePassUsesResolvedProviderControls(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			OAuthExcludedModels: map[string][]string{
+				"openai-compatible-cline-pass": {"cline-pass/glm-5.2"},
+			},
+			OAuthModelAlias: map[string][]config.OAuthModelAlias{
+				"openai-compatible-cline-pass": {
+					{Name: "cline-pass/qwen3.7-max", Alias: "cline-pass/qwen3.7-max-alias"},
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-cline-pass-controls",
+		Provider: "openai-compatible-cline-pass",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":         "oauth",
+			"compat_name":       "cline-pass",
+			"provider_key":      "openai-compatible-cline-pass",
+			"credential_source": clineauth.CredentialSourceProviderSettings,
+			"cline_provider":    clineauth.ProviderClinePass,
+			"base_url":          clineauth.APIBaseURL,
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected Cline Pass models to be registered")
+	}
+	var sawAlias bool
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch model.ID {
+		case "cline-pass/glm-5.2":
+			t.Fatal("expected cline-pass/glm-5.2 to be excluded by resolved Cline Pass provider key")
+		case "cline-pass/qwen3.7-max":
+			t.Fatal("expected original qwen model to be renamed by resolved Cline Pass alias")
+		case "cline-pass/qwen3.7-max-alias":
+			sawAlias = true
+		}
+	}
+	if !sawAlias {
+		t.Fatal("expected alias model registered through resolved Cline Pass provider key")
+	}
+}
+
+func TestRegisterModelsForAuth_OpenAICompatibilityNamedClinePassUsesConfigModels(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "cline-pass",
+					BaseURL: "https://example.com/v1",
+					Models: []config.OpenAICompatibilityModel{
+						{Name: "custom-upstream-model", Alias: "custom-cline-pass-model"},
+					},
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-config-cline-pass",
+		Provider: "openai-compatible-cline-pass",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":    coreauth.AuthKindAPIKey,
+			"compat_name":  "cline-pass",
+			"provider_key": "openai-compatible-cline-pass",
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatal("expected configured OpenAI-compatible models to be registered")
+	}
+	var sawConfigured bool
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch model.ID {
+		case "custom-cline-pass-model":
+			sawConfigured = true
+		case "cline-pass/glm-5.2":
+			t.Fatal("ordinary OpenAI-compatible config named cline-pass was replaced by static Cline Pass models")
+		}
+	}
+	if !sawConfigured {
+		t.Fatalf("expected configured model alias, got %#v", models)
+	}
+}
+
+func TestIsClineProviderSettingsCompatAuth(t *testing.T) {
+	tests := []struct {
+		name      string
+		attrs     map[string]string
+		wantCline bool
+	}{
+		{
+			name: "synthesized cline provider settings auth",
+			attrs: map[string]string{
+				"credential_source": clineauth.CredentialSourceProviderSettings,
+				"cline_provider":    clineauth.ProviderClinePass,
+				"base_url":          clineauth.APIBaseURL,
+			},
+			wantCline: true,
+		},
+		{
+			name: "compat name fallback",
+			attrs: map[string]string{
+				"credential_source": clineauth.CredentialSourceProviderSettings,
+				"compat_name":       clineauth.ProviderClinePass,
+				"base_url":          clineauth.APIBaseURL + "/",
+			},
+			wantCline: true,
+		},
+		{
+			name: "ordinary config named cline pass",
+			attrs: map[string]string{
+				"compat_name": clineauth.ProviderClinePass,
+				"base_url":    clineauth.APIBaseURL,
+			},
+		},
+		{
+			name: "different base URL",
+			attrs: map[string]string{
+				"credential_source": clineauth.CredentialSourceProviderSettings,
+				"cline_provider":    clineauth.ProviderClinePass,
+				"base_url":          "https://example.com/v1",
+			},
+		},
+		{
+			name: "different provider",
+			attrs: map[string]string{
+				"credential_source": clineauth.CredentialSourceProviderSettings,
+				"cline_provider":    "cline",
+				"base_url":          clineauth.APIBaseURL,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isClineProviderSettingsCompatAuth(&coreauth.Auth{Attributes: tc.attrs})
+			if got != tc.wantCline {
+				t.Fatalf("isClineProviderSettingsCompatAuth() = %v, want %v", got, tc.wantCline)
+			}
+		})
 	}
 }
 

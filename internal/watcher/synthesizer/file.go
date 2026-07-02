@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -116,6 +118,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			return auths
 		}
 	}
+	if clineAuths := synthesizeClineProviderSettingsAuths(ctx, fullPath, data); len(clineAuths) > 0 {
+		return clineAuths
+	}
 	if provider == "" || provider == "gemini-cli" {
 		return nil
 	}
@@ -209,6 +214,58 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	return []*coreauth.Auth{a}
+}
+
+func synthesizeClineProviderSettingsAuths(ctx *SynthesisContext, fullPath string, data []byte) []*coreauth.Auth {
+	var typed struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &typed); err == nil && strings.TrimSpace(typed.Type) != "" {
+		return nil
+	}
+	settings, err := clineauth.ParseProviderSettings(data)
+	if err != nil {
+		return nil
+	}
+	if _, ok := clineauth.FindProvider(settings, clineauth.ProviderClinePass); !ok {
+		return nil
+	}
+	if _, ok := clineauth.ProviderAuth(settings, clineauth.ProviderCline, clineauth.ProviderClinePass); !ok {
+		return nil
+	}
+
+	id := fullPath
+	if strings.TrimSpace(ctx.AuthDir) != "" {
+		if rel, errRel := filepath.Rel(ctx.AuthDir, fullPath); errRel == nil && rel != "" {
+			id = rel
+		}
+	}
+	id = id + "#" + clineauth.ProviderClinePass
+	if runtime.GOOS == "windows" {
+		id = strings.ToLower(id)
+	}
+
+	providerKey := util.OpenAICompatibleProviderKey(clineauth.ProviderClinePass)
+	return []*coreauth.Auth{{
+		ID:       id,
+		Provider: providerKey,
+		Label:    clineauth.ProviderClinePass,
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			coreauth.AttributeAuthIndexSeed: "cline-provider-settings|" + fullPath + "|" + clineauth.ProviderClinePass,
+			coreauth.AttributeAuthKind:      coreauth.AuthKindOAuth,
+			coreauth.AttributeSource:        fullPath,
+			coreauth.AttributePath:          fullPath,
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+			"base_url":                      clineauth.APIBaseURL,
+			"compat_name":                   clineauth.ProviderClinePass,
+			"provider_key":                  providerKey,
+			"credential_source":             clineauth.CredentialSourceProviderSettings,
+			"cline_provider":                clineauth.ProviderClinePass,
+		},
+		CreatedAt: ctx.Now,
+		UpdatedAt: ctx.Now,
+	}}
 }
 
 func parsePluginFileAuths(parser PluginAuthParser, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {

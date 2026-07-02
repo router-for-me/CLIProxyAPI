@@ -30,6 +30,19 @@ type staticModelsJSON struct {
 	XAI         []*ModelInfo `json:"xai"`
 }
 
+var clinePassModels = []*ModelInfo{
+	clinePassModelInfo("cline-pass/glm-5.2", "GLM 5.2"),
+	clinePassModelInfo("cline-pass/kimi-k2.7-code", "Kimi K2.7 Code"),
+	clinePassModelInfo("cline-pass/kimi-k2.6", "Kimi K2.6"),
+	clinePassModelInfo("cline-pass/deepseek-v4-pro", "DeepSeek V4 Pro"),
+	clinePassModelInfo("cline-pass/deepseek-v4-flash", "DeepSeek V4 Flash"),
+	clinePassModelInfo("cline-pass/mimo-v2.5", "MiMo V2.5"),
+	clinePassModelInfo("cline-pass/mimo-v2.5-pro", "MiMo V2.5 Pro"),
+	clinePassModelInfo("cline-pass/minimax-m3", "MiniMax M3"),
+	clinePassModelInfo("cline-pass/qwen3.7-max", "Qwen3.7 Max"),
+	clinePassModelInfo("cline-pass/qwen3.7-plus", "Qwen3.7 Plus"),
+}
+
 // GetClaudeModels returns the standard Claude model definitions.
 func GetClaudeModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Claude)
@@ -108,6 +121,11 @@ func AntigravityWebSearchModelFor(modelID string) string {
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
+}
+
+// GetClinePassModels returns the Cline Pass subscription model definitions.
+func GetClinePassModels() []*ModelInfo {
+	return cloneModelInfos(clinePassModels)
 }
 
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
@@ -207,6 +225,19 @@ func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 	}
 }
 
+func clinePassModelInfo(id string, displayName string) *ModelInfo {
+	return &ModelInfo{
+		ID:          id,
+		Object:      "model",
+		Created:     1780272000, // 2026-06-01
+		OwnedBy:     "cline-pass",
+		Type:        "openai-compatibility",
+		DisplayName: displayName,
+		Name:        id,
+		Thinking:    &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	}
+}
+
 func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 	if len(extras) == 0 {
 		return models
@@ -277,6 +308,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - kimi
 //   - antigravity
 //   - xai
+//   - cline-pass
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -296,6 +328,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "cline-pass":
+		return GetClinePassModels()
 	default:
 		return nil
 	}
@@ -318,6 +352,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
+		clinePassModels,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

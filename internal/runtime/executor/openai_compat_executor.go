@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -54,7 +55,10 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if req == nil {
 		return nil
 	}
-	_, apiKey := e.resolveCredentials(auth)
+	_, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -92,7 +96,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return resp, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return
@@ -127,6 +134,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			translated = updated
 		}
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+	} else if !opts.Stream {
+		translated = forceClineProviderSettingsNonStreamChatPayload(auth, translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -189,6 +198,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	body, err = e.handleClineProviderSettingsEnvelope(auth, body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -199,13 +213,81 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	return resp, nil
 }
 
+func (e *OpenAICompatExecutor) handleClineProviderSettingsEnvelope(auth *cliproxyauth.Auth, body []byte) ([]byte, error) {
+	if !isClineProviderSettingsAuth(auth) {
+		return body, nil
+	}
+	var envelope struct {
+		Success *bool           `json:"success"`
+		Data    json.RawMessage `json:"data"`
+		Code    string          `json:"code"`
+		Error   string          `json:"error"`
+		Message string          `json:"message"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body, nil
+	}
+	if envelope.Success == nil {
+		return body, nil
+	}
+	if !*envelope.Success {
+		return nil, statusErr{code: http.StatusBadGateway, msg: clineProviderSettingsEnvelopeError(envelope.Code, envelope.Error, envelope.Message)}
+	}
+	if len(envelope.Data) == 0 {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "cline provider settings upstream error: missing data"}
+	}
+	data := bytes.TrimSpace(envelope.Data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) || !json.Valid(data) {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "cline provider settings upstream error: invalid data"}
+	}
+	return data, nil
+}
+
+func forceClineProviderSettingsNonStreamChatPayload(auth *cliproxyauth.Auth, body []byte) []byte {
+	if !isClineProviderSettingsAuth(auth) {
+		return body
+	}
+	updated, err := sjson.SetBytes(body, "stream", false)
+	if err != nil {
+		log.Warnf("openai compat executor: failed to force Cline provider settings stream=false: %v", err)
+		return body
+	}
+	return updated
+}
+
+func clineProviderSettingsEnvelopeError(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if isSafeClineEnvelopeError(value) {
+			return fmt.Sprintf("cline provider settings upstream error: %s", value)
+		}
+	}
+	return "cline provider settings upstream error"
+}
+
+func isSafeClineEnvelopeError(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return resp, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return resp, err
@@ -298,7 +380,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return nil, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return nil, err
@@ -396,9 +481,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
 			trimmedLine := bytes.TrimSpace(line)
 			if len(trimmedLine) == 0 {
 				continue
@@ -410,7 +492,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					continue
 				}
 				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+					streamErr := e.openAICompatNonSSEStreamError(auth, trimmedLine)
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
@@ -422,8 +504,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				continue
 			}
 
+			streamLine, errUnwrap := e.handleClineProviderSettingsStreamDataLine(auth, trimmedLine)
+			if errUnwrap != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errUnwrap)
+				reporter.PublishFailure(ctx, errUnwrap)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errUnwrap}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if detail, ok := helps.ParseOpenAIStreamUsage(streamLine); ok {
+				reporter.Publish(ctx, detail)
+			}
 			// OpenAI-compatible streams must use SSE data lines.
-			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(streamLine), &param)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -458,13 +553,56 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
+func (e *OpenAICompatExecutor) handleClineProviderSettingsStreamDataLine(auth *cliproxyauth.Auth, line []byte) ([]byte, error) {
+	if !isClineProviderSettingsAuth(auth) || !bytes.HasPrefix(line, []byte("data:")) {
+		return line, nil
+	}
+	payload := bytes.TrimSpace(line[len("data:"):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !bytes.HasPrefix(payload, []byte("{")) {
+		return line, nil
+	}
+	var envelope struct {
+		Success *bool `json:"success"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Success == nil {
+		return line, nil
+	}
+	unwrapped, err := e.handleClineProviderSettingsEnvelope(auth, payload)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len("data: ")+len(unwrapped))
+	out = append(out, "data: "...)
+	out = append(out, unwrapped...)
+	return out, nil
+}
+
+func (e *OpenAICompatExecutor) openAICompatNonSSEStreamError(auth *cliproxyauth.Auth, body []byte) error {
+	if !isClineProviderSettingsAuth(auth) {
+		return statusErr{code: http.StatusBadGateway, msg: string(body)}
+	}
+	var envelope struct {
+		Success *bool `json:"success"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Success == nil {
+		return statusErr{code: http.StatusBadGateway, msg: string(body)}
+	}
+	if _, err := e.handleClineProviderSettingsEnvelope(auth, body); err != nil {
+		return err
+	}
+	return statusErr{code: http.StatusBadGateway, msg: "cline provider settings upstream returned non-SSE JSON"}
+}
+
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	baseURL, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey, err := e.resolveCredentials(auth)
+	if err != nil {
+		return nil, err
+	}
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return nil, err
@@ -732,15 +870,58 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 	return body.Bytes(), writer.FormDataContentType(), nil
 }
 
-func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {
+func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string, err error) {
 	if auth == nil {
-		return "", ""
+		return "", "", nil
 	}
 	if auth.Attributes != nil {
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
+	if apiKey == "" {
+		apiKey, err = e.resolveClineProviderSettingsToken(auth)
+		if err != nil {
+			return baseURL, "", err
+		}
+	}
 	return
+}
+
+func (e *OpenAICompatExecutor) resolveClineProviderSettingsToken(auth *cliproxyauth.Auth) (string, error) {
+	if !isClineProviderSettingsAuth(auth) {
+		return "", nil
+	}
+	path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath])
+	if path == "" {
+		path = strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource])
+	}
+	if path == "" {
+		return "", clineProviderSettingsCredentialError("missing provider settings path")
+	}
+	token, err := clineauth.ReadProviderAccessToken(path, clineauth.ProviderClinePass)
+	if err != nil {
+		log.Warnf("openai compat executor: failed to read Cline provider access token from %q: %v", path, err)
+		return "", clineProviderSettingsCredentialError("access token unavailable")
+	}
+	if strings.TrimSpace(token) == "" {
+		return "", clineProviderSettingsCredentialError("access token unavailable")
+	}
+	return token, nil
+}
+
+func clineProviderSettingsCredentialError(reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "access token unavailable"
+	}
+	return statusErr{code: http.StatusFailedDependency, msg: "cline provider settings credential error: " + reason}
+}
+
+func isClineProviderSettingsAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	return clineauth.IsProviderSettingsClinePassAttributes(auth.Attributes)
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
