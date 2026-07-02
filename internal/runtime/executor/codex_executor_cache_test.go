@@ -49,8 +49,14 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := httpReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
-		t.Fatalf("Session_id = %#v, want [%q]", gotSession, expectedKey)
+	if gotSession := httpReq.Header["session-id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
+		t.Fatalf("session-id = %#v, want [%q]", gotSession, expectedKey)
+	}
+	if gotThread := httpReq.Header["thread-id"]; len(gotThread) != 1 || gotThread[0] != expectedKey {
+		t.Fatalf("thread-id = %#v, want [%q]", gotThread, expectedKey)
+	}
+	if gotUnderscore := httpReq.Header["Session_id"]; len(gotUnderscore) != 0 {
+		t.Fatalf("Session_id (underscore) = %#v, want absent", gotUnderscore)
 	}
 	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
 		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
@@ -117,11 +123,14 @@ func TestCodexExecutorCacheHelper_ClaudeUsesClaudeCodeSessionID(t *testing.T) {
 	if secondKey != firstKey {
 		t.Fatalf("same Claude Code session_id produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
-	if gotSession := firstHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("first Session_id = %#v, want [%q]", gotSession, firstKey)
+	if gotSession := firstHTTPReq.Header["session-id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("first session-id = %#v, want [%q]", gotSession, firstKey)
 	}
-	if gotSession := secondHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("second Session_id = %#v, want [%q]", gotSession, firstKey)
+	if gotThread := firstHTTPReq.Header["thread-id"]; len(gotThread) != 1 || gotThread[0] != firstKey {
+		t.Fatalf("first thread-id = %#v, want [%q]", gotThread, firstKey)
+	}
+	if gotSession := secondHTTPReq.Header["session-id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("second session-id = %#v, want [%q]", gotSession, firstKey)
 	}
 }
 
@@ -201,13 +210,14 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	if gotWindowID := gjson.GetBytes(body, "client_metadata.x-codex-window-id").String(); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
 	}
-	if gotHeader := httpReq.Header["Session_id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
-		t.Fatalf("Session_id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
+	if gotHeader := httpReq.Header["session-id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
+		t.Fatalf("session-id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
 	}
-	for _, headerName := range []string{"X-Client-Request-Id", "Thread-Id"} {
-		if gotHeader := httpReq.Header.Get(headerName); gotHeader != expectedPromptCacheKey {
-			t.Fatalf("%s = %q, want %q", headerName, gotHeader, expectedPromptCacheKey)
-		}
+	if gotHeader := httpReq.Header["thread-id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
+		t.Fatalf("thread-id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
+	}
+	if gotHeader := httpReq.Header.Get("X-Client-Request-Id"); gotHeader != expectedPromptCacheKey {
+		t.Fatalf("X-Client-Request-Id = %q, want %q", gotHeader, expectedPromptCacheKey)
 	}
 	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
 		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)

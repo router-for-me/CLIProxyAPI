@@ -311,8 +311,8 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
 	}
-	if got := headers.Get("x-codex-beta-features"); got != "" {
-		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	if got := headers.Get("x-codex-beta-features"); got != codexDefaultBetaFeatures {
+		t.Fatalf("x-codex-beta-features = %q, want %q", got, codexDefaultBetaFeatures)
 	}
 	if got := headers.Get("X-Codex-Turn-Metadata"); got != "" {
 		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)
@@ -353,8 +353,8 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	if got := headers.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
 	}
-	if got := headers["session_id"]; len(got) != 1 || got[0] != "legacy-session" {
-		t.Fatalf("session_id = %#v, want [legacy-session]", got)
+	if got := headers["session-id"]; len(got) != 1 || got[0] != "legacy-session" {
+		t.Fatalf("session-id = %#v, want [legacy-session]", got)
 	}
 	if got := headers.Get("Session-Id"); got != "" {
 		t.Fatalf("Session-Id = %s, want empty", got)
@@ -374,8 +374,8 @@ func TestApplyCodexWebsocketHeadersCanonicalizesLegacyUnderscoreSessionHeader(t 
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
 
-	if got := headers["session_id"]; len(got) != 1 || got[0] != "legacy-underscore-session" {
-		t.Fatalf("session_id = %#v, want [legacy-underscore-session]", got)
+	if got := headers["session-id"]; len(got) != 1 || got[0] != "legacy-underscore-session" {
+		t.Fatalf("session-id = %#v, want [legacy-underscore-session]", got)
 	}
 	if got := headers.Get("Session-Id"); got != "" {
 		t.Fatalf("Session-Id = %s, want empty", got)
@@ -479,8 +479,8 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 	if got := headers.Get("User-Agent"); got != "" {
 		t.Fatalf("User-Agent = %s, want empty", got)
 	}
-	if got := headers.Get("x-codex-beta-features"); got != "" {
-		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	if got := headers.Get("x-codex-beta-features"); got != codexDefaultBetaFeatures {
+		t.Fatalf("x-codex-beta-features = %q, want %q (config ignored for API key auth)", got, codexDefaultBetaFeatures)
 	}
 	if got := headers.Get("Originator"); got != "" {
 		t.Fatalf("Originator = %s, want empty", got)
@@ -523,14 +523,17 @@ func TestApplyCodexPromptCacheHeadersSetsSessionIDAndLegacyConversation(t *testi
 
 	_, headers := applyCodexPromptCacheHeaders("openai-response", req, []byte(`{"model":"gpt-5-codex"}`))
 
-	if got := headers["session_id"]; len(got) != 1 || got[0] != "cache-1" {
-		t.Fatalf("session_id = %#v, want [cache-1]", got)
+	if got := headers["session-id"]; len(got) != 1 || got[0] != "cache-1" {
+		t.Fatalf("session-id = %#v, want [cache-1]", got)
 	}
 	if got := headers.Get("Session-Id"); got != "" {
 		t.Fatalf("Session-Id = %s, want empty", got)
 	}
-	if got := headers.Get("Conversation_id"); got != "cache-1" {
-		t.Fatalf("Conversation_id = %s, want cache-1", got)
+	if got := headers["thread-id"]; len(got) != 1 || got[0] != "cache-1" {
+		t.Fatalf("thread-id = %#v, want [cache-1]", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %s, want empty (no longer sent)", got)
 	}
 }
 
@@ -561,11 +564,11 @@ func TestApplyCodexPromptCacheHeadersClaudeUsesClaudeCodeSessionID(t *testing.T)
 	if secondKey != firstKey {
 		t.Fatalf("same Claude Code session_id produced different websocket prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
-	if got := firstHeaders["session_id"]; len(got) != 1 || got[0] != firstKey {
-		t.Fatalf("first session_id = %#v, want [%q]", got, firstKey)
+	if got := firstHeaders["session-id"]; len(got) != 1 || got[0] != firstKey {
+		t.Fatalf("first session-id = %#v, want [%q]", got, firstKey)
 	}
-	if got := secondHeaders["session_id"]; len(got) != 1 || got[0] != firstKey {
-		t.Fatalf("second session_id = %#v, want [%q]", got, firstKey)
+	if got := secondHeaders["session-id"]; len(got) != 1 || got[0] != firstKey {
+		t.Fatalf("second session-id = %#v, want [%q]", got, firstKey)
 	}
 }
 
@@ -580,8 +583,8 @@ func TestApplyCodexPromptCacheHeadersClaudeRejectsBareUserID(t *testing.T) {
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "" {
 		t.Fatalf("bare metadata.user_id must not create websocket prompt_cache_key, got %q; body=%s", got, string(body))
 	}
-	if got := headers["session_id"]; len(got) != 0 {
-		t.Fatalf("bare metadata.user_id must not create websocket session_id, got %#v", got)
+	if got := headers["session-id"]; len(got) != 0 {
+		t.Fatalf("bare metadata.user_id must not create websocket session-id, got %#v", got)
 	}
 	if got := headers.Get("Session-Id"); got != "" {
 		t.Fatalf("bare metadata.user_id must not create websocket Session-Id, got %q", got)
@@ -616,8 +619,8 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != expectedPromptCacheKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedPromptCacheKey)
 	}
-	if gotSession := headers["session_id"]; len(gotSession) != 1 || gotSession[0] != expectedPromptCacheKey {
-		t.Fatalf("session_id = %#v, want [%q]", gotSession, expectedPromptCacheKey)
+	if gotSession := headers["session-id"]; len(gotSession) != 1 || gotSession[0] != expectedPromptCacheKey {
+		t.Fatalf("session-id = %#v, want [%q]", gotSession, expectedPromptCacheKey)
 	}
 	if gotCanonicalSession := headers.Get("Session-Id"); gotCanonicalSession != "" {
 		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
@@ -625,11 +628,11 @@ func TestApplyCodexWebsocketHeadersIdentityConfuseRemapsPromptCacheKey(t *testin
 	if gotRequestID := headers.Get("X-Client-Request-Id"); gotRequestID != expectedPromptCacheKey {
 		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, expectedPromptCacheKey)
 	}
-	if gotThreadID := headers.Get("Thread-Id"); gotThreadID != expectedPromptCacheKey {
-		t.Fatalf("Thread-Id = %q, want %q", gotThreadID, expectedPromptCacheKey)
+	if gotThreadID := headers["thread-id"]; len(gotThreadID) != 1 || gotThreadID[0] != expectedPromptCacheKey {
+		t.Fatalf("thread-id = %#v, want [%q]", gotThreadID, expectedPromptCacheKey)
 	}
-	if gotConversation := headers.Get("Conversation_id"); gotConversation != expectedPromptCacheKey {
-		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedPromptCacheKey)
+	if gotConversation := headers.Get("Conversation_id"); gotConversation != "" {
+		t.Fatalf("Conversation_id = %q, want empty (no longer sent)", gotConversation)
 	}
 	if gotWindowID := headers.Get("X-Codex-Window-Id"); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
@@ -804,8 +807,10 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
-	if got := req.Header.Get("x-codex-beta-features"); got != "" {
-		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	// OAuth path now fills x-codex-beta-features (client > config > default);
+	// config value wins here.
+	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
+		t.Fatalf("x-codex-beta-features = %q, want %q", got, "config-beta")
 	}
 }
 

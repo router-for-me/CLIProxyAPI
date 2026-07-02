@@ -40,7 +40,7 @@ const (
 	// wrong). Originator/prefix is codex_cli_rs (DEFAULT_ORIGINATOR for the CLI;
 	// the `codex exec` subcommand uses codex_exec). Terminal token is "unknown"
 	// when no TTY; interactive uses e.g. iTerm.app/3.6.10.
-	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)"
+	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)"
 	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
 )
@@ -387,7 +387,7 @@ func codexReasoningReplaySessionKeyFromHeaders(headers http.Header) string {
 	if windowID := strings.TrimSpace(headerValueCaseInsensitive(headers, "X-Codex-Window-Id")); windowID != "" {
 		return "window:" + windowID
 	}
-	for _, headerName := range []string{"Session_id", "session_id", "Session-Id"} {
+	for _, headerName := range []string{"session-id", "Session_id", "session_id", "Session-Id"} {
 		if value := strings.TrimSpace(headerValueCaseInsensitive(headers, headerName)); value != "" {
 			return "session-id:" + value
 		}
@@ -1456,7 +1456,9 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		return nil, nil, codexIdentityConfuseState{}, err
 	}
 	if cache.ID != "" {
-		httpReq.Header.Set("Session_id", cache.ID)
+		// Real codex 0.142.5 shape (lowercase session-id + thread-id, no
+		// Conversation_id), identical to the WS path; h2 lowercases on the wire.
+		setCodexSessionThreadHeaders(httpReq.Header, cache.ID)
 	}
 	return httpReq, rawJSON, identityState, nil
 }
@@ -1502,12 +1504,11 @@ func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityC
 		return
 	}
 
-	setCodexSessionHeaderCasePreserved(headers, "Session_id", state.promptCacheKey)
-	if headerValueCaseInsensitive(headers, "Conversation_id") != "" {
-		setHeaderCasePreserved(headers, "Conversation_id", state.promptCacheKey)
-	}
+	// Real codex 0.142.5 shape: lowercase hyphenated session-id + thread-id (same
+	// UUID), NO Conversation_id / Thread-Id. Remap the identity-confuse UUID onto
+	// the real header names so confused output still matches a genuine client.
+	setCodexSessionThreadHeaders(headers, state.promptCacheKey)
 	headers.Set("X-Client-Request-Id", state.promptCacheKey)
-	headers.Set("Thread-Id", state.promptCacheKey)
 	headers.Set("X-Codex-Window-Id", state.promptCacheKey+":0")
 }
 
@@ -1606,13 +1607,10 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 
-	if ginHeaders != nil && ginHeaders.Get("X-Codex-Beta-Features") != "" {
-		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
-	}
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
+	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {
 		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
@@ -1627,11 +1625,23 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		// OAuth requests impersonate the official Codex CLI to the ChatGPT backend;
 		// never forward a foreign downstream User-Agent (see ensureCodexUserAgent).
 		ensureCodexUserAgent(r.Header, ginHeaders, cfgUserAgent, helps.PerAccountCodexUserAgent(helps.AccountFingerprintKey(auth, ""), codexUserAgent, cfg))
+		// beta-features default only on OAuth (ChatGPT backend), consistent with the
+		// WS path — keeps the HTTP fallback from being a missing-header tell.
+		ensureHeaderWithPriority(r.Header, ginHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, codexDefaultBetaFeatures)
 	}
 
-	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
+	// Real codex 0.142.5: lowercase hyphenated session-id + thread-id (same UUID),
+	// no Session_id/Conversation_id. Reuse the WS normalizer so the HTTP fallback
+	// (hit when WS upgrade fails — when detection is strictest) emits an identical
+	// shape. h2 lowercases header names on the wire.
+	sid := codexSessionHeaderValue(r.Header)
+	if sid == "" {
+		sid = codexSessionHeaderValue(ginHeaders)
 	}
+	if sid == "" && strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
+		sid = uuid.NewString()
+	}
+	setCodexSessionThreadHeaders(r.Header, sid)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
