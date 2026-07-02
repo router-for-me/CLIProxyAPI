@@ -31,6 +31,16 @@ type Metadata struct {
 	Logo string
 	// ConfigFields describes plugin-owned configuration fields for management clients.
 	ConfigFields []ConfigField
+	// Locales contains optional localized display metadata keyed by locale, for example "zh-CN".
+	Locales map[string]MetadataLocale `json:"locales,omitempty"`
+}
+
+// MetadataLocale contains localized plugin display metadata.
+type MetadataLocale struct {
+	// Name is the localized human-readable plugin name.
+	Name string `json:"name,omitempty"`
+	// Author is the localized plugin author or organization display name.
+	Author string `json:"author,omitempty"`
 }
 
 // ConfigFieldType classifies plugin-owned configuration values for management clients.
@@ -63,6 +73,14 @@ type ConfigField struct {
 	EnumValues []string
 	// Description explains how the plugin uses the field.
 	Description string
+	// Locales contains optional localized field text keyed by locale, for example "zh-CN".
+	Locales map[string]ConfigFieldLocale `json:"locales,omitempty"`
+}
+
+// ConfigFieldLocale contains localized configuration field text.
+type ConfigFieldLocale struct {
+	// Description explains how the plugin uses the field in the selected locale.
+	Description string `json:"description,omitempty"`
 }
 
 // Capabilities groups the optional host integration interfaces exposed by a plugin.
@@ -1207,6 +1225,8 @@ type ManagementRoute struct {
 	Menu string
 	// Description explains the legacy resource menu entry for UI display.
 	Description string
+	// Locales contains optional localized route menu text keyed by locale, for example "zh-CN".
+	Locales map[string]RouteLocale `json:"locales,omitempty"`
 	// Handler processes matching Management API requests.
 	Handler ManagementHandler
 }
@@ -1219,8 +1239,18 @@ type ResourceRoute struct {
 	Menu string
 	// Description explains the resource route for UI display.
 	Description string
+	// Locales contains optional localized resource menu text keyed by locale, for example "zh-CN".
+	Locales map[string]RouteLocale `json:"locales,omitempty"`
 	// Handler processes matching resource requests. Resource requests are not management-authenticated.
 	Handler ManagementHandler
+}
+
+// RouteLocale contains localized management or resource route menu text.
+type RouteLocale struct {
+	// Menu is the localized management UI menu label.
+	Menu string `json:"menu,omitempty"`
+	// Description explains the route in the selected locale.
+	Description string `json:"description,omitempty"`
 }
 
 // ManagementHandler handles one plugin-owned Management API or resource route.

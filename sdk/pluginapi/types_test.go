@@ -51,6 +51,39 @@ func TestMetadataConfigFieldsExposePluginSchema(t *testing.T) {
 	}
 }
 
+func TestPluginDisplayLocalesEncodeAsOptionalJSON(t *testing.T) {
+	meta := Metadata{
+		Name: "example",
+		Locales: map[string]MetadataLocale{
+			"zh-CN": {Name: "示例"},
+		},
+		ConfigFields: []ConfigField{{
+			Name:        "mode",
+			Description: "Execution mode.",
+			Locales: map[string]ConfigFieldLocale{
+				"zh-CN": {Description: "执行模式。"},
+			},
+		}},
+	}
+
+	raw, errMarshal := json.Marshal(meta)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	if !strings.Contains(string(raw), `"locales"`) {
+		t.Fatalf("metadata JSON = %s, want optional locales field", raw)
+	}
+
+	var decoded Metadata
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded.Locales["zh-CN"].Name != "示例" ||
+		decoded.ConfigFields[0].Locales["zh-CN"].Description != "执行模式。" {
+		t.Fatalf("decoded metadata = %#v, want localized fields", decoded)
+	}
+}
+
 func TestAuthParseResponseSupportsMultipleAuths(t *testing.T) {
 	resp := AuthParseResponse{
 		Handled: true,
