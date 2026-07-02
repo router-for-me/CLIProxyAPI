@@ -1,0 +1,42 @@
+name: fork-ci
+
+# Self-contained build+test gate for this fork, independent of upstream's
+# pr-test-build / path-guard workflows (which are upstream-governance and may
+# reject fork changes). Runs on the fork's mod branches.
+on:
+  push:
+    branches: [feat/fingerprint-hardening, main]
+  pull_request:
+    branches: [feat/fingerprint-hardening, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt (must be clean)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./... || true   # advisory; do not block on vet
+      - name: build
+        run: go build ./...
+      - name: build server binary
+        run: go build -o /tmp/cli-proxy-api ./cmd/server
+      - name: test
+        run: go test ./...

@@ -1,0 +1,73 @@
+name: fork-sync-upstream
+
+# Automatically merges upstream router-for-me/CLIProxyAPI into this fork's mod
+# branch. SAFE by design:
+#   - clean merge + build + test pass  -> push (which triggers fork-ci + fork-image)
+#   - merge conflicts                  -> open a PR on a sync/* branch for manual resolution
+#   - clean merge but build/test fails -> workflow goes red, nothing is pushed
+# It never force-pushes and never pushes a broken/conflicted merge.
+on:
+  schedule:
+    - cron: '0 3 * * *'   # daily 03:00 UTC — adjust cadence to taste
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: fork branch to update
+        default: feat/fingerprint-hardening
+      upstream_ref:
+        description: upstream branch to merge
+        default: main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch || 'feat/fingerprint-hardening' }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ github.event.inputs.target_branch || 'feat/fingerprint-hardening' }}
+          UREF: ${{ github.event.inputs.upstream_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          git config user.name  "fork-sync[bot]"
+          git config user.email "fork-sync[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git 2>/dev/null || \
+            git remote set-url upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch upstream --no-tags "$UREF"
+
+          if [ "$(git rev-list --count HEAD..upstream/$UREF)" = "0" ]; then
+            echo "Already up to date with upstream/$UREF."; exit 0
+          fi
+
+          if git merge --no-edit "upstream/$UREF"; then
+            echo "Clean merge. Verifying…"
+            unformatted="$(gofmt -l .)"; [ -z "$unformatted" ] || { echo "::error::gofmt drift after merge:"; echo "$unformatted"; exit 1; }
+            go build ./...
+            go test ./...
+            git push origin "HEAD:$TARGET"
+            echo "::notice::Synced upstream/$UREF into $TARGET and pushed."
+          else
+            echo "::warning::Merge conflicts — opening a PR for manual resolution."
+            git merge --abort
+            BR="sync/upstream-$(date -u +%Y%m%d-%H%M%S)"
+            git checkout -b "$BR"
+            git merge --no-edit "upstream/$UREF" || true   # keep conflict markers
+            git add -A
+            git commit -m "sync: upstream/$UREF (CONFLICTS — resolve manually)" || true
+            git push origin "$BR"
+            gh pr create --base "$TARGET" --head "$BR" \
+              --title "⚠️ upstream sync needs manual conflict resolution ($UREF)" \
+              --body "Automated upstream sync hit conflicts. Resolve the conflict markers here, run \`go build ./... && go test ./...\` plus \`FP_VERIFY=1 go test ./internal/runtime/executor/helps/ -run TestFingerprintAgainstReporter\`, then merge. Likely conflict files: utls_client.go, claude_executor.go, codex_*executor.go (see SYNC.md)." || true
+          fi
