@@ -23,6 +23,7 @@ Findings were cross-referenced against the upstream project plus
 | 6 | Codex UA | On OAuth (ChatGPT backend) paths — **both** WebSocket and HTTP `/responses` — a downstream `User-Agent` is forwarded only if it is a first-party Codex CLI (`codex-tui/`, `codex_cli_rs/`, `codex-exec/`); anything else is normalized to the canonical Codex UA. Config UA always wins; API-key/BYOK is unchanged. | `codex-header-defaults.user-agent` |
 | 7 | Codex Originator | Same guard for the `Originator` header (OAuth forwards only Codex-family values, else normalizes). | — |
 | 8 | Codex cookies | **Per-account persistent cookie jar** stores & replays Cloudflare clearance cookies (`cf_clearance`, `__cf_bm`, `_cfuvid`, `__cflb`, `cf_chl_*`), mirroring the real Codex CLI's reqwest jar — per OpenAI's own source this is the primary anti-403 lever. Keyed by `auth.ID`; process-lifetime. | `disable-upstream-cookie-jar` |
+| 9 | Anti-cluster | **Per-account device-fingerprint diversification.** When a client omits device headers, the Claude device profile (UA / `X-Stainless-Package-Version` / `Runtime-Version` / `Os` / `Arch`) and the Codex UA are filled with values drawn **deterministically per account** (`fnv(auth scope)`) from a realistic real-client distribution — the same account stays stable across requests/restarts, different accounts spread — so the fleet does not collapse onto the fixed defaults every stock CLIProxyAPI / codex2api / sub2api instance shares (which upstream could otherwise cluster and ban together). Client-supplied and config values always win; the TLS JA3/JA4 stays fixed to the real client. | `disable-fingerprint-randomization` |
 
 ## Already provided by upstream (verified, not re-implemented)
 
@@ -38,6 +39,7 @@ Findings were cross-referenced against the upstream project plus
 disable-dateline-normalization: false   # false = normalize (recommended)
 disable-node-tls-fingerprint: false     # false = Node/h1 profile for Anthropic (recommended)
 disable-upstream-cookie-jar: false      # false = persist Cloudflare cookies per account (recommended)
+disable-fingerprint-randomization: false # false = per-account device/UA diversification (recommended)
 claude-header-defaults:
   stabilize-device-profile: true         # optional: pin per-account platform baseline
 ```
