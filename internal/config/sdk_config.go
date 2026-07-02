@@ -4,10 +4,16 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import "strings"
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+
+	// ProxyURLs stores optional system proxy entries used for implicit per-auth binding.
+	// When empty, ProxyURL is used as the fallback proxy for auths without their own proxy.
+	ProxyURLs []string `yaml:"proxy_urls,omitempty" json:"proxy_urls,omitempty"`
 
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
@@ -55,6 +61,25 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// NormalizeProxyURLList trims and drops empty system proxy entries while preserving order.
+func NormalizeProxyURLList(proxyURLs []string) []string {
+	if len(proxyURLs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(proxyURLs))
+	for _, proxyURL := range proxyURLs {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if proxyURL == "" {
+			continue
+		}
+		out = append(out, proxyURL)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // StreamingConfig holds server streaming behavior configuration.

@@ -2,7 +2,6 @@ package cliproxy
 
 import (
 	"net/http"
-	"strings"
 	"sync"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -26,7 +25,7 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if auth == nil {
 		return nil
 	}
-	proxyStr := strings.TrimSpace(auth.ProxyURL)
+	proxyStr := coreauth.EffectiveProxyURL("", auth)
 	if proxyStr == "" {
 		return nil
 	}

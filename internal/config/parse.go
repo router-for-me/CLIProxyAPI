@@ -74,6 +74,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.ProxyURLs = NormalizeProxyURLList(cfg.ProxyURLs)
+
 	cfg.NormalizePluginsConfig()
 
 	// Apply the same sanitization pipeline.
