@@ -86,6 +86,7 @@ const (
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
 	transientErrorCooldown    = time.Minute
+	anthropicOverloadedStatus = 529
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2284,6 +2285,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		logRetryDecision(ctx, "execute", attempt, normalized, req.Model, maxWait, wait, shouldRetry, errExec)
 		if !shouldRetry {
 			break
 		}
@@ -2352,6 +2354,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		logRetryDecision(ctx, "stream", attempt, normalized, req.Model, maxWait, wait, shouldRetry, errStream)
 		if !shouldRetry {
 			break
 		}
@@ -2492,8 +2495,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				logAuthRotationExhausted(ctx, "execute", providers, routeModel, tried, lastErr, errPick)
 				return cliproxyexecutor.Response{}, lastErr
 			}
+			logAuthPickFailed(ctx, "execute", providers, routeModel, tried, errPick)
 			return cliproxyexecutor.Response{}, errPick
 		}
 
@@ -2696,8 +2701,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				logAuthRotationExhausted(ctx, "stream", providers, routeModel, tried, lastErr, errPick)
 				return nil, lastErr
 			}
+			logAuthPickFailed(ctx, "stream", providers, routeModel, tried, errPick)
 			return nil, errPick
 		}
 
@@ -3626,7 +3633,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
-						case 408, 500, 502, 503, 504:
+						case 408, 500, 502, 503, 504, anthropicOverloadedStatus:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -3655,6 +3662,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 	}
 	m.mu.Unlock()
+	logAuthResultState(ctx, result, authSnapshot, cooldownStateChanged)
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
@@ -3866,9 +3874,11 @@ func statusCodeFromError(err error) int {
 	}
 	var sc statusCoder
 	if errors.As(err, &sc) && sc != nil {
-		return sc.StatusCode()
+		if status := sc.StatusCode(); status != 0 {
+			return status
+		}
 	}
-	return 0
+	return inferredStatusCodeFromMessage(err.Error())
 }
 
 func isUnauthorizedError(err error) bool {
@@ -3928,7 +3938,41 @@ func statusCodeFromResult(err *Error) int {
 	if err == nil {
 		return 0
 	}
-	return err.StatusCode()
+	if status := err.StatusCode(); status != 0 {
+		return status
+	}
+	return inferredStatusCodeFromMessage(err.Message)
+}
+
+func inferredStatusCodeFromMessage(message string) int {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return 0
+	}
+	if strings.Contains(lower, "rate_limit_error") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "rate-limit") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "quota exceeded") ||
+		strings.Contains(lower, "quota exhausted") ||
+		strings.Contains(lower, "usage limit") ||
+		strings.Contains(lower, "usage credits") ||
+		strings.Contains(lower, "session limit") ||
+		strings.Contains(lower, "usage-credits") {
+		return http.StatusTooManyRequests
+	}
+	if strings.Contains(lower, "credit balance") ||
+		strings.Contains(lower, "out of credits") ||
+		strings.Contains(lower, "insufficient_quota") ||
+		strings.Contains(lower, "billing hard limit") {
+		return http.StatusPaymentRequired
+	}
+	if strings.Contains(lower, "overloaded_error") ||
+		strings.Contains(lower, "overloaded") ||
+		strings.Contains(lower, "temporarily overloaded") {
+		return anthropicOverloadedStatus
+	}
+	return 0
 }
 
 func isModelSupportErrorMessage(message string) bool {
@@ -4136,7 +4180,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
-	case 408, 500, 502, 503, 504:
+	case 408, 500, 502, 503, 504, anthropicOverloadedStatus:
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
@@ -5667,6 +5711,151 @@ func logEntryWithRequestID(ctx context.Context) *log.Entry {
 		return log.WithField("request_id", reqID)
 	}
 	return log.NewEntry(log.StandardLogger())
+}
+
+func logAuthPickFailed(ctx context.Context, phase string, providers []string, model string, tried map[string]struct{}, errPick error) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"event":          "auth_pick_failed",
+		"phase":          phase,
+		"providers":      strings.Join(providers, ","),
+		"model":          model,
+		"tried_count":    len(tried),
+		"tried_auth_ids": strings.Join(sortedMapKeys(tried), ","),
+		"pick_status":    statusCodeFromError(errPick),
+		"pick_error":     fmt.Sprintf("%T", errPick),
+	}).Debug("auth pick failed before upstream execution")
+}
+
+func logAuthRotationExhausted(ctx context.Context, phase string, providers []string, model string, tried map[string]struct{}, lastErr error, errPick error) {
+	logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"event":          "auth_rotation_exhausted",
+		"phase":          phase,
+		"providers":      strings.Join(providers, ","),
+		"model":          model,
+		"tried_count":    len(tried),
+		"tried_auth_ids": strings.Join(sortedMapKeys(tried), ","),
+		"last_status":    statusCodeFromError(lastErr),
+		"last_error":     fmt.Sprintf("%T", lastErr),
+		"pick_status":    statusCodeFromError(errPick),
+		"pick_error":     fmt.Sprintf("%T", errPick),
+	}).Warn("auth rotation exhausted; returning last upstream error")
+}
+
+func logRetryDecision(ctx context.Context, phase string, attempt int, providers []string, model string, maxWait time.Duration, wait time.Duration, shouldRetry bool, errExec error) {
+	status := statusCodeFromError(errExec)
+	if !shouldWarnAuthFailureStatus(status) && shouldRetry && !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	fields := log.Fields{
+		"event":            "request_retry_decision",
+		"phase":            phase,
+		"attempt":          attempt,
+		"providers":        strings.Join(providers, ","),
+		"model":            model,
+		"status":           status,
+		"request_invalid":  isRequestInvalidError(errExec),
+		"retry_after_ms":   durationMillis(retryAfterFromError(errExec)),
+		"max_wait_ms":      maxWait.Milliseconds(),
+		"selected_wait_ms": wait.Milliseconds(),
+		"should_retry":     shouldRetry,
+		"error_type":       fmt.Sprintf("%T", errExec),
+	}
+	entry := logEntryWithRequestID(ctx).WithFields(fields)
+	if shouldWarnAuthFailureStatus(status) || !shouldRetry {
+		entry.Warn("request retry decision")
+		return
+	}
+	entry.Debug("request retry decision")
+}
+
+func logAuthResultState(ctx context.Context, result Result, authSnapshot *Auth, cooldownStateChanged bool) {
+	if result.Success || result.Error == nil {
+		return
+	}
+	status := statusCodeFromResult(result.Error)
+	if !shouldWarnAuthFailureStatus(status) && !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	fields := log.Fields{
+		"event":                  "auth_result_state",
+		"auth_id":                result.AuthID,
+		"provider":               result.Provider,
+		"model":                  result.Model,
+		"status":                 status,
+		"retry_after_ms":         durationMillis(result.RetryAfter),
+		"cooldown_state_changed": cooldownStateChanged,
+	}
+	if authSnapshot != nil {
+		fields["auth_status"] = authSnapshot.Status
+		fields["auth_unavailable"] = authSnapshot.Unavailable
+		fields["auth_next_retry_after"] = formatLogTime(authSnapshot.NextRetryAfter)
+		fields["auth_retry_in_ms"] = retryInMillis(authSnapshot.NextRetryAfter)
+		fields["auth_quota_exceeded"] = authSnapshot.Quota.Exceeded
+		fields["auth_quota_reason"] = authSnapshot.Quota.Reason
+		if state := authSnapshot.ModelStates[result.Model]; state != nil {
+			fields["model_state_present"] = true
+			fields["model_status"] = state.Status
+			fields["model_unavailable"] = state.Unavailable
+			fields["model_next_retry_after"] = formatLogTime(state.NextRetryAfter)
+			fields["model_retry_in_ms"] = retryInMillis(state.NextRetryAfter)
+			fields["model_quota_exceeded"] = state.Quota.Exceeded
+			fields["model_quota_reason"] = state.Quota.Reason
+		} else {
+			fields["model_state_present"] = false
+		}
+	}
+	entry := logEntryWithRequestID(ctx).WithFields(fields)
+	if shouldWarnAuthFailureStatus(status) {
+		entry.Warn("auth failure state recorded")
+		return
+	}
+	entry.Debug("auth failure state recorded")
+}
+
+func shouldWarnAuthFailureStatus(status int) bool {
+	switch status {
+	case http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests, anthropicOverloadedStatus:
+		return true
+	default:
+		return false
+	}
+}
+
+func sortedMapKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func durationMillis(value *time.Duration) int64 {
+	if value == nil {
+		return 0
+	}
+	return value.Milliseconds()
+}
+
+func retryInMillis(next time.Time) int64 {
+	if next.IsZero() {
+		return 0
+	}
+	wait := time.Until(next)
+	if wait < 0 {
+		return 0
+	}
+	return wait.Milliseconds()
+}
+
+func formatLogTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model string) {

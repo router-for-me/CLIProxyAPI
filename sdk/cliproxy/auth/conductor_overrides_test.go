@@ -108,6 +108,77 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 }
 
+func TestManager_MarkResult_InferredLimitMessagesCooldownModel(t *testing.T) {
+	testCases := []struct {
+		name      string
+		message   string
+		wantQuota bool
+	}{
+		{
+			name:      "anthropic_rate_limit_body_without_status",
+			message:   `{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}`,
+			wantQuota: true,
+		},
+		{
+			name:      "claude_code_session_limit_without_status",
+			message:   "You've hit your session limit · resets 6:30am (Asia/Seoul)\n/usage-credits to finish what you're working on.",
+			wantQuota: true,
+		},
+		{
+			name:      "usage_credit_balance_without_status",
+			message:   "Your credit balance is too low to access this model.",
+			wantQuota: false,
+		},
+		{
+			name:      "anthropic_overloaded_without_status",
+			message:   `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+			wantQuota: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			auth := &Auth{ID: uuid.NewString(), Provider: "claude"}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			model := "claude-opus-4-8"
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: "claude",
+				Model:    model,
+				Success:  false,
+				Error:    &Error{Message: tc.message},
+			})
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok {
+				t.Fatalf("GetByID(%q) not found", auth.ID)
+			}
+			state := updated.ModelStates[model]
+			if state == nil {
+				t.Fatalf("model state missing for %q", model)
+			}
+			if !state.Unavailable {
+				t.Fatalf("model state Unavailable=false, want true")
+			}
+			if state.NextRetryAfter.IsZero() {
+				t.Fatalf("model NextRetryAfter is zero; selector would immediately reuse auth")
+			}
+			if state.Quota.Exceeded != tc.wantQuota {
+				t.Fatalf("model quota exceeded = %v, want %v", state.Quota.Exceeded, tc.wantQuota)
+			}
+			blocked, reason, next := isAuthBlockedForModel(updated, model, time.Now())
+			if !blocked {
+				t.Fatalf("isAuthBlockedForModel blocked=false, reason=%v next=%v", reason, next)
+			}
+		})
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
