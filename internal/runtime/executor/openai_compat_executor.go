@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
@@ -393,11 +394,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		var finalDetail usage.Detail
+		// Publish accumulated usage on every exit path. sync.Once inside the
+		// reporter ensures only the first Publish/PublishFailure call wins.
+		defer func() {
+			reporter.Publish(ctx, finalDetail)
+		}()
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
+				finalDetail = maxUsageDetailOpenAICompat(finalDetail, detail)
 			}
 			trimmedLine := bytes.TrimSpace(line)
 			if len(trimmedLine) == 0 {
@@ -434,7 +441,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			// Only mark as failure when the upstream itself is at fault.
+			// If the client disconnected (ctx canceled) the tokens were
+			// already consumed upstream, so let the deferred Publish record
+			// the partial usage as a successful request instead.
+			if ctx.Err() == nil {
+				reporter.PublishFailure(ctx, errScan)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
@@ -452,8 +465,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				}
 			}
 		}
-		// Ensure we record the request if no usage chunk was ever seen
-		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -795,3 +806,15 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+func maxUsageDetailOpenAICompat(a, b usage.Detail) usage.Detail {
+	return usage.Detail{
+		InputTokens:         max(a.InputTokens, b.InputTokens),
+		OutputTokens:        max(a.OutputTokens, b.OutputTokens),
+		ReasoningTokens:     max(a.ReasoningTokens, b.ReasoningTokens),
+		CachedTokens:        max(a.CachedTokens, b.CachedTokens),
+		CacheReadTokens:     max(a.CacheReadTokens, b.CacheReadTokens),
+		CacheCreationTokens: max(a.CacheCreationTokens, b.CacheCreationTokens),
+		TotalTokens:         max(a.TotalTokens, b.TotalTokens),
+	}
+}
