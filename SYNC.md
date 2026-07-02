@@ -22,10 +22,15 @@ There are **two independent kinds of "keeping up"**:
 | `.github/workflows/fork-ci.yml` | push / PR to `feat/fingerprint-hardening` or `main` | gofmt check + `go build ./...` + `go test ./...` (self-contained gate) |
 | `.github/workflows/fork-sync.yml` | daily cron 03:00 UTC + manual | merge `upstream/main`; **clean+green → push**; **conflict → open a `sync/*` PR**; broken build/test → red run, nothing pushed |
 | `.github/workflows/fork-image.yml` | push to mod branch / `v*` tag | build + push Docker image to `ghcr.io/<owner>/cliproxyapi` (`:latest`, `:<branch>`, `:sha`) using `GITHUB_TOKEN` — no extra secrets |
+| `.github/workflows/fork-release.yml` | `v*` tag / manual | cross-compile Linux **static** binaries (CGO=0) amd64+arm64, package with config + systemd unit + `install.sh` + `DEPLOY.md`, publish to **GitHub Releases** + checksums |
 
-Flow: `fork-sync` merges upstream → pushes → that push triggers `fork-ci` (verify)
-and `fork-image` (publish image). Deploy is an optional, commented step in
-`fork-image.yml` (fill in your SSH/registry target + secrets).
+Flow (day-to-day): `fork-sync` merges upstream → pushes → that push triggers
+`fork-ci` (verify) and `fork-image` (publish image). Deploy is an optional,
+commented step in `fork-image.yml` (fill in your SSH/registry target + secrets).
+
+Flow (release): push a `v*` tag → `fork-release` (static tarballs → GitHub
+Releases) and `fork-image` (multi-arch image → GHCR) run in parallel. Both use
+only `GITHUB_TOKEN`.
 
 ### One-time setup on the fork (you must do these in the GitHub UI)
 
@@ -33,16 +38,46 @@ and `fork-image` (publish image). Deploy is an optional, commented step in
    write permissions"** (lets `fork-sync` push merges and open PRs, and
    `fork-image` publish to GHCR).
 2. **Settings → Actions → General →** ensure Actions are **enabled** for the fork.
-3. **Disable interfering upstream governance workflows on the fork** (they are for
-   the upstream repo and will fail/mis-fire here): in the Actions tab, disable
-   `pr-path-guard`, `agents-md-guard`, `auto-retarget-main-pr-to-dev`, and
-   (optionally) upstream's `docker-image` / `release` if you prefer the `fork-*`
-   ones. (They live in `.github/workflows/`; disabling via the UI does not delete
-   them, so upstream merges stay clean.)
+3. **Disable interfering upstream workflows on the fork** (Actions tab → pick the
+   workflow → ⋯ → Disable). Disabling via the UI does not delete the files, so
+   upstream merges stay clean.
+   - **Must disable** `release` and `docker-image`: upstream `release.yaml` triggers
+     on `tags: ['*']` (every tag) and would race `fork-release` for the same GitHub
+     Release; `docker-image.yml` needs DockerHub secrets this fork doesn't have and
+     will fail. `fork-release` + `fork-image` replace both.
+   - **Should disable** (upstream-governance, mis-fire here): `pr-path-guard`,
+     `agents-md-guard`, `auto-retarget-main-pr-to-dev`.
 4. First image publish makes the GHCR package **private** by default — make it
    public under the repo's *Packages* if you want to `docker pull` without auth.
 5. (Optional) adjust the cron cadence in `fork-sync.yml`. Daily is a good default;
    weekly means fewer, larger merges.
+
+---
+
+## Releasing (打 tag 出产物)
+
+Cut a versioned release — this produces the deployable server artifacts:
+
+```bash
+git checkout feat/fingerprint-hardening
+git pull
+# choose a version; keeping upstream's vX.Y.Z base + a fork suffix is tidy:
+git tag v7.2.49-fp1 -m "fingerprint-hardening release"
+git push origin v7.2.49-fp1
+```
+
+That tag triggers, in parallel (both `GITHUB_TOKEN`-only):
+- **`fork-release`** → `CLIProxyAPI_<ver>_linux_amd64.tar.gz` + `_arm64.tar.gz`
+  (static, CGO=0) + `checksums.txt` attached to the GitHub Release. Each tarball
+  contains the binary, `config.example.yaml`, the systemd unit, `install.sh`, and
+  `DEPLOY.md` — `sudo ./install.sh` on the server does the rest.
+- **`fork-image`** → multi-arch image at `ghcr.io/<owner>/cliproxyapi:<tag>`.
+
+Manual dry-run without tagging: Actions → `fork-release` → *Run workflow* builds
+the tarballs as run **artifacts** (no Release published).
+
+> Prerequisite: upstream `release` + `docker-image` disabled (see step 3 above),
+> and "Read and write" workflow permissions (step 1).
 
 ---
 

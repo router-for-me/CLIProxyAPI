@@ -1,0 +1,125 @@
+name: fork-release
+
+# 打 tag 自动发布可部署产物。
+#   git tag v7.2.50-fp1 -m "..." && git push origin v7.2.50-fp1
+# 触发后:交叉编译 Linux 静态二进制(CGO=0,不挑 glibc)amd64 + arm64,
+# 连同 config/systemd/install.sh/DEPLOY.md 打成 tar.gz,发到 GitHub Releases。
+# 只用内置 GITHUB_TOKEN,无需任何外部 secret。GHCR 镜像由 fork-image.yml 并行产出。
+#
+# 注意:必须在 Actions 页禁用上游 `release` 与 `docker-image` —— 上游 release.yaml
+# 以 tags:['*'] 吃掉所有 tag 会和本流程争抢同一个 Release;docker-image.yml 缺
+# DockerHub secret 会失败。详见 SYNC.md。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            asset_arch: amd64
+          - goarch: arm64
+            asset_arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Refresh models catalog (tolerant)
+        run: |
+          set -uo pipefail
+          if git fetch --depth 1 https://github.com/router-for-me/models.git main; then
+            git show FETCH_HEAD:models.json > internal/registry/models/models.json
+            echo "models.json refreshed"
+          else
+            echo "models refresh skipped, using bundled models.json"
+          fi
+      - name: Build static binary (CGO=0)
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="dev-$(git rev-parse --short HEAD)"
+          fi
+          C="$(git rev-parse --short HEAD)"
+          D="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "version=$V commit=$C date=$D arch=$ASSET_ARCH"
+
+          pkg="CLIProxyAPI_${V}_linux_${ASSET_ARCH}"
+          dir="dist/${pkg}"
+          mkdir -p "$dir"
+
+          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath -buildvcs=false \
+            -ldflags="-s -w -X main.Version=${V} -X main.Commit=${C} -X main.BuildDate=${D}" \
+            -o "$dir/cli-proxy-api" ./cmd/server/
+
+          # 断言纯静态:不得依赖动态解释器
+          if readelf -l "$dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
+            echo "::error::binary is NOT static"; readelf -l "$dir/cli-proxy-api"; exit 1
+          fi
+
+          cp config.example.yaml LICENSE README.md README_CN.md "$dir/" 2>/dev/null || true
+          cp deploy/cli-proxy-api.service deploy/install.sh deploy/DEPLOY.md "$dir/"
+          chmod +x "$dir/install.sh" "$dir/cli-proxy-api"
+          tar -C dist -czf "dist/${pkg}.tar.gz" "$pkg"
+          ls -la dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.asset_arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum CLIProxyAPI_*.tar.gz > checksums.txt
+          cat checksums.txt
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          notes="指纹加固 fork 自动发布。
+
+          - Linux 静态二进制(CGO=0,不挑 glibc);amd64 与 arm64(aarch64)。
+          - 解压后见包内 \`DEPLOY.md\`,\`sudo ./install.sh\` 一键装到 systemd。
+          - Docker 镜像见 GHCR(fork-image.yml 并行产出)。"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/CLIProxyAPI_*.tar.gz dist/checksums.txt --clobber
+          else
+            gh release create "$TAG" --title "$TAG" --notes "$notes" \
+              dist/CLIProxyAPI_*.tar.gz dist/checksums.txt
+          fi
