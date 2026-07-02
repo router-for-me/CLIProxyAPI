@@ -593,6 +593,121 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 }
 
+func TestManager_MarkResult_QuotaProbeFailureDoesNotCooldownAuth(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{ID: "auth-1", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-opus-4-8"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		IsProbe:  true,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate_limit_error"},
+	})
+
+	updated, ok := m.GetByID("auth-1")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Quota.Exceeded {
+		t.Fatalf("expected quota probe failure to leave auth.Quota untouched, got Exceeded=true")
+	}
+	if state := updated.ModelStates[model]; state != nil && !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected quota probe failure not to cool down model state, got NextRetryAfter=%v", state.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_RealTraffic429StillCoolsDownAuth(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{ID: "auth-1", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    "claude-opus-4-8",
+		Success:  false,
+		IsProbe:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate_limit_error"},
+	})
+
+	updated, ok := m.GetByID("auth-1")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.Quota.Exceeded {
+		t.Fatalf("expected real-traffic 429 to still mark auth.Quota.Exceeded=true")
+	}
+}
+
+func TestIsQuotaProbeRequest(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{
+			name:    "matches Claude Code quota probe",
+			payload: `{"model":"claude-opus-4-8","max_tokens":1,"messages":[{"role":"user","content":"quota"}]}`,
+			want:    true,
+		},
+		{
+			name:    "case and whitespace tolerant",
+			payload: `{"max_tokens":1,"messages":[{"role":"user","content":"  Quota  "}]}`,
+			want:    true,
+		},
+		{
+			name:    "real traffic with max_tokens 1 but different content",
+			payload: `{"max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    false,
+		},
+		{
+			name:    "real traffic with larger max_tokens",
+			payload: `{"max_tokens":4096,"messages":[{"role":"user","content":"quota"}]}`,
+			want:    false,
+		},
+		{
+			name:    "content blocks array is not treated as probe",
+			payload: `{"max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"quota"}]}]}`,
+			want:    false,
+		},
+		{
+			name:    "empty payload",
+			payload: ``,
+			want:    false,
+		},
+		{
+			name:    "malformed json",
+			payload: `{not json`,
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isQuotaProbeRequest([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("isQuotaProbeRequest(%q) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestManager_MarkResult_TransientErrorCooldownDefault(t *testing.T) {
 	prevQuota := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
