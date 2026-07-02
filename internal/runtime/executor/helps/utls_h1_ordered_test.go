@@ -89,7 +89,7 @@ func TestWriteOrderedRequest_MatchesUndiciOrder(t *testing.T) {
 	}
 
 	// Assert: priority order is respected (SDK/undici insertion order).
-	seq := []string{"Accept", "User-Agent", "X-Stainless-Lang", "Anthropic-Version", "Authorization", "Anthropic-Beta", "Content-Type", "Content-Length", "X-Client-Request-Id"}
+	seq := []string{"Accept", "User-Agent", "X-Stainless-Lang", "Anthropic-Version", "Authorization", "Anthropic-Beta", "X-Client-Request-Id", "Content-Type", "Content-Length"}
 	prev := -1
 	for _, h := range seq {
 		idx := indexOf(names, h)

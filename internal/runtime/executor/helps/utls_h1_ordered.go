@@ -46,29 +46,39 @@ func (e *writeError) Unwrap() error { return e.err }
 // are appended afterwards in a stable order. Values are taken from whatever the
 // executor actually set; only ordering is imposed here.
 var claudeHeaderOrder = []string{
+	// undici writes Host (emitted first by writeOrderedRequest) then Connection,
+	// immediately after the request line, before any SDK header.
+	"Connection",
+	// SDK fixed block, in buildHeaders insertion order (client.ts). The CLI
+	// overrides the User-Agent value but keeps its fixed-block position.
 	"Accept",
 	"User-Agent",
 	"X-Stainless-Retry-Count",
 	"X-Stainless-Timeout",
+	// getPlatformHeaders() block — exact key order from detect-platform.ts.
 	"X-Stainless-Lang",
 	"X-Stainless-Package-Version",
 	"X-Stainless-Os",
 	"X-Stainless-Arch",
 	"X-Stainless-Runtime",
 	"X-Stainless-Runtime-Version",
-	"X-Stainless-Helper-Method",
-	"Anthropic-Dangerous-Direct-Browser-Access",
+	"Anthropic-Dangerous-Direct-Browser-Access", // conditional; usually absent
 	"Anthropic-Version",
+	// authHeaders: exactly one of these.
 	"Authorization",
 	"X-Api-Key",
+	// Claude Code defaultHeaders.
 	"Anthropic-Beta",
 	"X-App",
 	"X-Claude-Code-Session-Id",
+	// per-request options.headers, merged last (so helper-method lands here).
+	"X-Stainless-Helper-Method",
+	"X-Client-Request-Id",
+	// bodyHeaders + undici-synthesized framing.
 	"Content-Type",
 	"Content-Length",
-	"X-Client-Request-Id",
+	// undici appends accept-encoding last into the SDK header list.
 	"Accept-Encoding",
-	"Connection",
 }
 
 // writeOrderedRequest serializes an HTTP/1.1 request to w with header names
