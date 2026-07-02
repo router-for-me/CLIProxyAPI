@@ -45,40 +45,47 @@ func (e *writeError) Unwrap() error { return e.err }
 // that tell on the Anthropic (Node/HTTP-1.1) path. Header names not listed here
 // are appended afterwards in a stable order. Values are taken from whatever the
 // executor actually set; only ordering is imposed here.
+// claudeHeaderOrder entries are written to the wire with EXACTLY this casing
+// (writeOrderedRequest emits the entry verbatim and looks the value up by the
+// canonical key). The casing is traced from @anthropic-ai/sdk + undici: the SDK
+// sets Accept/User-Agent/X-Stainless-* mixed-case, but anthropic-*, authorization,
+// x-api-key, x-app, x-stainless-helper-method and the transport headers
+// (host/connection/content-type/content-length/accept-encoding) go out lowercase.
+// Matching this removes the "all-canonical Go casing" tell on top of the order.
 var claudeHeaderOrder = []string{
-	// undici writes Host (emitted first by writeOrderedRequest) then Connection,
-	// immediately after the request line, before any SDK header.
-	"Connection",
+	// undici writes Host (emitted first, lowercase, by writeOrderedRequest) then
+	// connection, before any SDK header.
+	"connection",
 	// SDK fixed block, in buildHeaders insertion order (client.ts). The CLI
 	// overrides the User-Agent value but keeps its fixed-block position.
 	"Accept",
 	"User-Agent",
 	"X-Stainless-Retry-Count",
 	"X-Stainless-Timeout",
-	// getPlatformHeaders() block — exact key order from detect-platform.ts.
+	// getPlatformHeaders() block — exact key order + casing from detect-platform.ts.
 	"X-Stainless-Lang",
 	"X-Stainless-Package-Version",
-	"X-Stainless-Os",
+	"X-Stainless-OS",
 	"X-Stainless-Arch",
 	"X-Stainless-Runtime",
 	"X-Stainless-Runtime-Version",
-	"Anthropic-Dangerous-Direct-Browser-Access", // conditional; usually absent
-	"Anthropic-Version",
-	// authHeaders: exactly one of these.
-	"Authorization",
-	"X-Api-Key",
-	// Claude Code defaultHeaders.
-	"Anthropic-Beta",
-	"X-App",
-	"X-Claude-Code-Session-Id",
+	"anthropic-dangerous-direct-browser-access", // conditional; usually absent
+	"anthropic-version",
+	// authHeaders: exactly one of these (lowercase from the SDK).
+	"authorization",
+	"x-api-key",
+	// Claude Code defaultHeaders (lowercase).
+	"anthropic-beta",
+	"x-app",
+	"x-claude-code-session-id",
 	// per-request options.headers, merged last (so helper-method lands here).
-	"X-Stainless-Helper-Method",
-	"X-Client-Request-Id",
-	// bodyHeaders + undici-synthesized framing.
-	"Content-Type",
-	"Content-Length",
+	"x-stainless-helper-method",
+	"x-client-request-id",
+	// bodyHeaders + undici-synthesized framing (lowercase).
+	"content-type",
+	"content-length",
 	// undici appends accept-encoding last into the SDK header list.
-	"Accept-Encoding",
+	"accept-encoding",
 }
 
 // writeOrderedRequest serializes an HTTP/1.1 request to w with header names
@@ -102,7 +109,8 @@ func writeOrderedRequest(w *bufio.Writer, req *http.Request, order []string) err
 	if host == "" {
 		host = req.URL.Host
 	}
-	if _, err := fmt.Fprintf(w, "Host: %s\r\n", host); err != nil {
+	// Lowercase "host" to match undici/Node's wire casing (server-agnostic).
+	if _, err := fmt.Fprintf(w, "host: %s\r\n", host); err != nil {
 		return err
 	}
 
@@ -116,6 +124,8 @@ func writeOrderedRequest(w *bufio.Writer, req *http.Request, order []string) err
 		return nil
 	}
 
+	// Emit each priority header with its EXACT slice casing (name), looking the
+	// value up by the canonical key (Go stores req.Header canonicalized).
 	for _, name := range order {
 		canonical := textproto.CanonicalMIMEHeaderKey(name)
 		if written[canonical] {
@@ -123,7 +133,7 @@ func writeOrderedRequest(w *bufio.Writer, req *http.Request, order []string) err
 		}
 		if canonical == "Content-Length" {
 			if req.ContentLength > 0 {
-				if err := writeHeader("Content-Length", []string{fmt.Sprintf("%d", req.ContentLength)}); err != nil {
+				if err := writeHeader(name, []string{fmt.Sprintf("%d", req.ContentLength)}); err != nil {
 					return err
 				}
 				written[canonical] = true
@@ -131,7 +141,7 @@ func writeOrderedRequest(w *bufio.Writer, req *http.Request, order []string) err
 			continue
 		}
 		if values, ok := req.Header[canonical]; ok && len(values) > 0 {
-			if err := writeHeader(canonical, values); err != nil {
+			if err := writeHeader(name, values); err != nil {
 				return err
 			}
 			written[canonical] = true

@@ -89,7 +89,7 @@ func TestWriteOrderedRequest_MatchesUndiciOrder(t *testing.T) {
 	}
 
 	// Assert: priority order is respected (SDK/undici insertion order).
-	seq := []string{"Accept", "User-Agent", "X-Stainless-Lang", "Anthropic-Version", "Authorization", "Anthropic-Beta", "X-Client-Request-Id", "Content-Type", "Content-Length"}
+	seq := []string{"Accept", "User-Agent", "X-Stainless-Lang", "anthropic-version", "authorization", "anthropic-beta", "x-client-request-id", "content-type", "content-length"}
 	prev := -1
 	for _, h := range seq {
 		idx := indexOf(names, h)
@@ -102,15 +102,16 @@ func TestWriteOrderedRequest_MatchesUndiciOrder(t *testing.T) {
 		prev = idx
 	}
 
-	// Assert: NOT alphabetical — Anthropic-Beta sorts before User-Agent but must
+	// Assert: NOT alphabetical — anthropic-beta sorts before User-Agent but must
 	// appear after it here (proves ordering is intentional, not Go's sort).
-	if indexOf(names, "Anthropic-Beta") < indexOf(names, "User-Agent") {
+	if indexOf(names, "anthropic-beta") < indexOf(names, "User-Agent") {
 		t.Fatalf("output looks alphabetically sorted (Go net/http fingerprint), got %v", names)
 	}
 
-	// Assert: non-priority headers come last, in stable sorted order.
+	// Assert: non-priority headers come last, in stable sorted order. They are not
+	// in the priority list, so they keep Go's canonical casing.
 	aIdx, zIdx := indexOf(names, "X-Aaa-Custom"), indexOf(names, "X-Zzz-Custom")
-	if aIdx < indexOf(names, "Content-Type") || zIdx < aIdx {
+	if aIdx < indexOf(names, "content-type") || zIdx < aIdx {
 		t.Fatalf("non-priority headers misplaced: %v", names)
 	}
 }
@@ -128,8 +129,8 @@ func TestWriteOrderedRequest_ContentLengthFromRequest(t *testing.T) {
 	}
 
 	// Assert
-	if !strings.Contains(buf.String(), "Content-Length: 3\r\n") {
-		t.Fatalf("missing Content-Length: 3 in\n%s", buf.String())
+	if !strings.Contains(buf.String(), "content-length: 3\r\n") {
+		t.Fatalf("missing content-length: 3 in\n%s", buf.String())
 	}
 }
 
@@ -174,7 +175,7 @@ func TestWriteOrderedRequest_NoBody(t *testing.T) {
 	out := buf.String()
 
 	// Assert
-	if !strings.HasPrefix(out, "GET /v1/models HTTP/1.1\r\nHost: api.anthropic.com\r\n") {
+	if !strings.HasPrefix(out, "GET /v1/models HTTP/1.1\r\nhost: api.anthropic.com\r\n") {
 		t.Fatalf("unexpected request head:\n%s", out)
 	}
 	if !strings.HasSuffix(out, "\r\n\r\n") {
