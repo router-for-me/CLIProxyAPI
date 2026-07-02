@@ -35,11 +35,16 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
-# API keys for authentication
+# API keys for authentication (client credentials for accessing this proxy)
+# Each entry may be a plain string or an object with per-key model aliases (same fields as oauth-model-alias entries).
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"
-  - "your-api-key-3"
+  - key: "your-api-key-3"
+    model-aliases:
+      - name: "deepseek-v4"
+        alias: "claude-opus-4.7"
+        force-mapping: true
 
 # Enable debug logging
 debug: false

@@ -131,7 +131,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	models := h.Models()
+	models := handlers.ApplyClientAPIKeyModelAliases(h.BaseAPIHandler, c, h.Models())
 	firstID := ""
 	lastID := ""
 	if len(models) > 0 {

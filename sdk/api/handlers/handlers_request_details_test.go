@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"reflect"
 	"strings"
@@ -102,7 +103,7 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			providers, model, errMsg := handler.getRequestDetails(tt.inputModel)
+			providers, model, errMsg := handler.getRequestDetails(context.Background(), tt.inputModel)
 			if (errMsg != nil) != tt.wantErr {
 				t.Fatalf("getRequestDetails() error = %v, wantErr %v", errMsg, tt.wantErr)
 			}
@@ -122,7 +123,7 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
-	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
+	_, _, errMsg := handler.getRequestDetails(context.Background(), "gpt-image-2")
 	if errMsg == nil {
 		t.Fatalf("expected error for gpt-image-2, got nil")
 	}
