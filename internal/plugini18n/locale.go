@@ -176,8 +176,14 @@ func localeCandidates(locale string) []string {
 		return nil
 	}
 	out := []string{locale}
-	if index := strings.Index(locale, "-"); index > 0 {
-		out = append(out, locale[:index])
+	current := locale
+	for {
+		index := strings.LastIndex(current, "-")
+		if index <= 0 {
+			break
+		}
+		current = current[:index]
+		out = append(out, current)
 	}
 	return out
 }

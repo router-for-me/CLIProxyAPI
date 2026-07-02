@@ -74,6 +74,20 @@ func TestLookupMatchesExactCaseInsensitiveAndLanguageFallback(t *testing.T) {
 	}
 }
 
+func TestLookupFallsBackThroughIntermediateLocaleSubtags(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]string{
+		"zh":      "Chinese",
+		"zh-Hant": "Traditional Chinese",
+	}
+
+	got, matchedLocale, ok := LookupMatch(values, "zh-Hant-HK")
+	if !ok || got != "Traditional Chinese" || matchedLocale != "zh-hant-hk" {
+		t.Fatalf("LookupMatch(zh-Hant-HK) = %q/%q/%v, want Traditional Chinese/zh-hant-hk/true", got, matchedLocale, ok)
+	}
+}
+
 func TestAppendLocalePreservesExistingQuery(t *testing.T) {
 	t.Parallel()
 
