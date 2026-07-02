@@ -91,6 +91,18 @@ func fnvIndex(scope string, n int) int {
 func AccountFingerprintKey(auth *cliproxyauth.Auth, apiKey string) string {
 	scope := claudeDeviceProfileScopeKey(auth, apiKey)
 	if scope == "global" {
+		// No auth.ID and no apiKey (e.g. a Codex OAuth auth whose ID is not yet
+		// populated). Fall back to a stable account identifier from metadata so
+		// diversification still works, before giving up and using the canonical
+		// value. account_id is used (not email) to keep account-less/anonymous
+		// callers on the canonical fallback.
+		if auth != nil && auth.Metadata != nil {
+			if v, ok := auth.Metadata["account_id"].(string); ok {
+				if tv := strings.TrimSpace(v); tv != "" {
+					return "meta:" + tv
+				}
+			}
+		}
 		return ""
 	}
 	return scope
