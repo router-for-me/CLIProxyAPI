@@ -18,7 +18,7 @@ func TestWriteOrderedRequest_RejectsUnframableBody(t *testing.T) {
 
 	// Act
 	var buf bytes.Buffer
-	err := writeOrderedRequest(bufio.NewWriter(&buf), req, claudeHeaderOrder)
+	err := writeOrderedRequest(bufio.NewWriter(&buf), req)
 
 	// Assert
 	if !errors.Is(err, errUnframableBody) {
@@ -27,110 +27,115 @@ func TestWriteOrderedRequest_RejectsUnframableBody(t *testing.T) {
 }
 
 // emittedHeaderNames writes req with writeOrderedRequest and returns the header
-// names in wire order (excluding the request line and Host), plus the body.
-func emittedHeaderNames(t *testing.T, req *http.Request, order []string) ([]string, string) {
+// names in exact wire order (excluding only the request line), plus the body.
+func emittedHeaderNames(t *testing.T, req *http.Request) ([]string, string) {
 	t.Helper()
 	var buf bytes.Buffer
 	bw := bufio.NewWriter(&buf)
-	if err := writeOrderedRequest(bw, req, order); err != nil {
+	if err := writeOrderedRequest(bw, req); err != nil {
 		t.Fatalf("writeOrderedRequest: %v", err)
 	}
 	raw := buf.String()
-	parts := strings.SplitN(raw, "\r\n\r\n", 2)
-	head := parts[0]
-	body := ""
-	if len(parts) == 2 {
-		body = parts[1]
-	}
+	head, body, _ := strings.Cut(raw, "\r\n\r\n")
 	lines := strings.Split(head, "\r\n")
 	var names []string
 	for _, line := range lines[1:] { // skip request line
-		if name, _, ok := strings.Cut(line, ": "); ok && name != "Host" {
+		if name, _, ok := strings.Cut(line, ": "); ok {
 			names = append(names, name)
 		}
 	}
 	return names, body
 }
 
-func indexOf(names []string, target string) int {
-	for i, n := range names {
-		if n == target {
-			return i
-		}
-	}
-	return -1
-}
-
-func TestWriteOrderedRequest_MatchesUndiciOrder(t *testing.T) {
-	// Arrange: headers set in a deliberately non-priority order.
+// TestWriteOrderedRequest_MatchesRealCaptureOrder asserts the emitted order and
+// wire casing exactly reproduce a live capture of the real claude-cli 2.1.153:
+// application headers case-sensitively sorted, then the transport trailer.
+func TestWriteOrderedRequest_MatchesRealCaptureOrder(t *testing.T) {
 	body := `{"model":"claude"}`
-	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", strings.NewReader(body))
+	// Set in a deliberately scrambled order; Go canonicalizes the keys.
+	set := map[string]string{
+		"Anthropic-Version":   "2023-06-01",
+		"X-Stainless-Timeout": "900",
+		"anthropic-beta":      "oauth-2025-04-20",
+		"Authorization":       "Bearer tok",
+		"X-Stainless-Arch":    "arm64",
+		"Accept":              "application/json",
+		"X-Stainless-Runtime": "node",
+		"anthropic-dangerous-direct-browser-access": "true",
+		"User-Agent":                  "claude-cli/2.1.153 (external, cli)",
+		"X-Stainless-Lang":            "js",
+		"X-App":                       "cli",
+		"X-Stainless-OS":              "MacOS",
+		"X-Claude-Code-Session-Id":    "sid",
+		"X-Stainless-Package-Version": "0.94.0",
+		"X-Stainless-Retry-Count":     "0",
+		"X-Stainless-Runtime-Version": "v24.3.0",
+		"Content-Type":                "application/json",
+		"Connection":                  "keep-alive",
+		"Accept-Encoding":             "gzip, deflate, br, zstd",
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
-	req.Header.Set("Authorization", "Bearer tok")
-	req.Header.Set("Anthropic-Version", "2023-06-01")
-	req.Header.Set("User-Agent", "claude-cli/2.1.63 (external, cli)")
-	req.Header.Set("X-Stainless-Lang", "js")
-	req.Header.Set("X-Stainless-Runtime", "node")
-	req.Header.Set("X-Client-Request-Id", "req-123")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Zzz-Custom", "z")
-	req.Header.Set("X-Aaa-Custom", "a")
+	for k, v := range set {
+		req.Header.Set(k, v)
+	}
 
-	// Act
-	names, gotBody := emittedHeaderNames(t, req, claudeHeaderOrder)
-
-	// Assert: body preserved.
+	names, gotBody := emittedHeaderNames(t, req)
 	if gotBody != body {
 		t.Fatalf("body = %q, want %q", gotBody, body)
 	}
 
-	// Assert: priority order is respected (SDK/undici insertion order).
-	seq := []string{"Accept", "User-Agent", "X-Stainless-Lang", "anthropic-version", "authorization", "anthropic-beta", "x-client-request-id", "content-type", "content-length"}
-	prev := -1
-	for _, h := range seq {
-		idx := indexOf(names, h)
-		if idx < 0 {
-			t.Fatalf("header %q missing from output %v", h, names)
-		}
-		if idx <= prev {
-			t.Fatalf("header %q at %d out of order in %v", h, idx, names)
-		}
-		prev = idx
+	want := []string{
+		"Accept", "Authorization", "Content-Type", "User-Agent",
+		"X-Claude-Code-Session-Id",
+		"X-Stainless-Arch", "X-Stainless-Lang", "X-Stainless-OS",
+		"X-Stainless-Package-Version", "X-Stainless-Retry-Count",
+		"X-Stainless-Runtime", "X-Stainless-Runtime-Version", "X-Stainless-Timeout",
+		"anthropic-beta", "anthropic-dangerous-direct-browser-access", "anthropic-version",
+		"x-app",
+		// transport trailer
+		"Connection", "Host", "Accept-Encoding", "Content-Length",
 	}
-
-	// Assert: NOT alphabetical — anthropic-beta sorts before User-Agent but must
-	// appear after it here (proves ordering is intentional, not Go's sort).
-	if indexOf(names, "anthropic-beta") < indexOf(names, "User-Agent") {
-		t.Fatalf("output looks alphabetically sorted (Go net/http fingerprint), got %v", names)
+	if len(names) != len(want) {
+		t.Fatalf("emitted %d headers, want %d\n got: %v\nwant: %v", len(names), len(want), names, want)
 	}
-
-	// Assert: non-priority headers come last, in stable sorted order. They are not
-	// in the priority list, so they keep Go's canonical casing.
-	aIdx, zIdx := indexOf(names, "X-Aaa-Custom"), indexOf(names, "X-Zzz-Custom")
-	if aIdx < indexOf(names, "content-type") || zIdx < aIdx {
-		t.Fatalf("non-priority headers misplaced: %v", names)
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("header[%d] = %q, want %q\n got: %v\nwant: %v", i, names[i], want[i], names, want)
+		}
 	}
 }
 
-func TestWriteOrderedRequest_ContentLengthFromRequest(t *testing.T) {
-	// Arrange
+func TestWriteOrderedRequest_ContentLengthAndCasing(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader("abc"))
 	req.Header.Set("Content-Type", "application/json")
 
-	// Act
 	var buf bytes.Buffer
-	bw := bufio.NewWriter(&buf)
-	if err := writeOrderedRequest(bw, req, claudeHeaderOrder); err != nil {
+	if err := writeOrderedRequest(bufio.NewWriter(&buf), req); err != nil {
 		t.Fatalf("writeOrderedRequest: %v", err)
 	}
+	out := buf.String()
+	// Capitalized transport casing (matches real client), and Content-Length synthesized.
+	if !strings.Contains(out, "Content-Length: 3\r\n") {
+		t.Fatalf("missing Content-Length: 3 in\n%s", out)
+	}
+	if !strings.Contains(out, "Host: api.anthropic.com\r\n") {
+		t.Fatalf("missing Host in\n%s", out)
+	}
+}
 
-	// Assert
-	if !strings.Contains(buf.String(), "content-length: 3\r\n") {
-		t.Fatalf("missing content-length: 3 in\n%s", buf.String())
+func TestWriteOrderedRequest_LowercaseCustomHeaders(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("Anthropic-Beta", "x")
+	req.Header.Set("X-App", "cli")
+	var buf bytes.Buffer
+	if err := writeOrderedRequest(bufio.NewWriter(&buf), req); err != nil {
+		t.Fatalf("writeOrderedRequest: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"anthropic-beta: x\r\n", "x-app: cli\r\n"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing lowercase %q in\n%s", want, out)
+		}
 	}
 }
 
@@ -143,7 +148,7 @@ func TestRewindBody(t *testing.T) {
 
 	// bytes/strings body → net/http sets GetBody; after consumption it rewinds.
 	req, _ = http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader("payload"))
-	_, _ = io.Copy(io.Discard, req.Body) // simulate writeOrderedRequest consuming it
+	_, _ = io.Copy(io.Discard, req.Body)
 	_ = req.Body.Close()
 	if !rewindBody(req) {
 		t.Fatal("in-memory body should be rewindable via GetBody")
@@ -153,7 +158,7 @@ func TestRewindBody(t *testing.T) {
 		t.Fatalf("rewound body = %q, want %q", data, "payload")
 	}
 
-	// Streaming body without GetBody → retry must be refused (would send empty body).
+	// Streaming body without GetBody → retry must be refused.
 	req, _ = http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", io.NopCloser(strings.NewReader("x")))
 	req.GetBody = nil
 	if rewindBody(req) {
@@ -162,24 +167,19 @@ func TestRewindBody(t *testing.T) {
 }
 
 func TestWriteOrderedRequest_NoBody(t *testing.T) {
-	// Arrange: a bodyless GET must still serialize and end cleanly.
 	req, _ := http.NewRequest(http.MethodGet, "https://api.anthropic.com/v1/models", nil)
-	req.Header.Set("User-Agent", "claude-cli/2.1.63")
+	req.Header.Set("User-Agent", "claude-cli/2.1.153 (external, cli)")
 
-	// Act
 	var buf bytes.Buffer
-	bw := bufio.NewWriter(&buf)
-	if err := writeOrderedRequest(bw, req, claudeHeaderOrder); err != nil {
+	if err := writeOrderedRequest(bufio.NewWriter(&buf), req); err != nil {
 		t.Fatalf("writeOrderedRequest: %v", err)
 	}
 	out := buf.String()
-
-	// Assert
-	if !strings.HasPrefix(out, "GET /v1/models HTTP/1.1\r\nhost: api.anthropic.com\r\n") {
+	// Request line, then the single app header, then Host in the transport trailer.
+	if !strings.HasPrefix(out, "GET /v1/models HTTP/1.1\r\nUser-Agent: claude-cli/2.1.153 (external, cli)\r\nHost: api.anthropic.com\r\n") {
 		t.Fatalf("unexpected request head:\n%s", out)
 	}
 	if !strings.HasSuffix(out, "\r\n\r\n") {
 		t.Fatalf("request must end with blank line:\n%q", out)
 	}
-	_ = io.Discard
 }

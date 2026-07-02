@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/textproto"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -32,70 +31,57 @@ type writeError struct{ err error }
 func (e *writeError) Error() string { return e.err.Error() }
 func (e *writeError) Unwrap() error { return e.err }
 
-// claudeHeaderOrder is the HTTP/1.1 request header order emitted by Claude Code
-// (the Anthropic TypeScript SDK on Node.js/undici). undici writes h1 headers in
-// insertion order, and the SDK's buildHeaders composes them in exactly this
-// sequence: the fixed block (Accept, User-Agent, X-Stainless-Retry-Count,
-// X-Stainless-Timeout, platform headers, anthropic-version), then auth headers,
-// then default headers (anthropic-beta, x-app, …), then body headers
-// (content-type/length), then per-request headers.
+// Header emission model, verified by LIVE-CAPTURING the real claude-cli 2.1.153
+// on this machine (raw HTTP/1.1 to a local server, byte-exact):
 //
-// Go's net/http instead sorts request headers alphabetically, which is itself a
-// recognizable "Go net/http" fingerprint. Emitting them in this order removes
-// that tell on the Anthropic (Node/HTTP-1.1) path. Header names not listed here
-// are appended afterwards in a stable order. Values are taken from whatever the
-// executor actually set; only ordering is imposed here.
-// claudeHeaderOrder entries are written to the wire with EXACTLY this casing
-// (writeOrderedRequest emits the entry verbatim and looks the value up by the
-// canonical key). The casing is traced from @anthropic-ai/sdk + undici: the SDK
-// sets Accept/User-Agent/X-Stainless-* mixed-case, but anthropic-*, authorization,
-// x-api-key, x-app, x-stainless-helper-method and the transport headers
-// (host/connection/content-type/content-length/accept-encoding) go out lowercase.
-// Matching this removes the "all-canonical Go casing" tell on top of the order.
-var claudeHeaderOrder = []string{
-	// undici writes Host (emitted first, lowercase, by writeOrderedRequest) then
-	// connection, before any SDK header.
-	"connection",
-	// SDK fixed block, in buildHeaders insertion order (client.ts). The CLI
-	// overrides the User-Agent value but keeps its fixed-block position.
-	"Accept",
-	"User-Agent",
-	"X-Stainless-Retry-Count",
-	"X-Stainless-Timeout",
-	// getPlatformHeaders() block — exact key order + casing from detect-platform.ts.
-	"X-Stainless-Lang",
-	"X-Stainless-Package-Version",
-	"X-Stainless-OS",
-	"X-Stainless-Arch",
-	"X-Stainless-Runtime",
-	"X-Stainless-Runtime-Version",
-	"anthropic-dangerous-direct-browser-access", // conditional; usually absent
-	"anthropic-version",
-	// authHeaders: exactly one of these (lowercase from the SDK).
-	"authorization",
-	"x-api-key",
-	// Claude Code defaultHeaders (lowercase).
-	"anthropic-beta",
-	"x-app",
-	"x-claude-code-session-id",
-	// per-request options.headers, merged last (so helper-method lands here).
-	// Mixed case: the SDK emits X-Stainless-Helper-Method like the other
-	// X-Stainless-* headers (verified in cli.js), not lowercased.
-	"X-Stainless-Helper-Method",
-	"x-client-request-id",
-	// bodyHeaders + undici-synthesized framing (lowercase).
-	"content-type",
-	"content-length",
-	// undici appends accept-encoding last into the SDK header list.
-	"accept-encoding",
+//   1. Application headers are emitted in a CASE-SENSITIVE (raw ASCII) sort of
+//      their wire name. Because ASCII uppercase (A–Z) sorts before lowercase
+//      (a–z), the observed order is: Accept, Authorization, Content-Type,
+//      User-Agent, X-Claude-Code-Session-Id, X-Stainless-* (sorted), then the
+//      lowercase custom headers anthropic-beta, anthropic-dangerous-…,
+//      anthropic-version, x-app. This is NOT the SDK buildHeaders insertion order
+//      and NOT Go's canonical-key alphabetical order.
+//   2. Then undici appends the transport headers in a fixed trailer:
+//      Connection, Host, Accept-Encoding, Content-Length.
+//   3. Casing on the wire is Go-canonical for everything EXCEPT anthropic-*,
+//      x-app and x-api-key (lowercase), and X-Stainless-OS (OS uppercased).
+//
+// Sorting (rather than a fixed list) is robust to whichever headers are present
+// and reproduces the client exactly.
+
+// headerWireCasing maps a Go-canonical header key to the exact casing the real
+// client puts on the wire. Only deviations from canonical are listed.
+var headerWireCasing = map[string]string{
+	"Anthropic-Beta":                            "anthropic-beta",
+	"Anthropic-Version":                         "anthropic-version",
+	"Anthropic-Dangerous-Direct-Browser-Access": "anthropic-dangerous-direct-browser-access",
+	"X-App":          "x-app",
+	"X-Api-Key":      "x-api-key",
+	"X-Stainless-Os": "X-Stainless-OS",
 }
 
-// writeOrderedRequest serializes an HTTP/1.1 request to w with header names
-// emitted in the given priority order first (only those actually present),
-// followed by any remaining headers in a stable alphabetical order. Host is
-// always written first and Content-Length is synthesized from req.ContentLength.
-// This is a pure function (no network) so the ordering is unit-testable.
-func writeOrderedRequest(w *bufio.Writer, req *http.Request, order []string) error {
+// transportHeaderTrailer is undici's fixed trailing header order, appended after
+// the sorted application headers.
+var transportHeaderTrailer = []string{"Connection", "Host", "Accept-Encoding", "Content-Length"}
+
+// transportHeaderSet is the trailer names (Go-canonical) excluded from the sorted
+// application-header block.
+var transportHeaderSet = map[string]bool{"Connection": true, "Host": true, "Accept-Encoding": true, "Content-Length": true}
+
+// wireHeaderName returns the on-the-wire casing for a Go-canonical header key.
+func wireHeaderName(canonical string) string {
+	if w, ok := headerWireCasing[canonical]; ok {
+		return w
+	}
+	return canonical
+}
+
+// writeOrderedRequest serializes an HTTP/1.1 request to w reproducing the real
+// Claude Code (undici) wire order: application headers case-sensitively sorted by
+// their wire-casing name, then the fixed transport trailer (Connection, Host,
+// Accept-Encoding, Content-Length). Host and Content-Length are synthesized. This
+// is a pure function (no network) so the ordering is unit-testable.
+func writeOrderedRequest(w *bufio.Writer, req *http.Request) error {
 	// Reject a body whose length cannot be framed: without Content-Length (and we
 	// never emit chunked) the server cannot find the message boundary and the
 	// bytes would bleed into the next pooled request.
@@ -107,61 +93,55 @@ func writeOrderedRequest(w *bufio.Writer, req *http.Request, order []string) err
 	if _, err := fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", req.Method, req.URL.RequestURI()); err != nil {
 		return err
 	}
-	host := req.Host
-	if host == "" {
-		host = req.URL.Host
-	}
-	// Lowercase "host" to match undici/Node's wire casing (server-agnostic).
-	if _, err := fmt.Fprintf(w, "host: %s\r\n", host); err != nil {
-		return err
-	}
-
-	written := make(map[string]bool, len(req.Header)+2)
-	writeHeader := func(key string, values []string) error {
+	writeHeader := func(name string, values []string) error {
 		for _, v := range values {
-			if _, err := fmt.Fprintf(w, "%s: %s\r\n", key, v); err != nil {
+			if _, err := fmt.Fprintf(w, "%s: %s\r\n", name, v); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	// Emit each priority header with its EXACT slice casing (name), looking the
-	// value up by the canonical key (Go stores req.Header canonicalized).
-	for _, name := range order {
-		canonical := textproto.CanonicalMIMEHeaderKey(name)
-		if written[canonical] {
+	// Application headers (everything except the transport trailer), emitted in a
+	// case-sensitive raw-ASCII sort of their wire casing — matching the real client.
+	type appHeader struct{ wire, canonical string }
+	apps := make([]appHeader, 0, len(req.Header))
+	for canonical := range req.Header {
+		if transportHeaderSet[canonical] {
 			continue
 		}
-		if canonical == "Content-Length" {
-			if req.ContentLength > 0 {
-				if err := writeHeader(name, []string{fmt.Sprintf("%d", req.ContentLength)}); err != nil {
-					return err
-				}
-				written[canonical] = true
-			}
-			continue
-		}
-		if values, ok := req.Header[canonical]; ok && len(values) > 0 {
-			if err := writeHeader(name, values); err != nil {
-				return err
-			}
-			written[canonical] = true
+		apps = append(apps, appHeader{wire: wireHeaderName(canonical), canonical: canonical})
+	}
+	sort.Slice(apps, func(i, j int) bool { return apps[i].wire < apps[j].wire })
+	for _, h := range apps {
+		if err := writeHeader(h.wire, req.Header[h.canonical]); err != nil {
+			return err
 		}
 	}
 
-	// Remaining headers not covered by the priority list, stable-sorted so the
-	// output is deterministic.
-	remaining := make([]string, 0, len(req.Header))
-	for name := range req.Header {
-		if !written[name] {
-			remaining = append(remaining, name)
-		}
+	// Transport trailer in undici's fixed order.
+	host := req.Host
+	if host == "" {
+		host = req.URL.Host
 	}
-	sort.Strings(remaining)
-	for _, name := range remaining {
-		if err := writeHeader(name, req.Header[name]); err != nil {
-			return err
+	for _, name := range transportHeaderTrailer {
+		switch name {
+		case "Host":
+			if err := writeHeader("Host", []string{host}); err != nil {
+				return err
+			}
+		case "Content-Length":
+			if req.ContentLength > 0 {
+				if err := writeHeader("Content-Length", []string{fmt.Sprintf("%d", req.ContentLength)}); err != nil {
+					return err
+				}
+			}
+		default:
+			if values, ok := req.Header[name]; ok && len(values) > 0 {
+				if err := writeHeader(name, values); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -185,12 +165,11 @@ type utlsH1Conn struct {
 }
 
 // utlsH1RoundTripper is an http.RoundTripper for HTTP/1.1 uTLS profiles that
-// writes request headers in a fixed (undici-matching) order instead of Go's
-// alphabetical sort, while keeping connections alive per host.
+// writes request headers in the real Claude Code (undici) wire order instead of
+// Go's alphabetical sort, while keeping connections alive per host.
 type utlsH1RoundTripper struct {
 	dialer  proxyDialer
 	profile tlsProfile
-	order   []string
 
 	mu   sync.Mutex
 	idle map[string][]*utlsH1Conn
@@ -201,11 +180,10 @@ type proxyDialer interface {
 	Dial(network, addr string) (net.Conn, error)
 }
 
-func newUtlsH1RoundTripper(dialer proxyDialer, p tlsProfile, order []string) *utlsH1RoundTripper {
+func newUtlsH1RoundTripper(dialer proxyDialer, p tlsProfile) *utlsH1RoundTripper {
 	return &utlsH1RoundTripper{
 		dialer:  dialer,
 		profile: p,
-		order:   order,
 		idle:    make(map[string][]*utlsH1Conn),
 	}
 }
@@ -321,7 +299,7 @@ func (t *utlsH1RoundTripper) roundTripOn(pc *utlsH1Conn, host string, req *http.
 		}()
 	}
 
-	if err := writeOrderedRequest(pc.bw, req, t.order); err != nil {
+	if err := writeOrderedRequest(pc.bw, req); err != nil {
 		finish()
 		_ = pc.conn.Close()
 		if errors.Is(err, errUnframableBody) {

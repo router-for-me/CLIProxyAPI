@@ -45,7 +45,7 @@ func TestFingerprintAgainstReporter(t *testing.T) {
 	}
 
 	t.Run("node_h1_profile", func(t *testing.T) {
-		rt := newUtlsH1RoundTripper(proxy.Direct, nodeH1Profile, claudeHeaderOrder)
+		rt := newUtlsH1RoundTripper(proxy.Direct, nodeH1Profile)
 		res, err := fetch(rt)
 		if err != nil {
 			t.Skipf("reporter unreachable: %v", err)
