@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/plugini18n"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -159,21 +160,23 @@ func resourceRouteFromManagementRoute(item pluginapi.ManagementRoute) pluginapi.
 		Path:        item.Path,
 		Menu:        item.Menu,
 		Description: item.Description,
+		Locales:     cloneRouteLocales(item.Locales),
 		Handler:     item.Handler,
 	}
 }
 
 func registerResourceRoute(routes map[string]resourceRouteRecord, record capabilityRecord, item pluginapi.ResourceRoute) bool {
-	path, okRoute := normalizeResourceRoute(record.id, item)
+	dispatchPath, launchPath, okRoute := normalizeResourceRoute(record.id, item)
 	if !okRoute {
 		return false
 	}
-	key := managementRouteKey(http.MethodGet, path)
+	key := managementRouteKey(http.MethodGet, dispatchPath)
 	if _, exists := routes[key]; exists {
 		log.Warnf("pluginhost: plugin %s resource route %s conflicts with a higher-priority plugin and was skipped", record.id, key)
 		return true
 	}
-	item.Path = path
+	item.Path = launchPath
+	item.Locales = cloneRouteLocales(item.Locales)
 	routes[key] = resourceRouteRecord{
 		pluginID: record.id,
 		path:     record.path,
@@ -183,21 +186,25 @@ func registerResourceRoute(routes map[string]resourceRouteRecord, record capabil
 	return true
 }
 
-func normalizeResourceRoute(pluginID string, item pluginapi.ResourceRoute) (string, bool) {
+func normalizeResourceRoute(pluginID string, item pluginapi.ResourceRoute) (string, string, bool) {
 	if item.Handler == nil {
-		return "", false
+		return "", "", false
 	}
 	pluginID = strings.TrimSpace(pluginID)
 	if pluginID == "" {
-		return "", false
+		return "", "", false
 	}
 
 	path := strings.TrimSpace(item.Path)
 	if path == "" {
-		return "", false
+		return "", "", false
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
+	}
+	path, rawQuery, okRoute := splitResourceRoutePath(path)
+	if !okRoute {
+		return "", "", false
 	}
 
 	pluginBasePath := resourcePluginBasePath + "/" + pluginID
@@ -208,17 +215,36 @@ func normalizeResourceRoute(pluginID string, item pluginapi.ResourceRoute) (stri
 	}
 	path = strings.TrimRight(path, "/")
 	if path == "" {
-		return "", false
+		return "", "", false
 	}
 
-	fullPath := pluginBasePath + path
-	if !strings.HasPrefix(fullPath, pluginBasePath+"/") {
-		return "", false
+	dispatchPath := pluginBasePath + path
+	if !strings.HasPrefix(dispatchPath, pluginBasePath+"/") {
+		return "", "", false
 	}
-	if strings.ContainsAny(fullPath, " \t\r\n") || strings.Contains(fullPath, ":") || strings.Contains(fullPath, "*") || strings.Contains(fullPath, "..") {
-		return "", false
+	if strings.ContainsAny(dispatchPath, " \t\r\n") || strings.Contains(dispatchPath, ":") || strings.Contains(dispatchPath, "*") || strings.Contains(dispatchPath, "..") {
+		return "", "", false
 	}
-	return fullPath, true
+	launchPath := dispatchPath
+	if rawQuery != "" {
+		launchPath += "?" + rawQuery
+	}
+	return dispatchPath, launchPath, true
+}
+
+func splitResourceRoutePath(path string) (string, string, bool) {
+	if strings.Contains(path, "#") {
+		return "", "", false
+	}
+	queryIndex := strings.Index(path, "?")
+	if queryIndex < 0 {
+		return path, "", true
+	}
+	rawQuery := path[queryIndex+1:]
+	if strings.ContainsAny(rawQuery, " \t\r\n") {
+		return "", "", false
+	}
+	return path[:queryIndex], rawQuery, true
 }
 
 func managementRouteKey(method, path string) string {
@@ -252,11 +278,14 @@ func (h *Host) ServeManagementHTTP(w http.ResponseWriter, r *http.Request) bool 
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
+	headers := cloneHeader(r.Header)
+	query := cloneValues(r.URL.Query())
+	headers = normalizePluginRequestLocale(headers, query)
 	resp, errHandle := h.callManagementHandler(r.Context(), record, pluginapi.ManagementRequest{
 		Method:  r.Method,
 		Path:    r.URL.Path,
-		Headers: cloneHeader(r.Header),
-		Query:   cloneValues(r.URL.Query()),
+		Headers: headers,
+		Query:   query,
 		Body:    bytes.Clone(body),
 	})
 	if errHandle != nil {
@@ -298,11 +327,14 @@ func (h *Host) ServeResourceHTTP(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
+	headers := cloneHeader(r.Header)
+	query := cloneValues(r.URL.Query())
+	headers = normalizePluginRequestLocale(headers, query)
 	resp, errHandle := h.callResourceHandler(r.Context(), record, pluginapi.ManagementRequest{
 		Method:  http.MethodGet,
 		Path:    r.URL.Path,
-		Headers: cloneHeader(r.Header),
-		Query:   cloneValues(r.URL.Query()),
+		Headers: headers,
+		Query:   query,
 	})
 	if errHandle != nil {
 		log.Warnf("pluginhost: resource handler %s failed: %v", record.pluginID, errHandle)
@@ -324,6 +356,18 @@ func (h *Host) ServeResourceHTTP(w http.ResponseWriter, r *http.Request) bool {
 		log.Warnf("pluginhost: failed to write plugin resource response: %v", errWrite)
 	}
 	return true
+}
+
+func normalizePluginRequestLocale(headers http.Header, query map[string][]string) http.Header {
+	if headers == nil {
+		headers = http.Header{}
+	}
+	locale := plugini18n.LocaleFromRequest(headers, query)
+	if locale == "" {
+		return headers
+	}
+	headers.Set(plugini18n.LocaleHeader, locale)
+	return headers
 }
 
 func (h *Host) callManagementHandler(ctx context.Context, record managementRouteRecord, req pluginapi.ManagementRequest) (resp pluginapi.ManagementResponse, err error) {

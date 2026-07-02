@@ -251,6 +251,65 @@ func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
 	}
 }
 
+func TestListPluginStoreUsesRequestedLocale(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     t.TempDir(),
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": []byte(`{
+				"schema_version": 1,
+				"plugins": [{
+					"id": "sample-provider",
+					"name": "Sample Provider",
+					"description": "Adds sample provider support.",
+					"author": "author-name",
+					"repository": "https://github.com/author-name/cliproxy-sample-provider-plugin",
+					"tags": ["provider"],
+					"locales": {
+						"zh": {
+							"name": "示例插件",
+							"description": "增加示例提供商支持。",
+							"author": "作者",
+							"tags": ["工具"]
+						}
+					}
+				}]
+			}`),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugin-store", nil)
+	c.Request.Header.Set("Accept-Language", "fr, zh-CN;q=0.9")
+
+	h.ListPluginStore(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body pluginStoreListResponse
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if len(body.Plugins) != 1 {
+		t.Fatalf("plugins len = %d, want 1", len(body.Plugins))
+	}
+	entry := body.Plugins[0]
+	if entry.Name != "示例插件" || entry.Description != "增加示例提供商支持。" || entry.Author != "作者" ||
+		len(entry.Tags) != 1 || entry.Tags[0] != "工具" {
+		t.Fatalf("store entry = %#v, want localized display fields", entry)
+	}
+}
+
 func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 	t.Parallel()
 

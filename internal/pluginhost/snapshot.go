@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/plugini18n"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -36,6 +37,7 @@ type RegisteredPluginMenu struct {
 	Path        string
 	Menu        string
 	Description string
+	Locales     map[string]pluginapi.RouteLocale
 }
 
 func emptySnapshot() *Snapshot {
@@ -120,6 +122,7 @@ func (h *Host) registeredPluginMenus() map[string][]RegisteredPluginMenu {
 			Path:        strings.TrimSpace(record.route.Path),
 			Menu:        menu,
 			Description: strings.TrimSpace(record.route.Description),
+			Locales:     cloneRouteLocales(record.route.Locales),
 		})
 	}
 	for pluginID := range out {
@@ -140,21 +143,69 @@ func sortRecords(records []capabilityRecord) {
 }
 
 func clonePluginMetadata(meta pluginapi.Metadata) pluginapi.Metadata {
-	if len(meta.ConfigFields) == 0 {
-		return meta
-	}
+	meta.Locales = cloneMetadataLocales(meta.Locales)
 	meta.ConfigFields = cloneConfigFields(meta.ConfigFields)
 	return meta
 }
 
 func cloneConfigFields(fields []pluginapi.ConfigField) []pluginapi.ConfigField {
-	if len(fields) == 0 {
+	if fields == nil {
 		return nil
 	}
 	out := make([]pluginapi.ConfigField, len(fields))
 	copy(out, fields)
 	for index := range out {
 		out[index].EnumValues = append([]string(nil), fields[index].EnumValues...)
+		out[index].Locales = cloneConfigFieldLocales(fields[index].Locales)
 	}
 	return out
+}
+
+func cloneMetadataLocales(locales map[string]pluginapi.MetadataLocale) map[string]pluginapi.MetadataLocale {
+	return cloneLocaleMap(locales)
+}
+
+func cloneConfigFieldLocales(locales map[string]pluginapi.ConfigFieldLocale) map[string]pluginapi.ConfigFieldLocale {
+	return cloneLocaleMap(locales)
+}
+
+func cloneRouteLocales(locales map[string]pluginapi.RouteLocale) map[string]pluginapi.RouteLocale {
+	return cloneLocaleMap(locales)
+}
+
+func cloneLocaleMap[T any](locales map[string]T) map[string]T {
+	if len(locales) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(locales))
+	for locale := range locales {
+		keys = append(keys, locale)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		left := normalizedHostLocaleKey(keys[i])
+		right := normalizedHostLocaleKey(keys[j])
+		if left == right {
+			return keys[i] < keys[j]
+		}
+		return left < right
+	})
+	out := make(map[string]T, len(locales))
+	for _, rawLocale := range keys {
+		locale := normalizedHostLocaleKey(rawLocale)
+		if locale == "" {
+			continue
+		}
+		if _, exists := out[locale]; exists {
+			continue
+		}
+		out[locale] = locales[rawLocale]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizedHostLocaleKey(locale string) string {
+	return strings.ToLower(plugini18n.NormalizeLocale(locale))
 }
