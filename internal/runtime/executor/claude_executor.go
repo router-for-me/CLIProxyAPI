@@ -1102,7 +1102,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "900"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
 	sessionID, errSessionID := helps.CachedSessionIDRequired(r.Context(), apiKey)
 	if errSessionID != nil {
@@ -1122,13 +1122,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
-		// Match the shipped @anthropic-ai/claude-code client exactly. The undici
-		// build bundled in claude-code (2.1.6x–2.1.72 era) sends "br, gzip, deflate"
-		// and does NOT advertise zstd — zstd landed in a later undici release than
-		// that bundle. Verified against the real cli.js literal
-		// (`headersList.append("accept-encoding","br, gzip, deflate")`). Both the SET
-		// and the ORDER are part of the client fingerprint.
-		r.Header.Set("Accept-Encoding", "br, gzip, deflate")
+		// Verified by live-capturing the REAL claude-cli 2.1.153 on this machine:
+		// the current client sends "gzip, deflate, br, zstd" (undici Node 24 default;
+		// the newer bundle DOES advertise zstd). Earlier attempts using older-bundle
+		// values ("br, gzip, deflate") were wrong. Both value and order are part of
+		// the fingerprint; zstd responses are decoded downstream.
+		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official

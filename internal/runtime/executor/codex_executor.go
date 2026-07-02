@@ -34,12 +34,13 @@ import (
 )
 
 const (
-	// Real Codex CLI (openai/codex, codex_cli_rs) User-Agent shape, verified
-	// against the source: "codex_cli_rs/<ver> (<OS> <ver>; <arch>) <terminal>/<ver>".
-	// The UA ends at the terminal token — there is NO trailing "(codex-tui; ver)"
-	// segment (that was a fabrication) — and the originator/prefix is codex_cli_rs
-	// (DEFAULT_ORIGINATOR), not codex-tui.
-	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+	// Real Codex CLI User-Agent shape, confirmed by live-capturing codex 0.130.0:
+	//   "<originator>/<ver> (<OS> <ver>; <arch>) <terminal> (<originator>; <ver>)"
+	// The trailing "(<originator>; <ver>)" segment IS real (the earlier removal was
+	// wrong). Originator/prefix is codex_cli_rs (DEFAULT_ORIGINATOR for the CLI;
+	// the `codex exec` subcommand uses codex_exec). Terminal token is "unknown"
+	// when no TTY; interactive uses e.g. iTerm.app/3.6.10.
+	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)"
 	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
 )

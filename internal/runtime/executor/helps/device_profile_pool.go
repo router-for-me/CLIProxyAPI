@@ -42,20 +42,20 @@ type claudeProfileTuple struct {
 // and common OS/arch combinations. Values are plausible real tuples; the goal is
 // population diversity, not any single "correct" identity.
 var claudeProfilePool = []claudeProfileTuple{
-	// pkg is pinned to 0.74.0: the real @anthropic-ai/sdk bundled by claude-code
-	// across the 2.1.63–2.1.72 era (verified in cli.js). An impossible
-	// cli-version→sdk-version pairing is a sharper tell than uniformity, so this
-	// field is NOT diversified. node is kept within the Node-24 family so the
-	// advertised X-Stainless-Runtime-Version stays consistent with the pinned
-	// Node-24 uTLS ClientHello. Diversity comes from cli version + OS + arch.
-	{ua: "claude-cli/2.1.72 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "MacOS", arch: "arm64"},
-	{ua: "claude-cli/2.1.70 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "MacOS", arch: "arm64"},
-	{ua: "claude-cli/2.1.68 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "Linux", arch: "x64"},
-	{ua: "claude-cli/2.1.66 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "Linux", arch: "x64"},
-	{ua: "claude-cli/2.1.72 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "Windows", arch: "x64"},
-	{ua: "claude-cli/2.1.63 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "MacOS", arch: "x64"},
-	{ua: "claude-cli/2.1.70 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "Linux", arch: "arm64"},
-	{ua: "claude-cli/2.1.69 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "MacOS", arch: "arm64"},
+	// pkg is pinned to 0.94.0: the real @anthropic-ai/sdk bundled by the current
+	// claude-cli (live-captured from 2.1.153 on this machine → X-Stainless-Package-
+	// Version: 0.94.0). An impossible cli-version→sdk-version pairing is a sharper
+	// tell than uniformity, so this field is NOT diversified. node stays in the
+	// Node-24 family so X-Stainless-Runtime-Version matches the pinned Node-24 uTLS
+	// ClientHello. Diversity comes from cli version + OS + arch.
+	{ua: "claude-cli/2.1.153 (external, cli)", pkg: "0.94.0", node: "v24.3.0", os: "MacOS", arch: "arm64"},
+	{ua: "claude-cli/2.1.152 (external, cli)", pkg: "0.94.0", node: "v24.4.0", os: "MacOS", arch: "arm64"},
+	{ua: "claude-cli/2.1.151 (external, cli)", pkg: "0.94.0", node: "v24.3.0", os: "Linux", arch: "x64"},
+	{ua: "claude-cli/2.1.150 (external, cli)", pkg: "0.94.0", node: "v24.4.0", os: "Linux", arch: "x64"},
+	{ua: "claude-cli/2.1.153 (external, cli)", pkg: "0.94.0", node: "v24.3.0", os: "Windows", arch: "x64"},
+	{ua: "claude-cli/2.1.149 (external, cli)", pkg: "0.94.0", node: "v24.3.0", os: "MacOS", arch: "x64"},
+	{ua: "claude-cli/2.1.152 (external, cli)", pkg: "0.94.0", node: "v24.4.0", os: "Linux", arch: "arm64"},
+	{ua: "claude-cli/2.1.151 (external, cli)", pkg: "0.94.0", node: "v24.3.0", os: "MacOS", arch: "arm64"},
 }
 
 // codexUAPool spreads accounts across recent Codex CLI releases and terminals.
@@ -64,12 +64,12 @@ var claudeProfilePool = []claudeProfileTuple{
 var codexUAPool = []string{
 	// Real codex_cli_rs UA shape: prefix codex_cli_rs/, ends at the terminal token
 	// (no trailing "(codex-tui; ver)"). Versions in the current 0.14x line.
-	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10",
-	"codex_cli_rs/0.141.0 (Mac OS 26.4.0; arm64) Apple_Terminal/455",
-	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) WezTerm/20240203-110809",
-	"codex_cli_rs/0.140.0 (Mac OS 26.3.0; arm64) iTerm.app/3.5.11",
-	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) vscode/1.95.3",
-	"codex_cli_rs/0.141.0 (Mac OS 26.4.0; arm64) iTerm.app/3.6.10",
+	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)",
+	"codex_cli_rs/0.141.0 (Mac OS 26.4.0; arm64) Apple_Terminal/455 (codex_cli_rs; 0.141.0)",
+	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) WezTerm/20240203-110809 (codex_cli_rs; 0.142.5)",
+	"codex_cli_rs/0.140.0 (Mac OS 26.3.0; arm64) iTerm.app/3.5.11 (codex_cli_rs; 0.140.0)",
+	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) vscode/1.95.3 (codex_cli_rs; 0.142.5)",
+	"codex_cli_rs/0.141.0 (Mac OS 26.4.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.141.0)",
 }
 
 // fnvIndex maps a scope key deterministically into [0, n).
