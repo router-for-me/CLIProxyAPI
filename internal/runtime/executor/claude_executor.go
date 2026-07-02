@@ -271,6 +271,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
+	// Erase the Anthropic "dateline" steganographic fingerprint before signing so
+	// the cch signature is computed over the normalized body (OAuth accounts only).
+	bodyForUpstream = normalizeAnthropicDateline(e.cfg, oauthToken, bodyForUpstream)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -458,6 +461,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel)
+	// Erase the Anthropic "dateline" steganographic fingerprint before signing so
+	// the cch signature is computed over the normalized body (OAuth accounts only).
+	bodyForUpstream = normalizeAnthropicDateline(e.cfg, oauthToken, bodyForUpstream)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
@@ -1040,11 +1046,17 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
+	// Per-account device-fingerprint diversification: fill any device header the
+	// client did not send with a stable per-account value drawn from a realistic
+	// distribution, so the fleet does not collapse onto stock CLIProxyAPI's fixed
+	// defaults. Client-supplied and config values always win. Only the device
+	// headers are affected; ginHeaders is left intact for all other logic.
+	deviceHeaders := helps.AugmentClaudeDeviceHeaders(ginHeaders, auth, apiKey, cfg)
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
 	if stabilizeDeviceProfile {
 		var errDeviceProfile error
-		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, ginHeaders, cfg)
+		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, deviceHeaders, cfg)
 		if errDeviceProfile != nil {
 			return errDeviceProfile
 		}
@@ -1090,7 +1102,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "900"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
 	sessionID, errSessionID := helps.CachedSessionIDRequired(r.Context(), apiKey)
 	if errSessionID != nil {
@@ -1110,6 +1122,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
+		// Verified by live-capturing the REAL claude-cli 2.1.153 on this machine:
+		// the current client sends "gzip, deflate, br, zstd" (undici Node 24 default;
+		// the newer bundle DOES advertise zstd). Earlier attempts using older-bundle
+		// values ("br, gzip, deflate") were wrong. Both value and order are part of
+		// the fingerprint; zstd responses are decoded downstream.
 		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
@@ -1118,7 +1135,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stabilizeDeviceProfile {
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+		helps.ApplyClaudeLegacyDeviceHeaders(r, deviceHeaders, cfg)
 	}
 	var attrs map[string]string
 	if auth != nil {
@@ -2074,6 +2091,27 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	}
 
 	return payload, nil
+}
+
+// normalizeAnthropicDateline erases the Anthropic "dateline" steganographic
+// fingerprint — apostrophe-glyph and date-separator variants in the
+// "Today's date is ..." sentence — that Claude Code embeds when it detects a
+// non-official base URL. It runs only for OAuth/setup-token accounts and can be
+// disabled globally via disable-dateline-normalization. API-key accounts are
+// never touched, so their byte stream is preserved exactly. It must run before
+// cch signing so the signature is computed over the normalized body.
+func normalizeAnthropicDateline(cfg *config.Config, oauthToken bool, payload []byte) []byte {
+	if !oauthToken {
+		return payload
+	}
+	if cfg != nil && cfg.DisableDatelineNormalization {
+		return payload
+	}
+	out, _, changed := helps.NormalizeDateline(payload)
+	if !changed {
+		return payload
+	}
+	return out
 }
 
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.

@@ -886,6 +886,11 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
 		setHeaderCasePreserved(headers, "session_id", cache.ID)
+		// NOTE (live-captured from real codex 0.130.0): the real responses request
+		// carries session_id AND thread_id (both lowercase, same UUID) — not
+		// "Conversation_id". Aligning fully (thread_id underscore, dropping
+		// Conversation_id/Thread-Id) is a multi-path, test-coupled routing change
+		// tracked as a follow-up; kept as-is here to preserve existing behavior.
 		headers.Set("Conversation_id", cache.ID)
 	}
 
@@ -916,7 +921,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if isAPIKey {
 		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
 	} else {
-		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+		ensureCodexUserAgent(headers, ginHeaders, cfgUserAgent, helps.PerAccountCodexUserAgent(helps.AccountFingerprintKey(auth, ""), codexUserAgent, cfg))
 	}
 
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
@@ -932,11 +937,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		sessionFallback = uuid.NewString()
 	}
 	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		headers.Set("Originator", originator)
-	} else if !isAPIKey {
-		headers.Set("Originator", codexOriginator)
-	}
+	setCodexOriginator(headers, ginHeaders.Get("Originator"), isAPIKey)
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
@@ -1148,6 +1149,85 @@ func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, ke
 	if val := strings.TrimSpace(fallbackValue); val != "" {
 		target.Set(key, val)
 	}
+}
+
+// officialCodexUserAgentPrefixes are the User-Agent prefixes of first-party
+// OpenAI Codex CLIs. Only these are forwarded verbatim to the ChatGPT OAuth
+// backend; any other (or absent) UA is replaced with the canonical Codex UA.
+// Kept intentionally strict: a too-broad prefix such as bare "codex/" would let
+// a foreign UA like "codex/evil" through, and third-party agents (e.g. opencode)
+// are deliberately excluded so their UA is normalized to the official one.
+var officialCodexUserAgentPrefixes = []string{
+	"codex-tui/",
+	"codex_cli_rs/",
+	"codex-exec/",
+}
+
+// isOfficialCodexUserAgent reports whether ua looks like a first-party Codex CLI.
+func isOfficialCodexUserAgent(ua string) bool {
+	u := strings.ToLower(strings.TrimSpace(ua))
+	if u == "" {
+		return false
+	}
+	for _, prefix := range officialCodexUserAgentPrefixes {
+		if strings.HasPrefix(u, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureCodexUserAgent sets the outbound Codex User-Agent for OAuth traffic with
+// precedence: existing target value > operator config > forwarded client UA (only
+// when it is a recognized Codex CLI) > canonical fallback. This prevents leaking
+// a foreign downstream User-Agent (e.g. an OpenAI SDK's) to the ChatGPT backend,
+// which would be an obvious client-fingerprint mismatch. Operator config is always
+// honored verbatim, so custom clients remain configurable.
+func ensureCodexUserAgent(target, source http.Header, configValue, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(target.Get("User-Agent")) != "" {
+		return
+	}
+	if val := strings.TrimSpace(configValue); val != "" {
+		target.Set("User-Agent", val)
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(source.Get("User-Agent")); val != "" && isOfficialCodexUserAgent(val) {
+			target.Set("User-Agent", val)
+			return
+		}
+	}
+	if val := strings.TrimSpace(fallbackValue); val != "" {
+		target.Set("User-Agent", val)
+	}
+}
+
+// isOfficialCodexOriginator reports whether an Originator value belongs to a
+// Codex-family client (codex_cli_rs, codex-tui, codex_exec, …).
+func isOfficialCodexOriginator(originator string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(originator)), "codex")
+}
+
+// setCodexOriginator sets the Originator header. API-key traffic forwards the
+// client value as-is; OAuth traffic (ChatGPT backend) forwards it only when it
+// is a recognized Codex originator, otherwise it is normalized to the canonical
+// codexOriginator so a foreign value never leaks upstream.
+func setCodexOriginator(target http.Header, clientOriginator string, isAPIKey bool) {
+	o := strings.TrimSpace(clientOriginator)
+	if isAPIKey {
+		if o != "" {
+			target.Set("Originator", o)
+		}
+		return
+	}
+	if o != "" && isOfficialCodexOriginator(o) {
+		target.Set("Originator", o)
+		return
+	}
+	target.Set("Originator", codexOriginator)
 }
 
 type statusErrWithHeaders struct {

@@ -34,8 +34,14 @@ import (
 )
 
 const (
-	codexUserAgent             = "codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)"
-	codexOriginator            = "codex-tui"
+	// Real Codex CLI User-Agent shape, confirmed by live-capturing codex 0.130.0:
+	//   "<originator>/<ver> (<OS> <ver>; <arch>) <terminal> (<originator>; <ver>)"
+	// The trailing "(<originator>; <ver>)" segment IS real (the earlier removal was
+	// wrong). Originator/prefix is codex_cli_rs (DEFAULT_ORIGINATOR for the CLI;
+	// the `codex exec` subcommand uses codex_exec). Terminal token is "unknown"
+	// when no TTY; interactive uses e.g. iTerm.app/3.6.10.
+	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)"
+	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
 )
 
@@ -1607,7 +1613,21 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	isAPIKey := false
+	if auth != nil && auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+			isAPIKey = true
+		}
+	}
+	if isAPIKey {
+		// BYOK/API-key requests hit the user's own OpenAI-compatible endpoint;
+		// forward the client User-Agent as-is (config/default fill in when absent).
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	} else {
+		// OAuth requests impersonate the official Codex CLI to the ChatGPT backend;
+		// never forward a foreign downstream User-Agent (see ensureCodexUserAgent).
+		ensureCodexUserAgent(r.Header, ginHeaders, cfgUserAgent, helps.PerAccountCodexUserAgent(helps.AccountFingerprintKey(auth, ""), codexUserAgent, cfg))
+	}
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
 		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
@@ -1619,18 +1639,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		r.Header.Set("Accept", "application/json")
 	}
 	r.Header.Set("Connection", "Keep-Alive")
-
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		r.Header.Set("Originator", originator)
-	} else if !isAPIKey {
-		r.Header.Set("Originator", codexOriginator)
-	}
+	setCodexOriginator(r.Header, ginHeaders.Get("Originator"), isAPIKey)
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {

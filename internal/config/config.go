@@ -144,6 +144,46 @@ type Config struct {
 	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
+	// DisableDatelineNormalization globally disables Anthropic "dateline"
+	// fingerprint normalization when true. Claude Code embeds a small
+	// steganographic signal in the "Today's date is YYYY-MM-DD." sentence
+	// (apostrophe-glyph and date-separator variants) when it detects a
+	// non-official base URL; normalization rewrites that sentence back to a
+	// canonical ASCII form, erasing the signal. Only OAuth/setup-token accounts
+	// are affected; API-key accounts are never touched. Default false keeps
+	// normalization enabled.
+	DisableDatelineNormalization bool `yaml:"disable-dateline-normalization" json:"disable-dateline-normalization"`
+
+	// DisableNodeTLSFingerprint reverts the Anthropic uTLS ClientHello from the
+	// Node.js/Claude-Code profile (JA3 44f88fca…, ALPN http/1.1) back to the
+	// generic Chrome profile when true. The Node profile removes the cross-layer
+	// tell of "User-Agent claims Node but the TLS fingerprint is Chrome". This is
+	// an escape hatch: leave false unless the Node profile causes handshake or
+	// transport problems in your environment. Default false = Node profile on.
+	DisableNodeTLSFingerprint bool `yaml:"disable-node-tls-fingerprint" json:"disable-node-tls-fingerprint"`
+
+	// DisableUpstreamCookieJar disables the per-account cookie jar when true. By
+	// default the proxy keeps a persistent cookie jar per upstream account so that
+	// Cloudflare clearance cookies (cf_clearance, __cf_bm, _cfuvid, __cflb,
+	// cf_chl_*) set by the edge are stored and replayed on later requests, matching
+	// the real Codex CLI (whose reqwest cookie jar round-trips them) and reducing
+	// Cloudflare 403s. Default false keeps the jar enabled.
+	DisableUpstreamCookieJar bool `yaml:"disable-upstream-cookie-jar" json:"disable-upstream-cookie-jar"`
+
+	// DisableFingerprintRandomization disables per-account device-fingerprint
+	// diversification when true. By default, when a downstream client does not
+	// supply its own device headers, the proxy fills the Claude device profile
+	// (User-Agent / X-Stainless-Package-Version / Runtime-Version / OS / Arch) and
+	// the Codex User-Agent with values drawn DETERMINISTICALLY from a realistic
+	// real-client distribution keyed by the account. This keeps each account's
+	// fingerprint STABLE (same account -> same values across requests/restarts)
+	// while spreading accounts across the population, so a fleet does not collapse
+	// onto the fixed default values shared by every stock CLIProxyAPI instance
+	// (which upstream could otherwise cluster and ban together). Explicit config
+	// values and client-supplied headers always take precedence. Default false
+	// keeps randomization enabled.
+	DisableFingerprintRandomization bool `yaml:"disable-fingerprint-randomization" json:"disable-fingerprint-randomization"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 

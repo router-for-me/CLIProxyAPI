@@ -141,6 +141,40 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
+# [fingerprint-hardening fork] Anthropic "dateline" steganographic-fingerprint suppression.
+# Claude Code embeds a small watermark in the "Today's date is YYYY-MM-DD." sentence
+# (apostrophe-glyph + date-separator variants) when it detects a non-official base URL.
+# When false (default) the proxy normalizes that sentence back to canonical ASCII on
+# OAuth/setup-token accounts (before cch signing); API-key accounts are never touched.
+# Set true to disable the normalization.
+disable-dateline-normalization: false
+
+# [fingerprint-hardening fork] uTLS ClientHello profile for api.anthropic.com.
+# When false (default) the proxy uses a Node.js/Claude-Code TLS fingerprint (JA3 44f88fca…,
+# HTTP/1.1 with undici-ordered request headers) so the TLS layer matches the Claude Code
+# User-Agent. Set true to revert to the generic Chrome/HTTP-2 profile (escape hatch if the
+# Node profile causes handshake or transport issues in your environment).
+disable-node-tls-fingerprint: false
+
+# [fingerprint-hardening fork] Per-account device-fingerprint diversification.
+# When false (default), any device header the client does NOT supply (Claude
+# User-Agent / X-Stainless-Package-Version / Runtime-Version / Os / Arch, and the
+# Codex User-Agent) is filled with a value chosen DETERMINISTICALLY per account
+# from a realistic real-client distribution: the same account is always stable
+# (no per-request drift), while different accounts spread across the population —
+# so your fleet does not all send the single fixed default that every stock
+# CLIProxyAPI instance emits (which upstream could cluster and ban together).
+# Client-supplied headers and explicit config values always take precedence, and
+# the TLS JA3/JA4 fingerprint is unaffected. Set true to use fixed canonical defaults.
+disable-fingerprint-randomization: false
+
+# [fingerprint-hardening fork] Per-account upstream cookie jar. When false
+# (default) the proxy keeps a persistent per-account cookie jar so Cloudflare
+# clearance cookies (cf_clearance, __cf_bm, _cfuvid, __cflb, cf_chl_*) set by the
+# edge are stored and replayed on later requests — mirroring the real Codex CLI's
+# reqwest cookie store and reducing Cloudflare 403s. Set true to disable the jar.
+disable-upstream-cookie-jar: false
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
@@ -289,6 +323,11 @@ nonstream-keepalive-interval: 0
 # stabilize-device-profile is enabled, OS/arch stay pinned to the baseline values below,
 # while user-agent/package-version/runtime-version seed a software fingerprint that can
 # still upgrade to newer official Claude client versions.
+# NOTE: enabling stabilize-device-profile intentionally pins OS/arch to the baseline,
+# which overrides the per-account OS/arch diversification from
+# disable-fingerprint-randomization (the per-account User-Agent still applies for
+# versions above the baseline). Leave stabilize off if you want per-account OS/arch
+# spread; enable it if you prefer one pinned platform per deployment.
 # claude-header-defaults:
 #   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
 #   package-version: "0.74.0"
