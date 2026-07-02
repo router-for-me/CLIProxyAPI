@@ -113,6 +113,19 @@ force-model-prefix: false
 # Default is false (disabled).
 passthrough-headers: false
 
+# Forward requests that carry an Anthropic web_search server tool (tools[].type starts with
+# "web_search", e.g. "web_search_20250305") to a different model. Useful when the requested
+# model's upstream does not support Anthropic's server-side web search.
+# The request body is forwarded unchanged; the existing pipeline (translation, auth selection,
+# headers, upstream model remapping) handles the target. The response model field is rewritten
+# back to the client's originally requested model so forwarding stays transparent.
+# A request whose model already equals the configured target is NOT forwarded (avoids a self-loop).
+# No target-capability validation is performed: forwarding to a target that cannot handle the
+# request is the user's responsibility.
+# websearch-forward:
+#   enable: false
+#   model: "deepseek" # target model (alias) to forward web_search requests to
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 

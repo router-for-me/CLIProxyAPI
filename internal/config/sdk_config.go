@@ -55,6 +55,20 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// WebSearchForward reroutes requests carrying an Anthropic web_search server tool
+	// (tools[].type = "web_search_*") to a different model, for upstreams that lack server-side
+	// web search. The request body is forwarded unchanged; the existing pipeline handles the target.
+	// The response model field is rewritten back to the client's originally requested model.
+	WebSearchForward WebSearchForwardConfig `yaml:"websearch-forward,omitempty" json:"websearch-forward,omitempty"`
+}
+
+// WebSearchForwardConfig controls rerouting of web_search tool requests to another model.
+type WebSearchForwardConfig struct {
+	// Enable activates web_search request forwarding.
+	Enable bool `yaml:"enable" json:"enable"`
+	// Model is the target model name (alias) to forward web_search requests to.
+	Model string `yaml:"model,omitempty" json:"model,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

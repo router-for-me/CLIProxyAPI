@@ -2510,6 +2510,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
 		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		applyForcedResponseModel(opts, &aliasResult)
 		if len(models) == 0 {
 			continue
 		}
@@ -2612,6 +2613,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 
 		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		applyForcedResponseModel(opts, &aliasResult)
 		if len(models) == 0 {
 			continue
 		}
@@ -2712,6 +2714,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		models, pooled, aliasResult := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		applyForcedResponseModel(opts, &aliasResult)
 		if len(models) == 0 {
 			continue
 		}
@@ -2924,6 +2927,35 @@ func requestedModelAliasFromOptions(opts cliproxyexecutor.Options, fallback stri
 	default:
 		return fallback
 	}
+}
+
+// applyForcedResponseModel rewrites aliasResult so the response model field is rewritten to the
+// client's originally requested model, when the request was rerouted transparently (e.g. web_search
+// forwarding sets ForcedResponseModelMetadataKey to the client model). It is a no-op when the
+// metadata key is absent, nil, or empty. This layers on top of the existing force-mapping rewrite
+// (rewriteForceMappedResponse / wrapStreamResult) without changing it.
+func applyForcedResponseModel(opts cliproxyexecutor.Options, aliasResult *OAuthModelAliasResult) {
+	if aliasResult == nil || len(opts.Metadata) == 0 {
+		return
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.ForcedResponseModelMetadataKey]
+	if !ok || raw == nil {
+		return
+	}
+	var model string
+	switch value := raw.(type) {
+	case string:
+		model = value
+	case []byte:
+		model = string(value)
+	default:
+		return
+	}
+	if model = strings.TrimSpace(model); model == "" {
+		return
+	}
+	aliasResult.ForceMapping = true
+	aliasResult.OriginalAlias = model
 }
 
 func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
@@ -5137,6 +5169,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
 		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		applyForcedResponseModel(creditsOpts, &aliasResult)
 		if len(models) == 0 {
 			continue
 		}
@@ -5188,6 +5221,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
 		models, pooled, aliasResult := m.executionModelCandidatesWithAlias(c.auth, routeModel)
+		applyForcedResponseModel(creditsOpts, &aliasResult)
 		if len(models) == 0 {
 			continue
 		}

@@ -11,6 +11,11 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// ForcedResponseModelMetadataKey, when set in Options.Metadata to a non-empty string, forces the
+// response model field to be rewritten to that value. Used by web_search forwarding to keep a
+// rerouted request transparent (the response reports the client's originally requested model).
+const ForcedResponseModelMetadataKey = "forced_response_model"
+
 // RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
