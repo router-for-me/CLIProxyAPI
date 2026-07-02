@@ -283,17 +283,39 @@ func initAntigravityTransport() {
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	antigravityTransportOnce.Do(initAntigravityTransport)
 
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	// If no transport is set, use the shared HTTP/1.1 transport.
-	if client.Transport == nil {
-		client.Transport = antigravityTransport
-		return client
+	// Resolve whether a proxy is configured the same way the proxy helper does,
+	// so we can decide between the shared HTTP/1.1 singleton and a cloned
+	// proxy transport. When request-timeout-seconds is configured the helper
+	// installs a non-proxy default transport to apply a connect timeout; for
+	// Antigravity that would trigger a per-request clone and lose connection
+	// pooling, so prefer the singleton whenever no proxy is in use.
+	proxyURL := ""
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	if proxyURL == "" {
+		// No proxy configured. Prefer the shared HTTP/1.1 singleton, but still
+		// honor a context-injected round tripper (e.g. RoundTripperProvider or a
+		// test mock) by falling through to the helper when one is present.
+		if _, hasRT := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); !hasRT {
+			return &http.Client{Transport: antigravityTransport}
+		}
 	}
 
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
 	if transport, ok := client.Transport.(*http.Transport); ok {
 		client.Transport = cloneTransportWithHTTP11(transport)
+	} else if client.Transport == nil {
+		// No transport at all (e.g. no proxy, no context RT, no cfg timeout):
+		// fall back to the shared HTTP/1.1 singleton.
+		client.Transport = antigravityTransport
 	}
+	// Otherwise (e.g. a context-injected custom round tripper) leave the
+	// transport as-is so injected transports are honored.
 	return client
 }
 
