@@ -231,6 +231,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 
 	client := &http.Client{
 		Transport: &utlsDispatchRoundTripper{perHost: perHost, fallback: standardTransport},
+		// Persistent per-account cookie jar so Cloudflare clearance cookies are
+		// stored and replayed across requests, matching the real Codex CLI.
+		Jar: cookieJarForAuth(cfg, auth),
 	}
 	if timeout > 0 {
 		client.Timeout = timeout

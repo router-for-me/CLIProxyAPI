@@ -162,6 +162,14 @@ type Config struct {
 	// transport problems in your environment. Default false = Node profile on.
 	DisableNodeTLSFingerprint bool `yaml:"disable-node-tls-fingerprint" json:"disable-node-tls-fingerprint"`
 
+	// DisableUpstreamCookieJar disables the per-account cookie jar when true. By
+	// default the proxy keeps a persistent cookie jar per upstream account so that
+	// Cloudflare clearance cookies (cf_clearance, __cf_bm, _cfuvid, __cflb,
+	// cf_chl_*) set by the edge are stored and replayed on later requests, matching
+	// the real Codex CLI (whose reqwest cookie jar round-trips them) and reducing
+	// Cloudflare 403s. Default false keeps the jar enabled.
+	DisableUpstreamCookieJar bool `yaml:"disable-upstream-cookie-jar" json:"disable-upstream-cookie-jar"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
