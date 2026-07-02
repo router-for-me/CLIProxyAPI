@@ -135,7 +135,7 @@ func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool
 		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
-	if providerKey == "" && compatName == "" && provider != "openai-compatibility" {
+	if providerKey == "" && compatName == "" && !util.IsOpenAICompatibleProvider(provider) {
 		return false
 	}
 	if providerKey == "" {
@@ -1011,13 +1011,13 @@ func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
 	if !isAPIKeyAuth(auth) {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+	if util.IsOpenAICompatibleProvider(auth.Provider) {
 		return true
 	}
 	if auth.Attributes == nil {
 		return false
 	}
-	return strings.TrimSpace(auth.Attributes["compat_name"]) != ""
+	return authAttribute(auth, "compat_name") != ""
 }
 
 func openAICompatProviderKey(auth *Auth) string {
@@ -1300,7 +1300,7 @@ func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel s
 			providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 		}
-		if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+		if compatName != "" || util.IsOpenAICompatibleProvider(auth.Provider) {
 			if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
 				models = asModelAliasEntries(entry.Models)
 			}
@@ -1979,7 +1979,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 				providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 				compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 			}
-			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+			if compatName != "" || util.IsOpenAICompatibleProvider(auth.Provider) {
 				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
 					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 				}
@@ -3201,7 +3201,7 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
-	if compatName == "" && !strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+	if compatName == "" && !util.IsOpenAICompatibleProvider(auth.Provider) {
 		return ""
 	}
 	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
@@ -3217,15 +3217,23 @@ func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatNa
 	if cfg == nil {
 		return nil
 	}
-	candidates := make([]string, 0, 3)
-	if v := strings.TrimSpace(compatName); v != "" {
-		candidates = append(candidates, v)
+	candidates := make([]string, 0, 6)
+	seen := make(map[string]struct{}, 6)
+	addCandidate := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, value)
 	}
-	if v := strings.TrimSpace(providerKey); v != "" {
-		candidates = append(candidates, v)
-	}
-	if v := strings.TrimSpace(authProvider); v != "" {
-		candidates = append(candidates, v)
+	for _, value := range []string{compatName, providerKey, authProvider} {
+		addCandidate(value)
+		addCandidate(util.OpenAICompatibleProviderName(value))
 	}
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
