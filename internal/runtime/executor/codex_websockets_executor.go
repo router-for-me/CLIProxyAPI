@@ -886,6 +886,11 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
 		setHeaderCasePreserved(headers, "session_id", cache.ID)
+		// NOTE (live-captured from real codex 0.130.0): the real responses request
+		// carries session_id AND thread_id (both lowercase, same UUID) — not
+		// "Conversation_id". Aligning fully (thread_id underscore, dropping
+		// Conversation_id/Thread-Id) is a multi-path, test-coupled routing change
+		// tracked as a follow-up; kept as-is here to preserve existing behavior.
 		headers.Set("Conversation_id", cache.ID)
 	}
 
