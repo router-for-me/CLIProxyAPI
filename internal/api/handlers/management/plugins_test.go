@@ -691,7 +691,7 @@ func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
 		Type:        pluginapi.ConfigFieldTypeEnum,
 		EnumValues:  []string{`<fast>`, `safe & sound`},
 		Description: `"quoted" 'single' <b>mode</b>`,
-	}})
+	}}, "")
 	if len(fields) != 1 {
 		t.Fatalf("fields len = %d, want 1", len(fields))
 	}
@@ -706,17 +706,20 @@ func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
 	}
 
 	menus := pluginMenus([]pluginhost.RegisteredPluginMenu{{
-		Path:        `/v0/resource/plugins/sample/<status>`,
+		Path:        `/v0/resource/plugins/sample/<status>?bar=1&baz=2`,
 		Menu:        `<b>Status</b>`,
 		Description: `Shows <script>alert(1)</script>.`,
-	}})
+	}}, "")
 	if len(menus) != 1 {
 		t.Fatalf("menus len = %d, want 1", len(menus))
 	}
-	if menus[0].Path != html.EscapeString(`/v0/resource/plugins/sample/<status>`) ||
+	if menus[0].Path != html.EscapeString(`/v0/resource/plugins/sample/<status>?bar=1&baz=2`) ||
 		menus[0].Menu != html.EscapeString(`<b>Status</b>`) ||
 		menus[0].Description != html.EscapeString(`Shows <script>alert(1)</script>.`) {
 		t.Fatalf("menu = %#v, want escaped strings", menus[0])
+	}
+	if menus[0].LaunchURL != `/v0/resource/plugins/sample/<status>?bar=1&baz=2` {
+		t.Fatalf("LaunchURL = %q, want raw navigable URL", menus[0].LaunchURL)
 	}
 
 	meta := pluginMetadata(pluginapi.Metadata{
@@ -725,13 +728,57 @@ func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
 		Author:           `"attacker"`,
 		GitHubRepository: `https://example.com/repo?x=<script>`,
 		Logo:             `<svg onload=alert(1)>`,
-	})
+	}, "")
 	if meta.Name != html.EscapeString(`<script>alert(1)</script>`) ||
 		meta.Version != html.EscapeString(`1.0.0&evil=true`) ||
 		meta.Author != html.EscapeString(`"attacker"`) ||
 		meta.GitHubRepository != html.EscapeString(`https://example.com/repo?x=<script>`) ||
 		meta.Logo != html.EscapeString(`<svg onload=alert(1)>`) {
 		t.Fatalf("metadata = %#v, want escaped strings", meta)
+	}
+}
+
+func TestPluginDisplayFieldsUseRequestedLocale(t *testing.T) {
+	t.Parallel()
+
+	fields := pluginConfigFields([]pluginapi.ConfigField{{
+		Name:        "mode",
+		Type:        pluginapi.ConfigFieldTypeEnum,
+		EnumValues:  []string{"fast", "safe"},
+		Description: "Execution mode.",
+		Locales: map[string]pluginapi.ConfigFieldLocale{
+			"zh-CN": {Description: "执行模式。"},
+		},
+	}}, "fr", "zh-CN")
+	if fields[0].Description != "执行模式。" || fields[0].EnumValues[0] != "fast" {
+		t.Fatalf("fields = %#v, want localized description and stable enum values", fields)
+	}
+
+	menus := pluginMenus([]pluginhost.RegisteredPluginMenu{{
+		Path:        `/v0/resource/plugins/sample/status?mode=full&tab=<status>`,
+		Menu:        `Status`,
+		Description: `Shows plugin status.`,
+		Locales: map[string]pluginapi.RouteLocale{
+			"zh": {Menu: "状态", Description: "显示插件状态。"},
+		},
+	}}, "fr", "zh-CN")
+	if len(menus) != 1 {
+		t.Fatalf("menus len = %d, want 1", len(menus))
+	}
+	if menus[0].Menu != "状态" || menus[0].Description != "显示插件状态。" ||
+		menus[0].LaunchURL != "/v0/resource/plugins/sample/status?locale=zh-cn&mode=full&tab=%3Cstatus%3E" {
+		t.Fatalf("menu = %#v, want localized menu with locale launch URL", menus[0])
+	}
+
+	meta := pluginMetadata(pluginapi.Metadata{
+		Name:   "Sample Provider",
+		Author: "author-name",
+		Locales: map[string]pluginapi.MetadataLocale{
+			"zh-CN": {Name: "示例插件", Author: "作者"},
+		},
+	}, "fr", "zh-CN")
+	if meta.Name != "示例插件" || meta.Author != "作者" {
+		t.Fatalf("metadata = %#v, want localized name and author", meta)
 	}
 }
 

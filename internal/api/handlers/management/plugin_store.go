@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/plugini18n"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -125,6 +126,7 @@ type sourcedPlugin struct {
 }
 
 func (h *Handler) ListPluginStore(c *gin.Context) {
+	locales := plugini18n.PreferredLocales(c.Request.Header, c.Request.URL.Query())
 	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
@@ -152,6 +154,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 	entries := make([]pluginStoreListEntry, 0, len(plugins))
 	for index, item := range plugins {
 		plugin := item.plugin
+		display := localizedPluginStoreDisplay(plugin, locales...)
 		status := statuses[plugin.ID]
 		installedVersion := status.InstalledVersion
 		// Fall back to the registry version when the latest release is unknown.
@@ -165,9 +168,9 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			SourceName:       htmlsanitize.String(item.source.Name),
 			SourceURL:        htmlsanitize.String(item.source.URL),
 			ID:               htmlsanitize.String(plugin.ID),
-			Name:             htmlsanitize.String(plugin.Name),
-			Description:      htmlsanitize.String(plugin.Description),
-			Author:           htmlsanitize.String(plugin.Author),
+			Name:             htmlsanitize.String(display.Name),
+			Description:      htmlsanitize.String(display.Description),
+			Author:           htmlsanitize.String(display.Author),
 			Version:          htmlsanitize.String(storeVersion),
 			Repository:       htmlsanitize.String(plugin.Repository),
 			InstallType:      htmlsanitize.String(pluginstore.PluginInstallType(plugin)),
@@ -175,9 +178,9 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			AuthConfigured:   pluginAuthConfigured(item.source, plugin, storeAuth),
 			Platforms:        sanitizePluginStorePlatforms(pluginstore.PluginPlatforms(plugin)),
 			Logo:             htmlsanitize.String(plugin.Logo),
-			Homepage:         htmlsanitize.String(plugin.Homepage),
-			License:          htmlsanitize.String(plugin.License),
-			Tags:             htmlsanitize.Strings(plugin.Tags),
+			Homepage:         htmlsanitize.String(display.Homepage),
+			License:          htmlsanitize.String(display.License),
+			Tags:             htmlsanitize.Strings(display.Tags),
 			Installed:        status.Installed,
 			InstalledVersion: htmlsanitize.String(installedVersion),
 			Path:             htmlsanitize.String(status.Path),
@@ -196,6 +199,38 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		SourceErrors:   sanitizePluginStoreSourceErrors(sourceErrors),
 		Plugins:        entries,
 	})
+}
+
+func localizedPluginStoreDisplay(plugin pluginstore.Plugin, locales ...string) pluginstore.PluginLocale {
+	display := pluginstore.PluginLocale{
+		Name:        plugin.Name,
+		Description: plugin.Description,
+		Author:      plugin.Author,
+		Homepage:    plugin.Homepage,
+		License:     plugin.License,
+		Tags:        append([]string(nil), plugin.Tags...),
+	}
+	if localized, ok := plugini18n.Lookup(plugin.Locales, locales...); ok {
+		if strings.TrimSpace(localized.Name) != "" {
+			display.Name = localized.Name
+		}
+		if strings.TrimSpace(localized.Description) != "" {
+			display.Description = localized.Description
+		}
+		if strings.TrimSpace(localized.Author) != "" {
+			display.Author = localized.Author
+		}
+		if strings.TrimSpace(localized.Homepage) != "" {
+			display.Homepage = localized.Homepage
+		}
+		if strings.TrimSpace(localized.License) != "" {
+			display.License = localized.License
+		}
+		if len(localized.Tags) > 0 {
+			display.Tags = append([]string(nil), localized.Tags...)
+		}
+	}
+	return display
 }
 
 func (h *Handler) InstallPluginFromStore(c *gin.Context) {
