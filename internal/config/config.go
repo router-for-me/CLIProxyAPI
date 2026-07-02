@@ -170,6 +170,20 @@ type Config struct {
 	// Cloudflare 403s. Default false keeps the jar enabled.
 	DisableUpstreamCookieJar bool `yaml:"disable-upstream-cookie-jar" json:"disable-upstream-cookie-jar"`
 
+	// DisableFingerprintRandomization disables per-account device-fingerprint
+	// diversification when true. By default, when a downstream client does not
+	// supply its own device headers, the proxy fills the Claude device profile
+	// (User-Agent / X-Stainless-Package-Version / Runtime-Version / OS / Arch) and
+	// the Codex User-Agent with values drawn DETERMINISTICALLY from a realistic
+	// real-client distribution keyed by the account. This keeps each account's
+	// fingerprint STABLE (same account -> same values across requests/restarts)
+	// while spreading accounts across the population, so a fleet does not collapse
+	// onto the fixed default values shared by every stock CLIProxyAPI instance
+	// (which upstream could otherwise cluster and ban together). Explicit config
+	// values and client-supplied headers always take precedence. Default false
+	// keeps randomization enabled.
+	DisableFingerprintRandomization bool `yaml:"disable-fingerprint-randomization" json:"disable-fingerprint-randomization"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 

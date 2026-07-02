@@ -1620,7 +1620,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	} else {
 		// OAuth requests impersonate the official Codex CLI to the ChatGPT backend;
 		// never forward a foreign downstream User-Agent (see ensureCodexUserAgent).
-		ensureCodexUserAgent(r.Header, ginHeaders, cfgUserAgent, codexUserAgent)
+		ensureCodexUserAgent(r.Header, ginHeaders, cfgUserAgent, helps.PerAccountCodexUserAgent(helps.AccountFingerprintKey(auth, ""), codexUserAgent, cfg))
 	}
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {

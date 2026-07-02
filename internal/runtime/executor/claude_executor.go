@@ -1046,11 +1046,17 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
+	// Per-account device-fingerprint diversification: fill any device header the
+	// client did not send with a stable per-account value drawn from a realistic
+	// distribution, so the fleet does not collapse onto stock CLIProxyAPI's fixed
+	// defaults. Client-supplied and config values always win. Only the device
+	// headers are affected; ginHeaders is left intact for all other logic.
+	deviceHeaders := helps.AugmentClaudeDeviceHeaders(ginHeaders, auth, apiKey, cfg)
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
 	if stabilizeDeviceProfile {
 		var errDeviceProfile error
-		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, ginHeaders, cfg)
+		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, deviceHeaders, cfg)
 		if errDeviceProfile != nil {
 			return errDeviceProfile
 		}
@@ -1128,7 +1134,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stabilizeDeviceProfile {
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+		helps.ApplyClaudeLegacyDeviceHeaders(r, deviceHeaders, cfg)
 	}
 	var attrs map[string]string
 	if auth != nil {
