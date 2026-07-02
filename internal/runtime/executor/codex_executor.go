@@ -39,6 +39,10 @@ const (
 	codexDefaultImageToolModel = "gpt-image-2"
 )
 
+var refreshCodexAuthForTokenInvalidatedRetry = func(ctx context.Context, e *CodexExecutor, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return e.Refresh(ctx, auth)
+}
+
 var dataTag = []byte("data:")
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
@@ -837,9 +841,63 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if isCodexTokenInvalidatedResponse(httpResp.StatusCode, b) && auth != nil {
+			if refreshedAuth, refreshErr := refreshCodexAuthForTokenInvalidatedRetry(ctx, e, auth); refreshErr == nil && refreshedAuth != nil {
+				auth = refreshedAuth
+				apiKey, baseURL = codexCreds(auth)
+				if baseURL == "" {
+					baseURL = "https://chatgpt.com/backend-api/codex"
+				}
+				url = strings.TrimSuffix(baseURL, "/") + "/responses"
+				retryReq, retryUpstreamBody, retryIdentityState, retryReqErr := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
+				if retryReqErr != nil {
+					err = retryReqErr
+					return resp, err
+				}
+				identityState = retryIdentityState
+				applyCodexHeaders(retryReq, auth, apiKey, true, e.cfg)
+				applyCodexIdentityConfuseHeaders(retryReq.Header, &identityState)
+				if auth != nil {
+					authID = auth.ID
+					authLabel = auth.Label
+					authType, authValue = auth.AccountInfo()
+				}
+				helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+					URL:       url,
+					Method:    http.MethodPost,
+					Headers:   retryReq.Header.Clone(),
+					Body:      retryUpstreamBody,
+					Provider:  e.Identifier(),
+					AuthID:    authID,
+					AuthLabel: authLabel,
+					AuthType:  authType,
+					AuthValue: authValue,
+				})
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("codex executor: close response body error: %v", errClose)
+				}
+				httpResp, err = httpClient.Do(retryReq)
+				if err != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, err)
+					return resp, err
+				}
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+					goto codexReadExecuteResponse
+				}
+				b, _ = io.ReadAll(httpResp.Body)
+				b = applyCodexIdentityConfuseResponsePayload(b, identityState)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+				helps.LogWithRequestID(ctx).Debugf("request error after refresh retry, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+			} else if refreshErr != nil {
+				helps.LogWithRequestID(ctx).Debugf("codex token_invalidated refresh retry failed: %v", refreshErr)
+			}
+		}
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
+
+codexReadExecuteResponse:
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -1006,9 +1064,53 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if isCodexTokenInvalidatedResponse(httpResp.StatusCode, b) && auth != nil {
+			if refreshedAuth, refreshErr := refreshCodexAuthForTokenInvalidatedRetry(ctx, e, auth); refreshErr == nil && refreshedAuth != nil {
+				auth = refreshedAuth
+				apiKey, baseURL = codexCreds(auth)
+				if baseURL == "" {
+					baseURL = "https://chatgpt.com/backend-api/codex"
+				}
+				url = strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+				retryReq, retryUpstreamBody, retryIdentityState, retryReqErr := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
+				if retryReqErr != nil {
+					err = retryReqErr
+					return resp, err
+				}
+				identityState = retryIdentityState
+				applyCodexHeaders(retryReq, auth, apiKey, false, e.cfg)
+				applyCodexIdentityConfuseHeaders(retryReq.Header, &identityState)
+				if auth != nil {
+					authID = auth.ID
+					authLabel = auth.Label
+					authType, authValue = auth.AccountInfo()
+				}
+				helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{URL: url, Method: http.MethodPost, Headers: retryReq.Header.Clone(), Body: retryUpstreamBody, Provider: e.Identifier(), AuthID: authID, AuthLabel: authLabel, AuthType: authType, AuthValue: authValue})
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("codex executor: close response body error: %v", errClose)
+				}
+				httpResp, err = httpClient.Do(retryReq)
+				if err != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, err)
+					return resp, err
+				}
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+					goto codexReadCompactResponse
+				}
+				b, _ = io.ReadAll(httpResp.Body)
+				b = applyCodexIdentityConfuseResponsePayload(b, identityState)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+				helps.LogWithRequestID(ctx).Debugf("request error after refresh retry, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+			} else if refreshErr != nil {
+				helps.LogWithRequestID(ctx).Debugf("codex token_invalidated refresh retry failed: %v", refreshErr)
+			}
+		}
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
+
+codexReadCompactResponse:
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -1126,9 +1228,56 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		if isCodexTokenInvalidatedResponse(httpResp.StatusCode, data) && auth != nil {
+			if refreshedAuth, refreshErr := refreshCodexAuthForTokenInvalidatedRetry(ctx, e, auth); refreshErr == nil && refreshedAuth != nil {
+				auth = refreshedAuth
+				apiKey, baseURL = codexCreds(auth)
+				if baseURL == "" {
+					baseURL = "https://chatgpt.com/backend-api/codex"
+				}
+				url = strings.TrimSuffix(baseURL, "/") + "/responses"
+				retryReq, retryUpstreamBody, retryIdentityState, retryReqErr := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
+				if retryReqErr != nil {
+					return nil, retryReqErr
+				}
+				identityState = retryIdentityState
+				applyCodexHeaders(retryReq, auth, apiKey, true, e.cfg)
+				applyCodexIdentityConfuseHeaders(retryReq.Header, &identityState)
+				if auth != nil {
+					authID = auth.ID
+					authLabel = auth.Label
+					authType, authValue = auth.AccountInfo()
+				}
+				helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{URL: url, Method: http.MethodPost, Headers: retryReq.Header.Clone(), Body: retryUpstreamBody, Provider: e.Identifier(), AuthID: authID, AuthLabel: authLabel, AuthType: authType, AuthValue: authValue})
+				httpResp, err = httpClient.Do(retryReq)
+				if err != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, err)
+					return nil, err
+				}
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+					goto codexBuildStreamResult
+				}
+				data, readErr = io.ReadAll(httpResp.Body)
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("codex executor: close response body error: %v", errClose)
+				}
+				if readErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+					return nil, readErr
+				}
+				data = applyCodexIdentityConfuseResponsePayload(data, identityState)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+				helps.LogWithRequestID(ctx).Debugf("request error after refresh retry, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+			} else if refreshErr != nil {
+				helps.LogWithRequestID(ctx).Debugf("codex token_invalidated refresh retry failed: %v", refreshErr)
+			}
+		}
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
+
+codexBuildStreamResult:
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -1643,6 +1792,14 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func isCodexTokenInvalidatedResponse(statusCode int, body []byte) bool {
+	if statusCode != http.StatusUnauthorized {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "token_invalidated") || strings.Contains(lower, "authentication token has been invalidated")
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
