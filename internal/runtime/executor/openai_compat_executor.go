@@ -139,7 +139,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header.Set("User-Agent", e.resolveOpenAICompatUserAgent(auth))
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -230,7 +230,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header.Set("User-Agent", e.resolveOpenAICompatUserAgent(auth))
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -338,7 +338,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header.Set("User-Agent", e.resolveOpenAICompatUserAgent(auth))
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -491,7 +491,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header.Set("User-Agent", e.resolveOpenAICompatUserAgent(auth))
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -741,6 +741,29 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	return
+}
+
+// openaiCompatDefaultUserAgent is a neutral default sent to third-party
+// OpenAI-compatible endpoints. The previous hardcoded "cli-proxy-openai-compat"
+// literally announced the proxy software to every upstream — a CLIProxyAPI
+// signature — so it is replaced with a common, non-identifying client UA. A
+// provider may override it via its config "headers: { User-Agent: ... }".
+const openaiCompatDefaultUserAgent = "OpenAI/Python 1.99.1"
+
+// resolveOpenAICompatUserAgent returns the User-Agent for outbound requests to
+// this provider: the provider's configured User-Agent header when set, otherwise
+// the neutral default. It never leaks a proxy-identifying value.
+func (e *OpenAICompatExecutor) resolveOpenAICompatUserAgent(auth *cliproxyauth.Auth) string {
+	if compat := e.resolveCompatConfig(auth); compat != nil {
+		for k, v := range compat.Headers {
+			if strings.EqualFold(k, "User-Agent") {
+				if tv := strings.TrimSpace(v); tv != "" {
+					return tv
+				}
+			}
+		}
+	}
+	return openaiCompatDefaultUserAgent
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

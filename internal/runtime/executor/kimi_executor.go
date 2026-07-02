@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -690,6 +691,19 @@ func getKimiHostname() string {
 	return hostname
 }
 
+// fallbackKimiDeviceID returns a realistic, stable-per-machine device ID used
+// only when the real kimi-cli device_id file is absent. The previous fixed
+// literal "cli-proxy-api-device" was identical across every CLIProxyAPI instance
+// — a self-identifying signature Kimi could cluster on. A hostname-derived UUID
+// looks like a genuine kimi-cli device_id while staying stable for this machine.
+func fallbackKimiDeviceID() string {
+	seed := "cli-proxy-kimi-device"
+	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
+		seed = strings.TrimSpace(h)
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("kimi-device:"+seed)).String()
+}
+
 // getKimiDeviceModel returns a device model string matching kimi-cli format.
 func getKimiDeviceModel() string {
 	return fmt.Sprintf("%s %s", runtime.GOOS, runtime.GOARCH)
@@ -699,7 +713,7 @@ func getKimiDeviceModel() string {
 func getKimiDeviceID() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "cli-proxy-api-device"
+		return fallbackKimiDeviceID()
 	}
 	// Check kimi-cli's device_id location first (platform-specific)
 	var kimiShareDir string
@@ -719,7 +733,7 @@ func getKimiDeviceID() string {
 	if data, err := os.ReadFile(deviceIDPath); err == nil {
 		return strings.TrimSpace(string(data))
 	}
-	return "cli-proxy-api-device"
+	return fallbackKimiDeviceID()
 }
 
 // kimiCreds extracts the access token from auth.
