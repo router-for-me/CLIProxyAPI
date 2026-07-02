@@ -398,7 +398,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		// Publish accumulated usage on every exit path. sync.Once inside the
 		// reporter ensures only the first Publish/PublishFailure call wins.
 		defer func() {
-			reporter.Publish(ctx, finalDetail)
+			reporter.Publish(context.WithoutCancel(ctx), finalDetail)
 		}()
 		for scanner.Scan() {
 			line := scanner.Bytes()
