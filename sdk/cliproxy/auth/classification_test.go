@@ -34,6 +34,29 @@ func TestAuthKind(t *testing.T) {
 			want: AuthKindOAuth,
 		},
 		{
+			name: "openai compatibility provider without api key",
+			auth: &Auth{Provider: "openai-compatibility"},
+			want: AuthKindAPIKey,
+		},
+		{
+			name: "named openai compatibility provider without api key",
+			auth: &Auth{Provider: "openai-compatible-foo"},
+			want: AuthKindAPIKey,
+		},
+		{
+			name: "compat name attribute without api key",
+			auth: &Auth{Attributes: map[string]string{"compat_name": "foo"}},
+			want: AuthKindAPIKey,
+		},
+		{
+			name: "oauth metadata wins over openai compatibility fallback",
+			auth: &Auth{
+				Provider: "openai-compatible-foo",
+				Metadata: map[string]any{"access_token": "token"},
+			},
+			want: AuthKindOAuth,
+		},
+		{
 			name: "unknown metadata shape",
 			auth: &Auth{Metadata: map[string]any{"type": "test"}},
 			want: "",

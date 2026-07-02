@@ -40,15 +40,15 @@ func (a *Auth) AuthKind() string {
 	if authAttribute(a, AttributeAPIKey) != "" {
 		return AuthKindAPIKey
 	}
+	if authHasOAuthMetadata(a) {
+		return AuthKindOAuth
+	}
 	// OpenAI-compatibility providers always use static credentials: either an API
 	// key or custom headers (e.g. cookie/device headers) when no api-key is set.
 	// Treat them as API-key auths so model-alias resolution and per-auth model
 	// pools apply even for header-authenticated entries.
 	if isOpenAICompatibilityAuth(a) {
 		return AuthKindAPIKey
-	}
-	if authHasOAuthMetadata(a) {
-		return AuthKindOAuth
 	}
 	return ""
 }
@@ -63,7 +63,7 @@ func isOpenAICompatibilityAuth(a *Auth) bool {
 	if util.IsOpenAICompatibleProvider(a.Provider) {
 		return true
 	}
-	if a.Attributes != nil && strings.TrimSpace(a.Attributes["compat_name"]) != "" {
+	if authAttribute(a, "compat_name") != "" {
 		return true
 	}
 	return false

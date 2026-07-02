@@ -267,3 +267,28 @@ func TestResolveAPIKeyModelAliasWithResult_ForceMappingUsesConfigAliasNotRequest
 		t.Fatalf("OriginalAlias = %q want claude-sonnet-4-5", result.OriginalAlias)
 	}
 }
+
+func TestResolveAPIKeyModelAliasWithResult_OpenAICompatProviderKeyName(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "vast",
+			Models: []internalconfig.OpenAICompatibilityModel{{
+				Name:         "glm-5.2",
+				Alias:        "claude-opus-4-8",
+				ForceMapping: true,
+			}},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	auth := &Auth{
+		ID:       "vast-header-auth",
+		Provider: "openai-compatible-vast",
+	}
+	result := mgr.resolveAPIKeyModelAliasWithResult(auth, "claude-opus-4-8")
+	if result.UpstreamModel != "glm-5.2" || !result.ForceMapping || result.OriginalAlias != "claude-opus-4-8" {
+		t.Fatalf("resolveAPIKeyModelAliasWithResult() = %+v, want upstream glm-5.2 with alias rewrite", result)
+	}
+}
