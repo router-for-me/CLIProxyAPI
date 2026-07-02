@@ -42,14 +42,20 @@ type claudeProfileTuple struct {
 // and common OS/arch combinations. Values are plausible real tuples; the goal is
 // population diversity, not any single "correct" identity.
 var claudeProfilePool = []claudeProfileTuple{
-	{ua: "claude-cli/2.1.72 (external, cli)", pkg: "0.75.0", node: "v24.4.0", os: "MacOS", arch: "arm64"},
-	{ua: "claude-cli/2.1.70 (external, cli)", pkg: "0.74.0", node: "v22.11.0", os: "MacOS", arch: "arm64"},
-	{ua: "claude-cli/2.1.68 (external, cli)", pkg: "0.74.0", node: "v22.9.0", os: "Linux", arch: "x64"},
-	{ua: "claude-cli/2.1.66 (external, cli)", pkg: "0.73.0", node: "v24.3.0", os: "Linux", arch: "x64"},
-	{ua: "claude-cli/2.1.72 (external, cli)", pkg: "0.75.0", node: "v24.4.0", os: "Windows", arch: "x64"},
+	// pkg is pinned to 0.74.0: the real @anthropic-ai/sdk bundled by claude-code
+	// across the 2.1.63–2.1.72 era (verified in cli.js). An impossible
+	// cli-version→sdk-version pairing is a sharper tell than uniformity, so this
+	// field is NOT diversified. node is kept within the Node-24 family so the
+	// advertised X-Stainless-Runtime-Version stays consistent with the pinned
+	// Node-24 uTLS ClientHello. Diversity comes from cli version + OS + arch.
+	{ua: "claude-cli/2.1.72 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "MacOS", arch: "arm64"},
+	{ua: "claude-cli/2.1.70 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "MacOS", arch: "arm64"},
+	{ua: "claude-cli/2.1.68 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "Linux", arch: "x64"},
+	{ua: "claude-cli/2.1.66 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "Linux", arch: "x64"},
+	{ua: "claude-cli/2.1.72 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "Windows", arch: "x64"},
 	{ua: "claude-cli/2.1.63 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "MacOS", arch: "x64"},
-	{ua: "claude-cli/2.1.70 (external, cli)", pkg: "0.74.0", node: "v22.11.0", os: "Linux", arch: "arm64"},
-	{ua: "claude-cli/2.1.69 (external, cli)", pkg: "0.74.0", node: "v22.9.0", os: "MacOS", arch: "arm64"},
+	{ua: "claude-cli/2.1.70 (external, cli)", pkg: "0.74.0", node: "v24.4.0", os: "Linux", arch: "arm64"},
+	{ua: "claude-cli/2.1.69 (external, cli)", pkg: "0.74.0", node: "v24.3.0", os: "MacOS", arch: "arm64"},
 }
 
 // codexUAPool spreads accounts across recent Codex CLI releases and terminals.

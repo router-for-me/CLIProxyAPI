@@ -1122,11 +1122,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
-		// Match undici/Node 24's exact default. Traced from undici fetch source
-		// (lib/web/fetch/index.js), which appends "br, gzip, deflate, zstd" when the
-		// caller has not set Accept-Encoding. Both the SET and the ORDER are part of
-		// the client fingerprint; zstd responses are decoded downstream.
-		r.Header.Set("Accept-Encoding", "br, gzip, deflate, zstd")
+		// Match the shipped @anthropic-ai/claude-code client exactly. The undici
+		// build bundled in claude-code (2.1.6x–2.1.72 era) sends "br, gzip, deflate"
+		// and does NOT advertise zstd — zstd landed in a later undici release than
+		// that bundle. Verified against the real cli.js literal
+		// (`headersList.append("accept-encoding","br, gzip, deflate")`). Both the SET
+		// and the ORDER are part of the client fingerprint.
+		r.Header.Set("Accept-Encoding", "br, gzip, deflate")
 	}
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official

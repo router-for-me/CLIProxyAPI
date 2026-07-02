@@ -79,7 +79,9 @@ var claudeHeaderOrder = []string{
 	"x-app",
 	"x-claude-code-session-id",
 	// per-request options.headers, merged last (so helper-method lands here).
-	"x-stainless-helper-method",
+	// Mixed case: the SDK emits X-Stainless-Helper-Method like the other
+	// X-Stainless-* headers (verified in cli.js), not lowercased.
+	"X-Stainless-Helper-Method",
 	"x-client-request-id",
 	// bodyHeaders + undici-synthesized framing (lowercase).
 	"content-type",

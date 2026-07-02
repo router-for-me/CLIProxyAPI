@@ -2023,8 +2023,8 @@ func TestClaudeExecutor_Execute_SetsCompressedAcceptEncoding(t *testing.T) {
 
 	// Matches undici/Node 24's exact default Accept-Encoding (set + order) so the
 	// request does not diverge from a real Claude Code client.
-	if gotEncoding != "br, gzip, deflate, zstd" {
-		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "br, gzip, deflate, zstd")
+	if gotEncoding != "br, gzip, deflate" {
+		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "br, gzip, deflate")
 	}
 	if gotAccept != "application/json" {
 		t.Errorf("Accept = %q, want %q", gotAccept, "application/json")
