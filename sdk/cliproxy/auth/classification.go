@@ -1,6 +1,10 @@
 package auth
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+)
 
 const (
 	AuthKindAPIKey = "apikey"
@@ -36,10 +40,33 @@ func (a *Auth) AuthKind() string {
 	if authAttribute(a, AttributeAPIKey) != "" {
 		return AuthKindAPIKey
 	}
+	// OpenAI-compatibility providers always use static credentials: either an API
+	// key or custom headers (e.g. cookie/device headers) when no api-key is set.
+	// Treat them as API-key auths so model-alias resolution and per-auth model
+	// pools apply even for header-authenticated entries.
+	if isOpenAICompatibilityAuth(a) {
+		return AuthKindAPIKey
+	}
 	if authHasOAuthMetadata(a) {
 		return AuthKindOAuth
 	}
 	return ""
+}
+
+// isOpenAICompatibilityAuth reports whether the auth belongs to an
+// OpenAI-compatibility provider. Such auths carry the provider key produced by
+// util.OpenAICompatibleProviderKey and/or a "compat_name" attribute.
+func isOpenAICompatibilityAuth(a *Auth) bool {
+	if a == nil {
+		return false
+	}
+	if util.IsOpenAICompatibleProvider(a.Provider) {
+		return true
+	}
+	if a.Attributes != nil && strings.TrimSpace(a.Attributes["compat_name"]) != "" {
+		return true
+	}
+	return false
 }
 
 // AuthSourceKind returns where the Auth entry came from at runtime.
