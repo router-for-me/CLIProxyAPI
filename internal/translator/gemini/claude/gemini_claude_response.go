@@ -9,6 +9,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -28,12 +29,107 @@ type Params struct {
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
 	ToolNameMap      map[string]string
 	SanitizedNameMap map[string]string
+	ToolInputSchemas map[string]string
+	ActiveToolName   string
 	SawToolCall      bool
 	HasFinalEvents   bool
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
 var toolUseIDCounter uint64
+
+// toolInputSchemaMapFromClaudeRequest returns a canonical tool name -> original
+// Anthropic input_schema map. The Gemini request translator strips fields such
+// as strict/additionalProperties for upstream compatibility, so response
+// translation must use the original Claude schema to clean tool arguments before
+// sending them back to Claude Code.
+func toolInputSchemaMapFromClaudeRequest(rawJSON []byte) map[string]string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return nil
+	}
+
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return nil
+	}
+
+	out := make(map[string]string)
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			return true
+		}
+		schema := tool.Get("input_schema")
+		if !schema.Exists() || !schema.IsObject() {
+			return true
+		}
+
+		rawSchema := schema.Raw
+		out[util.CanonicalToolName(name)] = rawSchema
+		out[util.CanonicalToolName(util.SanitizeFunctionName(name))] = rawSchema
+		return true
+	})
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// sanitizeToolArgsForClaude applies a small but important subset of JSON Schema
+// enforcement required by Claude Code. Gemini can add explanatory fields such as
+// "reason" even when the original Anthropic schema disallows extra properties.
+// Passing those fields through makes Claude Code's local tool executor reject
+// the tool call.
+func sanitizeToolArgsForClaude(schemaMap map[string]string, toolName string, argsRaw string) string {
+	argsRaw = strings.TrimSpace(argsRaw)
+	if argsRaw == "" || !gjson.Valid(argsRaw) {
+		return "{}"
+	}
+
+	args := gjson.Parse(argsRaw)
+	if !args.IsObject() {
+		return argsRaw
+	}
+
+	if schemaMap == nil || toolName == "" {
+		return argsRaw
+	}
+	schemaRaw := schemaMap[util.CanonicalToolName(toolName)]
+	if schemaRaw == "" {
+		return argsRaw
+	}
+
+	schema := gjson.Parse(schemaRaw)
+	props := schema.Get("properties")
+	additionalProps := schema.Get("additionalProperties")
+
+	// Empty object schema with additionalProperties:false means the only valid
+	// tool input is {}. This fixes no-arg tools such as CronList.
+	if props.IsObject() && len(props.Map()) == 0 && additionalProps.Type == gjson.False {
+		return "{}"
+	}
+
+	// If additionalProperties is not explicitly false, preserve upstream args.
+	if additionalProps.Type != gjson.False || !props.IsObject() {
+		return argsRaw
+	}
+
+	allowed := props.Map()
+	cleaned := make(map[string]any)
+	args.ForEach(func(key, value gjson.Result) bool {
+		if _, ok := allowed[key.String()]; ok {
+			cleaned[key.String()] = value.Value()
+		}
+		return true
+	})
+
+	out, err := json.Marshal(cleaned)
+	if err != nil {
+		return argsRaw
+	}
+	return string(out)
+}
 
 // ConvertGeminiResponseToClaude performs sophisticated streaming response format conversion.
 // This function implements a complex state machine that translates backend client responses
@@ -60,6 +156,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			ResponseIndex:    0,
 			ToolNameMap:      util.ToolNameMapFromClaudeRequest(originalRequestRawJSON),
 			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
+			ToolInputSchemas: toolInputSchemaMapFromClaudeRequest(originalRequestRawJSON),
 			SawToolCall:      false,
 		}
 	}
@@ -200,7 +297,8 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				// If we are already in tool use mode and name is empty, treat as continuation (delta).
 				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+						argsRaw := sanitizeToolArgsForClaude((*param).(*Params).ToolInputSchemas, (*param).(*Params).ActiveToolName, fcArgsResult.Raw)
+						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", argsRaw)
 						appendEvent("content_block_delta", string(data))
 					}
 					// Continue to next part without closing/opening logic
@@ -235,9 +333,11 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				data, _ = sjson.SetBytes(data, "content_block.name", clientToolName)
 				appendEvent("content_block_start", string(data))
+				(*param).(*Params).ActiveToolName = clientToolName
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
+					argsRaw := sanitizeToolArgsForClaude((*param).(*Params).ToolInputSchemas, clientToolName, fcArgsResult.Raw)
+					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", argsRaw)
 					appendEvent("content_block_delta", string(data))
 				}
 				(*param).(*Params).ResponseType = 3
@@ -291,6 +391,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	root := gjson.ParseBytes(rawJSON)
 	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
 	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
+	toolInputSchemas := toolInputSchemaMapFromClaudeRequest(originalRequestRawJSON)
 
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	out, _ = sjson.SetBytes(out, "id", root.Get("responseId").String())
@@ -354,7 +455,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", clientToolName)
 				inputRaw := "{}"
 				if args := functionCall.Get("args"); args.Exists() && gjson.Valid(args.Raw) && args.IsObject() {
-					inputRaw = args.Raw
+					inputRaw = sanitizeToolArgsForClaude(toolInputSchemas, clientToolName, args.Raw)
 				}
 				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(inputRaw))
 				out, _ = sjson.SetRawBytes(out, "content.-1", toolBlock)

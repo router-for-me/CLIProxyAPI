@@ -12,7 +12,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -362,25 +361,44 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				continue
 			}
 			originalRole := roleResult.String()
-			role := originalRole
-			if role == "assistant" {
-				role = "model"
-			} else if role == "system" {
-				role = "user"
-			}
-			clientContentJSON := []byte(`{"role":"","parts":[]}`)
-			clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "role", role)
 			contentsResult := messageResult.Get("content")
 			if originalRole == "system" {
-				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
+				var systemText strings.Builder
+				if contentsResult.Type == gjson.String {
+					systemText.WriteString(contentsResult.String())
+				} else if contentsResult.IsArray() {
+					contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
+						if contentResult.Get("type").String() != "text" {
+							return true
+						}
+						text := contentResult.Get("text").String()
+						if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
+							return true
+						}
+						if systemText.Len() > 0 {
+							systemText.WriteString("\n")
+						}
+						systemText.WriteString(text)
+						return true
+					})
+				}
+				if systemText.Len() > 0 && !util.IsClaudeCodeAttributionSystemText(systemText.String()) {
+					if !hasSystemInstruction {
+						systemInstructionJSON = []byte(`{"role":"user","parts":[]}`)
+						hasSystemInstruction = true
+					}
 					partJSON := []byte(`{}`)
-					partJSON, _ = sjson.SetBytes(partJSON, "text", reminderText)
-					clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
-					contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
-					hasContents = true
+					partJSON, _ = sjson.SetBytes(partJSON, "text", systemText.String())
+					systemInstructionJSON, _ = sjson.SetRawBytes(systemInstructionJSON, "parts.-1", partJSON)
 				}
 				continue
 			}
+			role := originalRole
+			if role == "assistant" {
+				role = "model"
+			}
+			clientContentJSON := []byte(`{"role":"","parts":[]}`)
+			clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "role", role)
 			if contentsResult.IsArray() {
 				contentResults := contentsResult.Array()
 				numContents := len(contentResults)

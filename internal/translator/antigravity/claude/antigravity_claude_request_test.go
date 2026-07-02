@@ -134,50 +134,24 @@ func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testin
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserContent(t *testing.T) {
+func TestConvertClaudeRequestToAntigravity_MidConversationSystemBecomesSystemInstruction(t *testing.T) {
 	inputJSON := []byte(`{
-		"model": "gemini-3.5-flash",
-		"system": [{"type": "text", "text": "Top-level rules"}],
+		"model": "gemini-3-pro",
 		"messages": [
-			{"role": "user", "content": [{"type": "text", "text": "Hello"}]},
-			{"role": "system", "content": "String mid-conversation rule"},
-			{"role": "system", "content": [{"type": "text", "text": "Array mid-conversation rule"}]}
+			{"role": "user", "content": [{"type": "text", "text": "hi"}]},
+			{"role": "system", "content": "Available tools and instructions"},
+			{"role": "user", "content": [{"type": "text", "text": "continue"}]}
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("gemini-3-flash-agent", inputJSON, false)
-	outputStr := string(output)
+	output := ConvertClaudeRequestToAntigravity("gemini-3-pro", inputJSON, false)
 
-	if systemContent := gjson.Get(outputStr, `request.contents.#(role=="system")`); systemContent.Exists() {
-		t.Fatalf("system role should not be emitted in request.contents: %s", systemContent.Raw)
+	if got := gjson.GetBytes(output, "request.systemInstruction.parts.0.text").String(); got != "Available tools and instructions" {
+		t.Fatalf("Expected mid-conversation system in systemInstruction, got %q: %s", got, output)
 	}
-
-	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 3 {
-		t.Fatalf("Expected the user and message-level system turns in request.contents, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
-	}
-	if got := contents[0].Get("role").String(); got != "user" {
-		t.Fatalf("Expected first content role user, got %q", got)
-	}
-	if got := contents[1].Get("role").String(); got != "user" {
-		t.Fatalf("Expected message-level system content to be downgraded to user role, got %q", got)
-	}
-	if got := contents[1].Get("parts.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
-		t.Fatalf("Unexpected string message-level system content text: %q", got)
-	}
-	if got := contents[2].Get("role").String(); got != "user" {
-		t.Fatalf("Expected array message-level system content to be downgraded to user role, got %q", got)
-	}
-	if got := contents[2].Get("parts.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
-		t.Fatalf("Unexpected array message-level system content text: %q", got)
-	}
-
-	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
-	if len(parts) != 1 {
-		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
-	}
-	if got := parts[0].Get("text").String(); got != "Top-level rules" {
-		t.Fatalf("Unexpected first system part: %q", got)
+	roles := gjson.GetBytes(output, "request.contents.#.role").Array()
+	if len(roles) != 2 || roles[0].String() != "user" || roles[1].String() != "user" {
+		t.Fatalf("Expected only user contents after removing system message, got %s: %s", gjson.GetBytes(output, "request.contents.#.role").Raw, output)
 	}
 }
 
