@@ -54,6 +54,10 @@ PackyCode provides special discounts for our software users: register using <a h
 <td width="180"><a href="https://t.me/CyberWlD/218"><img src="./assets/cyberpay.jpg" alt="CyberPay" width="150"></a></td>
 <td>CyberPay was founded in 2021. We are committed to providing stable, efficient, and secure payment settlement solutions for AI industry merchants. Working with us helps your website platform solve Alipay and WeChat payment collection needs. We support business cooperation for selling GPT, Gemini, Claude, and Codex accounts, relay platforms, and other related services, helping merchants address payment collection challenges. <a href="https://t.me/CyberWlD/218">Contact us</a> to start your path to growth.</td>
 </tr>
+<tr>
+<td width="180"><a href="https://console.claudeapi.com/agent/register/pJq9T52Fpugrhpgo"><img src="./assets/claudeapi.png" alt="CyberPay" width="150"></a></td>
+<td>Thanks to [Claude API](https://console.claudeapi.com/agent/register/pJq9T52Fpugrhpgo) for sponsoring this project! Claude API is an official-channel API provider focused on Claude models. Built on Anthropic official keys and AWS Bedrock official channels, it provides a stable integration experience for Claude Code and Agent applications, supports the full Claude model family, and preserves official capabilities such as Tool Use and long context. The service is not reverse-engineered and does not downgrade model capabilities, making it suitable for heavy Claude Code users, Agent engineers, and enterprise technical teams. Register through the [exclusive link](https://console.claudeapi.com/agent/register/pJq9T52Fpugrhpgo) and contact customer support to claim free test credits. Invoicing and team onboarding are also supported.</td>
+</tr>
 </tbody>
 </table>
 

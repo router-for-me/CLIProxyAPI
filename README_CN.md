@@ -54,6 +54,10 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td width="180"><a href="https://t.me/CyberWlD/218"><img src="./assets/cyberpay.jpg" alt="CyberPay" width="150"></a></td>
 <td>赛博支付（CyberPay）成立于2021年。我们致力于为AI从业者商家提供稳定、高效、安全的支付结算解决方案。与我们合作即可使您的网站平台解决用户支付宝/微信收款问题。承接售卖GPT 、Gemini、Claude、Codex账号与中转站等各类业务合作，解决各位商家收款困难痛点。<a href="https://t.me/CyberWlD/218">联系我们</a>开启您的致富通道。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://console.claudeapi.com/agent/register/pJq9T52Fpugrhpgo"><img src="./assets/claudeapi.png" alt="CyberPay" width="150"></a></td>
+<td>感谢 [Claude API](https://console.claudeapi.com/agent/register/pJq9T52Fpugrhpgo) 赞助本项目！Claude API 是专注 Claude 模型的官方渠道 API 服务商，基于 Anthropic 官方 Key 与 AWS Bedrock 官方渠道，提供稳定的 Claude Code 与 Agent 应用接入体验，支持 Claude 全系列模型，保留 Tool Use、长上下文等官方能力。服务非逆向、非降智，适合 Claude Code 深度用户、Agent 工程师与企业技术团队使用。通过[专属链接](https://console.claudeapi.com/agent/register/pJq9T52Fpugrhpgo)注册后联系客服，可领取免费测试额度，并支持开票和团队对接。</td>
+</tr>
 </tbody>
 </table>
 
