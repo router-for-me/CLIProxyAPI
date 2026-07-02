@@ -26,6 +26,21 @@ func OpenAICompatibleProviderKey(name string) string {
 	return openAICompatibleProviderPrefix + name
 }
 
+// IsOpenAICompatibleProvider reports whether the given provider key identifies an
+// OpenAI-compatibility provider (the generic "openai-compatibility" key or a named
+// "openai-compatible-<name>" key). Such providers always use static credentials
+// (an API key and/or custom headers) and are therefore treated as API-key auths.
+func IsOpenAICompatibleProvider(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	if provider == "openai-compatibility" {
+		return true
+	}
+	return strings.HasPrefix(provider, openAICompatibleProviderPrefix)
+}
+
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
 // When the model has not been registered yet, it falls back to legacy string heuristics to infer
