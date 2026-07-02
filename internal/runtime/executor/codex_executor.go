@@ -710,7 +710,7 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 	if req == nil {
 		return nil
 	}
-	apiKey, _ := codexCreds(auth)
+	apiKey, _ := codexCredsWithConfig(e.cfg, auth)
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -747,7 +747,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := codexCreds(auth)
+	apiKey, baseURL := codexCredsWithConfig(e.cfg, auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -927,7 +927,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := codexCreds(auth)
+	apiKey, baseURL := codexCredsWithConfig(e.cfg, auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -1034,7 +1034,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := codexCreds(auth)
+	apiKey, baseURL := codexCredsWithConfig(e.cfg, auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -1853,12 +1853,19 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
+	return codexCredsWithConfig(nil, a)
+}
+
+func codexCredsWithConfig(cfg *config.Config, a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
 	}
 	if a.Attributes != nil {
 		apiKey = a.Attributes["api_key"]
-		baseURL = a.Attributes["base_url"]
+		baseURL = strings.TrimSpace(a.Attributes["base_url"])
+	}
+	if baseURL == "" && apiKey == "" && cfg != nil {
+		baseURL = strings.TrimSpace(cfg.CodexBaseURL)
 	}
 	if apiKey == "" && a.Metadata != nil {
 		if v, ok := a.Metadata["access_token"].(string); ok {
