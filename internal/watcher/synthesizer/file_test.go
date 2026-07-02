@@ -132,6 +132,72 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_AuthFileBaseURL(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":     "codex",
+		"email":    "codex@example.com",
+		"base_url": "http://127.0.0.1:18081",
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["base_url"]; got != "http://127.0.0.1:18081" {
+		t.Fatalf("base_url attr = %q, want %q", got, "http://127.0.0.1:18081")
+	}
+}
+
+func TestFileSynthesizer_Synthesize_AuthFileBaseURLDashAlias(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":     "claude",
+		"email":    "claude@example.com",
+		"base-url": "http://127.0.0.1:18082",
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "claude-auth.json"), data, 0644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["base_url"]; got != "http://127.0.0.1:18082" {
+		t.Fatalf("base_url attr = %q, want %q", got, "http://127.0.0.1:18082")
+	}
+}
+
 func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	tempDir := t.TempDir()
 

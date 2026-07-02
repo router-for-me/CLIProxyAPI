@@ -65,6 +65,17 @@ func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) []*
 	return synthesizeFileAuths(ctx, fullPath, data)
 }
 
+func authFileBaseURL(metadata map[string]any) string {
+	for _, key := range []string{"base_url", "base-url"} {
+		if raw, ok := metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
 func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []*coreauth.Auth {
 	if ctx == nil || len(data) == 0 {
 		return nil
@@ -174,6 +185,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		Metadata:  metadata,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if baseURL := authFileBaseURL(metadata); baseURL != "" {
+		a.Attributes["base_url"] = baseURL
 	}
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
