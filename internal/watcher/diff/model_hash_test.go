@@ -36,6 +36,17 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHash_IncludesContextLength(t *testing.T) {
+	defaultContext := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "deepseek-v4-pro"}})
+	oneMillionContext := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "deepseek-v4-pro", ContextLength: 1000000}})
+	if defaultContext == "" || oneMillionContext == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if defaultContext == oneMillionContext {
+		t.Fatal("hash should change when context length changes")
+	}
+}
+
 func TestComputeOpenAICompatModelsHash_NormalizesAndDedups(t *testing.T) {
 	a := []config.OpenAICompatibilityModel{
 		{Name: "gpt-4", Alias: "gpt4"},
