@@ -83,8 +83,8 @@ func TestFingerprint_PopulationIsDiverse(t *testing.T) {
 		claudeUAs[perAccountClaudeProfile(scope, nil).UserAgent] = struct{}{}
 		ua := PerAccountCodexUserAgent(scope, testCodexUA, nil)
 		codexUAs[ua] = struct{}{}
-		if !strings.HasPrefix(ua, "codex-tui/") {
-			t.Fatalf("derived Codex UA not codex-shaped: %q", ua)
+		if !strings.HasPrefix(ua, "codex_cli_rs/") {
+			t.Fatalf("derived Codex UA not codex_cli_rs-shaped: %q", ua)
 		}
 	}
 	if len(claudeUAs) < 2 {

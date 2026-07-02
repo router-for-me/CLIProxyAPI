@@ -62,12 +62,14 @@ var claudeProfilePool = []claudeProfileTuple{
 // The format mirrors the real codex-tui User-Agent so isOfficialCodexUserAgent
 // still recognizes it; only version / OS minor / terminal vary.
 var codexUAPool = []string{
-	"codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)",
-	"codex-tui/0.134.0 (Mac OS 26.4.0; arm64) Apple_Terminal/455 (codex-tui; 0.134.0)",
-	"codex-tui/0.135.0 (Mac OS 26.5.0; arm64) WezTerm/20240203-110809 (codex-tui; 0.135.0)",
-	"codex-tui/0.133.0 (Mac OS 26.3.0; arm64) iTerm.app/3.5.11 (codex-tui; 0.133.0)",
-	"codex-tui/0.136.0 (Mac OS 26.5.0; arm64) vscode/1.95.3 (codex-tui; 0.136.0)",
-	"codex-tui/0.134.0 (Mac OS 26.4.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.134.0)",
+	// Real codex_cli_rs UA shape: prefix codex_cli_rs/, ends at the terminal token
+	// (no trailing "(codex-tui; ver)"). Versions in the current 0.14x line.
+	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10",
+	"codex_cli_rs/0.141.0 (Mac OS 26.4.0; arm64) Apple_Terminal/455",
+	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) WezTerm/20240203-110809",
+	"codex_cli_rs/0.140.0 (Mac OS 26.3.0; arm64) iTerm.app/3.5.11",
+	"codex_cli_rs/0.142.5 (Mac OS 26.5.0; arm64) vscode/1.95.3",
+	"codex_cli_rs/0.141.0 (Mac OS 26.4.0; arm64) iTerm.app/3.6.10",
 }
 
 // fnvIndex maps a scope key deterministically into [0, n).

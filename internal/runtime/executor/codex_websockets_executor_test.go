@@ -297,11 +297,13 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if !strings.HasPrefix(codexUserAgent, codexOriginator+"/") {
 		t.Fatalf("default Codex User-Agent = %s, want prefix %s/", codexUserAgent, codexOriginator)
 	}
-	if !strings.HasPrefix(codexUserAgent, "codex-tui/") {
-		t.Fatalf("default Codex User-Agent = %s, want codex-tui prefix", codexUserAgent)
+	if !strings.HasPrefix(codexUserAgent, "codex_cli_rs/") {
+		t.Fatalf("default Codex User-Agent = %s, want codex_cli_rs prefix", codexUserAgent)
 	}
-	if !strings.Contains(codexUserAgent, "(codex-tui;") {
-		t.Fatalf("default Codex User-Agent = %s, want codex-tui suffix", codexUserAgent)
+	// The real codex CLI UA ends at the terminal token; it must NOT carry the
+	// fabricated "(codex-tui; ver)" trailing segment (verified vs openai/codex).
+	if strings.Contains(codexUserAgent, "(codex-tui;") {
+		t.Fatalf("default Codex User-Agent = %s must not carry a (codex-tui; ver) suffix", codexUserAgent)
 	}
 	if got := headers.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
