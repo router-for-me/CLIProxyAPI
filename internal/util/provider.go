@@ -41,6 +41,16 @@ func IsOpenAICompatibleProvider(provider string) bool {
 	return strings.HasPrefix(provider, openAICompatibleProviderPrefix)
 }
 
+// OpenAICompatibleProviderName returns the config name encoded by a named
+// OpenAI-compatible provider key such as "openai-compatible-vast".
+func OpenAICompatibleProviderName(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if !strings.HasPrefix(provider, openAICompatibleProviderPrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(provider, openAICompatibleProviderPrefix)
+}
+
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
 // When the model has not been registered yet, it falls back to legacy string heuristics to infer
