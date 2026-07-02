@@ -158,6 +158,48 @@ func TestFileTokenStoreListExpandsPluginMultiAuths(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreListCopiesAuthFileBaseURL(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "codex.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex","email":"codex@example.com","base_url":"http://127.0.0.1:18081"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("List() len = %d, want one auth", len(auths))
+	}
+	if got := auths[0].Attributes["base_url"]; got != "http://127.0.0.1:18081" {
+		t.Fatalf("base_url attr = %q, want %q", got, "http://127.0.0.1:18081")
+	}
+}
+
+func TestFileTokenStoreListCopiesAuthFileBaseURLDashAlias(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "claude.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"claude","email":"claude@example.com","base-url":"http://127.0.0.1:18082"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("List() len = %d, want one auth", len(auths))
+	}
+	if got := auths[0].Attributes["base_url"]; got != "http://127.0.0.1:18082" {
+		t.Fatalf("base_url attr = %q, want %q", got, "http://127.0.0.1:18082")
+	}
+}
+
 func TestFileTokenStoreListPluginHandledEmptySuppressesBuiltin(t *testing.T) {
 	baseDir := t.TempDir()
 	path := filepath.Join(baseDir, "codex.json")

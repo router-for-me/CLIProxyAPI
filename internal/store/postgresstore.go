@@ -322,6 +322,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			LastRefreshedAt:  time.Time{},
 			NextRefreshAfter: time.Time{},
 		}
+		cliproxyauth.ApplyBaseURLFromMetadata(auth)
 		cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 		if disabled, ok := metadata["disabled"].(bool); ok && disabled {
 			auth.Disabled = true

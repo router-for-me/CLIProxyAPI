@@ -2887,3 +2887,82 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testin
 		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
 	}
 }
+
+func TestClaudeCredsUsesGlobalBaseURLWhenAuthHasNoBaseURL(t *testing.T) {
+	apiKey, baseURL := claudeCredsWithConfig(&config.Config{ClaudeBaseURL: "http://127.0.0.1:18081"}, &cliproxyauth.Auth{
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	})
+	if apiKey != "oauth-token" {
+		t.Fatalf("apiKey = %q, want oauth-token", apiKey)
+	}
+	if baseURL != "http://127.0.0.1:18081" {
+		t.Fatalf("baseURL = %q, want global override", baseURL)
+	}
+}
+
+func TestClaudeCredsAuthBaseURLPrecedesGlobalBaseURL(t *testing.T) {
+	_, baseURL := claudeCredsWithConfig(&config.Config{ClaudeBaseURL: "http://127.0.0.1:18081"}, &cliproxyauth.Auth{
+		Attributes: map[string]string{"base_url": "http://127.0.0.1:18101"},
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+	})
+	if baseURL != "http://127.0.0.1:18101" {
+		t.Fatalf("baseURL = %q, want auth override", baseURL)
+	}
+}
+
+func TestClaudeCredsMetadataBaseURLPrecedesGlobalBaseURL(t *testing.T) {
+	_, baseURL := claudeCredsWithConfig(&config.Config{ClaudeBaseURL: "http://127.0.0.1:18081"}, &cliproxyauth.Auth{
+		Metadata: map[string]any{"access_token": "oauth-token", "base-url": "http://127.0.0.1:18103/"},
+	})
+	if baseURL != "http://127.0.0.1:18103" {
+		t.Fatalf("baseURL = %q, want metadata override", baseURL)
+	}
+}
+
+func TestClaudeCredsDoesNotApplyGlobalBaseURLToAPIKeyAuth(t *testing.T) {
+	_, baseURL := claudeCredsWithConfig(&config.Config{ClaudeBaseURL: "http://127.0.0.1:18081"}, &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "sk-ant-test"},
+	})
+	if baseURL != "" {
+		t.Fatalf("baseURL = %q, want empty for API-key auth without per-key base_url", baseURL)
+	}
+}
+
+func TestClaudeCredsTrimsTrailingSlashFromBaseURLOverrides(t *testing.T) {
+	_, authBaseURL := claudeCredsWithConfig(&config.Config{ClaudeBaseURL: "http://127.0.0.1:18081/"}, &cliproxyauth.Auth{
+		Attributes: map[string]string{"base_url": "http://127.0.0.1:18101/"},
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+	})
+	if authBaseURL != "http://127.0.0.1:18101" {
+		t.Fatalf("auth baseURL = %q, want trimmed trailing slash", authBaseURL)
+	}
+
+	_, globalBaseURL := claudeCredsWithConfig(&config.Config{ClaudeBaseURL: "http://127.0.0.1:18081/"}, &cliproxyauth.Auth{
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	})
+	if globalBaseURL != "http://127.0.0.1:18081" {
+		t.Fatalf("global baseURL = %q, want trimmed trailing slash", globalBaseURL)
+	}
+}
+
+func TestResolveClaudeKeyConfigNormalizesTrailingSlashForBaseURLMatch(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:  "key-123",
+			BaseURL: "http://127.0.0.1:18101/",
+			Cloak:   &config.CloakConfig{Mode: "always"},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": "http://127.0.0.1:18101/",
+	}}
+
+	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
+	if cloakCfg == nil {
+		t.Fatal("expected trailing-slash base URL to match Claude key config")
+	}
+	if cloakCfg.Mode != "always" {
+		t.Fatalf("cloak mode = %q, want always", cloakCfg.Mode)
+	}
+}

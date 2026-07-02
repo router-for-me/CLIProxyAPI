@@ -315,3 +315,26 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForMultipart(t 
 		t.Fatalf("mask.image_url = %q, want mask-data data URL; body=%s", maskURL, string(gotBody))
 	}
 }
+
+func TestCodexExecutorDirectOpenAIImageGenerationUsesGlobalBaseURLForOAuthAuth(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1713833628,"data":[{"b64_json":"AA=="}],"usage":{"total_tokens":1,"input_tokens":1,"output_tokens":0}}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{CodexBaseURL: server.URL})
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"access_token": "oauth-token"}}
+	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "codex/gpt-image-1.5",
+		Payload: []byte(`{"model":"codex/gpt-image-1.5","prompt":"draw","stream":false}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if gotPath != "/images/generations" {
+		t.Fatalf("path = %q, want /images/generations", gotPath)
+	}
+}
