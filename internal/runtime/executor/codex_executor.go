@@ -1451,9 +1451,26 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
+	// Real codex 0.142.5 zstd-compresses the POST body and sends
+	// content-encoding: zstd on the OAuth path (live-captured on the HTTP
+	// fallback). Mirror it so the body size/entropy AND the header match a genuine
+	// client; BYOK/API-key endpoints stay plaintext. Only the wire body is
+	// compressed — the returned rawJSON stays plaintext for request logging.
+	wireBody := rawJSON
+	zstdEncoded := false
+	if codexShouldZstdBody(auth) {
+		if compressed, ok := codexZstdCompress(rawJSON); ok {
+			wireBody = compressed
+			zstdEncoded = true
+		}
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
+	}
+	if zstdEncoded {
+		// h2 lowercases the header name on the wire → content-encoding: zstd.
+		httpReq.Header.Set("Content-Encoding", "zstd")
 	}
 	if cache.ID != "" {
 		// Real codex 0.142.5 shape (lowercase session-id + thread-id, no
@@ -1611,12 +1628,9 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
+	// Same OAuth-vs-API-key split as codexShouldZstdBody, so the impersonation
+	// decisions (UA, beta-features, body zstd) stay consistent for a given auth.
+	isAPIKey := codexAuthIsAPIKey(auth)
 	if isAPIKey {
 		// BYOK/API-key requests hit the user's own OpenAI-compatible endpoint;
 		// forward the client User-Agent as-is (config/default fill in when absent).
