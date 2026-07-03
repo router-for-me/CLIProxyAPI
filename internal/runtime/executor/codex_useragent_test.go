@@ -9,7 +9,7 @@ import (
 
 func TestIsOfficialCodexUserAgent(t *testing.T) {
 	official := []string{
-		"codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)",
+		"codex-tui/0.135.0 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)",
 		"codex_cli_rs/0.1.0",
 		"codex-exec/2.3",
 	}

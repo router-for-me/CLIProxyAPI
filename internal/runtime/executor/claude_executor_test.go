@@ -550,7 +550,14 @@ func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *tes
 	resetClaudeDeviceProfileCache()
 
 	stabilize := false
+	// Isolate the LEGACY runtime OS/Arch fallback: turn per-account fingerprint
+	// randomization OFF. In production randomization is ON by default and
+	// intentionally overrides the runtime OS/Arch with a stable per-account
+	// profile (the whole point — a Linux proxy host must not advertise
+	// X-Stainless-Os: Linux). Without this, the assertion is platform-dependent:
+	// it passes on macOS (runtime==profile OS) but fails on the Linux CI runner.
 	cfg := &config.Config{
+		DisableFingerprintRandomization: true,
 		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
 			UserAgent:              "claude-cli/2.1.60 (external, cli)",
 			PackageVersion:         "0.70.0",
@@ -578,7 +585,10 @@ func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *tes
 func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallback(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 
+	// Randomization off to isolate the legacy runtime OS/Arch fallback (same
+	// reason as TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing).
 	cfg := &config.Config{
+		DisableFingerprintRandomization: true,
 		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
 			UserAgent:      "claude-cli/2.1.60 (external, cli)",
 			PackageVersion: "0.70.0",

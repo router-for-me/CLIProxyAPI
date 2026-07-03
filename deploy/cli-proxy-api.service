@@ -1,0 +1,30 @@
+[Unit]
+Description=CLIProxyAPI (fingerprint-hardened fork)
+Documentation=https://github.com/qinghua362330/CLIProxyAPI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cliproxy
+Group=cliproxy
+WorkingDirectory=/opt/cli-proxy-api
+# HOME 决定 auth-dir 默认位置(~/.cli-proxy-api => /opt/cli-proxy-api/.cli-proxy-api)
+# 也可在 config.yaml 用绝对路径覆盖 auth-dir
+Environment=HOME=/opt/cli-proxy-api
+ExecStart=/opt/cli-proxy-api/cli-proxy-api -config /opt/cli-proxy-api/config.yaml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+# 安全加固(静态二进制,无需额外运行时)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

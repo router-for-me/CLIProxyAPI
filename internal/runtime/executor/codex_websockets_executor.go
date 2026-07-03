@@ -35,8 +35,12 @@ import (
 
 const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
-	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
-	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
+	// codexDefaultBetaFeatures is the x-codex-beta-features value real codex 0.142.5
+	// sends by default (live-captured 2026-07-02). Emitting it avoids a missing-header
+	// tell vs the stock client; operator/client values still take precedence.
+	codexDefaultBetaFeatures           = "remote_compaction_v2"
+	codexResponsesWebsocketIdleTimeout = 5 * time.Minute
+	codexResponsesWebsocketHandshakeTO = 30 * time.Second
 )
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
@@ -885,13 +889,12 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
-		setHeaderCasePreserved(headers, "session_id", cache.ID)
-		// NOTE (live-captured from real codex 0.130.0): the real responses request
-		// carries session_id AND thread_id (both lowercase, same UUID) — not
-		// "Conversation_id". Aligning fully (thread_id underscore, dropping
-		// Conversation_id/Thread-Id) is a multi-path, test-coupled routing change
-		// tracked as a follow-up; kept as-is here to preserve existing behavior.
-		headers.Set("Conversation_id", cache.ID)
+		// Live-captured from real codex 0.142.5: the responses request carries
+		// lowercase hyphenated "session-id" AND "thread-id" (same UUID) and does
+		// NOT send "Conversation_id". Emit the real shape; dropping Conversation_id
+		// removes a CPA tell. Internal routing/prompt-cache key off cache.ID, not
+		// the header name, so this is an out-of-band (outbound-only) change.
+		setCodexSessionThreadHeaders(headers, cache.ID)
 	}
 
 	return rawJSON, headers, nil
@@ -912,7 +915,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 
 	isAPIKey := codexAuthUsesAPIKey(auth)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
+	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, codexDefaultBetaFeatures)
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
@@ -968,14 +971,11 @@ func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, f
 	if sessionID == "" {
 		sessionID = strings.TrimSpace(fallbackValue)
 	}
-	if sessionID != "" {
-		setHeaderCasePreserved(target, "session_id", sessionID)
-	}
-	deleteHeaderCaseInsensitive(target, "Session-Id")
+	setCodexSessionThreadHeaders(target, sessionID)
 }
 
 func codexSessionHeaderValue(headers http.Header) string {
-	for _, key := range []string{"Session-Id", "Session_id", "session_id"} {
+	for _, key := range []string{"session-id", "Session-Id", "Session_id", "session_id"} {
 		if value := strings.TrimSpace(headerValueCaseInsensitive(headers, key)); value != "" {
 			return value
 		}
@@ -1023,6 +1023,28 @@ func setHeaderCasePreserved(headers http.Header, key string, value string) {
 	}
 	deleteHeaderCaseInsensitive(headers, key)
 	headers[key] = []string{value}
+}
+
+// setCodexSessionThreadHeaders forces the outbound shape of real codex 0.142.5:
+// lowercase hyphenated "session-id" AND "thread-id" (same UUID). It purges the
+// legacy underscore variants and the "Conversation_id" header (a tell the real
+// client never sends). Uses direct map assignment because http.Header.Set would
+// canonicalize the key to "Session-Id". Live-captured from real codex 0.142.5.
+func setCodexSessionThreadHeaders(headers http.Header, id string) {
+	if headers == nil {
+		return
+	}
+	// Order matters: underscore/Conversation variants first (EqualFold won't match
+	// the hyphen forms), then the hyphen forms (EqualFold clears any-case), then set
+	// the exact lowercase keys.
+	for _, k := range []string{"session_id", "Session_id", "thread_id", "Thread_id", "Conversation_id", "Conversation-Id", "session-id", "thread-id"} {
+		deleteHeaderCaseInsensitive(headers, k)
+	}
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	headers["session-id"] = []string{id}
+	headers["thread-id"] = []string{id}
 }
 
 func setCodexSessionHeaderCasePreserved(headers http.Header, fallbackKey string, value string) {

@@ -1,0 +1,70 @@
+name: fork-image
+
+# Builds and publishes a Docker image of the fork to GitHub Container Registry
+# (ghcr.io/<owner>/<repo>) on every push to the mod branch and on version tags.
+# Uses the built-in GITHUB_TOKEN — no external secrets required to publish to GHCR.
+# This is the "package/publish" step; see the commented deploy block for wiring
+# an actual deploy to your own server/registry.
+on:
+  push:
+    branches: [feat/fingerprint-hardening, main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lowercase image name
+        id: img
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL DEPLOY — uncomment and fill in your target. Examples:
+  #
+  # deploy:
+  #   needs: image
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Deploy over SSH (pull + restart)
+  #       uses: appleboy/ssh-action@v1
+  #       with:
+  #         host: ${{ secrets.DEPLOY_HOST }}
+  #         username: ${{ secrets.DEPLOY_USER }}
+  #         key: ${{ secrets.DEPLOY_SSH_KEY }}
+  #         script: |
+  #           docker pull ghcr.io/<owner>/cliproxyapi:latest
+  #           docker compose -f /opt/cpa/docker-compose.yml up -d
+  # ---------------------------------------------------------------------------
