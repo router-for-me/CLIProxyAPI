@@ -28,6 +28,9 @@ type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 
+type ClientAPIKey = internalconfig.ClientAPIKey
+type ClientAPIKeys = internalconfig.ClientAPIKeys
+
 type TLS = internalconfig.TLSConfig
 
 const (
