@@ -7,6 +7,28 @@ import (
 	"testing"
 )
 
+func TestSanitizeToolArgsForClaude_RemovesAllArgsWhenPropertiesMissingAndAdditionalPropertiesFalse(t *testing.T) {
+	schemaMap := map[string]string{
+		"strict_tool": `{"type":"object","additionalProperties":false}`,
+	}
+
+	got := sanitizeToolArgsForClaude(schemaMap, "strict_tool", `{"extra":"value","id":123}`)
+	if got != "{}" {
+		t.Fatalf("expected all args to be stripped, got %s", got)
+	}
+}
+
+func TestSanitizeToolArgsForClaude_PreservesAllowedLargeIntegerPrecision(t *testing.T) {
+	schemaMap := map[string]string{
+		"strict_tool": `{"type":"object","properties":{"id":{"type":"integer"}},"additionalProperties":false}`,
+	}
+
+	got := sanitizeToolArgsForClaude(schemaMap, "strict_tool", `{"id":9223372036854775807,"extra":"drop"}`)
+	if got != `{"id":9223372036854775807}` {
+		t.Fatalf("expected large integer to be preserved exactly, got %s", got)
+	}
+}
+
 func TestConvertGeminiResponseToClaude_SignatureOnlyPartDoesNotOpenEmptyTextBlock(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	thinkingChunk := []byte(`{

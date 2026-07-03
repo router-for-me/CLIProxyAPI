@@ -9,7 +9,6 @@ package claude
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -104,31 +103,30 @@ func sanitizeToolArgsForClaude(schemaMap map[string]string, toolName string, arg
 	props := schema.Get("properties")
 	additionalProps := schema.Get("additionalProperties")
 
-	// Empty object schema with additionalProperties:false means the only valid
-	// tool input is {}. This fixes no-arg tools such as CronList.
-	if props.IsObject() && len(props.Map()) == 0 && additionalProps.Type == gjson.False {
-		return "{}"
-	}
-
 	// If additionalProperties is not explicitly false, preserve upstream args.
-	if additionalProps.Type != gjson.False || !props.IsObject() {
+	if additionalProps.Type != gjson.False || (props.Exists() && !props.IsObject()) {
 		return argsRaw
 	}
 
 	allowed := props.Map()
-	cleaned := make(map[string]any)
-	args.ForEach(func(key, value gjson.Result) bool {
-		if _, ok := allowed[key.String()]; ok {
-			cleaned[key.String()] = value.Value()
+	cleanedBytes := []byte(argsRaw)
+	var deleteErr error
+	args.ForEach(func(key, _ gjson.Result) bool {
+		if deleteErr != nil {
+			return false
 		}
-		return true
+		k := key.String()
+		if _, ok := allowed[k]; ok {
+			return true
+		}
+		escapedKey := strings.ReplaceAll(k, ".", `\.`)
+		cleanedBytes, deleteErr = sjson.DeleteBytes(cleanedBytes, escapedKey)
+		return deleteErr == nil
 	})
-
-	out, err := json.Marshal(cleaned)
-	if err != nil {
+	if deleteErr != nil {
 		return argsRaw
 	}
-	return string(out)
+	return string(cleanedBytes)
 }
 
 // ConvertGeminiResponseToClaude performs sophisticated streaming response format conversion.

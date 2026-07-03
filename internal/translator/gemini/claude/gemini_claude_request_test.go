@@ -128,6 +128,33 @@ func TestConvertClaudeRequestToGemini_MidConversationSystemBecomesSystemInstruct
 	}
 }
 
+func TestConvertClaudeRequestToGemini_MidConversationSystemSkipsAttribution(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "hi"}]},
+			{"role": "system", "content": "x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=12345;"},
+			{"role": "system", "content": [
+				{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=12345;"},
+				{"type": "text", "text": "Real system instruction"}
+			]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	parts := gjson.GetBytes(output, "system_instruction.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected only non-attribution system part, got %d: %s", len(parts), gjson.GetBytes(output, "system_instruction.parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "Real system instruction" {
+		t.Fatalf("Unexpected system instruction text: %q", got)
+	}
+	if gjson.GetBytes(output, `system_instruction.parts.#(text%"x-anthropic-billing-header:*")`).Exists() {
+		t.Fatalf("Claude Code attribution block was forwarded: %s", gjson.GetBytes(output, "system_instruction.parts").Raw)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_SkipsEmptyTextParts(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet",

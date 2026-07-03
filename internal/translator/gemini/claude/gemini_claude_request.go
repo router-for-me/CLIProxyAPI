@@ -29,6 +29,9 @@ func appendGeminiSystemInstructionText(out []byte, text string) []byte {
 
 func claudeTextContent(content gjson.Result) string {
 	if content.Type == gjson.String {
+		if util.IsClaudeCodeAttributionSystemText(content.String()) {
+			return ""
+		}
 		return content.String()
 	}
 	if !content.IsArray() {
@@ -41,7 +44,7 @@ func claudeTextContent(content gjson.Result) string {
 			return true
 		}
 		text := part.Get("text")
-		if text.Type != gjson.String || text.String() == "" {
+		if text.Type != gjson.String || text.String() == "" || util.IsClaudeCodeAttributionSystemText(text.String()) {
 			return true
 		}
 		if b.Len() > 0 {
