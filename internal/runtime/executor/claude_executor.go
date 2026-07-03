@@ -244,7 +244,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = normalizeClaudeSamplingForThinking(body)
+	body = normalizeClaudeSamplingForUpstream(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -434,7 +434,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = normalizeClaudeSamplingForThinking(body)
+	body = normalizeClaudeSamplingForUpstream(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -865,16 +865,13 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	return body
 }
 
-// normalizeClaudeSamplingForThinking keeps Anthropic message requests valid when
-// thinking is active. Anthropic rejects non-default sampling while thinking is
-// enabled/adaptive/auto.
-func normalizeClaudeSamplingForThinking(body []byte) []byte {
+// normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
+func normalizeClaudeSamplingForUpstream(body []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "temperature")
+
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
 	case "enabled", "adaptive", "auto":
-		if temp := gjson.GetBytes(body, "temperature"); temp.Exists() && (temp.Type != gjson.Number || temp.Float() != 1) {
-			body, _ = sjson.SetBytes(body, "temperature", 1)
-		}
 		body, _ = sjson.DeleteBytes(body, "top_p")
 		body, _ = sjson.DeleteBytes(body, "top_k")
 	}

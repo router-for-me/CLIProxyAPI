@@ -114,11 +114,8 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		if maxTokens := genConfig.Get("maxOutputTokens"); maxTokens.Exists() {
 			out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 		}
-		// Temperature setting for controlling response randomness
-		if temp := genConfig.Get("temperature"); temp.Exists() {
-			out, _ = sjson.SetBytes(out, "temperature", temp.Float())
-		} else if topP := genConfig.Get("topP"); topP.Exists() {
-			// Top P setting for nucleus sampling (filtered out if temperature is set)
+		// Top P setting for nucleus sampling.
+		if topP := genConfig.Get("topP"); topP.Exists() {
 			out, _ = sjson.SetBytes(out, "top_p", topP.Float())
 		}
 		// Stop sequences configuration for custom termination conditions
