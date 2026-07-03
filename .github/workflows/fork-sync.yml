@@ -13,7 +13,7 @@ on:
     inputs:
       target_branch:
         description: fork branch to update
-        default: feat/fingerprint-hardening
+        default: main
       upstream_ref:
         description: upstream branch to merge
         default: main
@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.target_branch || 'feat/fingerprint-hardening' }}
+          ref: ${{ github.event.inputs.target_branch || 'main' }}
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
@@ -37,7 +37,7 @@ jobs:
       - name: Sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET: ${{ github.event.inputs.target_branch || 'feat/fingerprint-hardening' }}
+          TARGET: ${{ github.event.inputs.target_branch || 'main' }}
           UREF: ${{ github.event.inputs.upstream_ref || 'main' }}
         run: |
           set -euo pipefail
