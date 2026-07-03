@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -168,5 +170,57 @@ func TestCacheHelper_NilAuthBodyPlaintext(t *testing.T) {
 	}
 	if got := httpReq.Header.Get("Content-Encoding"); got != "" {
 		t.Fatalf("Content-Encoding = %q, want empty for nil-auth path", got)
+	}
+}
+
+// TestCacheHelper_OAuthWireBodyReachesServerAsZstd is the end-to-end wire check:
+// it drives the real cacheHelper output through a real http.Client.Do over a real
+// TCP connection to a local server, then asserts the SERVER received a zstd body
+// advertised via content-encoding: zstd that decodes back to the plaintext. This
+// proves the transport puts the compressed body on the socket verbatim (the
+// segment the pure unit tests can't reach) — stronger evidence than sniffing an
+// encrypted capture of the chatgpt.com connection, which would only show ciphertext.
+func TestCacheHelper_OAuthWireBodyReachesServerAsZstd(t *testing.T) {
+	var (
+		gotEncoding string
+		gotBody     []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Content-Encoding")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	executor := &CodexExecutor{}
+	ctx := context.Background()
+	rawJSON := []byte(`{"model":"gpt-5-codex","stream":false,"input":[{"role":"user","content":"end to end zstd wire check"}]}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"model":"gpt-5-codex"}`)}
+
+	httpReq, upstreamBody, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), srv.URL+"/responses", oauthCodexAuth(), req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("Do error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if gotEncoding != "zstd" {
+		t.Fatalf("server saw Content-Encoding = %q, want zstd", gotEncoding)
+	}
+	if !bytes.HasPrefix(gotBody, zstdMagic) {
+		t.Fatalf("server received non-zstd body: % x", gotBody[:min(4, len(gotBody))])
+	}
+	decoded := zstdDecodeAll(t, gotBody)
+	if !bytes.Equal(decoded, upstreamBody) {
+		t.Fatalf("server body decoded != plaintext upstreamBody:\n decoded=%s\n upstream=%s", decoded, upstreamBody)
+	}
+	if got := gjson.GetBytes(decoded, "model").String(); got != "gpt-5-codex" {
+		t.Fatalf("server decoded model = %q, want gpt-5-codex", got)
 	}
 }
