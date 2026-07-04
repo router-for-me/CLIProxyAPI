@@ -9,15 +9,502 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestOpenAICompatExecutorPrepareRequestUsesClineProviderSettingsToken(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "providers.json")
+	raw := []byte(`{
+		"providers": {
+			"cline-pass": {
+				"settings": {
+					"provider": "cline-pass",
+					"auth": {"accessToken": "cline-access-token"}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(settingsPath, raw, 0600); err != nil {
+		t.Fatalf("failed to write Cline provider settings: %v", err)
+	}
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: settingsPath,
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest error: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer cline-access-token" {
+		t.Fatalf("Authorization = %q, want bearer token from Cline provider settings", got)
+	}
+}
+
+func TestOpenAICompatExecutorPrepareRequestUsesClineAccountTokenForClinePass(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "providers.json")
+	raw := []byte(`{
+		"providers": {
+			"cline-pass": {
+				"settings": {
+					"provider": "cline-pass",
+					"model": "cline-pass/glm-5.2"
+				}
+			},
+			"cline": {
+				"settings": {
+					"provider": "cline",
+					"auth": {"accessToken": "cline-account-token"}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(settingsPath, raw, 0600); err != nil {
+		t.Fatalf("failed to write Cline provider settings: %v", err)
+	}
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: settingsPath,
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest error: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer cline-account-token" {
+		t.Fatalf("Authorization = %q, want bearer token from Cline account settings", got)
+	}
+}
+
+func TestOpenAICompatExecutorPrepareRequestDoesNotUseClineTokenForOtherBaseURL(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "providers.json")
+	raw := []byte(`{
+		"providers": {
+			"cline-pass": {
+				"settings": {
+					"provider": "cline-pass",
+					"auth": {"accessToken": "cline-access-token"}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(settingsPath, raw, 0600); err != nil {
+		t.Fatalf("failed to write Cline provider settings: %v", err)
+	}
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 "https://example.com/v1",
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: settingsPath,
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest error: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty header for non-Cline base URL", got)
+	}
+}
+
+func TestOpenAICompatExecutorPrepareRequestErrorsWhenClineTokenUnavailable(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: filepath.Join(t.TempDir(), "missing-providers.json"),
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	err = executor.PrepareRequest(req, auth)
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", err, err)
+	}
+	if status.code != http.StatusFailedDependency {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusFailedDependency)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want no header when token is unavailable", got)
+	}
+}
+
+func TestOpenAICompatExecutorPrepareRequestErrorsWhenClineTokenExpired(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "providers.json")
+	raw := []byte(`{
+		"providers": {
+			"cline": {
+				"settings": {
+					"provider": "cline",
+					"auth": {"accessToken": "expired-token", "expiresAt": 1700000000000}
+				}
+			},
+			"cline-pass": {
+				"settings": {"provider": "cline-pass", "model": "cline-pass/glm-5.2"}
+			}
+		}
+	}`)
+	if err := os.WriteFile(settingsPath, raw, 0600); err != nil {
+		t.Fatalf("failed to write Cline provider settings: %v", err)
+	}
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: settingsPath,
+	}}
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+
+	err = executor.PrepareRequest(req, auth)
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", err, err)
+	}
+	if status.code != http.StatusFailedDependency {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusFailedDependency)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want no header when token is expired", got)
+	}
+}
+
+func TestOpenAICompatExecutorUnwrapsClineProviderSettingsEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{
+		"success": true,
+		"data": {
+			"id": "chatcmpl_1",
+			"object": "chat.completion",
+			"model": "zai/glm-5.2",
+			"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+			"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+		}
+	}`)
+
+	got, err := executor.handleClineProviderSettingsEnvelope(auth, body)
+	if err != nil {
+		t.Fatalf("handleClineProviderSettingsEnvelope error: %v", err)
+	}
+	if gjson.GetBytes(got, "object").String() != "chat.completion" {
+		t.Fatalf("payload was not unwrapped: %s", string(got))
+	}
+	if gjson.GetBytes(got, "success").Exists() {
+		t.Fatalf("unexpected Cline envelope in payload: %s", string(got))
+	}
+}
+
+func TestOpenAICompatExecutorDoesNotUnwrapNonClineEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "https://example.com/v1",
+		"api_key":  "test",
+	}}
+	body := []byte(`{"success":true,"data":{"object":"chat.completion"}}`)
+
+	got, err := executor.handleClineProviderSettingsEnvelope(auth, body)
+	if err != nil {
+		t.Fatalf("handleClineProviderSettingsEnvelope error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("non-Cline payload was unwrapped: %s", string(got))
+	}
+}
+
+func TestOpenAICompatExecutorErrorsOnClineProviderSettingsFailureEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{"success":false,"code":"invalid_auth","message":"token expired"}`)
+
+	got, err := executor.handleClineProviderSettingsEnvelope(auth, body)
+	if err == nil {
+		t.Fatalf("expected failure envelope error, got payload: %s", string(got))
+	}
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if status.code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusBadGateway)
+	}
+	if !strings.Contains(status.msg, "invalid_auth") {
+		t.Fatalf("status message = %q, want safe upstream code", status.msg)
+	}
+	if strings.Contains(status.msg, "token expired") {
+		t.Fatalf("status message leaked free-form upstream message: %q", status.msg)
+	}
+}
+
+func TestOpenAICompatExecutorSanitizesClineProviderSettingsStreamJSONEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{"success":false,"code":"invalid_auth","message":"token expired"}`)
+
+	err := executor.openAICompatNonSSEStreamError(auth, body)
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if status.code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusBadGateway)
+	}
+	if !strings.Contains(status.msg, "invalid_auth") {
+		t.Fatalf("status message = %q, want safe upstream code", status.msg)
+	}
+	if strings.Contains(status.msg, "token expired") || strings.Contains(status.msg, `"success"`) {
+		t.Fatalf("status message used unsanitized upstream JSON: %q", status.msg)
+	}
+}
+
+func TestOpenAICompatExecutorKeepsRawClineStreamJSONWithoutEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{"error":{"message":"plain upstream JSON"}}`)
+
+	err := executor.openAICompatNonSSEStreamError(auth, body)
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if status.code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusBadGateway)
+	}
+	if status.msg != string(body) {
+		t.Fatalf("status message = %q, want raw JSON %q", status.msg, string(body))
+	}
+}
+
+func TestOpenAICompatExecutorErrorsOnMalformedClineProviderSettingsEnvelope(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{"success":true}`)
+
+	got, err := executor.handleClineProviderSettingsEnvelope(auth, body)
+	if err == nil {
+		t.Fatalf("expected malformed envelope error, got payload: %s", string(got))
+	}
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if status.code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusBadGateway)
+	}
+	if !strings.Contains(status.msg, "missing data") {
+		t.Fatalf("status message = %q, want missing data", status.msg)
+	}
+}
+
+func TestOpenAICompatExecutorForcesClineProviderSettingsNonStreamChatPayload(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	body := []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
+
+	got := forceClineProviderSettingsNonStreamChatPayload(auth, body)
+	stream := gjson.GetBytes(got, "stream")
+	if !stream.Exists() || stream.Bool() {
+		t.Fatalf("stream = %s, want explicit false; body=%s", stream.Raw, string(got))
+	}
+
+	bodyWithStreamTrue := []byte(`{"model":"cline-pass/glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	got = forceClineProviderSettingsNonStreamChatPayload(auth, bodyWithStreamTrue)
+	stream = gjson.GetBytes(got, "stream")
+	if !stream.Exists() || stream.Bool() {
+		t.Fatalf("stream = %s, want forced false; body=%s", stream.Raw, string(got))
+	}
+}
+
+func TestOpenAICompatExecutorDoesNotForceNonClineNonStreamChatPayload(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "https://example.com/v1",
+		"api_key":  "test",
+	}}
+	body := []byte(`{"model":"custom-openai","messages":[{"role":"user","content":"hi"}]}`)
+
+	got := forceClineProviderSettingsNonStreamChatPayload(auth, body)
+	if !bytes.Equal(got, body) {
+		t.Fatalf("non-Cline body changed: %s", string(got))
+	}
+}
+
+func TestOpenAICompatExecutorExecuteForcesClineProviderSettingsNonStream(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		gotPath = req.URL.Path
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("failed to read request body: %v", err)
+		}
+		gotBody = body
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)),
+			Request:    req,
+		}, nil
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"api_key":           "test",
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	payload := []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/api/v1/chat/completions" {
+		t.Fatalf("path = %q, want /api/v1/chat/completions", gotPath)
+	}
+	stream := gjson.GetBytes(gotBody, "stream")
+	if !stream.Exists() || stream.Bool() {
+		t.Fatalf("stream = %s, want explicit false; body=%s", stream.Raw, string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorExecuteDoesNotCallUpstreamWhenClineTokenUnavailable(t *testing.T) {
+	called := false
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		t.Fatalf("upstream should not be called when Cline provider settings token is unavailable")
+		return nil, nil
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: filepath.Join(t.TempDir(), "missing-providers.json"),
+	}}
+	payload := []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", err, err)
+	}
+	if status.code != http.StatusFailedDependency {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusFailedDependency)
+	}
+	if called {
+		t.Fatal("upstream was called despite missing Cline provider settings token")
+	}
+}
+
+func TestOpenAICompatExecutorExecuteStreamDoesNotCallUpstreamWhenClineTokenUnavailable(t *testing.T) {
+	called := false
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		t.Fatalf("upstream should not be called when Cline provider settings token is unavailable")
+		return nil, nil
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                 clineauth.APIBaseURL,
+		"credential_source":        clineauth.CredentialSourceProviderSettings,
+		"cline_provider":           clineauth.ProviderClinePass,
+		cliproxyauth.AttributePath: filepath.Join(t.TempDir(), "missing-providers.json"),
+	}}
+	payload := []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	_, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", err, err)
+	}
+	if status.code != http.StatusFailedDependency {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusFailedDependency)
+	}
+	if called {
+		t.Fatal("upstream was called despite missing Cline provider settings token")
+	}
+}
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	var gotPath string
@@ -440,5 +927,100 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 	}
 	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
 		t.Fatalf("stream payload = %s", got.String())
+	}
+}
+
+func TestOpenAICompatExecutorStreamUnwrapsClineProviderSettingsDataEnvelope(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body := `data: {"success":true,"data":{"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}}` + "\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"api_key":           "test",
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/glm-5.2",
+		Payload: []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var got strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
+		t.Fatalf("stream payload = %s", got.String())
+	}
+	if strings.Contains(got.String(), `"success"`) {
+		t.Fatalf("stream payload still contains Cline envelope: %s", got.String())
+	}
+}
+
+func TestOpenAICompatExecutorStreamSanitizesClineProviderSettingsDataEnvelopeError(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body := `data: {"success":false,"code":"invalid_auth","message":"token expired"}` + "\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatible-cline-pass", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":          clineauth.APIBaseURL,
+		"api_key":           "test",
+		"credential_source": clineauth.CredentialSourceProviderSettings,
+		"cline_provider":    clineauth.ProviderClinePass,
+	}}
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/glm-5.2",
+		Payload: []byte(`{"model":"cline-pass/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+			break
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected Cline stream envelope error")
+	}
+	status, ok := gotErr.(statusErr)
+	if !ok {
+		t.Fatalf("error = %T(%v), want statusErr", gotErr, gotErr)
+	}
+	if status.code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", status.code, http.StatusBadGateway)
+	}
+	if !strings.Contains(status.msg, "invalid_auth") || strings.Contains(status.msg, "token expired") {
+		t.Fatalf("status message = %q, want sanitized Cline code", status.msg)
 	}
 }

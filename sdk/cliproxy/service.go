@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	clineauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -821,6 +822,13 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 		return util.OpenAICompatibleProviderKey(providerKey), compatName, true
 	}
 	return "", "", false
+}
+
+func isClineProviderSettingsCompatAuth(a *coreauth.Auth) bool {
+	if a == nil {
+		return false
+	}
+	return clineauth.IsProviderSettingsClinePassAttributes(a.Attributes)
 }
 
 type openAICompatibilityRegistrationCache struct {
@@ -2014,6 +2022,28 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
 	default:
+		if compatDetected && strings.EqualFold(compatDisplayName, clineauth.ProviderClinePass) && isClineProviderSettingsCompatAuth(a) {
+			providerKey := compatProviderKey
+			if providerKey == "" {
+				providerKey = util.OpenAICompatibleProviderKey(clineauth.ProviderClinePass)
+			}
+			clineExcluded := s.oauthExcludedModels(providerKey, authKind)
+			if a.Attributes != nil {
+				if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
+					clineExcluded = strings.Split(val, ",")
+				}
+			}
+			models = registry.GetClinePassModels()
+			models = applyExcludedModels(models, clineExcluded)
+			models = applyOAuthModelAliasForAuth(s.cfg, providerKey, authKind, a.Attributes, models)
+			models = s.appendPluginModels(providerKey, models)
+			if len(models) > 0 {
+				s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+			} else {
+				GlobalModelRegistry().UnregisterClient(a.ID)
+			}
+			return
+		}
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
 			providerKey := provider

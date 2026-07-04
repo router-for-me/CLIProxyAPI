@@ -81,12 +81,29 @@ PackyCode provides special discounts for our software users: register using <a h
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
+- Cline Pass support via the Cline provider settings file
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+
+## Cline Pass
+
+CLIProxyAPI can route Cline Pass models through Cline's OpenAI-compatible API
+when Cline is already signed in locally. Put Cline's provider settings JSON in
+the configured `auth-dir` explicitly, for example:
+
+```bash
+ln -s ~/.cline/data/settings/providers.json ~/.cli-proxy-api/cline-providers.json
+```
+
+The proxy reads the current Cline Pass access token from that file at request
+time instead of copying it into CLIProxyAPI auth metadata. Once loaded, models
+such as `cline-pass/glm-5.2`, `cline-pass/kimi-k2.7-code`,
+`cline-pass/deepseek-v4-pro`, and `cline-pass/qwen3.7-max` are available
+through the OpenAI-compatible chat completions endpoint.
 
 ## Management API
 
