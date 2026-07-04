@@ -1,11 +1,15 @@
 # CLIProxyAPI(指纹加固 fork)服务器部署
 
-本发布包为 **Linux 静态二进制**(`CGO_ENABLED=0` 编译,不依赖目标机 glibc 版本,
-不支持动态库插件——绝大多数部署用不到)。适用于 systemd 的主流发行版
-(Debian/Ubuntu/CentOS/Rocky/Alma 等)。
+本发布包为 **Linux 动态链接二进制**(`CGO_ENABLED=1` 编译,复用仓库根 `Dockerfile` 的
+`golang:1.26-bookworm` builder,glibc 基线 = debian bookworm **2.36**)。**支持 Go 原生
+`.so` 插件**——插件宿主依赖 CGO,纯静态(CGO=0)会静默禁用整个插件系统 + 前端插件市场。
+- 裸机 systemd 部署需目标机 **glibc ≥ 2.36**:Debian 12+ / Ubuntu 24.04+ / Rocky 9+ / Alma 9+ 满足;
+  ⚠️ **Alpine/musl 不兼容**,老发行版(CentOS 7 = glibc 2.17)也**不兼容**(会报 `GLIBC_2.xx not found`)。
+- 目标机 glibc 过旧就改用 **GHCR 镜像**(`ghcr.io/<owner>/cliproxyapi`,自带 debian:bookworm runtime,
+  与本二进制同源同 glibc),用 docker/compose 部署。
 
 包内容:
-- `cli-proxy-api` — 主程序(静态)
+- `cli-proxy-api` — 主程序(CGO=1 动态链接,支持 `.so` 插件)
 - `config.example.yaml` — 配置模板
 - `cli-proxy-api.service` — systemd 单元
 - `install.sh` — 一键安装脚本
