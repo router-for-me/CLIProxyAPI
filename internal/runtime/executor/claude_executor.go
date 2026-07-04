@@ -1144,6 +1144,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
 	}
+
+	// LOG-ONLY: sampled outbound fingerprint observability (off by default).
+	observeClaudeFingerprint(cfg, auth, r)
 	return nil
 }
 

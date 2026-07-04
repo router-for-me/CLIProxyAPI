@@ -136,6 +136,11 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// FingerprintObserve enables sampled, LOG-ONLY observability of the actual outbound
+	// fingerprint (UA / device-profile / TLS profile / key headers) per account. Off by
+	// default; additive, side-effect-free (never mutates requests). Feeds the fp patrol.
+	FingerprintObserve FingerprintObserveConfig `yaml:"fingerprint-observe" json:"fingerprint-observe"`
+
 	// DisableClaudeCloakMode globally disables Claude request cloaking when true.
 	// Cloaking disguises requests as the official Claude Code CLI and replaces the
 	// system prompt. When true, every Claude credential defaults to no cloaking
@@ -312,6 +317,18 @@ type ClaudeHeaderDefaults struct {
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+}
+
+// FingerprintObserveConfig controls sampled outbound-fingerprint observability logging.
+// Log-only, off by default; intended to feed the daily fingerprint patrol so operators
+// can verify each account's UA/device-profile/TLS profile/key headers stay self-consistent
+// and catch drift without a packet capture.
+type FingerprintObserveConfig struct {
+	// Enabled turns on the sampled [FP-OBSERVE] log lines. Default false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MinIntervalSeconds throttles to at most one log line per account per interval
+	// (default 3600 = 1h when <= 0). Set 1 to log every request.
+	MinIntervalSeconds int `yaml:"min-interval-seconds" json:"min-interval-seconds"`
 }
 
 // CodexConfig configures provider-wide Codex request behavior.

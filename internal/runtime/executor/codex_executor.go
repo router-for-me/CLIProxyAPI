@@ -1694,6 +1694,11 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+
+	// LOG-ONLY: sampled outbound fingerprint observability (off by default). Placed at the
+	// end of header application so it sees the final per-account UA/originator/session/
+	// account-id. Never mutates the request.
+	observeCodexFingerprint(cfg, auth, r)
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {

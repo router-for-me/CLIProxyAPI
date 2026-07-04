@@ -73,3 +73,17 @@ slot of transport-injected `Content-Length`. These are deeper than what common J
 detectors key on, which are addressed. For the ChatGPT/Codex path, faithful rustls impersonation is
 deliberately **not** attempted — OpenAI's own rustls ClientHello is sometimes 403'd by Cloudflare, so
 a clean Chrome profile plus the cookie jar (#8) is the safer, higher-fidelity choice.
+
+## Observability (`fingerprint-observe`)
+
+`fingerprint-observe` (config, **off by default**) writes a sampled, **LOG-ONLY** `[FP-OBSERVE]`
+line per account carrying the **actual** outbound fingerprint the executor applied — UA /
+device-profile / resolved TLS profile / key-header shapes (`session-id` vs `session_id`, account-id
+presence). It exists because the applied fingerprint is otherwise **invisible in logs**: the plugin
+interceptor hooks fire at the handler layer, *before* the executor sets UA/TLS/session-id, so a plugin
+cannot see it — verifying per-account self-consistency or catching version drift previously required a
+packet capture. It never mutates requests; account identifiers are reported as shape/presence only (the
+account is a stable `fnv` tag, not the email). `min-interval-seconds` throttles to one line per account
+per interval (default 1h). Grep `FP-OBSERVE`; the daily fingerprint patrol can consume it to catch
+byte-level drift a version-number check misses (e.g. the `session-id`→`session_id` flip across codex
+versions).

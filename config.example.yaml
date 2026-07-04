@@ -175,6 +175,18 @@ disable-fingerprint-randomization: false
 # reqwest cookie store and reducing Cloudflare 403s. Set true to disable the jar.
 disable-upstream-cookie-jar: false
 
+# [fingerprint-hardening fork] Sampled outbound-fingerprint observability (LOG-ONLY).
+# When enabled, the proxy emits a sampled `[FP-OBSERVE]` log line per account carrying the
+# ACTUAL outbound fingerprint it applied — UA / device-profile / resolved TLS profile name /
+# key-header shapes (session-id vs session_id, account-id presence) — so you can verify each
+# account stays self-consistent and catch drift WITHOUT a packet capture. It never mutates
+# requests; account identifiers are logged as shape/presence only (the account is a stable
+# fnv tag, not the email). Off by default. Grep the logs for `FP-OBSERVE` (the daily patrol
+# can consume it). min-interval-seconds throttles to one line / account / interval (<=0 => 1h).
+fingerprint-observe:
+  enabled: false
+  min-interval-seconds: 3600
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
