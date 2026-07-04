@@ -64,7 +64,9 @@ var claudeProfilePool = []claudeProfileTuple{
 // openai/codex source). isOfficialCodexUserAgent recognizes this bare shape.
 var codexUAPool = []string{
 	// Real codex_cli_rs UA shape: prefix codex_cli_rs/, ends at the terminal token.
-	// Version pinned to the current-latest codex_cli_rs/0.142.5; vary ONLY OS-minor
+	// Version pinned to the byte-verified codex_cli_rs/0.142.5 evidence set (a local
+	// capture shows the real CLI now reports 1.3.0; hold until a clean 1.3.0 capture
+	// pins the full value set); vary ONLY OS-minor
 	// (real shipped macOS 26.0-26.2.0) and terminal. Version is intentionally NOT
 	// diversified: advertising an older UA (0.140/0.141) while emitting a 0.142.x-only
 	// beta flag (remote_compaction_v2) is an impossible pairing — a sharper tell than

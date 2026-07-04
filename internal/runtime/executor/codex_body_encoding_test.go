@@ -56,6 +56,34 @@ func TestCodexZstdCompress_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestCodexZstdCompress_NoContentChecksum is a frame-level regression guard for the
+// WithEncoderCRC(false) encoder option: it asserts the produced zstd frame carries
+// NO content-checksum trailer, i.e. the Frame_Header_Descriptor's Content_Checksum_flag
+// (bit 2, per RFC 8878 §3.1.1.1.1) is 0. Real codex_cli_rs uses libzstd's
+// zstd::stream::encode_all(_, 3), which emits no checksum; klauspost defaults crc=true
+// (a 4-byte trailer + the flag set). Without WithEncoderCRC(false) a server-side
+// reference encoder could flag "this frame has a klauspost checksum" as a non-codex
+// tell. If someone drops that option, this test fails loudly.
+func TestCodexZstdCompress_NoContentChecksum(t *testing.T) {
+	const contentChecksumFlag = 0x04 // FHD bit 2
+	src := []byte(`{"model":"gpt-5-codex","stream":true,"input":[{"role":"user","content":"frame descriptor check frame descriptor check"}]}`)
+	compressed, ok := codexZstdCompress(src)
+	if !ok {
+		t.Fatal("codexZstdCompress returned ok=false for non-empty input")
+	}
+	if len(compressed) < 5 || !bytes.HasPrefix(compressed, zstdMagic) {
+		t.Fatalf("not a valid zstd frame: % x", compressed[:min(8, len(compressed))])
+	}
+	// Byte 4 (immediately after the 4-byte magic) is the Frame_Header_Descriptor.
+	if fhd := compressed[4]; fhd&contentChecksumFlag != 0 {
+		t.Fatalf("Content_Checksum_flag SET (frame descriptor = 0x%02x): WithEncoderCRC(false) not in effect — frame carries a klauspost checksum that libzstd/real codex never emits", fhd)
+	}
+	// Sanity: it must still decode back to the original.
+	if got := zstdDecodeAll(t, compressed); !bytes.Equal(got, src) {
+		t.Fatalf("round-trip mismatch after CRC-off: got %q want %q", got, src)
+	}
+}
+
 func TestCodexShouldZstdBody(t *testing.T) {
 	oauth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
 	apiKey := &cliproxyauth.Auth{ID: "auth-2", Provider: "codex", Attributes: map[string]string{"api_key": "sk-test"}}

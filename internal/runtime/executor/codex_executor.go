@@ -46,7 +46,10 @@ const (
 	// tests); removed so prefix + (absent) suffix + originator are all self-consistent
 	// as codex_cli_rs. Originator is codex_cli_rs (DEFAULT_ORIGINATOR; `codex exec`
 	// uses codex_exec). Terminal token is "unknown" with no TTY; interactive uses e.g.
-	// iTerm.app/3.6.10. Version pinned to current-latest 0.142.5. A real downstream
+	// iTerm.app/3.6.10. Version pinned to the byte-verified 0.142.5 evidence set (a
+	// 2026-07-04 local capture shows the CLI now reports 1.3.0, but bumping the number
+	// needs the whole 1.3.0 value set — beta flags etc. — to avoid an impossible
+	// pairing, so we hold at the verified 0.142.5 set). A real downstream
 	// codex-tui/CLI UA is forwarded verbatim by ensureCodexUserAgent; this is only the
 	// fallback when the downstream sends no usable Codex UA.
 	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10"
