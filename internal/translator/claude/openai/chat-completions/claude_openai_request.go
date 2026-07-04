@@ -31,7 +31,7 @@ var (
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
 // The function performs comprehensive transformation including:
-// 1. Model name mapping and parameter extraction (max_tokens, temperature, top_p, etc.)
+// 1. Model name mapping and parameter extraction (max_tokens, top_p, etc.)
 // 2. Message content conversion from OpenAI to Claude Code format
 // 3. Tool call and tool result handling with proper ID mapping
 // 4. Image data conversion from OpenAI data URLs to Claude Code base64 format
@@ -136,11 +136,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
 
-	// Temperature setting for controlling response randomness
-	if temp := root.Get("temperature"); temp.Exists() {
-		out, _ = sjson.SetBytes(out, "temperature", temp.Float())
-	} else if topP := root.Get("top_p"); topP.Exists() {
-		// Top P setting for nucleus sampling (filtered out if temperature is set)
+	// Top P setting for nucleus sampling.
+	if topP := root.Get("top_p"); topP.Exists() {
 		out, _ = sjson.SetBytes(out, "top_p", topP.Float())
 	}
 
