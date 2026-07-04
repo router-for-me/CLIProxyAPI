@@ -401,6 +401,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
+	if codexWebsocketRequestHasInputItemType(req, opts, "compaction_trigger") {
+		return e.executeCompactionTriggerStream(ctx, auth, req, opts)
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
@@ -739,6 +742,193 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	fallback := bytes.Clone(body)
 	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
 	return fallback
+}
+
+func (e *CodexWebsocketsExecutor) executeCompactionTriggerStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if e == nil || e.CodexExecutor == nil {
+		return nil, fmt.Errorf("codex websockets executor: codex executor is nil")
+	}
+
+	compactReq := req
+	compactReq.Payload = codexWebsocketPrepareCompactionTriggerPayload(compactReq.Payload)
+	compactOpts := opts
+	compactOpts.Stream = false
+	if len(compactOpts.OriginalRequest) > 0 {
+		compactOpts.OriginalRequest = codexWebsocketPrepareCompactionTriggerPayload(compactOpts.OriginalRequest)
+	}
+
+	resp, err := e.CodexExecutor.executeCompact(ctx, auth, compactReq, compactOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	headers := resp.Headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	headers.Set("Content-Type", "text/event-stream")
+
+	chunks := codexWebsocketBuildCompactionTriggerStreamChunks(resp.Payload)
+	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+	}
+	close(out)
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+}
+
+func codexWebsocketRequestHasInputItemType(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, itemType string) bool {
+	return codexWebsocketInputHasItemType(req.Payload, itemType) || codexWebsocketInputHasItemType(opts.OriginalRequest, itemType)
+}
+
+func codexWebsocketInputHasItemType(body []byte, itemType string) bool {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		if item.Get("type").String() == itemType {
+			return true
+		}
+	}
+	return false
+}
+
+func codexWebsocketPrepareCompactionTriggerPayload(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	body = codexWebsocketRemoveInputItemsByType(body, "compaction_trigger")
+	body, _ = sjson.DeleteBytes(body, "stream")
+	return body
+}
+
+func codexWebsocketRemoveInputItemsByType(body []byte, itemType string) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	kept := 0
+	for _, item := range input.Array() {
+		if item.Get("type").String() == itemType {
+			continue
+		}
+		if kept > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(item.Raw)
+		kept++
+	}
+	buf.WriteByte(']')
+
+	updated, err := sjson.SetRawBytes(body, "input", buf.Bytes())
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+func codexWebsocketBuildCompactionTriggerStreamChunks(compactData []byte) [][]byte {
+	compactData = codexWebsocketCompactionResponseData(compactData)
+	responseID := codexWebsocketCompactionResponseID(compactData)
+	now := time.Now().Unix()
+	createdAt := gjson.GetBytes(compactData, "created_at").Int()
+	if createdAt == 0 {
+		createdAt = now
+	}
+	completedAt := gjson.GetBytes(compactData, "completed_at").Int()
+	if completedAt == 0 {
+		completedAt = now
+	}
+
+	item := codexWebsocketCompactionOutputItem(compactData, responseID)
+	output := make([]byte, 0, len(item)+2)
+	output = append(output, '[')
+	output = append(output, item...)
+	output = append(output, ']')
+
+	createdResponse := codexWebsocketBuildCompactionBaseResponse(compactData, responseID, createdAt, "in_progress")
+	inProgressResponse := codexWebsocketBuildCompactionBaseResponse(compactData, responseID, createdAt, "in_progress")
+	completedResponse := codexWebsocketBuildCompactionBaseResponse(compactData, responseID, createdAt, "completed")
+	completedResponse, _ = sjson.SetBytes(completedResponse, "completed_at", completedAt)
+	completedResponse, _ = sjson.SetRawBytes(completedResponse, "output", output)
+	if usage := gjson.GetBytes(compactData, "usage"); usage.Exists() {
+		completedResponse, _ = sjson.SetRawBytes(completedResponse, "usage", []byte(usage.Raw))
+	}
+
+	createdPayload := []byte(`{"type":"response.created","sequence_number":0}`)
+	createdPayload, _ = sjson.SetRawBytes(createdPayload, "response", createdResponse)
+	inProgressPayload := []byte(`{"type":"response.in_progress","sequence_number":1}`)
+	inProgressPayload, _ = sjson.SetRawBytes(inProgressPayload, "response", inProgressResponse)
+	addedPayload := []byte(`{"type":"response.output_item.added","sequence_number":2,"output_index":0}`)
+	addedPayload, _ = sjson.SetRawBytes(addedPayload, "item", item)
+	keepalivePayload := []byte(`{"type":"keepalive","sequence_number":3}`)
+	donePayload := []byte(`{"type":"response.output_item.done","sequence_number":4,"output_index":0}`)
+	donePayload, _ = sjson.SetRawBytes(donePayload, "item", item)
+	completedPayload := []byte(`{"type":"response.completed","sequence_number":5}`)
+	completedPayload, _ = sjson.SetRawBytes(completedPayload, "response", completedResponse)
+
+	return [][]byte{
+		codexBuildSSEFrame("response.created", createdPayload),
+		codexBuildSSEFrame("response.in_progress", inProgressPayload),
+		codexBuildSSEFrame("response.output_item.added", addedPayload),
+		codexBuildSSEFrame("keepalive", keepalivePayload),
+		codexBuildSSEFrame("response.output_item.done", donePayload),
+		codexBuildSSEFrame("response.completed", completedPayload),
+	}
+}
+
+func codexWebsocketCompactionResponseData(compactData []byte) []byte {
+	if response := gjson.GetBytes(compactData, "response"); response.Exists() && response.IsObject() {
+		return []byte(response.Raw)
+	}
+	return compactData
+}
+
+func codexWebsocketBuildCompactionBaseResponse(compactData []byte, responseID string, createdAt int64, status string) []byte {
+	response := []byte(`{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null,"incomplete_details":null,"output":[]}`)
+	response, _ = sjson.SetBytes(response, "id", responseID)
+	response, _ = sjson.SetBytes(response, "created_at", createdAt)
+	response, _ = sjson.SetBytes(response, "status", status)
+	if model := gjson.GetBytes(compactData, "model").String(); model != "" {
+		response, _ = sjson.SetBytes(response, "model", model)
+	}
+	return response
+}
+
+func codexWebsocketCompactionOutputItem(compactData []byte, responseID string) []byte {
+	itemResult := gjson.GetBytes(compactData, "output.0")
+	item := []byte(`{"type":"compaction"}`)
+	if itemResult.Exists() && itemResult.Type == gjson.JSON {
+		item = []byte(itemResult.Raw)
+	}
+	if !gjson.GetBytes(item, "type").Exists() {
+		item, _ = sjson.SetBytes(item, "type", "compaction")
+	}
+	if !gjson.GetBytes(item, "id").Exists() {
+		item, _ = sjson.SetBytes(item, "id", codexWebsocketCompactionItemID(responseID))
+	}
+	return item
+}
+
+func codexWebsocketCompactionResponseID(compactData []byte) string {
+	if responseID := strings.TrimSpace(gjson.GetBytes(compactData, "id").String()); responseID != "" {
+		if strings.HasPrefix(responseID, "resp_") {
+			return responseID
+		}
+		return "resp_" + strings.TrimPrefix(responseID, "cmp_")
+	}
+	return fmt.Sprintf("resp_codex_compaction_%d", time.Now().UnixNano())
+}
+
+func codexWebsocketCompactionItemID(responseID string) string {
+	if suffix := strings.TrimPrefix(responseID, "resp_"); suffix != "" && suffix != responseID {
+		return "cmp_" + suffix
+	}
+	return "cmp_" + responseID
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
