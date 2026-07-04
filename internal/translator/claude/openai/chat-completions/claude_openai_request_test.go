@@ -44,6 +44,27 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_DropsTemperature(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"temperature": 0.2,
+		"top_p": 0.8,
+		"messages": [
+			{"role": "user", "content": "hi"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if resultJSON.Get("temperature").Exists() {
+		t.Fatalf("temperature should be removed")
+	}
+	if got := resultJSON.Get("top_p").Float(); got != 0.8 {
+		t.Fatalf("top_p = %v, want 0.8", got)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
