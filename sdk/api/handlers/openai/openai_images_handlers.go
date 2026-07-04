@@ -212,7 +212,7 @@ func isXAIImagesModel(model string) bool {
 	}
 
 	prefix = strings.ToLower(strings.TrimSpace(prefix))
-	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
+	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok" || strings.HasPrefix(prefix, "txc-")
 }
 
 func isSupportedImagesModel(model string) bool {
@@ -635,7 +635,7 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	}
 	if isXAIImagesModel(imageModel) {
 		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
-		h.handleXAIImages(c, xaiReq, responseFormat, "image_generation", stream)
+		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_generation", stream)
 		return
 	}
 	if isOpenAICompatImagesModel(imageModel) {
@@ -794,7 +794,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		resolution := xaiImagesResolution(c.PostForm("resolution"), c.PostForm("size"), "")
 		n := parseIntField(c.PostForm("n"), 0)
 		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
-		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
+		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_edit", stream)
 		return
 	}
 	if isOpenAICompatImagesModel(imageModel) {
@@ -933,7 +933,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		}
 		aspectRatio, resolution, n := xaiImagesEditOptionsFromJSON(rawJSON)
 		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
-		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
+		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_edit", stream)
 		return
 	}
 	if isOpenAICompatImagesModel(imageModel) {
@@ -1120,12 +1120,12 @@ func buildImagesAPIResponseFromXAI(payload []byte, responseFormat string) ([]byt
 	return out, nil
 }
 
-func (h *OpenAIAPIHandler) handleXAIImages(c *gin.Context, xaiReq []byte, responseFormat string, streamPrefix string, stream bool) {
+func (h *OpenAIAPIHandler) handleXAIImages(c *gin.Context, xaiReq []byte, routeModel string, responseFormat string, streamPrefix string, stream bool) {
 	if stream {
-		h.streamXAIImages(c, xaiReq, responseFormat, streamPrefix)
+		h.streamXAIImages(c, xaiReq, routeModel, responseFormat, streamPrefix)
 		return
 	}
-	h.collectXAIImages(c, xaiReq, responseFormat)
+	h.collectXAIImages(c, xaiReq, routeModel, responseFormat)
 }
 
 func (h *OpenAIAPIHandler) handleOpenAICompatImages(c *gin.Context, compatReq []byte, imageModel string, responseFormat string, streamPrefix string, stream bool) {
@@ -1389,8 +1389,11 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 	}
 }
 
-func (h *OpenAIAPIHandler) collectXAIImages(c *gin.Context, xaiReq []byte, responseFormat string) {
-	model := strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
+func (h *OpenAIAPIHandler) collectXAIImages(c *gin.Context, xaiReq []byte, routeModel string, responseFormat string) {
+	model := strings.TrimSpace(routeModel)
+	if model == "" {
+		model = strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
+	}
 	h.collectImagesWithModel(c, xaiReq, model, responseFormat)
 }
 
@@ -1426,8 +1429,11 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	cliCancel(nil)
 }
 
-func (h *OpenAIAPIHandler) streamXAIImages(c *gin.Context, xaiReq []byte, responseFormat string, streamPrefix string) {
-	model := strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
+func (h *OpenAIAPIHandler) streamXAIImages(c *gin.Context, xaiReq []byte, routeModel string, responseFormat string, streamPrefix string) {
+	model := strings.TrimSpace(routeModel)
+	if model == "" {
+		model = strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
+	}
 	h.streamImagesWithModel(c, xaiReq, model, responseFormat, streamPrefix)
 }
 

@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -15,6 +16,8 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -53,7 +56,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 }
 
 func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
-	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality"} {
+	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "grok-imagine-image", "xai/grok-imagine-image", "txc-imp-Jb8ee1Sc5vQ/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality", "txc-imp-Jb8ee1Sc5vQ/grok-imagine-image-quality"} {
 		if !isSupportedImagesModel(model) {
 			t.Fatalf("expected %s to be supported", model)
 		}
@@ -63,6 +66,82 @@ func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
 	}
 	if isSupportedImagesModel("codex/grok-imagine-image") {
 		t.Fatal("expected codex/grok-imagine-image to be rejected")
+	}
+}
+
+type xaiImagesRouteCaptureExecutor struct {
+	model   string
+	payload []byte
+	authID  string
+}
+
+func (e *xaiImagesRouteCaptureExecutor) Identifier() string { return "xai" }
+
+func (e *xaiImagesRouteCaptureExecutor) Execute(_ context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if auth != nil {
+		e.authID = auth.ID
+	}
+	e.model = req.Model
+	e.payload = append([]byte(nil), req.Payload...)
+	return cliproxyexecutor.Response{Payload: []byte(`{"created":123,"data":[{"b64_json":"AA=="}],"usage":{"total_tokens":1}}`)}, nil
+}
+
+func (e *xaiImagesRouteCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *xaiImagesRouteCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *xaiImagesRouteCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *xaiImagesRouteCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestImagesGenerationsRoutesPrefixedXAIModelWithBareUpstreamPayload(t *testing.T) {
+	routeModel := "txc-imp-Jb8ee1Sc5vQ/grok-imagine-image"
+	executor := &xaiImagesRouteCaptureExecutor{}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	bareAuth := &coreauth.Auth{ID: "xai-bare-images-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), bareAuth); err != nil {
+		t.Fatalf("manager.Register bare auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(bareAuth.ID, bareAuth.Provider, []*registry.ModelInfo{{ID: defaultXAIImagesModel}})
+	manager.RefreshSchedulerEntry(bareAuth.ID)
+
+	auth := &coreauth.Auth{ID: "xai-prefixed-images-auth", Provider: "xai", Status: coreauth.StatusActive, Prefix: "txc-imp-Jb8ee1Sc5vQ"}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: routeModel}})
+	manager.RefreshSchedulerEntry(auth.ID)
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(bareAuth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"` + routeModel + `","prompt":"draw","response_format":"b64_json","resolution":"1k"}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.authID != auth.ID {
+		t.Fatalf("authID = %q, want %q", executor.authID, auth.ID)
+	}
+	if executor.model != defaultXAIImagesModel {
+		t.Fatalf("executor model = %q, want %q", executor.model, defaultXAIImagesModel)
+	}
+	if got := gjson.GetBytes(executor.payload, "model").String(); got != defaultXAIImagesModel {
+		t.Fatalf("upstream payload model = %q, want %q; payload=%s", got, defaultXAIImagesModel, string(executor.payload))
 	}
 }
 
