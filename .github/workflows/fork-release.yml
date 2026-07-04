@@ -2,9 +2,12 @@ name: fork-release
 
 # 打 tag 自动发布可部署产物。
 #   git tag v7.2.50-fp1 -m "..." && git push origin v7.2.50-fp1
-# 触发后:交叉编译 Linux 静态二进制(CGO=0,不挑 glibc)amd64 + arm64,
+# 触发后:复用仓库根 Dockerfile(CGO_ENABLED=1)构建 Linux **动态链接**二进制 amd64 + arm64,
+# 产物与 GHCR 镜像(fork-image.yml)同源、支持插件系统 —— Go 原生 .so 插件必须 CGO+动态链接,
+# 纯静态(CGO=0)会静默禁用插件宿主 + 前端插件市场(X-CPA-SUPPORT-PLUGIN:0)。
 # 连同 config/systemd/install.sh/DEPLOY.md 打成 tar.gz,发到 GitHub Releases。
-# 只用内置 GITHUB_TOKEN,无需任何外部 secret。GHCR 镜像由 fork-image.yml 并行产出。
+# glibc 基线 = debian bookworm(2.36):裸机 systemd 部署需 host glibc≥2.36(debian12+/ubuntu24.04+);
+# docker 部署(debian/ubuntu 壳)天然满足,不受影响。只用内置 GITHUB_TOKEN,无需外部 secret。
 #
 # 注意:必须在 Actions 页禁用上游 `release` 与 `docker-image` —— 上游 release.yaml
 # 以 tags:['*'] 吃掉所有 tag 会和本流程争抢同一个 Release;docker-image.yml 缺
@@ -28,18 +31,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goarch: amd64
+          - platform: linux/amd64
             asset_arch: amd64
-          - goarch: arm64
+          - platform: linux/arm64
             asset_arch: aarch64
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
       - name: Refresh models catalog (tolerant)
         run: |
           set -uo pipefail
@@ -49,9 +48,11 @@ jobs:
           else
             echo "models refresh skipped, using bundled models.json"
           fi
-      - name: Build static binary (CGO=0)
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build CGO=1 plugin-capable binary via Dockerfile
         env:
-          GOARCH: ${{ matrix.goarch }}
+          PLATFORM: ${{ matrix.platform }}
           ASSET_ARCH: ${{ matrix.asset_arch }}
         run: |
           set -euo pipefail
@@ -62,20 +63,30 @@ jobs:
           fi
           C="$(git rev-parse --short HEAD)"
           D="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "version=$V commit=$C date=$D arch=$ASSET_ARCH"
+          echo "version=$V commit=$C date=$D arch=$ASSET_ARCH platform=$PLATFORM"
+
+          # 复用官方 Dockerfile(CGO_ENABLED=1)的 builder 阶段构建,产物与 GHCR 镜像同源、支持插件。
+          # --target builder 只构建到编译阶段(跳过 runtime apt),二进制落在 /app/CLIProxyAPI。
+          docker buildx build --platform "$PLATFORM" --target builder --load \
+            --build-arg VERSION="$V" --build-arg COMMIT="$C" --build-arg BUILD_DATE="$D" \
+            -t cpa-rel:"$ASSET_ARCH" .
 
           pkg="CLIProxyAPI_${V}_linux_${ASSET_ARCH}"
           dir="dist/${pkg}"
           mkdir -p "$dir"
 
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -trimpath -buildvcs=false \
-            -ldflags="-s -w -X main.Version=${V} -X main.Commit=${C} -X main.BuildDate=${D}" \
-            -o "$dir/cli-proxy-api" ./cmd/server/
+          # 从镜像提取二进制(docker cp 是纯文件拷贝、不执行,故跨架构 arm64 也 OK)
+          cid="$(docker create --platform "$PLATFORM" cpa-rel:"$ASSET_ARCH")"
+          docker cp "$cid:/app/CLIProxyAPI" "$dir/cli-proxy-api"
+          docker rm "$cid" >/dev/null
 
-          # 断言纯静态:不得依赖动态解释器
-          if readelf -l "$dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
-            echo "::error::binary is NOT static"; readelf -l "$dir/cli-proxy-api"; exit 1
+          # 断言:CGO=1 动态链接(插件系统所需);纯静态则插件被禁用 —— 此处必须失败
+          if ! readelf -l "$dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
+            echo "::error::binary is NOT dynamically linked — plugin system would be disabled"
+            readelf -l "$dir/cli-proxy-api"; exit 1
           fi
+          echo "OK: dynamically linked, plugin-capable"
+          file "$dir/cli-proxy-api" || true
 
           cp config.example.yaml LICENSE README.md README_CN.md "$dir/" 2>/dev/null || true
           cp deploy/cli-proxy-api.service deploy/install.sh deploy/DEPLOY.md "$dir/"
@@ -114,9 +125,11 @@ jobs:
           set -euo pipefail
           notes="指纹加固 fork 自动发布。
 
-          - Linux 静态二进制(CGO=0,不挑 glibc);amd64 与 arm64(aarch64)。
+          - Linux **动态链接**二进制(CGO=1,支持插件系统);amd64 与 arm64(aarch64)。
+          - glibc 基线 debian bookworm(2.36):裸机部署需 host glibc≥2.36(debian12+/Ubuntu24.04+);
+            docker 部署(debian/ubuntu 壳)天然满足。alpine/musl 不兼容。
           - 解压后见包内 \`DEPLOY.md\`,\`sudo ./install.sh\` 一键装到 systemd。
-          - Docker 镜像见 GHCR(fork-image.yml 并行产出)。"
+          - Docker 镜像见 GHCR(fork-image.yml,同为 CGO=1、支持插件)。"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/CLIProxyAPI_*.tar.gz dist/checksums.txt --clobber
           else
