@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/fpobserve"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -105,49 +106,68 @@ func fpTLSProfile(cfg *config.Config, host string) string {
 	}
 }
 
-// observeCodexFingerprint logs the sampled outbound codex fingerprint. No-op unless enabled.
+// observeCodexFingerprint records the sampled outbound codex fingerprint into the
+// in-memory store (every request, feeds the observatory page) and emits a throttled
+// [FP-OBSERVE] log line. No-op unless enabled.
 func observeCodexFingerprint(cfg *config.Config, auth *cliproxyauth.Auth, r *http.Request) {
 	if !fingerprintObserveEnabled(cfg) || r == nil || r.URL == nil {
 		return
 	}
-	tag := fpAccountTag(auth)
-	if !fpObserveShouldLog(cfg, "codex|"+tag) {
+	h := r.Header
+	host := r.URL.Hostname()
+	rec := fpobserve.Record{
+		Account:    fpAccountTag(auth),
+		Provider:   "codex",
+		Host:       host,
+		TLSProfile: fpTLSProfile(cfg, host),
+		UserAgent:  fpHeaderRaw(h, "User-Agent"),
+		Originator: fpHeaderRaw(h, "Originator"),
+		SessionHdr: fpSessionShape(h),
+		AccountID:  fpPresence(h, "chatgpt-account-id"),
+		AcceptEnc:  fpHeaderRaw(h, "Accept-Encoding"),
+	}
+	fpobserve.Put(rec, 0)
+	if !fpObserveShouldLog(cfg, "codex|"+rec.Account) {
 		return
 	}
-	h := r.Header
 	log.WithFields(log.Fields{
-		"kind":        "codex",
-		"account":     tag,
-		"host":        r.URL.Hostname(),
-		"tls_profile": fpTLSProfile(cfg, r.URL.Hostname()),
-		"user_agent":  fpHeaderRaw(h, "User-Agent"),
-		"originator":  fpHeaderRaw(h, "Originator"),
-		"session_hdr": fpSessionShape(h),
-		"account_id":  fpPresence(h, "chatgpt-account-id"),
-		"accept_enc":  fpHeaderRaw(h, "Accept-Encoding"),
+		"kind": "codex", "account": rec.Account, "host": rec.Host,
+		"tls_profile": rec.TLSProfile, "user_agent": rec.UserAgent,
+		"originator": rec.Originator, "session_hdr": rec.SessionHdr,
+		"account_id": rec.AccountID, "accept_enc": rec.AcceptEnc,
 	}).Info("[FP-OBSERVE] codex outbound fingerprint")
 }
 
-// observeClaudeFingerprint logs the sampled outbound claude fingerprint. No-op unless enabled.
+// observeClaudeFingerprint records the sampled outbound claude fingerprint into the
+// in-memory store and emits a throttled [FP-OBSERVE] log line. No-op unless enabled.
 func observeClaudeFingerprint(cfg *config.Config, auth *cliproxyauth.Auth, r *http.Request) {
 	if !fingerprintObserveEnabled(cfg) || r == nil || r.URL == nil {
 		return
 	}
-	tag := fpAccountTag(auth)
-	if !fpObserveShouldLog(cfg, "claude|"+tag) {
+	h := r.Header
+	host := r.URL.Hostname()
+	rec := fpobserve.Record{
+		Account:      fpAccountTag(auth),
+		Provider:     "claude",
+		Host:         host,
+		TLSProfile:   fpTLSProfile(cfg, host),
+		UserAgent:    fpHeaderRaw(h, "User-Agent"),
+		XApp:         fpHeaderRaw(h, "X-App"),
+		StainlessPkg: fpHeaderRaw(h, "X-Stainless-Package-Version"),
+		StainlessOS:  fpHeaderRaw(h, "X-Stainless-OS"),
+		StainlessRT:  fpHeaderRaw(h, "X-Stainless-Runtime-Version"),
+		Arch:         fpHeaderRaw(h, "X-Stainless-Arch"),
+		AcceptEnc:    fpHeaderRaw(h, "Accept-Encoding"),
+	}
+	fpobserve.Put(rec, 0)
+	if !fpObserveShouldLog(cfg, "claude|"+rec.Account) {
 		return
 	}
-	h := r.Header
 	log.WithFields(log.Fields{
-		"kind":          "claude",
-		"account":       tag,
-		"host":          r.URL.Hostname(),
-		"tls_profile":   fpTLSProfile(cfg, r.URL.Hostname()),
-		"user_agent":    fpHeaderRaw(h, "User-Agent"),
-		"x_app":         fpHeaderRaw(h, "X-App"),
-		"stainless_pkg": fpHeaderRaw(h, "X-Stainless-Package-Version"),
-		"stainless_os":  fpHeaderRaw(h, "X-Stainless-OS"),
-		"stainless_rt":  fpHeaderRaw(h, "X-Stainless-Runtime-Version"),
-		"accept_enc":    fpHeaderRaw(h, "Accept-Encoding"),
+		"kind": "claude", "account": rec.Account, "host": rec.Host,
+		"tls_profile": rec.TLSProfile, "user_agent": rec.UserAgent,
+		"x_app": rec.XApp, "stainless_pkg": rec.StainlessPkg,
+		"stainless_os": rec.StainlessOS, "stainless_rt": rec.StainlessRT,
+		"accept_enc": rec.AcceptEnc,
 	}).Info("[FP-OBSERVE] claude outbound fingerprint")
 }
