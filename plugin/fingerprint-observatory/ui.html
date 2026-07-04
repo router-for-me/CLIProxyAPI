@@ -1,0 +1,247 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>指纹观测台 · Fingerprint Observatory</title>
+<style>
+  :root{
+    --ink:#0b1216;--panel:#101c22;--panel2:#152530;--raise:#182b34;--line:#223640;--line2:#2c4551;
+    --txt:#e6f0f1;--muted:#87a1ab;--dim:#54707b;--scan:#33d1bd;--scan-dim:#1c6b64;
+    --good:#4bbf6b;--warn:#e0a83f;--crit:#f0603a;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--txt);font-family:var(--sans);font-size:14px;line-height:1.5;
+    background-image:radial-gradient(1200px 600px at 78% -8%,rgba(51,209,189,.06),transparent 60%);}
+  .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  a{color:var(--scan)}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 20px 60px}
+  header.top{border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;backdrop-filter:blur(8px);
+    background:linear-gradient(180deg,rgba(21,37,48,.72),transparent)}
+  .top .row{max-width:1180px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:11px;min-width:0}
+  .glyph{width:32px;height:32px;flex:none;border:1px solid var(--scan-dim);border-radius:9px;position:relative;overflow:hidden;
+    background:radial-gradient(circle at 50% 50%,rgba(51,209,189,.14),transparent 70%)}
+  .glyph canvas{position:absolute;inset:0}
+  h1{font-size:15px;font-weight:640;margin:0;line-height:1.15}
+  h1 .en{display:block;font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:2.2px;text-transform:uppercase;color:var(--scan);margin-top:3px}
+  .src{margin-left:auto;display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px}
+  .badge{padding:2px 9px;border-radius:20px;border:1px solid var(--line2);letter-spacing:.5px}
+  .badge.live{color:var(--good);border-color:#2f6b45;background:rgba(75,191,107,.1)}
+  .badge.demo{color:var(--warn);border-color:#6b5423;background:rgba(224,168,63,.1)}
+  .badge.err{color:var(--crit);border-color:#6b382c;background:rgba(240,96,58,.1)}
+  .keybar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0 4px}
+  .keybar input{background:var(--ink);border:1px solid var(--line);color:var(--txt);font-family:var(--mono);font-size:12px;
+    padding:7px 11px;border-radius:8px;width:230px;max-width:52vw}
+  .keybar input:focus{outline:2px solid var(--scan);outline-offset:-1px}
+  .keybar button{background:var(--raise);border:1px solid var(--line2);color:var(--scan);font-family:var(--mono);font-size:12px;
+    padding:7px 13px;border-radius:8px;cursor:pointer}
+  .keybar button:hover{background:#1e3540}
+  .keybar .hint{font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .summary{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:16px 0}
+  .metric{background:var(--panel);padding:14px 15px;min-width:0}
+  .metric .k{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim)}
+  .metric .v{font-family:var(--mono);font-size:24px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:6px;line-height:1}
+  .metric .s{font-size:11px;color:var(--muted);margin-top:5px}
+  .v.ok{color:var(--good)}.v.wa{color:var(--warn)}.v.sc{color:var(--scan)}
+  .advisory{display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(224,168,63,.35);border-radius:12px;padding:13px 15px;margin-bottom:18px;
+    background:linear-gradient(180deg,rgba(224,168,63,.1),rgba(224,168,63,.03))}
+  .advisory .ic{font-family:var(--mono);color:var(--warn);font-weight:700;flex:none;border:1px solid rgba(224,168,63,.4);border-radius:7px;width:25px;height:25px;display:grid;place-items:center;margin-top:1px}
+  .advisory p{margin:0;color:#d8c39a;font-size:12.5px}.advisory b{color:#f2d79a}
+  .advisory code{font-family:var(--mono);background:rgba(224,168,63,.14);padding:1px 6px;border-radius:5px;color:#f2d79a;font-size:12px}
+  .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel)}
+  .seg button{background:transparent;border:0;color:var(--muted);font-family:var(--mono);font-size:12px;padding:7px 13px;cursor:pointer;border-right:1px solid var(--line)}
+  .seg button:last-child{border-right:0}.seg button[aria-pressed=true]{background:var(--raise);color:var(--scan)}
+  .seg button:focus-visible{outline:2px solid var(--scan);outline-offset:-2px}
+  .count{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(338px,1fr));gap:13px}
+  .card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 15px 13px 17px;cursor:pointer;overflow:hidden;
+    transition:border-color .16s,transform .16s,background .16s}
+  .card:hover{border-color:var(--line2);transform:translateY(-2px);background:var(--panel2)}
+  .card:focus-visible{outline:2px solid var(--scan);outline-offset:2px}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--stripe,var(--good))}
+  .card.st-good{--stripe:var(--good)}.card.st-warn{--stripe:var(--warn)}.card.st-crit{--stripe:var(--crit)}
+  .chead{display:flex;align-items:center;gap:9px;margin-bottom:10px}
+  .acct{font-family:var(--mono);font-size:13px;font-weight:600}
+  .prov{font-family:var(--mono);font-size:10px;letter-spacing:.6px;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid var(--line2)}
+  .prov.codex{color:#7fd3ff;border-color:#2c5468;background:rgba(127,211,255,.08)}
+  .prov.claude{color:#e0a666;border-color:#5c4525;background:rgba(224,166,102,.08)}
+  .prov.antigravity{color:#b39bff;border-color:#3f3663;background:rgba(179,155,255,.08)}
+  .verdict{margin-left:auto;display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px}
+  .verdict .dot2{width:7px;height:7px;border-radius:50%}
+  .st-good .verdict{color:var(--good)}.st-good .dot2{background:var(--good)}
+  .st-warn .verdict{color:var(--warn)}.st-warn .dot2{background:var(--warn)}
+  .st-crit .verdict{color:var(--crit)}.st-crit .dot2{background:var(--crit)}
+  .ua{font-family:var(--mono);font-size:12px;line-height:1.5;background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 10px;word-break:break-all;margin-bottom:10px}
+  .ua .v{color:var(--scan)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-family:var(--mono);font-size:11.5px}
+  .kv dt{color:var(--dim)}.kv dd{margin:0;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+  .kv dd.hi{color:var(--txt)}.kv dd .tag{color:var(--good)}.kv dd .tag.warn{color:var(--warn)}.kv dd .tag.dim{color:var(--dim)}
+  section.dist{margin-top:28px}
+  .h2{display:flex;align-items:baseline;gap:11px;margin:0 0 6px}.h2 h2{font-size:14px;font-weight:620;margin:0}
+  .h2 .en{font-family:var(--mono);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--dim)}
+  .distgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:13px;margin-top:12px}
+  .dpanel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 15px}
+  .dpanel h3{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin:0 0 4px}
+  .dpanel .note{font-size:11px;color:var(--dim);margin:0 0 12px}
+  .bar{display:flex;align-items:center;gap:9px;margin:8px 0;font-family:var(--mono);font-size:11.5px}
+  .bar .lab{width:120px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bar .track{flex:1;height:8px;background:var(--ink);border-radius:4px;overflow:hidden;border:1px solid var(--line)}
+  .bar .fill{height:100%;background:linear-gradient(90deg,var(--scan-dim),var(--scan));border-radius:4px}
+  .bar .n{width:20px;text-align:right;color:var(--txt);font-variant-numeric:tabular-nums}
+  .pinned{color:var(--warn)}
+  .empty{color:var(--dim);font-family:var(--mono);padding:28px;text-align:center}
+  footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);color:var(--dim);font-family:var(--mono);font-size:11px;display:flex;gap:16px;flex-wrap:wrap}
+  footer .k{color:var(--muted)}
+  .scrim{position:fixed;inset:0;background:rgba(6,11,14,.66);backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
+  .scrim.open{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:0;height:100%;width:min(470px,94vw);background:var(--panel);border-left:1px solid var(--line2);transform:translateX(100%);
+    transition:transform .24s cubic-bezier(.2,.7,.2,1);z-index:41;overflow-y:auto;padding:22px 22px 40px}
+  .drawer.open{transform:none}.drawer h3{font-family:var(--mono);font-size:15px;margin:0 0 3px}
+  .drawer .close{position:absolute;top:15px;right:15px;background:transparent;border:1px solid var(--line);color:var(--muted);width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:16px}
+  .drawer .close:hover{color:var(--txt);border-color:var(--line2)}
+  .drow{border:1px solid var(--line);border-radius:9px;margin-top:12px;overflow:hidden}
+  .drow .dr{display:flex;justify-content:space-between;gap:12px;padding:9px 12px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px}
+  .drow .dr:last-child{border-bottom:0}.drow .dr .k{color:var(--dim)}.drow .dr .val{color:var(--txt);text-align:right;word-break:break-all}
+  .checks{margin-top:16px}
+  .chk{display:flex;gap:9px;align-items:flex-start;font-size:12.5px;padding:7px 0;border-bottom:1px dashed var(--line)}
+  .chk:last-child{border-bottom:0}.chk .m{font-family:var(--mono);flex:none;margin-top:1px}
+  .chk.pass .m{color:var(--good)}.chk.warn .m{color:var(--warn)}.chk.fail .m{color:var(--crit)}
+  .chk .t{color:var(--muted)}.chk .t b{color:var(--txt);font-weight:600}
+  @media(max-width:820px){.summary{grid-template-columns:repeat(2,1fr)}.distgrid{grid-template-columns:1fr}}
+  @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head>
+<body>
+<h2 class="sr-only">指纹观测台:按账号展示 CPA 代理实际出站的指纹与自洽性检查。</h2>
+<header class="top"><div class="row">
+  <div class="brand"><span class="glyph"><canvas id="rid" width="64" height="64" aria-hidden="true"></canvas></span>
+    <h1>指纹观测台<span class="en">Fingerprint Observatory</span></h1></div>
+  <div class="src"><span class="badge demo" id="srcBadge">DEMO</span></div>
+</div></header>
+<div class="wrap">
+  <div class="keybar">
+    <input id="keyInput" type="password" placeholder="管理密钥(管控密钥,同面板)" autocomplete="off">
+    <button id="connectBtn">连接实时数据</button>
+    <button id="refreshBtn">刷新</button>
+    <span class="hint" id="keyHint">未连接 · 展示样例数据</span>
+  </div>
+  <div class="summary" id="summary"></div>
+  <div class="advisory" id="advisory" style="display:none"><span class="ic">!</span><p id="advText"></p></div>
+  <div class="toolbar">
+    <div class="seg" role="group" aria-label="provider"><button data-f="all" aria-pressed="true">全部</button><button data-f="codex" aria-pressed="false">codex</button><button data-f="claude" aria-pressed="false">claude</button><button data-f="antigravity" aria-pressed="false">antigravity</button></div>
+    <div class="seg" role="group" aria-label="status"><button data-s="all" aria-pressed="true">所有状态</button><button data-s="warn" aria-pressed="false">仅告警</button></div>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="grid" id="grid"></div>
+  <section class="dist"><div class="h2"><h2>反聚类分布</h2><span class="en">anti-cluster spread</span></div>
+    <p class="note" style="color:var(--dim);font-size:12px;margin:0">同账号指纹稳定、不同账号铺开——版本刻意锁定(避免"声称旧版却发新 beta"),只散 OS-minor 与终端,防号池塌缩到同一签名被一锅端。</p>
+    <div class="distgrid" id="dist"></div></section>
+  <footer><span><span class="k">源:</span> GET /v0/management/fingerprint-observe</span><span><span class="k">开关:</span> config.fingerprint-observe(默认关)</span><span><span class="k">隐私:</span> 账号=fnv tag · 无邮箱/session 值</span></footer>
+</div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="账号指纹详情"></aside>
+<script>
+const $=s=>document.querySelector(s);
+const KEYNAME='fp_observe_key';
+let fProv='all',fStat='all',STATE=[],SRC='demo';
+
+const DEMO=[
+ {account:"acct-1a2b3c4d",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1284},
+ {account:"acct-5e6f7a80",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) Apple_Terminal/455",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:963},
+ {account:"acct-9b0c1d2e",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) WezTerm/20240203-110809",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1531},
+ {account:"acct-3f4a5b6c",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.0.0; arm64) iTerm.app/3.5.11",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:640},
+ {account:"acct-7d8e9f01",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) vscode/1.95.3",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1120},
+ {account:"acct-a1b2c3d4",provider:"claude",host:"api.anthropic.com",tls_profile:"node-h1",user_agent:"claude-cli/2.1.153",accept_enc:"gzip, deflate, br, zstd",stainless_pkg:"0.94.0",stainless_os:"MacOS",arch:"arm64",stainless_rt:"v24.3.0",last_seen_unix:0,count:2210},
+ {account:"acct-b5c6d7e8",provider:"claude",host:"api.anthropic.com",tls_profile:"node-h1",user_agent:"claude-cli/2.1.153",accept_enc:"gzip, deflate, br, zstd",stainless_pkg:"0.94.0",stainless_os:"Windows",arch:"x64",stainless_rt:"v24.3.0",last_seen_unix:0,count:1876},
+ {account:"acct-f0e1d2c3",provider:"antigravity",host:"api.antigravity.google",tls_profile:"stdlib",user_agent:"antigravity (default reqwest)",accept_enc:"gzip, br",last_seen_unix:0,count:305},
+];
+
+(function(){const c=$('#rid');if(!c)return;const x=c.getContext('2d');const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;let t=0;
+ (function d(){x.clearRect(0,0,64,64);x.lineWidth=1.4;for(let i=0;i<7;i++){x.beginPath();const r=7+i*3.9;x.strokeStyle=`rgba(51,209,189,${0.5-i*0.05})`;
+   for(let a=-.6;a<=Math.PI+.6;a+=.18){const rr=r+Math.sin(a*3+t+i)*1.4;const px=32+Math.cos(a)*rr,py=38+Math.sin(a)*rr*.62;a===-.6?x.moveTo(px,py):x.lineTo(px,py);}x.stroke();}
+   if(!reduce){t+=0.02;requestAnimationFrame(d);}})();})();
+
+function relTime(u){if(!u)return'—';const s=Math.max(0,Math.floor(Date.now()/1000-u));if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';return Math.floor(s/3600)+'h ago';}
+function statusOf(r){
+  if(r.provider==='codex'){
+    if(r.originator&&r.originator!=='codex_cli_rs')return'crit';
+    if(r.user_agent&&!/^codex_cli_rs\//.test(r.user_agent))return'crit';
+    if(r.session_hdr==='session_id')return'warn';
+    if(r.account_id&&r.account_id!=='present')return'warn';
+    if(r.last_seen_unix&&Date.now()/1000-r.last_seen_unix>1200)return'warn';
+    return'good';}
+  if(r.provider==='claude'){if(r.tls_profile!=='node-h1')return'warn';if(r.user_agent&&!/^claude-cli\//.test(r.user_agent))return'warn';return'good';}
+  return'good';}
+function chip(v,c){return `<span class="tag ${c||''}">${v}</span>`}
+
+function renderSummary(){
+  const codex=STATE.filter(a=>a.provider==='codex').length,cl=STATE.filter(a=>a.provider==='claude').length,ag=STATE.filter(a=>a.provider==='antigravity').length;
+  const good=STATE.filter(a=>statusOf(a)==='good').length,warn=STATE.length-good,tls=[...new Set(STATE.map(a=>a.tls_profile))].length;
+  $('#summary').innerHTML=[
+    ['观测账号',STATE.length,`codex ${codex} · claude ${cl} · agy ${ag}`,'sc'],
+    ['自洽',good,'指纹内部一致','ok'],['告警',warn,warn?'需留意':'无','wa'],
+    ['TLS profile',tls,'node-h1 · chrome-h2 · …','sc'],
+    ['数据源',SRC==='live'?'实时':'样例',SRC==='live'?'来自 fpobserve 存储':'开关未开/未连接','sc'],
+  ].map(([k,v,s,c])=>`<div class="metric"><div class="k">${k}</div><div class="v ${c}">${v}</div><div class="s">${s}</div></div>`).join('');
+  const codexOld=STATE.some(a=>a.provider==='codex'&&/0\.142\.5/.test(a.user_agent||''));
+  $('#advisory').style.display=codexOld?'flex':'none';
+  if(codexOld)$('#advText').innerHTML=`<b>舰队版本基线漂移</b> — codex UA 全部 pin 在 <code>0.142.5</code>(字节验证过的 evidence set),但一手抓包显示实机 CLI 已报 <code>1.3.0</code>。仅兜底路径受影响、不紧迫;升版本号需连整套 1.3.0 值一起对齐,等一次干净抓包再动。`;
+}
+function card(r){
+  const st=statusOf(r);const ua=(r.user_agent||'—').replace(/(0\.142\.5|2\.1\.153)/,'<span class="v">$1</span>');
+  const kv=r.provider==='codex'?`<dt>originator</dt><dd class="hi">${r.originator||'—'}</dd><dt>session 头</dt><dd>${r.session_hdr==='session_id'?chip('session_id','warn'):r.session_hdr?chip(r.session_hdr):'<span class="tag dim">—</span>'}</dd><dt>account-id</dt><dd>${chip(r.account_id||'—')}</dd><dt>accept-enc</dt><dd>${r.accept_enc?chip(r.accept_enc):'<span class="tag dim">(空·符合真实codex)</span>'}</dd>`
+    :r.provider==='claude'?`<dt>x-app</dt><dd class="hi">cli</dd><dt>stainless</dt><dd class="hi">${r.stainless_pkg||'?'} · ${r.stainless_os||'?'} ${r.arch||''}</dd><dt>runtime</dt><dd>${r.stainless_rt||'—'}</dd><dt>accept-enc</dt><dd>${chip(r.accept_enc||'—')}</dd>`
+    :`<dt>类型</dt><dd class="hi">Go/reqwest 原生</dd><dt>accept-enc</dt><dd>${chip(r.accept_enc||'—')}</dd>`;
+  return `<article class="card st-${st}" tabindex="0" data-a="${r.account}"><div class="chead"><span class="acct">${r.account}</span><span class="prov ${r.provider}">${r.provider}</span><span class="verdict"><span class="dot2"></span>${st==='good'?'自洽':st==='warn'?'留意':'矛盾'}</span></div><div class="ua">${ua}</div><dl class="kv"><dt>TLS profile</dt><dd class="hi">${r.tls_profile}</dd>${kv}<dt>last seen</dt><dd>${relTime(r.last_seen_unix)} · ${(r.count||0).toLocaleString()} 次</dd></dl></article>`;
+}
+function render(){
+  const list=STATE.filter(a=>(fProv==='all'||a.provider===fProv)&&(fStat==='all'||statusOf(a)!=='good'));
+  $('#grid').innerHTML=list.length?list.map(card).join(''):`<div class="empty">${STATE.length?'无匹配账号':'暂无观测数据 —— 开启 fingerprint-observe 并有请求经过后,这里会出现每账号指纹'}</div>`;
+  $('#count').textContent=`${list.length} / ${STATE.length} 账号`;
+}
+function renderDist(){
+  const cod=STATE.filter(a=>a.provider==='codex');const term=k=>cod.filter(a=>(a.user_agent||'').includes(k)).length;const osv=k=>cod.filter(a=>(a.user_agent||'').includes('Mac OS '+k)).length;
+  const blk=(t,n,ps,pin)=>{const mx=Math.max(1,...ps.map(p=>p[1]));return `<div class="dpanel"><h3>${t}</h3><p class="note">${n}</p>${ps.map(([l,v])=>`<div class="bar"><span class="lab ${l===pin?'pinned':''}">${l}</span><span class="track"><span class="fill" style="width:${Math.round(v/mx*100)}%"></span></span><span class="n">${v}</span></div>`).join('')}</div>`};
+  $('#dist').innerHTML=[blk('CLI 版本','刻意锁定单版本(反破绽)',[['0.142.5',cod.length],['0.140 / 0.141',0]],'0.142.5'),
+    blk('macOS minor','散在真实发行区间',[['26.2.0',osv('26.2.0')],['26.1.0',osv('26.1.0')],['26.0.0',osv('26.0.0')]]),
+    blk('终端','铺开避免同签名',[['iTerm.app',term('iTerm')],['Apple_Terminal',term('Apple_Terminal')],['WezTerm',term('WezTerm')],['vscode',term('vscode')]])].join('');
+}
+function checks(r){const o=[];
+  if(r.provider==='codex'){o.push(['pass','✓',`UA 前缀 <b>codex_cli_rs</b> 与 originator <b>${r.originator||'?'}</b> 一致`]);
+    o.push([r.session_hdr==='session-id'?'pass':'warn',r.session_hdr==='session-id'?'✓':'!',`session 头为 <b>${r.session_hdr||'—'}</b>(实机 0.142.5 = 连字符)`]);
+    o.push([r.accept_enc?'warn':'pass',r.accept_enc?'!':'✓',`accept-encoding <b>${r.accept_enc||'为空'}</b> —— 真实 codex 不发`]);
+    o.push(['pass','✓',`TLS profile <b>${r.tls_profile}</b> 与 chatgpt.com 路径匹配`]);
+    o.push(['warn','!',`舰队级:UA 版本 <b>0.142.5</b> 落后实机 <b>1.3.0</b>`]);}
+  else if(r.provider==='claude'){o.push(['pass','✓',`UA <b>${r.user_agent}</b> 与 pkg <b>${r.stainless_pkg||'?'}</b> 组自洽`]);
+    o.push([r.tls_profile==='node-h1'?'pass':'warn',r.tls_profile==='node-h1'?'✓':'!',`TLS profile <b>${r.tls_profile}</b>(node-h1=JA3 44f88fca…)与 UA 声称 Node 一致`]);
+    o.push(['pass','✓',`accept-encoding <b>${r.accept_enc}</b> —— 实测 claude-cli 2.1.153 默认值`]);
+    o.push(['pass','✓',`X-Stainless-Os <b>${r.stainless_os||'?'}</b> · arch <b>${r.arch||'?'}</b> 组合真实`]);}
+  else o.push(['pass','✓','Go/reqwest 原生 UA —— 真实 antigravity 行为,保留不伪装']);
+  return o.map(([c,m,t])=>`<div class="chk ${c}"><span class="m">${m}</span><span class="t">${t}</span></div>`).join('');}
+function openDetail(r){const rows=[['account',r.account],['provider',r.provider],['host',r.host],['tls_profile',r.tls_profile],['user-agent',r.user_agent],['originator',r.originator||'—'],['session 头',r.session_hdr||'—'],['account-id',r.account_id||'—'],['accept-encoding',r.accept_enc||'(空)'],['观测请求数',(r.count||0).toLocaleString()]];
+  $('#drawer').innerHTML=`<button class="close" aria-label="关闭">×</button><h3>${r.account}</h3><div style="font-family:var(--mono);font-size:11px;color:var(--dim)">${r.provider.toUpperCase()} · 实际出站指纹快照</div><div class="drow">${rows.map(([k,v])=>`<div class="dr"><span class="k">${k}</span><span class="val">${v}</span></div>`).join('')}</div><div class="checks"><div style="font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">自洽性检查</div>${checks(r)}</div>`;
+  $('#drawer').querySelector('.close').onclick=closeDetail;$('#drawer').classList.add('open');$('#scrim').classList.add('open');}
+function closeDetail(){$('#drawer').classList.remove('open');$('#scrim').classList.remove('open');}
+$('#scrim').onclick=closeDetail;document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDetail();});
+$('#grid').addEventListener('click',e=>{const c=e.target.closest('.card');if(c)openDetail(STATE.find(a=>a.account===c.dataset.a));});
+$('#grid').addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target.classList.contains('card')){e.preventDefault();openDetail(STATE.find(a=>a.account===e.target.dataset.a));}});
+document.querySelectorAll('.seg').forEach(seg=>seg.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;[...seg.children].forEach(x=>x.setAttribute('aria-pressed',x===b));if(b.dataset.f!==undefined)fProv=b.dataset.f;if(b.dataset.s!==undefined)fStat=b.dataset.s;render();}));
+
+function setSrc(kind){SRC=kind;const b=$('#srcBadge');b.className='badge '+(kind==='live'?'live':kind==='err'?'err':'demo');b.textContent=kind==='live'?'LIVE':kind==='err'?'连接失败':'DEMO';}
+function draw(){renderSummary();render();renderDist();}
+async function loadLive(){
+  const key=($('#keyInput').value||localStorage.getItem(KEYNAME)||'').trim();
+  if(!key){setSrc('demo');STATE=DEMO;$('#keyHint').textContent='未连接 · 展示样例数据(输入管理密钥连接实时)';draw();return;}
+  try{
+    const base=location.pathname.replace(/\/v0\/resource\/plugins\/.*$/,'');
+    const res=await fetch(base+'/v0/management/fingerprint-observe',{headers:{Authorization:'Bearer '+key}});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    const j=await res.json();localStorage.setItem(KEYNAME,key);
+    STATE=(j.accounts&&j.accounts.length)?j.accounts:[];setSrc('live');
+    $('#keyHint').textContent=j.enabled?`已连接 · ${STATE.length} 账号`:'已连接 · 但 fingerprint-observe 开关未开(config 里设 enabled: true)';
+    if(!STATE.length&&!j.enabled)STATE=[];
+    draw();
+  }catch(err){setSrc('err');STATE=DEMO;$('#keyHint').textContent='连接失败('+err.message+')· 回退样例数据';draw();}
+}
+$('#connectBtn').onclick=loadLive;$('#refreshBtn').onclick=loadLive;
+$('#keyInput').addEventListener('keydown',e=>{if(e.key==='Enter')loadLive();});
+if(localStorage.getItem(KEYNAME)){$('#keyInput').value=localStorage.getItem(KEYNAME);loadLive();}else{STATE=DEMO;draw();}
+</script></body></html>
