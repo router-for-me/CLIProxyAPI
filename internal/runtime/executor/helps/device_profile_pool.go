@@ -58,24 +58,24 @@ var claudeProfilePool = []claudeProfileTuple{
 	{ua: "claude-cli/2.1.151 (external, cli)", pkg: "0.94.0", node: "v24.3.0", os: "MacOS", arch: "arm64"},
 }
 
-// codexUAPool spreads accounts across recent Codex CLI releases and terminals.
-// The format mirrors the real codex-tui User-Agent so isOfficialCodexUserAgent
-// still recognizes it; only version / OS minor / terminal vary.
+// codexUAPool spreads accounts across recent Codex releases and terminals.
+// Format = bare codex_cli_rs CLI UA (prefix codex_cli_rs/, ending at the terminal
+// token, NO trailing "(name; ver)" suffix — that suffix is codex-tui/MCP-only per
+// openai/codex source). isOfficialCodexUserAgent recognizes this bare shape.
 var codexUAPool = []string{
-	// Real codex_cli_rs UA shape: prefix codex_cli_rs/, ends at the terminal token
-	// (no trailing "(codex-tui; ver)"). Versions in the current 0.14x line.
-	// Version pinned to the live-captured codex_cli_rs/0.142.5; vary ONLY OS-minor
+	// Real codex_cli_rs UA shape: prefix codex_cli_rs/, ends at the terminal token.
+	// Version pinned to the current-latest codex_cli_rs/0.142.5; vary ONLY OS-minor
 	// (real shipped macOS 26.0-26.2.0) and terminal. Version is intentionally NOT
 	// diversified: advertising an older UA (0.140/0.141) while emitting a 0.142.x-only
 	// beta flag (remote_compaction_v2) is an impossible pairing — a sharper tell than
 	// uniformity (mirrors the claudeProfilePool no-impossible-pairing rule). Do NOT
 	// invent non-existent OS versions like 26.5.0.
-	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)",
-	"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) Apple_Terminal/455 (codex_cli_rs; 0.142.5)",
-	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) WezTerm/20240203-110809 (codex_cli_rs; 0.142.5)",
-	"codex_cli_rs/0.142.5 (Mac OS 26.0.0; arm64) iTerm.app/3.5.11 (codex_cli_rs; 0.142.5)",
-	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) vscode/1.95.3 (codex_cli_rs; 0.142.5)",
-	"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)",
+	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10",
+	"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) Apple_Terminal/455",
+	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) WezTerm/20240203-110809",
+	"codex_cli_rs/0.142.5 (Mac OS 26.0.0; arm64) iTerm.app/3.5.11",
+	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) vscode/1.95.3",
+	"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) iTerm.app/3.6.10",
 }
 
 // fnvIndex maps a scope key deterministically into [0, n).

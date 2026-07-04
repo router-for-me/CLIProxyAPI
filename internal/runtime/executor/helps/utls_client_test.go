@@ -43,3 +43,15 @@ func TestNewUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) 
 		t.Fatal("expected context RoundTripper to handle protected host request")
 	}
 }
+
+func TestUtlsHTTP2TransportDoesNotAutoInjectGzip(t *testing.T) {
+	t.Parallel()
+
+	tr := newUtlsHTTP2Transport()
+	if tr == nil {
+		t.Fatal("newUtlsHTTP2Transport returned nil")
+	}
+	if !tr.DisableCompression {
+		t.Fatal("uTLS HTTP/2 transport must disable automatic Accept-Encoding: gzip injection")
+	}
+}

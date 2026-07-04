@@ -68,6 +68,19 @@ func TestApplyCodexWebsocketHeadersKeepsOfficialClientUA(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersDoesNotSetConnectionHeader(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	applyCodexHeaders(req, codexOAuthAuth(), "oauth-token", false, nil)
+
+	if got := req.Header.Get("Connection"); got != "" {
+		t.Fatalf("Connection = %q, want empty; HTTP/2 transport should manage connection reuse", got)
+	}
+}
+
 func TestIsOfficialCodexOriginator(t *testing.T) {
 	for _, o := range []string{"codex_cli_rs", "codex-tui", "Codex_Exec", "codex_vscode"} {
 		if !isOfficialCodexOriginator(o) {

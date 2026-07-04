@@ -34,13 +34,22 @@ import (
 )
 
 const (
-	// Real Codex CLI User-Agent shape, confirmed by live-capturing codex 0.130.0:
-	//   "<originator>/<ver> (<OS> <ver>; <arch>) <terminal> (<originator>; <ver>)"
-	// The trailing "(<originator>; <ver>)" segment IS real (the earlier removal was
-	// wrong). Originator/prefix is codex_cli_rs (DEFAULT_ORIGINATOR for the CLI;
-	// the `codex exec` subcommand uses codex_exec). Terminal token is "unknown"
-	// when no TTY; interactive uses e.g. iTerm.app/3.6.10.
-	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.142.5)"
+	// Real bare codex_cli_rs CLI User-Agent, per openai/codex source
+	// (login/src/auth/default_client.rs get_codex_user_agent + terminal-detection
+	// user_agent_token) and its CI test default_client_tests.rs::test_macos, whose
+	// regex ends at the terminal token with a `$` anchor:
+	//   "<originator>/<ver> (<OS> <ver>; <arch>) <terminal>"   — NO trailing suffix.
+	// The trailing " (<name>; <ver>)" segment belongs ONLY to codex-tui / MCP clients
+	// (set via USER_AGENT_SUFFIX); the bare CLI never emits it. An earlier value
+	// carried "(codex_cli_rs; ver)" — a frankenstein no real variant produces
+	// (codex_cli_rs prefix WITH a suffix, cross-verified vs sub2api #3646 + official
+	// tests); removed so prefix + (absent) suffix + originator are all self-consistent
+	// as codex_cli_rs. Originator is codex_cli_rs (DEFAULT_ORIGINATOR; `codex exec`
+	// uses codex_exec). Terminal token is "unknown" with no TTY; interactive uses e.g.
+	// iTerm.app/3.6.10. Version pinned to current-latest 0.142.5. A real downstream
+	// codex-tui/CLI UA is forwarded verbatim by ensureCodexUserAgent; this is only the
+	// fallback when the downstream sends no usable Codex UA.
+	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10"
 	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
 )
@@ -1652,7 +1661,14 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	if sid == "" {
 		sid = codexSessionHeaderValue(ginHeaders)
 	}
-	if sid == "" && strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
+	if sid == "" {
+		// Real codex ALWAYS emits session-id/thread-id regardless of OS — a missing
+		// session-id is itself a strong tell. This is the last-resort fallback: the
+		// cache.ID path (request builder ~L1475) and the identity-confuse
+		// promptCacheKey path already supply a per-conversation stable id upstream of
+		// here, so this random UUID only fires when no conversation context exists at
+		// all. The old `&& strings.Contains(UA, "Mac OS")` gate could leave the header
+		// absent on non-macOS UAs, which is worse than a random-but-present id.
 		sid = uuid.NewString()
 	}
 	setCodexSessionThreadHeaders(r.Header, sid)
@@ -1662,7 +1678,6 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
-	r.Header.Set("Connection", "Keep-Alive")
 	setCodexOriginator(r.Header, ginHeaders.Get("Originator"), isAPIKey)
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {

@@ -25,8 +25,12 @@ import (
 
 // codexZstdEncoder is process-wide and safe for concurrent EncodeAll use (per the
 // klauspost/compress docs). SpeedDefault ≈ zstd level 3, matching the Rust zstd
-// crate default that the real codex_cli_rs ships with.
-var codexZstdEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+// crate (libzstd) default that the real codex_cli_rs ships with. WithEncoderCRC(false)
+// drops klauspost's default 4-byte content-checksum trailer — libzstd's
+// zstd::stream::encode_all(_, 3) does NOT emit one, so the frame descriptor
+// (Content_Checksum_flag) and length match the real client's byte layout instead of
+// a klauspost-flavored frame that a server-side reference encoder could distinguish.
+var codexZstdEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderCRC(false))
 
 // codexAuthIsAPIKey reports whether auth is a BYOK / API-key credential (its
 // upstream is the user's own OpenAI-compatible endpoint rather than the official

@@ -115,7 +115,7 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
-	tr := &http2.Transport{}
+	tr := newUtlsHTTP2Transport()
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
 		tlsConn.Close()
@@ -123,6 +123,15 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	}
 
 	return h2Conn, nil
+}
+
+func newUtlsHTTP2Transport() *http2.Transport {
+	return &http2.Transport{
+		// Codex/ChatGPT requests manage Accept-Encoding explicitly. The x/net
+		// HTTP/2 transport otherwise injects "Accept-Encoding: gzip" when the
+		// request leaves it empty, which diverges from captured codex_cli_rs.
+		DisableCompression: true,
+	}
 }
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
