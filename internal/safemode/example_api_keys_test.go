@@ -1,12 +1,8 @@
 package safemode
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestExampleAPIKeysDetectsOnlyTemplateValues(t *testing.T) {
@@ -42,60 +38,14 @@ func TestExampleAPIKeysIgnoresSimilarValues(t *testing.T) {
 	}
 }
 
-func TestExampleAPIKeyWarningHandler(t *testing.T) {
-	handler := NewExampleAPIKeyWarningHandler("C:\\config.yaml", []string{"your-api-key-1"})
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET / status = %d, want %d", w.Code, http.StatusOK)
-	}
-	body := w.Body.String()
-	for _, want := range []string{"Example API key detected", "your-api-key-1", "C:\\config.yaml"} {
+func TestExampleAPIKeyWarningPageIncludesManagementButton(t *testing.T) {
+	body := ExampleAPIKeyWarningPageHTML([]string{"your-api-key-1"}, "/management.html?safe-mode=configure")
+	for _, want := range []string{"Example API key detected", "your-api-key-1", "Open Management", `href="/management.html?safe-mode=configure"`, "Proxy API endpoints are disabled"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("GET / body missing %q: %s", want, body)
+			t.Fatalf("warning page missing %q: %s", want, body)
 		}
 	}
-
-	req = httptest.NewRequest(http.MethodGet, "/management.html", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET /management.html status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if body := w.Body.String(); !strings.Contains(body, "Example API key detected") {
-		t.Fatalf("GET /management.html body missing warning: %s", body)
-	}
-
-	req = httptest.NewRequest(http.MethodHead, "/", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("HEAD / status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if w.Body.Len() != 0 {
-		t.Fatalf("HEAD / body length = %d, want 0", w.Body.Len())
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("GET /v1/models status = %d, want %d", w.Code, http.StatusNotFound)
-	}
-}
-
-func TestWarningServerURL(t *testing.T) {
-	cfg := &config.Config{Port: 8317}
-	if got := WarningServerURL(cfg); got != "http://127.0.0.1:8317/" {
-		t.Fatalf("WarningServerURL() = %q", got)
-	}
-
-	cfg.Host = "::1"
-	cfg.TLS.Enable = true
-	if got := WarningServerURL(cfg); got != "https://[::1]:8317/" {
-		t.Fatalf("WarningServerURL() = %q", got)
+	if strings.Contains(body, `class="path"`) {
+		t.Fatalf("warning page should not include a local config path: %s", body)
 	}
 }
