@@ -3758,6 +3758,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					// Some upstreams (e.g. MiMo) report quota/capacity exhaustion as
+					// HTTP 400 "Param Incorrect" instead of 429. Remap those to 429 so
+					// the standard quota cooldown below applies and the exhausted
+					// credential is skipped while other credentials are tried.
+					if statusCode != http.StatusTooManyRequests && isUpstreamQuotaMasqueradeResultError(result.Error) {
+						statusCode = http.StatusTooManyRequests
+					}
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -4233,6 +4240,27 @@ func isModelSupportResultError(err *Error) bool {
 		return false
 	}
 	return isModelSupportErrorMessage(err.Message)
+}
+
+// isUpstreamQuotaMasqueradeResultError detects upstream responses that report a
+// quota/capacity condition using a non-429 status code. Most providers signal
+// quota exhaustion with HTTP 429, but some (e.g. MiMo) return HTTP 400
+// "Param Incorrect" when a key's model quota is exhausted under load, even
+// though the request parameters are valid for a configured model. Treating
+// these like 429 lets the conductor apply the standard quota cooldown and fall
+// through to the next credential instead of re-picking the exhausted key.
+func isUpstreamQuotaMasqueradeResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Message), "param incorrect")
 }
 
 func isCloudflareChallengeErrorMessage(message string) bool {
