@@ -17,7 +17,7 @@ Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
 
-# 安全加固(静态二进制,无需额外运行时)
+# 安全加固(CGO=1 动态链接二进制,依赖目标机 glibc≥2.36;下列 systemd sandbox 与链接方式无关)
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

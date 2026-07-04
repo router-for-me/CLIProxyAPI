@@ -123,6 +123,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # RC/beta/alpha 预发布标签打 --prerelease,不抢 Latest
+          PRERELEASE=""
+          case "$TAG" in *-rc*|*-beta*|*-alpha*) PRERELEASE="--prerelease";; esac
           notes="指纹加固 fork 自动发布。
 
           - Linux **动态链接**二进制(CGO=1,支持插件系统);amd64 与 arm64(aarch64)。
@@ -133,6 +136,6 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/CLIProxyAPI_*.tar.gz dist/checksums.txt --clobber
           else
-            gh release create "$TAG" --title "$TAG" --notes "$notes" \
+            gh release create "$TAG" --title "$TAG" --notes "$notes" $PRERELEASE \
               dist/CLIProxyAPI_*.tar.gz dist/checksums.txt
           fi
