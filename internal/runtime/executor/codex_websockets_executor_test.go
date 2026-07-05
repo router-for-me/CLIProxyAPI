@@ -338,8 +338,12 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
 
-	if got := headers.Get("Originator"); got != "Codex Desktop" {
-		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
+	// Originator is normalized on the OAuth path for fingerprint consistency: a
+	// non-first-party value like "Codex Desktop" must not pass through alongside a
+	// codex_cli_rs User-Agent (a cross-layer identity mismatch). The other identity
+	// headers below still pass through untouched.
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want normalized %s", got, codexOriginator)
 	}
 	if got := headers.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
 		t.Fatalf("User-Agent = %s, want %s", got, "codex_cli_rs/0.1.0")
@@ -832,8 +836,10 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 
 	applyCodexHeaders(req, auth, "oauth-token", true, nil)
 
-	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
-		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
+	// OAuth path normalizes a non-first-party Originator (see setCodexOriginator):
+	// "Codex Desktop" would otherwise disagree with the codex_cli_rs User-Agent.
+	if got := req.Header.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want normalized %s", got, codexOriginator)
 	}
 	if got := req.Header.Get("Version"); got != "0.115.0-alpha.27" {
 		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")

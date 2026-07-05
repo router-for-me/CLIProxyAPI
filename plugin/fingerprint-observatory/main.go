@@ -93,7 +93,7 @@ type mgmtResponse struct {
 func meta() pluginMeta {
 	return pluginMeta{
 		Name:             "fingerprint-observatory",
-		Version:          "0.1.0",
+		Version:          "0.1.1",
 		Author:           "fingerprint-hardening fork",
 		GitHubRepository: "https://github.com/qinghua362330/CLIProxyAPI",
 		Logo:             "",

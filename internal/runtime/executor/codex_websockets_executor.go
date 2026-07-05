@@ -1227,10 +1227,26 @@ func ensureCodexUserAgent(target, source http.Header, configValue, fallbackValue
 	}
 }
 
-// isOfficialCodexOriginator reports whether an Originator value belongs to a
-// Codex-family client (codex_cli_rs, codex-tui, codex_exec, …).
+// officialCodexOriginators are the exact Originator tokens of first-party OpenAI
+// Codex clients. This mirrors the strict officialCodexUserAgentPrefixes allowlist:
+// only these pass through verbatim to the ChatGPT OAuth backend. The previous loose
+// "codex" prefix let a plausible-but-foreign value like "Codex Desktop" — or an
+// injected "codexZZZ" — through while the User-Agent was normalized to codex_cli_rs,
+// producing a cross-layer identity mismatch (UA=codex_cli_rs vs Originator=Codex
+// Desktop) that the fingerprint observatory caught live on real accounts. Exact
+// matching keeps Originator and User-Agent consistent.
+var officialCodexOriginators = map[string]struct{}{
+	"codex_cli_rs": {},
+	"codex-tui":    {},
+	"codex_exec":   {},
+	"codex_vscode": {},
+}
+
+// isOfficialCodexOriginator reports whether an Originator value is exactly a
+// first-party Codex token (case-insensitive).
 func isOfficialCodexOriginator(originator string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(originator)), "codex")
+	_, ok := officialCodexOriginators[strings.ToLower(strings.TrimSpace(originator))]
+	return ok
 }
 
 // setCodexOriginator sets the Originator header. API-key traffic forwards the

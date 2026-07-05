@@ -181,9 +181,9 @@ function renderSummary(){
     ['TLS profile',tls,'node-h1 · chrome-h2 · …','sc'],
     ['数据源',SRC==='live'?'实时':'样例',SRC==='live'?'来自 fpobserve 存储':'开关未开/未连接','sc'],
   ].map(([k,v,s,c])=>`<div class="metric"><div class="k">${k}</div><div class="v ${c}">${v}</div><div class="s">${s}</div></div>`).join('');
-  const codexOld=STATE.some(a=>a.provider==='codex'&&/0\.142\.5/.test(a.user_agent||''));
-  $('#advisory').style.display=codexOld?'flex':'none';
-  if(codexOld)$('#advText').innerHTML=`<b>舰队版本基线漂移</b> — codex UA 全部 pin 在 <code>0.142.5</code>(字节验证过的 evidence set),但一手抓包显示实机 CLI 已报 <code>1.3.0</code>。仅兜底路径受影响、不紧迫;升版本号需连整套 1.3.0 值一起对齐,等一次干净抓包再动。`;
+  const critAccts=STATE.filter(a=>statusOf(a)==='crit');
+  $('#advisory').style.display=critAccts.length?'flex':'none';
+  if(critAccts.length)$('#advText').innerHTML=`<b>跨层身份矛盾 · ${critAccts.length} 账号</b> — originator 与 <code>codex_cli_rs</code> UA 不一致(如 <code>Codex Desktop</code>),下游客户端标识与 UA 冲突,易被服务端聚类识别。魔改核心已收紧 originator 归一化,重启后该账号下一次请求即自动恢复一致。`;
 }
 function card(r){
   const st=statusOf(r);const ua=(r.user_agent||'—').replace(/(0\.142\.5|2\.1\.153)/,'<span class="v">$1</span>');
@@ -205,11 +205,13 @@ function renderDist(){
     blk('终端','铺开避免同签名',[['iTerm.app',term('iTerm')],['Apple_Terminal',term('Apple_Terminal')],['WezTerm',term('WezTerm')],['vscode',term('vscode')]])].join('');
 }
 function checks(r){const o=[];
-  if(r.provider==='codex'){o.push(['pass','✓',`UA 前缀 <b>codex_cli_rs</b> 与 originator <b>${r.originator||'?'}</b> 一致`]);
+  if(r.provider==='codex'){
+    const uaCli=/^codex_cli_rs\//.test(r.user_agent||'');const origOk=(r.originator||'')==='codex_cli_rs';const consistent=uaCli&&origOk;
+    o.push([consistent?'pass':'fail',consistent?'✓':'✗',consistent?`UA 前缀 <b>codex_cli_rs</b> 与 originator <b>codex_cli_rs</b> 一致`:`originator <b>${r.originator||'—'}</b> 与 UA 前缀 <b>codex_cli_rs</b> <b>不一致</b> —— 跨层身份矛盾,易被检测`]);
     o.push([r.session_hdr==='session-id'?'pass':'warn',r.session_hdr==='session-id'?'✓':'!',`session 头为 <b>${r.session_hdr||'—'}</b>(实机 0.142.5 = 连字符)`]);
     o.push([r.accept_enc?'warn':'pass',r.accept_enc?'!':'✓',`accept-encoding <b>${r.accept_enc||'为空'}</b> —— 真实 codex 不发`]);
     o.push(['pass','✓',`TLS profile <b>${r.tls_profile}</b> 与 chatgpt.com 路径匹配`]);
-    o.push(['warn','!',`舰队级:UA 版本 <b>0.142.5</b> 落后实机 <b>1.3.0</b>`]);}
+    o.push(['pass','✓',`CLI 版本 <b>0.142.5</b> —— 刻意锁定的真实版本(homebrew codex 当前版),反同签名聚类`]);}
   else if(r.provider==='claude'){o.push(['pass','✓',`UA <b>${r.user_agent}</b> 与 pkg <b>${r.stainless_pkg||'?'}</b> 组自洽`]);
     o.push([r.tls_profile==='node-h1'?'pass':'warn',r.tls_profile==='node-h1'?'✓':'!',`TLS profile <b>${r.tls_profile}</b>(node-h1=JA3 44f88fca…)与 UA 声称 Node 一致`]);
     o.push(['pass','✓',`accept-encoding <b>${r.accept_enc}</b> —— 实测 claude-cli 2.1.153 默认值`]);

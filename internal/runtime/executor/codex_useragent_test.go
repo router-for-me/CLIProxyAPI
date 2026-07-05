@@ -87,7 +87,10 @@ func TestIsOfficialCodexOriginator(t *testing.T) {
 			t.Errorf("want official Codex originator: %q", o)
 		}
 	}
-	for _, o := range []string{"", "python", "vscode", "my-app"} {
+	// "Codex Desktop" and the injection-style values must NOT match: a loose "codex"
+	// prefix would forward them verbatim while the UA is normalized to codex_cli_rs,
+	// a cross-layer mismatch the observatory caught live on real accounts.
+	for _, o := range []string{"", "python", "vscode", "my-app", "Codex Desktop", "codexZZZ", "codex/evil", "codex"} {
 		if isOfficialCodexOriginator(o) {
 			t.Errorf("want foreign originator: %q", o)
 		}
