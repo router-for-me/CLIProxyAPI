@@ -155,27 +155,41 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 func TestJitteredCooldownWaitBounds(t *testing.T) {
 	cases := []struct {
 		wait      time.Duration
+		maxWait   time.Duration
 		maxJitter time.Duration
 	}{
-		{time.Second, 250 * time.Millisecond},
-		{8 * time.Second, 2 * time.Second},
-		{30 * time.Second, 2 * time.Second},
+		{time.Second, 0, 250 * time.Millisecond},
+		{8 * time.Second, 0, 2 * time.Second},
+		{30 * time.Second, 0, 2 * time.Second},
+		{time.Second, 30 * time.Second, 250 * time.Millisecond},
+		{29 * time.Second, 30 * time.Second, time.Second},
 	}
 	for _, tc := range cases {
 		for i := 0; i < 200; i++ {
-			got := jitteredCooldownWait(tc.wait)
+			got := jitteredCooldownWait(tc.wait, tc.maxWait)
 			if got < tc.wait || got >= tc.wait+tc.maxJitter {
-				t.Fatalf("jitteredCooldownWait(%v) = %v, want in [%v, %v)", tc.wait, got, tc.wait, tc.wait+tc.maxJitter)
+				t.Fatalf("jitteredCooldownWait(%v, %v) = %v, want in [%v, %v)", tc.wait, tc.maxWait, got, tc.wait, tc.wait+tc.maxJitter)
+			}
+			if tc.maxWait > 0 && got > tc.maxWait {
+				t.Fatalf("jitteredCooldownWait(%v, %v) = %v exceeds maxWait", tc.wait, tc.maxWait, got)
 			}
 		}
 	}
-	if got := jitteredCooldownWait(0); got != 0 {
+
+	// maxWait is a hard ceiling: zero headroom disables jitter entirely.
+	for i := 0; i < 50; i++ {
+		if got := jitteredCooldownWait(30*time.Second, 30*time.Second); got != 30*time.Second {
+			t.Fatalf("expected wait at maxWait to stay unjittered, got %v", got)
+		}
+	}
+
+	if got := jitteredCooldownWait(0, time.Minute); got != 0 {
 		t.Fatalf("expected zero wait to stay zero, got %v", got)
 	}
-	if got := jitteredCooldownWait(-time.Second); got != -time.Second {
+	if got := jitteredCooldownWait(-time.Second, time.Minute); got != -time.Second {
 		t.Fatalf("expected negative wait to pass through, got %v", got)
 	}
-	if got := jitteredCooldownWait(3); got != 3 {
+	if got := jitteredCooldownWait(3, 0); got != 3 {
 		t.Fatalf("expected sub-4ns wait to stay unchanged, got %v", got)
 	}
 }

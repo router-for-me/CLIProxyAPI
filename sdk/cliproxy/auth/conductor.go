@@ -2288,7 +2288,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
@@ -2325,7 +2325,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
@@ -2356,7 +2356,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return nil, errWait
 		}
 	}
@@ -3485,8 +3485,10 @@ const cooldownWaitJitterCap = 2 * time.Second
 
 // jitteredCooldownWait adds a small random delay to a cooldown wait so
 // concurrent requests waiting on the same recovery deadline do not wake in
-// lockstep and stampede the first credential that recovers.
-func jitteredCooldownWait(wait time.Duration) time.Duration {
+// lockstep and stampede the first credential that recovers. The jitter never
+// pushes the total wait past maxWait, which callers have already enforced as
+// the retry ceiling; maxWait <= 0 means no ceiling.
+func jitteredCooldownWait(wait, maxWait time.Duration) time.Duration {
 	if wait <= 0 {
 		return wait
 	}
@@ -3494,17 +3496,20 @@ func jitteredCooldownWait(wait time.Duration) time.Duration {
 	if jitterRange > cooldownWaitJitterCap {
 		jitterRange = cooldownWaitJitterCap
 	}
+	if maxWait > 0 && jitterRange > maxWait-wait {
+		jitterRange = maxWait - wait
+	}
 	if jitterRange <= 0 {
 		return wait
 	}
 	return wait + rand.N(jitterRange)
 }
 
-func waitForCooldown(ctx context.Context, wait time.Duration) error {
+func waitForCooldown(ctx context.Context, wait, maxWait time.Duration) error {
 	if wait <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(jitteredCooldownWait(wait))
+	timer := time.NewTimer(jitteredCooldownWait(wait, maxWait))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
