@@ -225,6 +225,24 @@ nonstream-keepalive-interval: 0
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
 
+# Native Interactions API keys
+# These keys are used only for direct /v1beta/interactions execution. Regular gemini-api-key entries still
+# send Gemini generateContent/streamGenerateContent requests when the client enters through the interactions API.
+# interactions-api-key:
+#   - api-key: "AIzaSy...03"
+#     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     base-url: "https://generativelanguage.googleapis.com"
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080"
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     models:
+#       - name: "gemini-2.5-flash" # upstream model name
+#         alias: "native-gemini-flash" # client alias mapped to the upstream model
+#     excluded-models:
+#       - "gemini-2.5-pro"
+
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
@@ -359,7 +377,7 @@ nonstream-keepalive-interval: 0
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.

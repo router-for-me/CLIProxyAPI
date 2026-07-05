@@ -959,3 +959,14 @@ func TestHomeModelsErrorMessage(t *testing.T) {
 		t.Fatalf("default message = %q, want fallback", msg)
 	}
 }
+
+func TestInteractionsRouteRegistered(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{"model":"gemini-3.5-flash","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
+	}
+}
