@@ -713,12 +713,21 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	if routeDecision.ExecutorPluginID != "" {
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision)
+	routingModel := originalRequestedModel
+	if routeDecision.Provider == "" {
+		if target := h.webSearchForwardTarget(originalRequestedModel, rawJSON); target != "" {
+			routingModel = target
+		}
+	}
+	providers, normalizedModel, errMsg := h.providersForExecution(routingModel, originalRequestedModel, allowImageModel, routeDecision)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	if routingModel != originalRequestedModel {
+		reqMeta[coreexecutor.ForcedResponseModelMetadataKey] = originalRequestedModel
+	}
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
@@ -779,12 +788,21 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision)
+	routingModel := originalRequestedModel
+	if routeDecision.Provider == "" {
+		if target := h.webSearchForwardTarget(originalRequestedModel, rawJSON); target != "" {
+			routingModel = target
+		}
+	}
+	providers, normalizedModel, errMsg := h.providersForExecution(routingModel, originalRequestedModel, false, routeDecision)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	if routingModel != originalRequestedModel {
+		reqMeta[coreexecutor.ForcedResponseModelMetadataKey] = originalRequestedModel
+	}
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	payload := rawJSON
@@ -1100,7 +1118,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	if routeDecision.ExecutorPluginID != "" {
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision)
+	routingModel := originalRequestedModel
+	if routeDecision.Provider == "" {
+		if target := h.webSearchForwardTarget(originalRequestedModel, rawJSON); target != "" {
+			routingModel = target
+		}
+	}
+	providers, normalizedModel, errMsg := h.providersForExecution(routingModel, originalRequestedModel, allowImageModel, routeDecision)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -1109,6 +1133,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	if routingModel != originalRequestedModel {
+		reqMeta[coreexecutor.ForcedResponseModelMetadataKey] = originalRequestedModel
+	}
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
 	setReasoningEffortMetadata(reqMeta, entryProtocol, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
