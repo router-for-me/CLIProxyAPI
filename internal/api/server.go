@@ -34,6 +34,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -62,19 +63,25 @@ var corsExposedResponseHeaders = []string{
 
 var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, ", ")
 
+const (
+	exampleAPIKeyManagementPath = "/management.html"
+	exampleAPIKeyManagementURL  = "/management.html?safe-mode=configure"
+)
+
 type serverOptionConfig struct {
-	extraMiddleware      []gin.HandlerFunc
-	engineConfigurator   func(*gin.Engine)
-	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
-	localPassword        string
-	keepAliveEnabled     bool
-	keepAliveTimeout     time.Duration
-	keepAliveOnTimeout   func()
-	postAuthHook         auth.PostAuthHook
-	postAuthPersistHook  auth.PostAuthHook
-	pluginHost           *pluginhost.Host
-	configReloadHook     func(context.Context, *config.Config)
+	extraMiddleware       []gin.HandlerFunc
+	engineConfigurator    func(*gin.Engine)
+	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	requestLoggerFactory  func(*config.Config, string) logging.RequestLogger
+	localPassword         string
+	keepAliveEnabled      bool
+	keepAliveTimeout      time.Duration
+	keepAliveOnTimeout    func()
+	postAuthHook          auth.PostAuthHook
+	postAuthPersistHook   auth.PostAuthHook
+	pluginHost            *pluginhost.Host
+	configReloadHook      func(context.Context, *config.Config)
+	exampleAPIKeySafeMode bool
 }
 
 // ServerOption customises HTTP server construction.
@@ -174,6 +181,13 @@ func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOpti
 	}
 }
 
+// WithExampleAPIKeySafeMode blocks proxy API endpoints while template API keys remain configured.
+func WithExampleAPIKeySafeMode() ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.exampleAPIKeySafeMode = true
+	}
+}
+
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
@@ -239,6 +253,9 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	exampleAPIKeySafeModeEnabled bool
+	exampleAPIKeySafeModeActive  atomic.Bool
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -315,8 +332,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 		pluginHost:          optionState.pluginHost,
+
+		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
 	if optionState.pluginHost != nil {
 		optionState.pluginHost.SetModelExecutor(s.handlers)
@@ -352,6 +372,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Home heartbeat gate: when home is enabled, block all endpoints with 503 until the
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
+	engine.Use(s.exampleAPIKeySafeModeMiddleware())
 
 	// Setup routes
 	s.setupRoutes()
@@ -404,6 +425,71 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 			return
 		}
 		c.Next()
+	}
+}
+
+func (s *Server) exampleAPIKeySafeModeRequired(cfg *config.Config) bool {
+	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(cfg.APIKeys)
+}
+
+func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || !s.exampleAPIKeySafeModeActive.Load() || c == nil || c.Request == nil || c.Request.URL == nil {
+			c.Next()
+			return
+		}
+
+		path := c.Request.URL.Path
+		if path == exampleAPIKeyManagementPath && c.Query("safe-mode") == "configure" {
+			c.Next()
+			return
+		}
+		if (path == "/" || path == exampleAPIKeyManagementPath) && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
+			s.serveExampleAPIKeyWarningPage(c)
+			return
+		}
+		if !isExampleAPIKeySafeModeProxyPath(path) {
+			c.Next()
+			return
+		}
+
+		c.Header("X-CPA-SAFE-MODE", "example-api-key")
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "unsafe_example_api_key",
+			"message": "Proxy API endpoints are disabled because api-keys contains template values. Open /management.html?safe-mode=configure, update api-keys in Management, then retry.",
+		})
+	}
+}
+
+func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
+	cfg := s.cfg
+	var keys []string
+	if cfg != nil {
+		keys = safemode.ExampleAPIKeys(cfg.APIKeys)
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Header("Cache-Control", "no-store")
+	if c.Request.Method == http.MethodHead {
+		c.Status(http.StatusOK)
+		c.Abort()
+		return
+	}
+	c.String(http.StatusOK, safemode.ExampleAPIKeyWarningPageHTML(keys, exampleAPIKeyManagementURL))
+	c.Abort()
+}
+
+func isExampleAPIKeySafeModeProxyPath(path string) bool {
+	switch {
+	case path == "/v1" || strings.HasPrefix(path, "/v1/"):
+		return true
+	case path == "/v1beta" || strings.HasPrefix(path, "/v1beta/"):
+		return true
+	case path == "/openai/v1" || strings.HasPrefix(path, "/openai/v1/"):
+		return true
+	case path == "/backend-api/codex" || strings.HasPrefix(path, "/backend-api/codex/"):
+		return true
+	default:
+		return false
 	}
 }
 
@@ -470,6 +556,7 @@ func (s *Server) setupRoutes() {
 	v1beta.Use(AuthMiddleware(s.accessManager))
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
+		v1beta.POST("/interactions", geminiHandlers.Interactions)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 	}
@@ -661,6 +748,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)
 		mgmt.DELETE("/gemini-api-key", s.mgmt.DeleteGeminiKey)
+
+		mgmt.GET("/interactions-api-key", s.mgmt.GetInteractionsKeys)
+		mgmt.PUT("/interactions-api-key", s.mgmt.PutInteractionsKeys)
+		mgmt.PATCH("/interactions-api-key", s.mgmt.PatchInteractionsKey)
+		mgmt.DELETE("/interactions-api-key", s.mgmt.DeleteInteractionsKey)
 
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
@@ -1560,13 +1652,14 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
+func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) bool {
 	if s == nil || s.accessManager == nil || newCfg == nil {
-		return
+		return false
 	}
 	if _, err := access.ApplyAccessProviders(s.accessManager, oldCfg, newCfg); err != nil {
-		return
+		return false
 	}
+	return true
 }
 
 // UpdateClients updates the server's client list and configuration.
@@ -1676,7 +1769,14 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 	redisqueue.SetEnabled(s.managementRoutesEnabled.Load() || (cfg != nil && cfg.Home.Enabled))
 
-	s.applyAccessConfig(oldCfg, cfg)
+	exampleAPIKeySafeModeRequired := s.exampleAPIKeySafeModeRequired(cfg)
+	if exampleAPIKeySafeModeRequired {
+		s.exampleAPIKeySafeModeActive.Store(true)
+	}
+	accessConfigApplied := s.applyAccessConfig(oldCfg, cfg)
+	if accessConfigApplied || exampleAPIKeySafeModeRequired {
+		s.exampleAPIKeySafeModeActive.Store(exampleAPIKeySafeModeRequired)
+	}
 	s.cfg = cfg
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
@@ -1710,6 +1810,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		authEntries = util.CountAuthFiles(context.Background(), tokenStore)
 	}
 	geminiAPIKeyCount := len(cfg.GeminiKey)
+	interactionsAPIKeyCount := len(cfg.InteractionsKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
@@ -1722,11 +1823,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + interactionsAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Interactions API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
+		interactionsAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		vertexAICompatCount,

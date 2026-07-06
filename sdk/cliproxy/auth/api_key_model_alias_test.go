@@ -66,6 +66,27 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 	}
 }
 
+func TestLookupAPIKeyUpstreamModel_InteractionsKey(t *testing.T) {
+	cfg := &internalconfig.Config{
+		InteractionsKey: []internalconfig.GeminiKey{{
+			APIKey:  "interactions-key",
+			BaseURL: "https://interactions.example.com",
+			Models:  []internalconfig.GeminiModel{{Name: "gemini-2.5-flash", Alias: "native-flash"}},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	_, _ = mgr.Register(ctx, &Auth{ID: "interactions-auth", Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "interactions-key", "base_url": "https://interactions.example.com"}})
+
+	resolved := mgr.lookupAPIKeyUpstreamModel("interactions-auth", "native-flash")
+	if resolved != "gemini-2.5-flash" {
+		t.Fatalf("lookupAPIKeyUpstreamModel() = %q, want gemini-2.5-flash", resolved)
+	}
+}
+
 func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 	cfg := &internalconfig.Config{
 		GeminiKey: []internalconfig.GeminiKey{

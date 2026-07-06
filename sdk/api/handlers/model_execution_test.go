@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -516,5 +518,271 @@ func TestExecuteModelStreamContextCancel(t *testing.T) {
 		}
 	case <-timeout.C:
 		t.Fatal("stream chunks did not close after context cancellation")
+	}
+}
+
+func TestExecuteProtocolWithAuthManagerUsesForcedProvider(t *testing.T) {
+	model := "interactions-agent-target"
+	requestBody := []byte(`{"agent":"agents/test-agent","input":"hi"}`)
+	executor := &modelExecutionCaptureExecutor{
+		provider: "gemini",
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{Payload: []byte(`{"id":"interaction_1"}`)}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+
+	resp, errMsg := handler.ExecuteProtocolWithAuthManager(context.Background(), ProtocolExecutionRequest{
+		EntryProtocol:  "interactions",
+		ExitProtocol:   "interactions",
+		ForcedProvider: "gemini",
+		Model:          model,
+		Body:           requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteProtocolWithAuthManager() error = %+v", errMsg)
+	}
+	if string(resp.Body) != `{"id":"interaction_1"}` {
+		t.Fatalf("body = %q, want native interactions response", resp.Body)
+	}
+
+	gotReq, gotOpts := executor.captured()
+	if gotReq.Model != model {
+		t.Fatalf("executor model = %q, want %q", gotReq.Model, model)
+	}
+	if gotOpts.SourceFormat != sdktranslator.FormatInteractions {
+		t.Fatalf("SourceFormat = %q, want %q", gotOpts.SourceFormat, sdktranslator.FormatInteractions)
+	}
+	if gotOpts.ResponseFormat != sdktranslator.FormatInteractions {
+		t.Fatalf("ResponseFormat = %q, want %q", gotOpts.ResponseFormat, sdktranslator.FormatInteractions)
+	}
+	if gotOpts.Metadata[coreexecutor.RequestedModelMetadataKey] != model {
+		t.Fatalf("requested model metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.RequestedModelMetadataKey], model)
+	}
+}
+
+func TestPreferExecutionProviderMovesPreferredFirst(t *testing.T) {
+	providers := preferExecutionProvider([]string{"gemini", "gemini-interactions", "claude"}, "gemini-interactions")
+	want := []string{"gemini-interactions", "gemini", "claude"}
+	if len(providers) != len(want) {
+		t.Fatalf("providers = %#v, want %#v", providers, want)
+	}
+	for i := range want {
+		if providers[i] != want[i] {
+			t.Fatalf("providers = %#v, want %#v", providers, want)
+		}
+	}
+}
+
+func TestAdjustExecutionProvidersExcludesInteractionsProviderForUnsupportedEntry(t *testing.T) {
+	providers := adjustExecutionProvidersForEntryProtocol("codex", []string{"gemini-interactions", "codex"})
+	want := []string{"codex"}
+	if len(providers) != len(want) {
+		t.Fatalf("providers = %#v, want %#v", providers, want)
+	}
+	for i := range want {
+		if providers[i] != want[i] {
+			t.Fatalf("providers = %#v, want %#v", providers, want)
+		}
+	}
+}
+
+func TestAdjustExecutionProvidersKeepsInteractionsProviderForSupportedNativeInteractionsEntries(t *testing.T) {
+	for _, entryProtocol := range []string{constant.OpenAI, constant.OpenaiResponse, constant.Claude, constant.Gemini} {
+		t.Run(entryProtocol, func(t *testing.T) {
+			providers := adjustExecutionProvidersForEntryProtocol(entryProtocol, []string{"gemini-interactions"})
+			want := []string{"gemini-interactions"}
+			if len(providers) != len(want) {
+				t.Fatalf("providers = %#v, want %#v", providers, want)
+			}
+			for i := range want {
+				if providers[i] != want[i] {
+					t.Fatalf("providers = %#v, want %#v", providers, want)
+				}
+			}
+		})
+	}
+}
+
+func TestExecuteModelStreamKeepsInteractionsProviderForOpenAIEntry(t *testing.T) {
+	model := "gemini-3.1-flash-lite"
+	requestBody := []byte(`{"model":"gemini-3.1-flash-lite","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	executor := &modelExecutionCaptureExecutor{
+		provider: constant.GeminiInteractions,
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"chunk_1","object":"chat.completion.chunk","choices":[]}`)}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+
+	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol: constant.OpenAI,
+		ExitProtocol:  constant.OpenAI,
+		Model:         model,
+		Stream:        true,
+		Body:          requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModelStream() error = %+v", errMsg)
+	}
+	for range stream.Chunks {
+	}
+	gotReq, gotOpts := executor.captured()
+	if gotReq.Model != model {
+		t.Fatalf("executor model = %q, want %q", gotReq.Model, model)
+	}
+	if gotOpts.SourceFormat != sdktranslator.FormatOpenAI {
+		t.Fatalf("SourceFormat = %q, want %q", gotOpts.SourceFormat, sdktranslator.FormatOpenAI)
+	}
+}
+
+func TestExecuteProtocolWithAuthManagerAgentUsesSelectionModelForAuth(t *testing.T) {
+	selectionModel := "gemini-2.5-flash"
+	agentModel := "agents/test-agent"
+	requestBody := []byte(`{"agent":"agents/test-agent","input":"hi"}`)
+	executor := &modelExecutionCaptureExecutor{
+		provider: constant.GeminiInteractions,
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{Payload: []byte(`{"id":"interaction_1"}`)}, nil
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       "model-execution-agent-selection",
+		Provider: constant.GeminiInteractions,
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "agent-selection@example.com"},
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: selectionModel}, {ID: agentModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register(): %v", errRegister)
+	}
+	manager.RefreshSchedulerEntry(auth.ID)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	resp, errMsg := handler.ExecuteProtocolWithAuthManager(context.Background(), ProtocolExecutionRequest{
+		EntryProtocol:      "interactions",
+		ExitProtocol:       "interactions",
+		ForcedProvider:     constant.GeminiInteractions,
+		AuthSelectionModel: selectionModel,
+		Model:              agentModel,
+		Body:               requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteProtocolWithAuthManager() error = %+v", errMsg)
+	}
+	if string(resp.Body) != `{"id":"interaction_1"}` {
+		t.Fatalf("body = %q, want native interactions response", resp.Body)
+	}
+	gotReq, gotOpts := executor.captured()
+	if gotReq.Model != agentModel {
+		t.Fatalf("executor model = %q, want %q", gotReq.Model, agentModel)
+	}
+	if string(gotReq.Payload) != string(requestBody) {
+		t.Fatalf("executor payload = %q, want %q", gotReq.Payload, requestBody)
+	}
+	if gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey] != selectionModel {
+		t.Fatalf("auth selection metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey], selectionModel)
+	}
+}
+
+func TestExecuteProtocolStreamWithAuthManagerAgentUsesSelectionModelForAuth(t *testing.T) {
+	selectionModel := "gemini-2.5-flash"
+	agentModel := "agents/test-agent"
+	requestBody := []byte(`{"agent":"agents/test-agent","input":"hi","stream":true}`)
+	executor := &modelExecutionCaptureExecutor{
+		provider: constant.GeminiInteractions,
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"interaction_1"}`)}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       "model-execution-agent-stream-selection",
+		Provider: constant.GeminiInteractions,
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "agent-stream-selection@example.com"},
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: selectionModel}, {ID: agentModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register(): %v", errRegister)
+	}
+	manager.RefreshSchedulerEntry(auth.ID)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	stream, errMsg := handler.ExecuteProtocolStreamWithAuthManager(context.Background(), ProtocolExecutionRequest{
+		EntryProtocol:      "interactions",
+		ExitProtocol:       "interactions",
+		ForcedProvider:     constant.GeminiInteractions,
+		AuthSelectionModel: selectionModel,
+		Model:              agentModel,
+		Stream:             true,
+		Body:               requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteProtocolStreamWithAuthManager() error = %+v", errMsg)
+	}
+	chunk, ok := <-stream.Chunks
+	if !ok {
+		t.Fatal("stream chunks closed before payload")
+	}
+	if chunk.Err != nil {
+		t.Fatalf("stream chunk error = %+v", chunk.Err)
+	}
+	if string(chunk.Payload) != `{"id":"interaction_1"}` {
+		t.Fatalf("stream chunk payload = %q, want native interactions response", chunk.Payload)
+	}
+	gotReq, gotOpts := executor.captured()
+	if gotReq.Model != agentModel {
+		t.Fatalf("executor model = %q, want %q", gotReq.Model, agentModel)
+	}
+	if string(gotReq.Payload) != string(requestBody) {
+		t.Fatalf("executor payload = %q, want %q", gotReq.Payload, requestBody)
+	}
+	if gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey] != selectionModel {
+		t.Fatalf("auth selection metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey], selectionModel)
+	}
+}
+
+func TestProvidersForExecutionForcedGeminiRejectsRouterProvider(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	decision := modelRouteDecision{Provider: "claude", Model: "claude-sonnet-4"}
+	_, _, errMsg := handler.providersForExecution("agents/test-agent", "agents/test-agent", false, decision, modelExecutionOptions{ForcedProvider: "gemini"})
+	if errMsg == nil {
+		t.Fatal("providersForExecution() error = nil, want native interactions error")
+	}
+	if errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+	}
+	if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "native interactions") {
+		t.Fatalf("error = %v, want native interactions message", errMsg.Error)
+	}
+}
+
+func TestProvidersForExecutionForcedGeminiUsesGeminiProvider(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	providers, model, errMsg := handler.providersForExecution("agents/test-agent", "agents/test-agent", false, modelRouteDecision{}, modelExecutionOptions{ForcedProvider: "gemini"})
+	if errMsg != nil {
+		t.Fatalf("providersForExecution() error = %+v", errMsg)
+	}
+	if len(providers) != 1 || providers[0] != "gemini" {
+		t.Fatalf("providers = %#v, want [gemini]", providers)
+	}
+	if model != "agents/test-agent" {
+		t.Fatalf("model = %q, want agents/test-agent", model)
 	}
 }
