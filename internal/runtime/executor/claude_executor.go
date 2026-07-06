@@ -545,6 +545,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if responseFormat == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
+			// Accumulate lines into complete SSE events before sending.
+			// A complete event is delimited by a blank line. Sending whole
+			// events atomically prevents the downstream keep-alive ticker
+			// from inserting heartbeats between the event: and data: lines
+			// of the same SSE frame.
+			var eventBuf []byte
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -552,12 +558,23 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					reporter.Publish(ctx, detail)
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
-				// Forward the line as-is to preserve SSE format
-				cloned := make([]byte, len(line)+1)
-				copy(cloned, line)
-				cloned[len(line)] = '\n'
+				eventBuf = append(eventBuf, line...)
+				eventBuf = append(eventBuf, '\n')
+				// Blank line signals end of an SSE event — flush the buffer.
+				if len(line) == 0 {
+					cloned := bytes.Clone(eventBuf)
+					eventBuf = eventBuf[:0]
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+			// Flush any trailing data that was not terminated by a blank line.
+			if len(eventBuf) > 0 {
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: bytes.Clone(eventBuf)}:
 				case <-ctx.Done():
 					return
 				}
