@@ -24,7 +24,24 @@ const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 	DefaultAuthDir               = "~/.cli-proxy-api"
+
+	// ProviderResilience defaults. MaxInflightPerProvider == 0 disables the limiter.
+	DefaultProviderMaxInFlight    = 4
+	DefaultProviderMaxQueueWaitMS = 30000
 )
+
+// ProviderResilienceConfig configures per-provider inflight request limiting
+// with a bounded blocking queue. When MaxInflightPerProvider is 0 the limiter
+// is disabled entirely (no queueing, no rejection).
+type ProviderResilienceConfig struct {
+	// MaxInflightPerProvider caps concurrent upstream calls per provider key.
+	// 0 disables limiting. Clamped to [0, 10000].
+	MaxInflightPerProvider int `yaml:"max-inflight-per-provider" json:"max-inflight-per-provider"`
+	// MaxQueueWaitMS is the maximum time a request waits for a permit before
+	// being rejected with 503 provider_backpressure. 0 waits until ctx cancel.
+	// Clamped to [0, 300000] (5 min).
+	MaxQueueWaitMS int `yaml:"max-queue-wait-ms" json:"max-queue-wait-ms"`
+}
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
@@ -105,6 +122,10 @@ type Config struct {
 
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
+
+	// ProviderResilience configures per-provider inflight limiting with a bounded
+	// blocking queue. When MaxInflightPerProvider is 0 the limiter is disabled.
+	ProviderResilience ProviderResilienceConfig `yaml:"provider-resilience" json:"-"`
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
@@ -722,6 +743,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.ProviderResilience.MaxInflightPerProvider = DefaultProviderMaxInFlight
+	cfg.ProviderResilience.MaxQueueWaitMS = DefaultProviderMaxQueueWaitMS
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -773,6 +796,20 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	// ProviderResilience clamping. 0 disables the limiter.
+	if cfg.ProviderResilience.MaxInflightPerProvider < 0 {
+		cfg.ProviderResilience.MaxInflightPerProvider = 0
+	}
+	if cfg.ProviderResilience.MaxInflightPerProvider > 10000 {
+		cfg.ProviderResilience.MaxInflightPerProvider = 10000
+	}
+	if cfg.ProviderResilience.MaxQueueWaitMS < 0 {
+		cfg.ProviderResilience.MaxQueueWaitMS = 0
+	}
+	if cfg.ProviderResilience.MaxQueueWaitMS > 300000 {
+		cfg.ProviderResilience.MaxQueueWaitMS = 300000
 	}
 
 	cfg.NormalizePluginsConfig()
