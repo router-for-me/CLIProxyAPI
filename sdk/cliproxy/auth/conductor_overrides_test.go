@@ -108,6 +108,77 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 }
 
+func TestManager_MarkResult_InferredLimitMessagesCooldownModel(t *testing.T) {
+	testCases := []struct {
+		name      string
+		message   string
+		wantQuota bool
+	}{
+		{
+			name:      "anthropic_rate_limit_body_without_status",
+			message:   `{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}`,
+			wantQuota: true,
+		},
+		{
+			name:      "claude_code_session_limit_without_status",
+			message:   "You've hit your session limit · resets 6:30am (Asia/Seoul)\n/usage-credits to finish what you're working on.",
+			wantQuota: true,
+		},
+		{
+			name:      "usage_credit_balance_without_status",
+			message:   "Your credit balance is too low to access this model.",
+			wantQuota: false,
+		},
+		{
+			name:      "anthropic_overloaded_without_status",
+			message:   `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+			wantQuota: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			auth := &Auth{ID: uuid.NewString(), Provider: "claude"}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			model := "claude-opus-4-8"
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: "claude",
+				Model:    model,
+				Success:  false,
+				Error:    &Error{Message: tc.message},
+			})
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok {
+				t.Fatalf("GetByID(%q) not found", auth.ID)
+			}
+			state := updated.ModelStates[model]
+			if state == nil {
+				t.Fatalf("model state missing for %q", model)
+			}
+			if !state.Unavailable {
+				t.Fatalf("model state Unavailable=false, want true")
+			}
+			if state.NextRetryAfter.IsZero() {
+				t.Fatalf("model NextRetryAfter is zero; selector would immediately reuse auth")
+			}
+			if state.Quota.Exceeded != tc.wantQuota {
+				t.Fatalf("model quota exceeded = %v, want %v", state.Quota.Exceeded, tc.wantQuota)
+			}
+			blocked, reason, next := isAuthBlockedForModel(updated, model, time.Now())
+			if !blocked {
+				t.Fatalf("isAuthBlockedForModel blocked=false, reason=%v next=%v", reason, next)
+			}
+		})
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
@@ -519,6 +590,121 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 	if !state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_QuotaProbeFailureDoesNotCooldownAuth(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{ID: "auth-1", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-opus-4-8"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		IsProbe:  true,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate_limit_error"},
+	})
+
+	updated, ok := m.GetByID("auth-1")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Quota.Exceeded {
+		t.Fatalf("expected quota probe failure to leave auth.Quota untouched, got Exceeded=true")
+	}
+	if state := updated.ModelStates[model]; state != nil && !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected quota probe failure not to cool down model state, got NextRetryAfter=%v", state.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_RealTraffic429StillCoolsDownAuth(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{ID: "auth-1", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "claude",
+		Model:    "claude-opus-4-8",
+		Success:  false,
+		IsProbe:  false,
+		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate_limit_error"},
+	})
+
+	updated, ok := m.GetByID("auth-1")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.Quota.Exceeded {
+		t.Fatalf("expected real-traffic 429 to still mark auth.Quota.Exceeded=true")
+	}
+}
+
+func TestIsQuotaProbeRequest(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{
+			name:    "matches Claude Code quota probe",
+			payload: `{"model":"claude-opus-4-8","max_tokens":1,"messages":[{"role":"user","content":"quota"}]}`,
+			want:    true,
+		},
+		{
+			name:    "case and whitespace tolerant",
+			payload: `{"max_tokens":1,"messages":[{"role":"user","content":"  Quota  "}]}`,
+			want:    true,
+		},
+		{
+			name:    "real traffic with max_tokens 1 but different content",
+			payload: `{"max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`,
+			want:    false,
+		},
+		{
+			name:    "real traffic with larger max_tokens",
+			payload: `{"max_tokens":4096,"messages":[{"role":"user","content":"quota"}]}`,
+			want:    false,
+		},
+		{
+			name:    "content blocks array is not treated as probe",
+			payload: `{"max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"quota"}]}]}`,
+			want:    false,
+		},
+		{
+			name:    "empty payload",
+			payload: ``,
+			want:    false,
+		},
+		{
+			name:    "malformed json",
+			payload: `{not json`,
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isQuotaProbeRequest([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("isQuotaProbeRequest(%q) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
 	}
 }
 
