@@ -1173,16 +1173,39 @@ func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, ke
 	}
 }
 
-// officialCodexUserAgentPrefixes are the User-Agent prefixes of first-party
-// OpenAI Codex CLIs. Only these are forwarded verbatim to the ChatGPT OAuth
-// backend; any other (or absent) UA is replaced with the canonical Codex UA.
-// Kept intentionally strict: a too-broad prefix such as bare "codex/" would let
-// a foreign UA like "codex/evil" through, and third-party agents (e.g. opencode)
-// are deliberately excluded so their UA is normalized to the official one.
-var officialCodexUserAgentPrefixes = []string{
-	"codex-tui/",
-	"codex_cli_rs/",
-	"codex-exec/",
+// codexFirstPartyClients are the canonical client-name tokens of first-party OpenAI
+// Codex clients. In real codex the Originator header and the User-Agent prefix are
+// both produced from the SAME originator() value, so they are same-named and can
+// never disagree on the wire (source: codex-rs login/src/auth/default_client.rs —
+// UA = "{originator}/{ver} (...)", asserted by its own unit tests). This single
+// table is therefore the one source of truth for BOTH the Originator allowlist and
+// the User-Agent-prefix allowlist, so the two can never drift apart. (The earlier
+// two independent lists had codex_vscode as an originator with no matching UA
+// prefix, and listed "codex-exec/" where the real client — first-hand captured —
+// sends the underscore form "codex_exec/"; both are fixed by deriving from here.)
+// GUI/host originators (codex_app, codex_chatgpt_desktop, codex_atlas, "Codex <X>"
+// space forms) are intentionally excluded: not wire-verified here, and admitting
+// them would re-open the cross-layer mismatch fp7 closed.
+var codexFirstPartyClients = []string{
+	"codex_cli_rs",
+	"codex-tui",
+	"codex_exec",
+	"codex_vscode",
+}
+
+// officialCodexUserAgentPrefixes are the "{client}/" User-Agent prefixes derived
+// from codexFirstPartyClients. Only these are forwarded verbatim to the ChatGPT
+// OAuth backend; any other (or absent) UA is replaced with the canonical Codex UA.
+// Kept strict so a too-broad prefix such as bare "codex/" cannot let "codex/evil"
+// through, and third-party agents (e.g. opencode) normalize to the official UA.
+var officialCodexUserAgentPrefixes = codexClientUAPrefixes()
+
+func codexClientUAPrefixes() []string {
+	prefixes := make([]string, len(codexFirstPartyClients))
+	for i, name := range codexFirstPartyClients {
+		prefixes[i] = strings.ToLower(strings.TrimSpace(name)) + "/"
+	}
+	return prefixes
 }
 
 // isOfficialCodexUserAgent reports whether ua looks like a first-party Codex CLI.
@@ -1227,19 +1250,22 @@ func ensureCodexUserAgent(target, source http.Header, configValue, fallbackValue
 	}
 }
 
-// officialCodexOriginators are the exact Originator tokens of first-party OpenAI
-// Codex clients. This mirrors the strict officialCodexUserAgentPrefixes allowlist:
-// only these pass through verbatim to the ChatGPT OAuth backend. The previous loose
-// "codex" prefix let a plausible-but-foreign value like "Codex Desktop" — or an
-// injected "codexZZZ" — through while the User-Agent was normalized to codex_cli_rs,
-// producing a cross-layer identity mismatch (UA=codex_cli_rs vs Originator=Codex
-// Desktop) that the fingerprint observatory caught live on real accounts. Exact
-// matching keeps Originator and User-Agent consistent.
-var officialCodexOriginators = map[string]struct{}{
-	"codex_cli_rs": {},
-	"codex-tui":    {},
-	"codex_exec":   {},
-	"codex_vscode": {},
+// officialCodexOriginators is the exact-match Originator set derived from the same
+// codexFirstPartyClients source of truth as officialCodexUserAgentPrefixes, so the
+// Originator and User-Agent allowlists can never disagree on which clients are
+// first-party. The previous loose "codex" prefix let a plausible-but-foreign value
+// like "Codex Desktop" — or an injected "codexZZZ" — through while the User-Agent
+// normalized to codex_cli_rs, producing a cross-layer identity mismatch
+// (UA=codex_cli_rs vs Originator=Codex Desktop) that the fingerprint observatory
+// caught live on real accounts. Exact matching keeps Originator and UA consistent.
+var officialCodexOriginators = codexOriginatorSet()
+
+func codexOriginatorSet() map[string]struct{} {
+	set := make(map[string]struct{}, len(codexFirstPartyClients))
+	for _, name := range codexFirstPartyClients {
+		set[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	return set
 }
 
 // isOfficialCodexOriginator reports whether an Originator value is exactly a
