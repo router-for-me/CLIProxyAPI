@@ -876,17 +876,21 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("codex executor: close response body error: %v", errClose)
 				}
-				httpResp, err = httpClient.Do(retryReq)
-				if err != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, err)
-					return resp, err
+				retryResp, retryErr := httpClient.Do(retryReq)
+				if retryErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+					return resp, retryErr
 				}
+				httpResp = retryResp
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 					goto codexReadExecuteResponse
 				}
 				b, _ = io.ReadAll(httpResp.Body)
 				b = applyCodexIdentityConfuseResponsePayload(b, identityState)
+				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
+					return resp, errClearReplay
+				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 				helps.LogWithRequestID(ctx).Debugf("request error after refresh retry, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 			} else if refreshErr != nil {
@@ -1089,11 +1093,12 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("codex executor: close response body error: %v", errClose)
 				}
-				httpResp, err = httpClient.Do(retryReq)
-				if err != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, err)
-					return resp, err
+				retryResp, retryErr := httpClient.Do(retryReq)
+				if retryErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+					return resp, retryErr
 				}
+				httpResp = retryResp
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 					goto codexReadCompactResponse
@@ -1249,11 +1254,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					authType, authValue = auth.AccountInfo()
 				}
 				helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{URL: url, Method: http.MethodPost, Headers: retryReq.Header.Clone(), Body: retryUpstreamBody, Provider: e.Identifier(), AuthID: authID, AuthLabel: authLabel, AuthType: authType, AuthValue: authValue})
-				httpResp, err = httpClient.Do(retryReq)
-				if err != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, err)
-					return nil, err
+				retryResp, retryErr := httpClient.Do(retryReq)
+				if retryErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+					return nil, retryErr
 				}
+				httpResp = retryResp
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 				if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 					goto codexBuildStreamResult
@@ -1267,6 +1273,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return nil, readErr
 				}
 				data = applyCodexIdentityConfuseResponsePayload(data, identityState)
+				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
+					return nil, errClearReplay
+				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 				helps.LogWithRequestID(ctx).Debugf("request error after refresh retry, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			} else if refreshErr != nil {
