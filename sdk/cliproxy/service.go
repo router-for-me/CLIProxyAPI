@@ -1951,7 +1951,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildGeminiConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -1962,7 +1962,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildGeminiConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -1974,7 +1974,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildVertexCompatConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -1992,7 +1992,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildClaudeConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -2018,7 +2018,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildCodexConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -2381,6 +2381,58 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 	}
 	return filtered
+}
+
+func expandExcludedModelsForConfigAliases[T modelEntry](excluded []string, models []T) []string {
+	if len(excluded) == 0 || len(models) == 0 {
+		return excluded
+	}
+	patterns := make([]string, 0, len(excluded))
+	seen := make(map[string]struct{}, len(excluded)+len(models)*2)
+	out := make([]string, 0, len(excluded)+len(models)*2)
+	add := func(model string) {
+		model = strings.ToLower(strings.TrimSpace(model))
+		if model == "" {
+			return
+		}
+		if _, exists := seen[model]; exists {
+			return
+		}
+		seen[model] = struct{}{}
+		out = append(out, model)
+	}
+	for _, item := range excluded {
+		trimmed := strings.ToLower(strings.TrimSpace(item))
+		if trimmed == "" {
+			continue
+		}
+		patterns = append(patterns, trimmed)
+		add(trimmed)
+	}
+	if len(patterns) == 0 {
+		return excluded
+	}
+	for i := range models {
+		name := strings.TrimSpace(models[i].GetName())
+		alias := strings.TrimSpace(models[i].GetAlias())
+		if name == "" || alias == "" || name == alias {
+			continue
+		}
+		nameKey := strings.ToLower(name)
+		aliasKey := strings.ToLower(alias)
+		matched := false
+		for _, pattern := range patterns {
+			if matchWildcard(pattern, nameKey) || matchWildcard(pattern, aliasKey) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			add(name)
+			add(alias)
+		}
+	}
+	return out
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

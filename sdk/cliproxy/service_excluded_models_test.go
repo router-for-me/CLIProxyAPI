@@ -281,6 +281,44 @@ func providersContain(providers []string, want string) bool {
 	return false
 }
 
+func TestRegisterModelsForAuth_ConfigAliasExclusionBlocksOriginalModelPair(t *testing.T) {
+	service := &Service{cfg: &config.Config{
+		CodexKey: []internalconfig.CodexKey{{
+			APIKey:         "codex-excluded-key",
+			BaseURL:        "https://example.com",
+			ExcludedModels: []string{"my-gpt"},
+			Models: []internalconfig.CodexModel{{
+				Name:  "gpt-5",
+				Alias: "my-gpt",
+			}},
+		}},
+	}}
+	auth := &coreauth.Auth{
+		ID:       "auth-codex-alias-excluded-route",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "codex-excluded-key",
+			"base_url":  "https://example.com",
+		},
+	}
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	if providersContain(modelRegistry.GetModelProviders("my-gpt"), "codex") {
+		t.Fatalf("alias model remained routable after exclusion")
+	}
+	if providersContain(modelRegistry.GetModelProviders("gpt-5"), "codex") {
+		t.Fatalf("original model remained routable after alias exclusion")
+	}
+}
+
 func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
 	var sawFetch bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
