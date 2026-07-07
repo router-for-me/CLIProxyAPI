@@ -1331,6 +1331,12 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
+	if !*req.Disabled {
+		if _, _, errReset := h.authManager.ResetQuota(ctx, targetAuth.ID); errReset != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to reset auth quota: %v", errReset)})
+			return
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
