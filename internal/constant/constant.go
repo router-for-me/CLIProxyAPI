@@ -7,6 +7,9 @@ const (
 	// Gemini represents the Google Gemini provider identifier.
 	Gemini = "gemini"
 
+	// GeminiInteractions represents the native Google Interactions API provider identifier.
+	GeminiInteractions = "gemini-interactions"
+
 	// Codex represents the OpenAI Codex provider identifier.
 	Codex = "codex"
 
@@ -21,4 +24,7 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// Interactions represents the Google Interactions API format identifier.
+	Interactions = "interactions"
 )
