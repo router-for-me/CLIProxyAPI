@@ -2540,9 +2540,8 @@ func appendModelInfoIfUnique(models []*ModelInfo, info *ModelInfo, seen map[stri
 		return models
 	}
 	seen[key] = struct{}{}
-	clone := *info
-	clone.ID = modelID
-	return append(models, &clone)
+	info.ID = modelID
+	return append(models, info)
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
