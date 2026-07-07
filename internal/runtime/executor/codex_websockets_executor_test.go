@@ -227,6 +227,68 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		deadline := time.Now().Add(time.Second)
+		closeMessage := websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "message too big")
+		if errWrite := conn.WriteControl(websocket.CloseMessage, closeMessage, deadline); errWrite != nil {
+			t.Errorf("write close websocket message: %v", errWrite)
+			return
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before error chunk")
+		}
+		if chunk.Err == nil {
+			t.Fatal("error chunk Err = nil, want message-too-big error")
+		}
+		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("error type %T does not expose StatusCode", chunk.Err)
+		}
+		if got := statusErr.StatusCode(); got != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want %d", got, http.StatusRequestEntityTooLarge)
+		}
+		if got := gjson.Get(chunk.Err.Error(), "error.code").String(); got != "message_too_big" {
+			t.Fatalf("error code = %q, want message_too_big; err=%v", got, chunk.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for error stream chunk")
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
