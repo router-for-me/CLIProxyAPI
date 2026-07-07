@@ -2008,31 +2008,17 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	oauthToken := isClaudeOAuthToken(apiKey)
 	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
 
-	// Get cloak config from ClaudeKey configuration
-	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	// Resolve cloak mode via shared helper (same precedence used by shouldCloakForCount).
+	cloakMode := resolveCloakMode(cfg, auth)
 
-	// Determine cloak settings. Precedence (low -> high):
-	//   built-in "auto" default
-	//   -> global disable-claude-cloak-mode switch (forces "never")
-	//   -> per-credential settings from auth attributes/metadata
-	//   -> per claude-api-key cloak config
-	cloakMode := "auto"
-	if cfg != nil && cfg.DisableClaudeCloakMode {
-		cloakMode = "never"
-	}
+	// Resolve remaining per-credential cloak settings (strict, sensitive words, cache).
+	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
+	_, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
 	strictMode := attrStrict
 	sensitiveWords := attrWords
 	cacheUserID := attrCache
 
-	if attrMode != "" {
-		cloakMode = attrMode
-	}
-
 	if cloakCfg != nil {
-		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
-			cloakMode = mode
-		}
 		if cloakCfg.StrictMode {
 			strictMode = true
 		}
@@ -2073,9 +2059,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	return payload, nil
 }
 
-// shouldCloakForCount mirrors the cloak-mode resolution in applyCloaking so the
-// count_tokens path only injects the system prompt when cloaking is required.
-func shouldCloakForCount(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) bool {
+// resolveCloakMode resolves the effective cloak mode from global config,
+// per-credential auth attributes, and per claude-api-key cloak config.
+// Precedence (low → high): "auto" → disable-claude-cloak-mode → auth attr → claude-api-key.
+func resolveCloakMode(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	cloakMode := "auto"
 	if cfg != nil && cfg.DisableClaudeCloakMode {
 		cloakMode = "never"
@@ -2088,7 +2075,13 @@ func shouldCloakForCount(ctx context.Context, cfg *config.Config, auth *cliproxy
 			cloakMode = mode
 		}
 	}
-	return helps.ShouldCloak(cloakMode, getClientUserAgent(ctx))
+	return cloakMode
+}
+
+// shouldCloakForCount uses the shared cloak-mode resolution so the count_tokens
+// path only injects the system prompt when cloaking is required.
+func shouldCloakForCount(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	return helps.ShouldCloak(resolveCloakMode(cfg, auth), getClientUserAgent(ctx))
 }
 
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.
