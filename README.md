@@ -209,7 +209,11 @@ Cross-platform (Tauri) port of Quotio for Windows, macOS and Linux. Manages a po
 
 VS Code extension that brings your Claude, ChatGPT/Codex, Antigravity, Grok, and Kimi subscriptions into GitHub Copilot Chat as native language models — and can power your Git commit messages, chat titles, and summaries too. Runs CLIProxyAPI in a fully managed background lifecycle (download, verify, supervise) shared across all windows, so it's zero-setup. No API keys needed, just OAuth.
 
-> [!NOTE]  
+### [codexcomp](https://github.com/uf-hy/cpa-plugin-codexcomp)
+
+CPA plugin that detects and continues gpt-5.5 reasoning truncation at the 518n−2 token boundary (516/1034/1552), folds multi-round continuations into a single streaming response with reconstructed usage and metadata.
+
+> [!NOTE]
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
 ## More choices
