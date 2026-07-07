@@ -691,7 +691,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
-	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
+	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") && shouldCloakForCount(ctx, e.cfg, auth) {
 		body = checkSystemInstructions(body)
 	}
 
@@ -2071,6 +2071,24 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	}
 
 	return payload, nil
+}
+
+// shouldCloakForCount mirrors the cloak-mode resolution in applyCloaking so the
+// count_tokens path only injects the system prompt when cloaking is required.
+func shouldCloakForCount(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	cloakMode := "auto"
+	if cfg != nil && cfg.DisableClaudeCloakMode {
+		cloakMode = "never"
+	}
+	if attrMode, _, _, _ := getCloakConfigFromAuth(auth); attrMode != "" {
+		cloakMode = attrMode
+	}
+	if cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth); cloakCfg != nil {
+		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
+			cloakMode = mode
+		}
+	}
+	return helps.ShouldCloak(cloakMode, getClientUserAgent(ctx))
 }
 
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.

@@ -2887,3 +2887,91 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testin
 		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
 	}
 }
+
+func TestClaudeExecutor_CountTokens_SkipsCloakWhenDisabled(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":8}`))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+
+	tests := []struct {
+		name      string
+		cfg       *config.Config
+		auth      *cliproxyauth.Auth
+		userAgent string
+		wantCloak bool
+	}{
+		{
+			name:      "disable-claude-cloak-mode skips injection",
+			cfg:       &config.Config{DisableClaudeCloakMode: true},
+			auth:      &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "base_url": server.URL}},
+			wantCloak: false,
+		},
+		{
+			name:      "claude-cli user-agent auto-skips injection",
+			cfg:       &config.Config{},
+			auth:      &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "base_url": server.URL}},
+			userAgent: "claude-cli/2.1.70 (external, cli)",
+			wantCloak: false,
+		},
+		{
+			name: "per-credential cloak_mode=never skips injection",
+			cfg:  &config.Config{},
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":    "key-123",
+				"base_url":   server.URL,
+				"cloak_mode": "never",
+			}},
+			wantCloak: false,
+		},
+		{
+			name:      "default config with non-claude UA still injects",
+			cfg:       &config.Config{},
+			auth:      &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "base_url": server.URL}},
+			userAgent: "some-other-client/1.0",
+			wantCloak: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seenBody = nil
+			executor := NewClaudeExecutor(tt.cfg)
+
+			ctx := context.Background()
+			if tt.userAgent != "" {
+				gin.SetMode(gin.TestMode)
+				ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages/count_tokens", nil)
+				ginReq.Header.Set("User-Agent", tt.userAgent)
+				ginCtx.Request = ginReq
+				ctx = context.WithValue(ctx, "gin", ginCtx)
+			}
+
+			_, err := executor.CountTokens(ctx, tt.auth, cliproxyexecutor.Request{
+				Model:   "claude-sonnet-4-20250514",
+				Payload: payload,
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+			if err != nil {
+				t.Fatalf("CountTokens() error = %v", err)
+			}
+			if len(seenBody) == 0 {
+				t.Fatal("expected request body to be captured")
+			}
+
+			hasBilling := strings.Contains(string(seenBody), "x-anthropic-billing-header:")
+			if tt.wantCloak && !hasBilling {
+				t.Fatalf("expected system prompt injection but it was absent: %s", string(seenBody))
+			}
+			if !tt.wantCloak && hasBilling {
+				t.Fatalf("system prompt injection should be skipped but was present: %s", string(seenBody))
+			}
+		})
+	}
+}
