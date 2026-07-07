@@ -541,10 +541,24 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 
-		// If the response target is Claude, directly forward the SSE stream without translation.
+		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
+			var event bytes.Buffer
+			flushEvent := func() bool {
+				if event.Len() == 0 {
+					return true
+				}
+				cloned := bytes.Clone(event.Bytes())
+				event.Reset()
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+					return true
+				case <-ctx.Done():
+					return false
+				}
+			}
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -552,15 +566,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					reporter.Publish(ctx, detail)
 				}
 				line = restoreClaudeOAuthToolNamesFromStreamLine(line, claudeToolPrefix, auth.ToolPrefixDisabled(), oauthToolNamesReverseMap)
-				// Forward the line as-is to preserve SSE format
-				cloned := make([]byte, len(line)+1)
-				copy(cloned, line)
-				cloned[len(line)] = '\n'
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
-				case <-ctx.Done():
+				event.Write(line)
+				event.WriteByte('\n')
+				if len(bytes.TrimSpace(line)) == 0 && !flushEvent() {
 					return
 				}
+			}
+			if !flushEvent() {
+				return
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
