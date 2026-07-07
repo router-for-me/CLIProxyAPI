@@ -173,6 +173,10 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		}
 		if info.Type == registry.OpenAIImageModelType {
 			entry["visibility"] = "hide"
+			delete(entry, "input_modalities")
+			delete(entry, "supports_image_detail_original")
+		} else {
+			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 		}
 		applyCodexClientThinkingMetadata(entry, info.Thinking)
 	}
@@ -210,6 +214,33 @@ func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 	switch strings.TrimSpace(id) {
 	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"
+	}
+}
+
+func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []string) {
+	if len(modalities) == 0 {
+		return
+	}
+	codexModalities := make([]any, 0, len(modalities))
+	supportsImage := false
+	for _, raw := range modalities {
+		modality := strings.ToLower(strings.TrimSpace(raw))
+		if modality == "" {
+			continue
+		}
+		codexModalities = append(codexModalities, modality)
+		if modality == "image" {
+			supportsImage = true
+		}
+	}
+	if len(codexModalities) == 0 {
+		return
+	}
+	entry["input_modalities"] = codexModalities
+	if supportsImage {
+		entry["supports_image_detail_original"] = true
+	} else {
+		delete(entry, "supports_image_detail_original")
 	}
 }
 
