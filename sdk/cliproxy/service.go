@@ -2605,6 +2605,9 @@ func configOriginalModelInfo(name, ownedBy, modelType string, created int64, use
 		if info.DisplayName == "" {
 			info.DisplayName = name
 		}
+		if thinking != nil {
+			info.Thinking = thinking
+		}
 		info.UserDefined = false
 		return info
 	}

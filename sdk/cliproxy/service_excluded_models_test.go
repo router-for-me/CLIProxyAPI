@@ -293,6 +293,52 @@ func clientModelByID(models []*internalregistry.ModelInfo, id string) *internalr
 	return nil
 }
 
+func TestRegisterModelsForAuth_OpenAICompatibilityOriginalModelKeepsCompatThinking(t *testing.T) {
+	static := internalregistry.LookupStaticModelInfo("gemini-2.5-pro")
+	if static == nil {
+		t.Fatal("expected static gemini-2.5-pro metadata")
+	}
+	service := &Service{cfg: &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "compat-thinking",
+			BaseURL: "https://example.com/v1",
+			Models: []config.OpenAICompatibilityModel{{
+				Name:     "gemini-2.5-pro",
+				Alias:    "gemini-pro",
+				Thinking: &internalregistry.ThinkingSupport{Levels: []string{"low", "high"}},
+			}},
+		}},
+	}}
+	auth := &coreauth.Auth{
+		ID:       "auth-openai-compat-thinking-route",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":    "api_key",
+			"compat_name":  "compat-thinking",
+			"provider_key": "compat-thinking",
+		},
+	}
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	registered := clientModelByID(modelRegistry.GetModelsForClient(auth.ID), "gemini-2.5-pro")
+	if registered == nil {
+		t.Fatal("expected original model to be registered")
+	}
+	if static.ContextLength > 0 && registered.ContextLength != static.ContextLength {
+		t.Fatalf("context length = %d, want static %d", registered.ContextLength, static.ContextLength)
+	}
+	if registered.Thinking == nil || len(registered.Thinking.Levels) != 2 || registered.Thinking.Levels[0] != "low" || registered.Thinking.Levels[1] != "high" {
+		t.Fatalf("thinking = %+v, want compat levels [low high]", registered.Thinking)
+	}
+}
+
 func providersContain(providers []string, want string) bool {
 	for _, provider := range providers {
 		if strings.EqualFold(strings.TrimSpace(provider), want) {
