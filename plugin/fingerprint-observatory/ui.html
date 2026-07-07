@@ -160,10 +160,13 @@ const DEMO=[
    if(!reduce){t+=0.02;requestAnimationFrame(d);}})();})();
 
 function relTime(u){if(!u)return'—';const s=Math.max(0,Math.floor(Date.now()/1000-u));if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';return Math.floor(s/3600)+'h ago';}
+var FIRST_PARTY=['codex_cli_rs','codex-tui','codex_exec','codex_vscode'];
+function uaPrefixOf(ua){return (ua||'').split('/')[0];}
 function statusOf(r){
   if(r.provider==='codex'){
-    if(r.originator&&r.originator!=='codex_cli_rs')return'crit';
-    if(r.user_agent&&!/^codex_cli_rs\//.test(r.user_agent))return'crit';
+    if(r.originator&&FIRST_PARTY.indexOf(r.originator)<0)return'crit';
+    if(r.user_agent&&FIRST_PARTY.indexOf(uaPrefixOf(r.user_agent))<0)return'crit';
+    if(r.originator&&r.user_agent&&r.originator!==uaPrefixOf(r.user_agent))return'crit';
     if(r.session_hdr==='session_id')return'warn';
     if(r.account_id&&r.account_id!=='present')return'warn';
     if(r.last_seen_unix&&Date.now()/1000-r.last_seen_unix>1200)return'warn';
@@ -183,7 +186,7 @@ function renderSummary(){
   ].map(([k,v,s,c])=>`<div class="metric"><div class="k">${k}</div><div class="v ${c}">${v}</div><div class="s">${s}</div></div>`).join('');
   const critAccts=STATE.filter(a=>statusOf(a)==='crit');
   $('#advisory').style.display=critAccts.length?'flex':'none';
-  if(critAccts.length)$('#advText').innerHTML=`<b>跨层身份矛盾 · ${critAccts.length} 账号</b> — originator 与 <code>codex_cli_rs</code> UA 不一致(如 <code>Codex Desktop</code>),下游客户端标识与 UA 冲突,易被服务端聚类识别。魔改核心已收紧 originator 归一化,重启后该账号下一次请求即自动恢复一致。`;
+  if(critAccts.length)$('#advText').innerHTML=`<b>跨层身份矛盾 · ${critAccts.length} 账号</b> — originator 与 UA 前缀不一致,或非一方客户端(<code>codex_cli_rs / codex-tui / codex_exec / codex_vscode</code> 之外,如 <code>Codex Desktop</code>),下游客户端标识与 UA 冲突,易被服务端聚类识别。魔改核心已收紧 originator 归一化,重启后该账号下一次请求即自动恢复一致。`;
 }
 function card(r){
   const st=statusOf(r);const ua=(r.user_agent||'—').replace(/(0\.142\.5|2\.1\.153)/,'<span class="v">$1</span>');
@@ -206,8 +209,8 @@ function renderDist(){
 }
 function checks(r){const o=[];
   if(r.provider==='codex'){
-    const uaCli=/^codex_cli_rs\//.test(r.user_agent||'');const origOk=(r.originator||'')==='codex_cli_rs';const consistent=uaCli&&origOk;
-    o.push([consistent?'pass':'fail',consistent?'✓':'✗',consistent?`UA 前缀 <b>codex_cli_rs</b> 与 originator <b>codex_cli_rs</b> 一致`:`originator <b>${r.originator||'—'}</b> 与 UA 前缀 <b>codex_cli_rs</b> <b>不一致</b> —— 跨层身份矛盾,易被检测`]);
+    const uaPref=uaPrefixOf(r.user_agent);const origVal=r.originator||'';const consistent=FIRST_PARTY.indexOf(uaPref)>=0&&FIRST_PARTY.indexOf(origVal)>=0&&uaPref===origVal;
+    o.push([consistent?'pass':'fail',consistent?'✓':'✗',consistent?`originator <b>${origVal}</b> 与 UA 前缀 <b>${uaPref}</b> 一致(一方客户端)`:`originator <b>${origVal||'—'}</b> 与 UA 前缀 <b>${uaPref||'—'}</b> <b>不一致或非一方客户端</b> —— 跨层身份矛盾,易被检测`]);
     o.push([r.session_hdr==='session-id'?'pass':'warn',r.session_hdr==='session-id'?'✓':'!',`session 头为 <b>${r.session_hdr||'—'}</b>(实机 0.142.5 = 连字符)`]);
     o.push([r.accept_enc?'warn':'pass',r.accept_enc?'!':'✓',`accept-encoding <b>${r.accept_enc||'为空'}</b> —— 真实 codex 不发`]);
     o.push(['pass','✓',`TLS profile <b>${r.tls_profile}</b> 与 chatgpt.com 路径匹配`]);
