@@ -54,3 +54,72 @@ func TestConvertOpenAIRequestToAntigravitySkipsEmptyTextPartsWithoutNulls(t *tes
 		t.Fatalf("functionCall missing. Output: %s", result)
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "Default Gemini include thoughts",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}]
+			}`,
+			want: true,
+		},
+		{
+			name: "GenerationConfig snake include thoughts",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}],
+				"generationConfig":{"thinkingConfig":{"include_thoughts":true}}
+			}`,
+			want: true,
+		},
+		{
+			name: "Top-level thinking include thoughts",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}],
+				"thinking":{"include_thoughts":true}
+			}`,
+			want: true,
+		},
+		{
+			name: "Reasoning exclude false includes thoughts",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning":{"exclude":false}
+			}`,
+			want: true,
+		},
+		{
+			name: "Reasoning exclude true hides thoughts",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning":{"exclude":true}
+			}`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", []byte(tt.body), false)
+			includeThoughts := gjson.GetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts")
+			if !includeThoughts.Exists() {
+				t.Fatalf("includeThoughts missing. Output: %s", result)
+			}
+			if got := includeThoughts.Bool(); got != tt.want {
+				t.Fatalf("includeThoughts = %v, want %v. Output: %s", got, tt.want, result)
+			}
+			if snake := gjson.GetBytes(result, "request.generationConfig.thinkingConfig.include_thoughts"); snake.Exists() {
+				t.Fatalf("include_thoughts should be normalized away. Output: %s", result)
+			}
+		})
+	}
+}

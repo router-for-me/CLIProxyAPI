@@ -37,6 +37,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// Let user-provided generationConfig pass through
 	if genConfig := gjson.GetBytes(rawJSON, "generationConfig"); genConfig.Exists() {
 		out, _ = sjson.SetRawBytes(out, "request.generationConfig", []byte(genConfig.Raw))
+	} else if genConfig := gjson.GetBytes(rawJSON, "generation_config"); genConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "request.generationConfig", []byte(genConfig.Raw))
 	}
 
 	// Apply thinking configuration: convert OpenAI reasoning_effort to Antigravity thinkingConfig.
@@ -55,6 +57,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			}
 		}
 	}
+	out = applyOpenAIThinkingCompatibilityToAntigravity(out, rawJSON, modelName)
 
 	// Temperature/top_p/top_k/max_tokens
 	if tr := gjson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == gjson.Number {
@@ -449,6 +452,84 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
+}
+
+func applyOpenAIThinkingCompatibilityToAntigravity(out []byte, rawJSON []byte, modelName string) []byte {
+	out = normalizeAntigravityOpenAIThinkingConfig(out)
+
+	for _, path := range []string{
+		"thinking.includeThoughts",
+		"thinking.include_thoughts",
+		"reasoning.includeThoughts",
+		"reasoning.include_thoughts",
+	} {
+		if value := gjson.GetBytes(rawJSON, path); value.Exists() {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", value.Bool())
+		}
+	}
+
+	if exclude := gjson.GetBytes(rawJSON, "reasoning.exclude"); exclude.Exists() {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", !exclude.Bool())
+	}
+
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Exists() && antigravityOpenAIDefaultIncludeThoughts(modelName) {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+	}
+
+	return normalizeAntigravityOpenAIThinkingConfig(out)
+}
+
+func normalizeAntigravityOpenAIThinkingConfig(out []byte) []byte {
+	for _, prefix := range []string{
+		"request.generationConfig.thinking_config",
+		"request.generationConfig.thinkingConfig",
+	} {
+		if includeThoughts := gjson.GetBytes(out, prefix+".includeThoughts"); includeThoughts.Exists() {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
+		}
+		if includeThoughts := gjson.GetBytes(out, prefix+".include_thoughts"); includeThoughts.Exists() {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
+		}
+		if thinkingLevel := gjson.GetBytes(out, prefix+".thinkingLevel"); thinkingLevel.Exists() {
+			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", []byte(thinkingLevel.Raw))
+		}
+		if thinkingLevel := gjson.GetBytes(out, prefix+".thinking_level"); thinkingLevel.Exists() {
+			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", []byte(thinkingLevel.Raw))
+		}
+		if thinkingBudget := gjson.GetBytes(out, prefix+".thinkingBudget"); thinkingBudget.Exists() {
+			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", []byte(thinkingBudget.Raw))
+		}
+		if thinkingBudget := gjson.GetBytes(out, prefix+".thinking_budget"); thinkingBudget.Exists() {
+			out, _ = sjson.SetRawBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", []byte(thinkingBudget.Raw))
+		}
+	}
+
+	for _, path := range []string{
+		"request.generationConfig.includeThoughts",
+		"request.generationConfig.include_thoughts",
+	} {
+		if includeThoughts := gjson.GetBytes(out, path); includeThoughts.Exists() {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts.Bool())
+		}
+	}
+
+	for _, path := range []string{
+		"request.generationConfig.thinking_config",
+		"request.generationConfig.thinkingConfig.include_thoughts",
+		"request.generationConfig.thinkingConfig.thinking_level",
+		"request.generationConfig.thinkingConfig.thinking_budget",
+		"request.generationConfig.includeThoughts",
+		"request.generationConfig.include_thoughts",
+	} {
+		out, _ = sjson.DeleteBytes(out, path)
+	}
+
+	return out
+}
+
+func antigravityOpenAIDefaultIncludeThoughts(modelName string) bool {
+	modelName = strings.ToLower(modelName)
+	return strings.Contains(modelName, "gemini-3")
 }
 
 // itoa converts int to string without strconv import for few usages.

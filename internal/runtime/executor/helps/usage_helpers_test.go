@@ -89,6 +89,43 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 }
 
+func TestStreamUsageBufferKeepsLastUsage(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.Observe(usage.Detail{}, true)
+	buffer.Observe(usage.Detail{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}, false)
+	buffer.Observe(usage.Detail{InputTokens: 39320, OutputTokens: 26, TotalTokens: 39346, CachedTokens: 33280}, true)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("buffer detail ok = false, want true")
+	}
+	if detail.InputTokens != 39320 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 39320)
+	}
+	if detail.OutputTokens != 26 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 26)
+	}
+	if detail.TotalTokens != 39346 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 39346)
+	}
+	if detail.CachedTokens != 33280 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 33280)
+	}
+}
+
+func TestStreamUsageBufferPreservesOnlyZeroUsage(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.Observe(usage.Detail{}, true)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("buffer detail ok = false, want true")
+	}
+	if detail != (usage.Detail{}) {
+		t.Fatalf("detail = %+v, want zero detail", detail)
+	}
+}
+
 func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_read_input_tokens":7,"cache_creation_input_tokens":19514}}`)
 	detail := ParseClaudeUsage(data)
