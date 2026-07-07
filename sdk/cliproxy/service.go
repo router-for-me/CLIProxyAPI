@@ -2511,7 +2511,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			Thinking:    thinking,
 		}
 		models = appendModelInfoIfUnique(models, info, seen)
-		if alias != "" && name != "" && !strings.EqualFold(alias, name) {
+		if alias != "" && name != "" && alias != name {
 			models = appendModelInfoIfUnique(models, &ModelInfo{
 				ID:          name,
 				Object:      "model",
@@ -2535,7 +2535,7 @@ func appendModelInfoIfUnique(models []*ModelInfo, info *ModelInfo, seen map[stri
 	if modelID == "" {
 		return models
 	}
-	key := strings.ToLower(modelID)
+	key := modelID
 	if _, exists := seen[key]; exists {
 		return models
 	}
@@ -2580,7 +2580,7 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			}
 		}
 		out = appendModelInfoIfUnique(out, info, seen)
-		if name != "" && !strings.EqualFold(alias, name) {
+		if name != "" && alias != name {
 			nameInfo := &ModelInfo{
 				ID:          name,
 				Object:      "model",

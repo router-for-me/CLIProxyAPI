@@ -198,6 +198,58 @@ func TestRegisterModelsForAuth_ConfigAliasKeepsOriginalModelRoutable(t *testing.
 			originalModel: "gpt-5.4-mini",
 			aliasModel:    "GPT-5.4 Mini",
 		},
+		{
+			name: "codex case-distinct alias",
+			service: &Service{cfg: &config.Config{
+				CodexKey: []internalconfig.CodexKey{{
+					APIKey:  "codex-case-key",
+					BaseURL: "https://example.com",
+					Models: []internalconfig.CodexModel{{
+						Name:  "gpt-5",
+						Alias: "GPT-5",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-codex-case-alias-route",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind": "api_key",
+					"api_key":   "codex-case-key",
+					"base_url":  "https://example.com",
+				},
+			},
+			provider:      "codex",
+			originalModel: "gpt-5",
+			aliasModel:    "GPT-5",
+		},
+		{
+			name: "openai compatibility case-distinct alias",
+			service: &Service{cfg: &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{{
+					Name:    "compat-case",
+					BaseURL: "https://example.com/v1",
+					Models: []config.OpenAICompatibilityModel{{
+						Name:  "gpt-5",
+						Alias: "GPT-5",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-openai-compat-case-alias-route",
+				Provider: "openai-compatibility",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind":    "api_key",
+					"compat_name":  "compat-case",
+					"provider_key": "compat-case",
+				},
+			},
+			provider:      "compat-case",
+			originalModel: "gpt-5",
+			aliasModel:    "GPT-5",
+		},
 	}
 
 	for _, tt := range testCases {
