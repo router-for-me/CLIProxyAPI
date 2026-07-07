@@ -2564,16 +2564,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		models = appendModelInfoIfUnique(models, info, seen)
 		if alias != "" && name != "" && alias != name {
-			models = appendModelInfoIfUnique(models, &ModelInfo{
-				ID:          name,
-				Object:      "model",
-				Created:     now,
-				OwnedBy:     compat.Name,
-				Type:        modelType,
-				DisplayName: name,
-				UserDefined: false,
-				Thinking:    thinking,
-			}, seen)
+			models = appendModelInfoIfUnique(models, configOriginalModelInfo(name, compat.Name, modelType, now, false, thinking), seen)
 		}
 	}
 	return models
@@ -2594,6 +2585,39 @@ func appendModelInfoIfUnique(models []*ModelInfo, info *ModelInfo, seen map[stri
 	seen[key] = struct{}{}
 	info.ID = modelID
 	return append(models, info)
+}
+
+func configOriginalModelInfo(name, ownedBy, modelType string, created int64, userDefined bool, thinking *registry.ThinkingSupport) *ModelInfo {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if info := registry.LookupStaticModelInfo(name); info != nil {
+		info.ID = name
+		if info.Object == "" {
+			info.Object = "model"
+		}
+		if info.Created == 0 {
+			info.Created = created
+		}
+		info.OwnedBy = ownedBy
+		info.Type = modelType
+		if info.DisplayName == "" {
+			info.DisplayName = name
+		}
+		info.UserDefined = false
+		return info
+	}
+	return &ModelInfo{
+		ID:          name,
+		Object:      "model",
+		Created:     created,
+		OwnedBy:     ownedBy,
+		Type:        modelType,
+		DisplayName: name,
+		UserDefined: userDefined,
+		Thinking:    thinking,
+	}
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
@@ -2633,19 +2657,7 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		}
 		out = appendModelInfoIfUnique(out, info, seen)
 		if name != "" && alias != name {
-			nameInfo := &ModelInfo{
-				ID:          name,
-				Object:      "model",
-				Created:     now,
-				OwnedBy:     ownedBy,
-				Type:        modelType,
-				DisplayName: name,
-				UserDefined: true,
-			}
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-				nameInfo.Thinking = upstream.Thinking
-			}
-			out = appendModelInfoIfUnique(out, nameInfo, seen)
+			out = appendModelInfoIfUnique(out, configOriginalModelInfo(name, ownedBy, modelType, now, true, info.Thinking), seen)
 		}
 	}
 	return out

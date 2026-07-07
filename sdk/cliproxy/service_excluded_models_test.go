@@ -268,8 +268,29 @@ func TestRegisterModelsForAuth_ConfigAliasKeepsOriginalModelRoutable(t *testing.
 			if !providersContain(modelRegistry.GetModelProviders(tt.originalModel), tt.provider) {
 				t.Fatalf("original model %q providers = %v, want %q", tt.originalModel, modelRegistry.GetModelProviders(tt.originalModel), tt.provider)
 			}
+			if static := internalregistry.LookupStaticModelInfo(tt.originalModel); static != nil && static.ContextLength > 0 {
+				registered := clientModelByID(modelRegistry.GetModelsForClient(tt.auth.ID), tt.originalModel)
+				if registered == nil {
+					t.Fatalf("registered original model %q not found", tt.originalModel)
+				}
+				if registered.ContextLength != static.ContextLength {
+					t.Fatalf("original model %q context length = %d, want static %d", tt.originalModel, registered.ContextLength, static.ContextLength)
+				}
+				if registered.UserDefined {
+					t.Fatalf("original model %q should preserve static metadata instead of being marked user-defined", tt.originalModel)
+				}
+			}
 		})
 	}
+}
+
+func clientModelByID(models []*internalregistry.ModelInfo, id string) *internalregistry.ModelInfo {
+	for _, model := range models {
+		if model != nil && model.ID == id {
+			return model
+		}
+	}
+	return nil
 }
 
 func providersContain(providers []string, want string) bool {
