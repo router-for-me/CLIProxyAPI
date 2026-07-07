@@ -2479,12 +2479,15 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		return nil
 	}
 	now := time.Now().Unix()
-	models := make([]*ModelInfo, 0, len(compat.Models))
+	models := make([]*ModelInfo, 0, len(compat.Models)*2)
+	seen := make(map[string]struct{}, len(compat.Models)*2)
 	for i := range compat.Models {
 		model := compat.Models[i]
-		modelID := strings.TrimSpace(model.Alias)
+		alias := strings.TrimSpace(model.Alias)
+		name := strings.TrimSpace(model.Name)
+		modelID := alias
 		if modelID == "" {
-			modelID = strings.TrimSpace(model.Name)
+			modelID = name
 		}
 		if modelID == "" {
 			continue
@@ -2497,7 +2500,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if thinking == nil && !model.Image {
 			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
-		models = append(models, &ModelInfo{
+		info := &ModelInfo{
 			ID:          modelID,
 			Object:      "model",
 			Created:     now,
@@ -2506,9 +2509,40 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			DisplayName: modelID,
 			UserDefined: false,
 			Thinking:    thinking,
-		})
+		}
+		models = appendModelInfoIfUnique(models, info, seen)
+		if alias != "" && name != "" && !strings.EqualFold(alias, name) {
+			models = appendModelInfoIfUnique(models, &ModelInfo{
+				ID:          name,
+				Object:      "model",
+				Created:     now,
+				OwnedBy:     compat.Name,
+				Type:        modelType,
+				DisplayName: name,
+				UserDefined: false,
+				Thinking:    thinking,
+			}, seen)
+		}
 	}
 	return models
+}
+
+func appendModelInfoIfUnique(models []*ModelInfo, info *ModelInfo, seen map[string]struct{}) []*ModelInfo {
+	if info == nil {
+		return models
+	}
+	modelID := strings.TrimSpace(info.ID)
+	if modelID == "" {
+		return models
+	}
+	key := strings.ToLower(modelID)
+	if _, exists := seen[key]; exists {
+		return models
+	}
+	seen[key] = struct{}{}
+	clone := *info
+	clone.ID = modelID
+	return append(models, &clone)
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
@@ -2516,8 +2550,8 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		return nil
 	}
 	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(models))
-	seen := make(map[string]struct{}, len(models))
+	out := make([]*ModelInfo, 0, len(models)*2)
+	seen := make(map[string]struct{}, len(models)*2)
 	for i := range models {
 		model := models[i]
 		name := strings.TrimSpace(model.GetName())
@@ -2528,11 +2562,6 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		if alias == "" {
 			continue
 		}
-		key := strings.ToLower(alias)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
 		display := name
 		if display == "" {
 			display = alias
@@ -2551,7 +2580,22 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 				info.Thinking = upstream.Thinking
 			}
 		}
-		out = append(out, info)
+		out = appendModelInfoIfUnique(out, info, seen)
+		if name != "" && !strings.EqualFold(alias, name) {
+			nameInfo := &ModelInfo{
+				ID:          name,
+				Object:      "model",
+				Created:     now,
+				OwnedBy:     ownedBy,
+				Type:        modelType,
+				DisplayName: name,
+				UserDefined: true,
+			}
+			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
+				nameInfo.Thinking = upstream.Thinking
+			}
+			out = appendModelInfoIfUnique(out, nameInfo, seen)
+		}
 	}
 	return out
 }

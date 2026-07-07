@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -134,6 +135,98 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	if chatModel.Thinking == nil {
 		t.Fatal("expected chat model to keep default thinking support")
 	}
+}
+
+func TestRegisterModelsForAuth_ConfigAliasKeepsOriginalModelRoutable(t *testing.T) {
+	testCases := []struct {
+		name          string
+		service       *Service
+		auth          *coreauth.Auth
+		provider      string
+		originalModel string
+		aliasModel    string
+	}{
+		{
+			name: "codex api key",
+			service: &Service{cfg: &config.Config{
+				CodexKey: []internalconfig.CodexKey{{
+					APIKey:  "codex-key",
+					BaseURL: "https://example.com",
+					Models: []internalconfig.CodexModel{{
+						Name:  "gpt-5.4-mini",
+						Alias: "GPT-5.4 Mini",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-codex-alias-route",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind": "api_key",
+					"api_key":   "codex-key",
+					"base_url":  "https://example.com",
+				},
+			},
+			provider:      "codex",
+			originalModel: "gpt-5.4-mini",
+			aliasModel:    "GPT-5.4 Mini",
+		},
+		{
+			name: "openai compatibility",
+			service: &Service{cfg: &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{{
+					Name:    "compat",
+					BaseURL: "https://example.com/v1",
+					Models: []config.OpenAICompatibilityModel{{
+						Name:  "gpt-5.4-mini",
+						Alias: "GPT-5.4 Mini",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-openai-compat-alias-route",
+				Provider: "openai-compatibility",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind":    "api_key",
+					"compat_name":  "compat",
+					"provider_key": "compat",
+				},
+			},
+			provider:      "compat",
+			originalModel: "gpt-5.4-mini",
+			aliasModel:    "GPT-5.4 Mini",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			modelRegistry := internalregistry.GetGlobalRegistry()
+			modelRegistry.UnregisterClient(tt.auth.ID)
+			t.Cleanup(func() {
+				modelRegistry.UnregisterClient(tt.auth.ID)
+			})
+
+			tt.service.registerModelsForAuth(context.Background(), tt.auth)
+
+			if !providersContain(modelRegistry.GetModelProviders(tt.aliasModel), tt.provider) {
+				t.Fatalf("alias model %q providers = %v, want %q", tt.aliasModel, modelRegistry.GetModelProviders(tt.aliasModel), tt.provider)
+			}
+			if !providersContain(modelRegistry.GetModelProviders(tt.originalModel), tt.provider) {
+				t.Fatalf("original model %q providers = %v, want %q", tt.originalModel, modelRegistry.GetModelProviders(tt.originalModel), tt.provider)
+			}
+		})
+	}
+}
+
+func providersContain(providers []string, want string) bool {
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.T) {
