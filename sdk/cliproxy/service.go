@@ -2552,19 +2552,28 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if thinking == nil && !model.Image {
 			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
+		inputModalities := normalizeCompatConfigModalities(model.InputModalities)
+		outputModalities := normalizeCompatConfigModalities(model.OutputModalities)
 		info := &ModelInfo{
-			ID:          modelID,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     compat.Name,
-			Type:        modelType,
-			DisplayName: modelID,
-			UserDefined: false,
-			Thinking:    thinking,
+			ID:                        modelID,
+			Object:                    "model",
+			Created:                   now,
+			OwnedBy:                   compat.Name,
+			Type:                      modelType,
+			DisplayName:               modelID,
+			UserDefined:               false,
+			Thinking:                  thinking,
+			SupportedInputModalities:  inputModalities,
+			SupportedOutputModalities: outputModalities,
 		}
 		models = appendModelInfoIfUnique(models, info, seen)
 		if alias != "" && name != "" && alias != name {
-			models = appendModelInfoIfUnique(models, configOriginalModelInfo(name, compat.Name, modelType, now, false, thinking), seen)
+			original := configOriginalModelInfo(name, compat.Name, modelType, now, false, thinking)
+			if original != nil {
+				original.SupportedInputModalities = inputModalities
+				original.SupportedOutputModalities = outputModalities
+			}
+			models = appendModelInfoIfUnique(models, original, seen)
 		}
 	}
 	return models
@@ -2621,6 +2630,29 @@ func configOriginalModelInfo(name, ownedBy, modelType string, created int64, use
 		UserDefined: userDefined,
 		Thinking:    thinking,
 	}
+}
+
+func normalizeCompatConfigModalities(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		modality := strings.ToLower(strings.TrimSpace(item))
+		if modality == "" {
+			continue
+		}
+		if _, exists := seen[modality]; exists {
+			continue
+		}
+		seen[modality] = struct{}{}
+		out = append(out, modality)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
