@@ -12,7 +12,7 @@ services:
       PGSTORE_DSN: "postgresql://lijiahua%40looplaygame.com:LooPlay2026@cpaupdate-cpadb-ffnby0:5432/postgres?sslmode=disable"
       PGSTORE_SCHEMA: "public"
     ports:
-      - "8317:8317"
+      - "8318:8317"
     volumes:
       - "../files/logs:/CLIProxyAPI/logs"
     restart: unless-stopped
