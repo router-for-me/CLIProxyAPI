@@ -2940,3 +2940,126 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testin
 		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
 	}
 }
+
+// TestRemapOAuthToolNames_CustomSnakeCase_GenericFallback verifies that custom /
+// MCP tools whose names are NOT in oauthToolRenameMap (e.g. "browser_navigate")
+// are still normalised to TitleCase via the generic fallback, and that the
+// response tool_use name is reversed back to the client's original snake_case.
+func TestRemapOAuthToolNames_CustomSnakeCase_GenericFallback(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"browser_navigate","input_schema":{"type":"object","properties":{"url":{"type":"string"}}}}],"tool_choice":{"type":"tool","name":"browser_navigate"},"messages":[{"role":"user","content":[{"type":"text","text":"open example.com"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "BrowserNavigate")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "BrowserNavigate")
+	}
+	if reverseMap["BrowserNavigate"] != "browser_navigate" {
+		t.Fatalf("reverseMap = %v, want entry BrowserNavigate->browser_navigate", reverseMap)
+	}
+
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"BrowserNavigate","input":{"url":"https://example.com"}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "browser_navigate" {
+		t.Fatalf("content.0.name = %q, want %q", got, "browser_navigate")
+	}
+}
+
+// TestRemapOAuthToolNames_CustomTitleCase_Untouched verifies that a custom tool
+// already supplied in TitleCase is left unchanged by the generic fallback and
+// produces no reverse-map entry (so it cannot corrupt the response).
+func TestRemapOAuthToolNames_CustomTitleCase_Untouched(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"BrowserNavigate","input_schema":{"type":"object","properties":{"url":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tools.0.name = %q, want %q (unchanged)", got, "BrowserNavigate")
+	}
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty", reverseMap)
+	}
+}
+
+// TestRemapOAuthToolNames_MCPDoubleUnderscore_Untouched verifies that MCP-style
+// tool names (mcp__server__tool, with consecutive underscores) are left
+// unchanged. Claude Code emits these lowercase MCP names natively, so they are
+// already first-party-safe; rewriting them would produce a form Claude Code
+// never sends and break MCP tool routing on the response side.
+func TestRemapOAuthToolNames_MCPDoubleUnderscore_Untouched(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"mcp__context7__query_docs","input_schema":{"type":"object","properties":{}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "mcp__context7__query_docs" {
+		t.Fatalf("tools.0.name = %q, want %q (unchanged)", got, "mcp__context7__query_docs")
+	}
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty", reverseMap)
+	}
+}
+
+// TestRemapOAuthToolNames_ToolChoiceBuiltin_NotRenamed verifies that forcing an
+// Anthropic built-in tool via tool_choice keeps the built-in's lowercase name so
+// it still matches the typed tool in the tools array (which is intentionally left
+// unchanged). A custom tool declared alongside it is still cloaked. Without the
+// built-in guard the generic fallback would rewrite the choice to "WebSearch",
+// producing a tool_choice/tools mismatch that Anthropic rejects.
+func TestRemapOAuthToolNames_ToolChoiceBuiltin_NotRenamed(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"browser_navigate","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"tool","name":"web_search"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "web_search" {
+		t.Fatalf("tool_choice.name = %q, want %q (built-in unchanged)", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+		t.Fatalf("tools.0.name = %q, want web_search (built-in unchanged)", got)
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "BrowserNavigate" {
+		t.Fatalf("tools.1.name = %q, want BrowserNavigate (custom still cloaked)", got)
+	}
+	if _, exists := reverseMap["WebSearch"]; exists {
+		t.Fatalf("web_search must not be renamed/reversed: %v", reverseMap)
+	}
+}
+
+// TestRemapOAuthToolNames_TitleCaseCollision_NoDuplicate verifies that two
+// distinct client tool names that title-case to the same value (e.g. "tool1_call"
+// and "tool_1_call" -> "Tool1Call") never produce duplicate upstream tool names:
+// the first wins the TitleCase slot, the second keeps its original name, and the
+// reverse map restores each unambiguously.
+func TestRemapOAuthToolNames_TitleCaseCollision_NoDuplicate(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"tool1_call","input_schema":{"type":"object","properties":{}}},{"name":"tool_1_call","input_schema":{"type":"object","properties":{}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	n0 := gjson.GetBytes(out, "tools.0.name").String()
+	n1 := gjson.GetBytes(out, "tools.1.name").String()
+	if n0 == n1 {
+		t.Fatalf("duplicate upstream tool names: both %q", n0)
+	}
+	if n0 != "Tool1Call" {
+		t.Fatalf("tools.0.name = %q, want Tool1Call", n0)
+	}
+	if n1 != "tool_1_call" {
+		t.Fatalf("tools.1.name = %q, want tool_1_call (kept to avoid collision)", n1)
+	}
+	if reverseMap["Tool1Call"] != "tool1_call" {
+		t.Fatalf("reverseMap[Tool1Call] = %q, want tool1_call", reverseMap["Tool1Call"])
+	}
+}
+
+// TestRemapOAuthToolNames_UntypedCustomNamedLikeBuiltin_Renamed verifies that a
+// custom tool whose name merely matches an Anthropic built-in (e.g. "web_search")
+// but is declared WITHOUT a built-in "type" (only name/input_schema, as the OpenAI
+// chat-completions translator emits) is still cloaked to TitleCase — only tools
+// with an actual built-in "type" are protected.
+func TestRemapOAuthToolNames_UntypedCustomNamedLikeBuiltin_Renamed(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"web_search","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "WebSearch" {
+		t.Fatalf("tools.0.name = %q, want WebSearch (untyped custom tool must be cloaked)", got)
+	}
+	if reverseMap["WebSearch"] != "web_search" {
+		t.Fatalf("reverseMap[WebSearch] = %q, want web_search", reverseMap["WebSearch"])
+	}
+}
