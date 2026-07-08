@@ -2134,6 +2134,26 @@
       "max_completion_tokens": 256000
     },
     {
+      "id": "grok-4.5",
+      "object": "model",
+      "created": 1783526400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.5",
+      "name": "grok-4.5",
+      "description": "SpaceXAI's intelligent coding model for agentic software, engineering, and workflow tasks.",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "grok-4.3",
       "object": "model",
       "created": 1775606400,
