@@ -158,7 +158,7 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	if req == nil {
 		return nil
 	}
-	apiKey, _ := claudeCreds(auth)
+	apiKey, _ := claudeCredsWithConfig(e.cfg, auth)
 	if strings.TrimSpace(apiKey) == "" {
 		return nil
 	}
@@ -201,7 +201,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
+	apiKey, baseURL := claudeCredsWithConfig(e.cfg, auth)
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -393,7 +393,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
+	apiKey, baseURL := claudeCredsWithConfig(e.cfg, auth)
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -688,7 +688,7 @@ func validateClaudeStreamingResponse(data []byte) error {
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
+	apiKey, baseURL := claudeCredsWithConfig(e.cfg, auth)
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -1145,12 +1145,25 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
+	return claudeCredsWithConfig(nil, a)
+}
+
+func claudeCredsWithConfig(cfg *config.Config, a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
 	}
 	if a.Attributes != nil {
 		apiKey = a.Attributes["api_key"]
-		baseURL = a.Attributes["base_url"]
+		baseURL = strings.TrimSpace(a.Attributes["base_url"])
+	}
+	if baseURL == "" && a.AuthKind() == cliproxyauth.AuthKindOAuth && a.Metadata != nil {
+		baseURL = cliproxyauth.BaseURLFromMetadata(a.Metadata)
+	}
+	if baseURL == "" && a.AuthKind() == cliproxyauth.AuthKindOAuth && cfg != nil {
+		baseURL = strings.TrimSpace(cfg.ClaudeBaseURL)
+	}
+	if baseURL != "" {
+		baseURL = normalizeClaudeBaseURL(baseURL)
 	}
 	if apiKey == "" && a.Metadata != nil {
 		if v, ok := a.Metadata["access_token"].(string); ok {

@@ -617,3 +617,24 @@ func assertRemoteBranchContents(t *testing.T, remoteDir, branch, wantContents st
 		t.Fatalf("remote branch %s contents = %q, want %q", branch, contents, wantContents)
 	}
 }
+
+func TestGitTokenStoreReadAuthFileCopiesBaseURL(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auths")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	path := filepath.Join(authDir, "codex.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","email":"codex@example.com","base_url":"http://127.0.0.1:18081"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	store := NewGitTokenStore("", "", "", "")
+	auth, err := store.readAuthFile(path, authDir)
+	if err != nil {
+		t.Fatalf("readAuthFile() error = %v", err)
+	}
+	if got := auth.Attributes["base_url"]; got != "http://127.0.0.1:18081" {
+		t.Fatalf("base_url attr = %q, want copied metadata base URL", got)
+	}
+}

@@ -35,6 +35,12 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# OAuth auth files may optionally include base_url or base-url to override the
+# upstream endpoint for that account only. This is useful for routing one OAuth
+# account through a local gateway while leaving other accounts on the default
+# provider endpoint. Example auth file field:
+#   "base_url": "http://127.0.0.1:18081"
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
@@ -105,6 +111,13 @@ redis-usage-queue-retention-seconds: 60
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
+
+# Provider-wide upstream base URL overrides for OAuth/file-backed credentials.
+# Per-auth-file base_url/base-url values and per-api-key base-url values take precedence.
+# Empty keeps the official upstream defaults.
+# claude-base-url: "http://127.0.0.1:18081"
+# codex-base-url: "http://127.0.0.1:18082"
+
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
