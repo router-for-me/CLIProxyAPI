@@ -37,9 +37,7 @@ auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - "LOOPLAY2026"
 
 # Enable debug logging
 debug: false

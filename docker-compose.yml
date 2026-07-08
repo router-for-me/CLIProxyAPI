@@ -10,9 +10,10 @@ services:
     container_name: cli-proxy-api
     environment:
       DEPLOY: cloud
+      PGSTORE_DSN: "postgresql://lijiahua%40looplaygame.com:LOOPLAY2026@cpa-cpa-db-hofpqp:5432/CPADB?sslmode=disable"
+      PGSTORE_SCHEMA: "public"
     ports:
       - "8317:8317"
     volumes:
-      - "../files/auths:/root/.cli-proxy-api"
       - "../files/logs:/CLIProxyAPI/logs"
     restart: unless-stopped
