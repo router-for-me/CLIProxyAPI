@@ -675,8 +675,8 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
 	exec := NewAntigravityExecutor(&config.Config{})
-	const configuredUserAgent = "antigravity/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
-	const loadCodeAssistUserAgent = "antigravity/1.23.2 windows/amd64"
+	const configuredUserAgent = "antigravity/hub/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
+	const loadCodeAssistUserAgent = "antigravity/hub/1.23.2 windows/amd64"
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-load-code-assist-ua",
 		Attributes: map[string]string{"user_agent": configuredUserAgent},
