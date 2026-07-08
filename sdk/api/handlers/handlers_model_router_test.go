@@ -455,7 +455,7 @@ func TestExecuteModelPropagatesRouterSkipPluginID(t *testing.T) {
 func TestHandlerProvidersForExecutionUsesRouterProvider(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	decision := modelRouteDecision{Provider: "claude", Model: "claude-sonnet-4"}
-	providers, normalizedModel, errMsg := handler.providersForExecution("ignored-by-router", "original-model", false, decision)
+	providers, normalizedModel, errMsg := handler.providersForExecution("ignored-by-router", "original-model", false, decision, modelExecutionOptions{})
 	if errMsg != nil {
 		t.Fatalf("providersForExecution() error = %+v", errMsg)
 	}
@@ -470,7 +470,7 @@ func TestHandlerProvidersForExecutionUsesRouterProvider(t *testing.T) {
 func TestHandlerProvidersForExecutionFallsBackToOriginalModel(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	decision := modelRouteDecision{Provider: "claude"}
-	providers, normalizedModel, errMsg := handler.providersForExecution("ignored-by-router", "original-model", false, decision)
+	providers, normalizedModel, errMsg := handler.providersForExecution("ignored-by-router", "original-model", false, decision, modelExecutionOptions{})
 	if errMsg != nil {
 		t.Fatalf("providersForExecution() error = %+v", errMsg)
 	}
@@ -532,7 +532,7 @@ func TestHandlerProvidersForExecutionRejectsImageOnlyModelOnProviderRoute(t *tes
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, errMsg := handler.providersForExecution("ignored", tc.originalModel, false, tc.decision)
+			_, _, errMsg := handler.providersForExecution("ignored", tc.originalModel, false, tc.decision, modelExecutionOptions{})
 			if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
 				t.Fatalf("providersForExecution() error = %+v, want image-only service unavailable", errMsg)
 			}

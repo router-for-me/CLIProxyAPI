@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -986,7 +987,8 @@ func baselineExecutorAuths() []*coreauth.Auth {
 	providers := []string{
 		"codex",
 		"claude",
-		"gemini",
+		constant.Gemini,
+		constant.GeminiInteractions,
 		"vertex",
 		"aistudio",
 		"antigravity",
@@ -1062,8 +1064,10 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		return
 	}
 	switch strings.ToLower(a.Provider) {
-	case "gemini":
+	case constant.Gemini:
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+	case constant.GeminiInteractions:
+		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(s.cfg))
 	case "vertex":
 		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
 	case "aistudio":
@@ -1940,9 +1944,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 	var models []*ModelInfo
 	switch provider {
-	case "gemini":
+	case constant.Gemini:
 		models = registry.GetGeminiModels()
 		if entry := s.resolveConfigGeminiKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildGeminiConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case constant.GeminiInteractions:
+		models = registry.GetGeminiModels()
+		if entry := s.resolveConfigInteractionsKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildGeminiConfigModels(entry)
 			}
@@ -2221,6 +2236,20 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 }
 
 func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return s.resolveConfigGeminiKeyEntry(auth, s.cfg.GeminiKey)
+}
+
+func (s *Service) resolveConfigInteractionsKey(auth *coreauth.Auth) *config.GeminiKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return s.resolveConfigGeminiKeyEntry(auth, s.cfg.InteractionsKey)
+}
+
+func (s *Service) resolveConfigGeminiKeyEntry(auth *coreauth.Auth, entries []config.GeminiKey) *config.GeminiKey {
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
@@ -2229,8 +2258,8 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.GeminiKey {
-		entry := &s.cfg.GeminiKey[i]
+	for i := range entries {
+		entry := &entries[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
@@ -2468,18 +2497,45 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if thinking == nil && !model.Image {
 			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
+		inputModalities := normalizeCompatConfigModalities(model.InputModalities)
+		outputModalities := normalizeCompatConfigModalities(model.OutputModalities)
 		models = append(models, &ModelInfo{
-			ID:          modelID,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     compat.Name,
-			Type:        modelType,
-			DisplayName: modelID,
-			UserDefined: false,
-			Thinking:    thinking,
+			ID:                        modelID,
+			Object:                    "model",
+			Created:                   now,
+			OwnedBy:                   compat.Name,
+			Type:                      modelType,
+			DisplayName:               modelID,
+			UserDefined:               false,
+			Thinking:                  thinking,
+			SupportedInputModalities:  inputModalities,
+			SupportedOutputModalities: outputModalities,
 		})
 	}
 	return models
+}
+
+func normalizeCompatConfigModalities(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		modality := strings.ToLower(strings.TrimSpace(item))
+		if modality == "" {
+			continue
+		}
+		if _, exists := seen[modality]; exists {
+			continue
+		}
+		seen[modality] = struct{}{}
+		out = append(out, modality)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {

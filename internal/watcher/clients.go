@@ -384,6 +384,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	if len(cfg.GeminiKey) > 0 {
 		geminiAPIKeyCount += len(cfg.GeminiKey)
 	}
+	if len(cfg.InteractionsKey) > 0 {
+		geminiAPIKeyCount += len(cfg.InteractionsKey)
+	}
 	if len(cfg.VertexCompatAPIKey) > 0 {
 		vertexCompatAPIKeyCount += len(cfg.VertexCompatAPIKey)
 	}

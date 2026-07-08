@@ -357,6 +357,119 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	})
 }
 
+func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	staticDir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", staticDir)
+	if err := os.WriteFile(filepath.Join(staticDir, "management.html"), []byte("<html>management app</html>"), 0o600); err != nil {
+		t.Fatalf("failed to write management asset: %v", err)
+	}
+
+	server := newTestServerWithOptions(t, WithExampleAPIKeySafeMode())
+	cfg := *server.cfg
+	cfg.APIKeys = []string{"your-api-key-1"}
+	server.UpdateClients(&cfg)
+
+	t.Run("root warning page includes management link", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		body := rr.Body.String()
+		for _, want := range []string{"Example API key detected", "Open Management", `href="/management.html?safe-mode=configure"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("warning page missing %q: %s", want, body)
+			}
+		}
+	})
+
+	t.Run("management html defaults to warning page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "Example API key detected") {
+			t.Fatalf("management.html did not show warning page: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("management html head stops at warning page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("HEAD body length = %d, want 0", rr.Body.Len())
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q, want no-store", got)
+		}
+	})
+
+	t.Run("management button query opens control panel", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html?safe-mode=configure", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "management app") {
+			t.Fatalf("management panel body missing: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("proxy endpoints are blocked", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+		}
+		if got := rr.Header().Get("X-CPA-SAFE-MODE"); got != "example-api-key" {
+			t.Fatalf("X-CPA-SAFE-MODE = %q, want example-api-key", got)
+		}
+		if !strings.Contains(rr.Body.String(), "unsafe_example_api_key") {
+			t.Fatalf("body missing safe-mode error: %s", rr.Body.String())
+		}
+		if strings.Contains(rr.Body.String(), "management_url") {
+			t.Fatalf("body should not include management_url field: %s", rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "/management.html?safe-mode=configure") {
+			t.Fatalf("body missing management link in message: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("management endpoints still work", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+	})
+
+	t.Run("safe mode clears after key update", func(t *testing.T) {
+		nextCfg := cfg
+		nextCfg.APIKeys = []string{"real-key"}
+		server.UpdateClients(&nextCfg)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer real-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code == http.StatusForbidden && strings.Contains(rr.Body.String(), "unsafe_example_api_key") {
+			t.Fatalf("proxy endpoint still blocked after key update: %s", rr.Body.String())
+		}
+	})
+}
+
 func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-anthropic-version-dispatch"
@@ -844,5 +957,16 @@ func TestHomeModelsErrorMessage(t *testing.T) {
 	}
 	if msg := homeModelsErrorMessage([]byte(`{"openai":[]}`)); msg != "home models request failed" {
 		t.Fatalf("default message = %q, want fallback", msg)
+	}
+}
+
+func TestInteractionsRouteRegistered(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{"model":"gemini-3.5-flash","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
 	}
 }

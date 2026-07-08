@@ -49,6 +49,14 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 			return true, nil
 		}
 	}
+	for i := range cfg.InteractionsKey {
+		entry := &cfg.InteractionsKey[i]
+		id, _ := idGen.Next("gemini-interactions:apikey", entry.APIKey, entry.BaseURL)
+		if id == authID {
+			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
+			return true, nil
+		}
+	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		id, _ := idGen.Next("claude:apikey", entry.APIKey, entry.BaseURL)

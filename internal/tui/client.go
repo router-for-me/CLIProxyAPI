@@ -290,6 +290,12 @@ func (c *Client) GetGeminiKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/gemini-api-key", "gemini-api-key")
 }
 
+// GetInteractionsKeys fetches native Interactions API keys.
+// API returns {"interactions-api-key": [...]}.
+func (c *Client) GetInteractionsKeys() ([]map[string]any, error) {
+	return c.getWrappedKeyList("/v0/management/interactions-api-key", "interactions-api-key")
+}
+
 // GetClaudeKeys fetches Claude API keys.
 func (c *Client) GetClaudeKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/claude-api-key", "claude-api-key")

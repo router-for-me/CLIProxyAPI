@@ -398,7 +398,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 
 				// reasoning_content (OpenAI reasoning incremental text)
-				if rc := delta.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+				rc := delta.Get("reasoning_content")
+				if !rc.Exists() || rc.String() == "" {
+					rc = delta.Get("reasoning")
+				}
+				if rc.Exists() && rc.String() != "" {
 					// On first appearance, add reasoning item and part
 					if st.ReasoningID == "" {
 						st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)

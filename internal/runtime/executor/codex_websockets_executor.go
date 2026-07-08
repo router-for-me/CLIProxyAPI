@@ -641,11 +641,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				fallbackReq, fallbackOpts := codexHTTPFallbackRequest(req, opts)
 				return e.CodexExecutor.Execute(ctx, auth, fallbackReq, fallbackOpts)
 			}
+			mappedErr := mapCodexWebsocketReadError(errRead)
 			if sess != nil {
-				e.invalidateUpstreamConn(sess, conn, "read_error", errRead)
+				e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
 			}
-			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
-			return resp, errRead
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
+			return resp, mappedErr
 		}
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
@@ -1213,12 +1214,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					}
 					return
 				}
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
-				reporter.PublishFailure(ctx, errRead)
+				mappedErr := mapCodexWebsocketReadError(errRead)
+				terminateErr = mappedErr
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
+				reporter.PublishFailure(ctx, mappedErr)
 				if sess != nil {
-					e.invalidateUpstreamConn(sess, conn, "read_error", errRead)
+					e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
 				}
-				_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
+				_ = send(cliproxyexecutor.StreamChunk{Err: mappedErr})
 				return
 			}
 			if msgType != websocket.TextMessage {
@@ -1344,6 +1347,16 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
+func mapCodexWebsocketReadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isCodexWebsocketMessageTooBigCloseError(err) {
+		return statusErr{code: http.StatusRequestEntityTooLarge, msg: `{"error":{"message":"upstream websocket message too big","type":"invalid_request_error","code":"message_too_big"}}`}
+	}
+	return err
+}
+
 func buildCodexWebsocketRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
@@ -1396,6 +1409,19 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 }
 
 func isCodexWebsocketMessageTooBigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isCodexWebsocketMessageTooBigCloseError(err) {
+		return true
+	}
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil && se.StatusCode() == http.StatusRequestEntityTooLarge {
+		return strings.TrimSpace(gjson.Get(err.Error(), "error.code").String()) == "message_too_big"
+	}
+	return false
+}
+
+func isCodexWebsocketMessageTooBigCloseError(err error) bool {
 	if err == nil {
 		return false
 	}

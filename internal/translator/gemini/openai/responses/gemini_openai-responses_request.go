@@ -17,9 +17,9 @@ const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
-	// Note: modelName and stream parameters are part of the fixed method signature
-	_ = modelName // Unused but required by interface
-	_ = stream    // Unused but required by interface
+	// Note: stream parameter is part of the fixed method signature
+	useGeminiNativeReasoningLayout := sigcompat.SignatureProviderFromModelName(modelName) == sigcompat.SignatureProviderGemini
+	_ = stream // Unused but required by interface
 
 	// Base Gemini API template (do not include thinkingConfig by default)
 	out := []byte(`{"contents":[]}`)
@@ -111,7 +111,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			i++
 		}
 
-		for _, item := range normalized {
+		for i := 0; i < len(normalized); i++ {
+			item := normalized[i]
 			itemType := item.Get("type").String()
 			itemRole := item.Get("role").String()
 			if itemType == "" && itemRole != "" {
@@ -354,13 +355,20 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRawBytes(out, "contents.-1", functionContent)
 
 			case "reasoning":
-				thoughtContent := []byte(`{"role":"model","parts":[]}`)
-				thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
-				thought, _ = sjson.SetBytes(thought, "text", item.Get("summary.0.text").String())
-				thought, _ = sjson.SetBytes(thought, "thoughtSignature", openAIResponsesGeminiThoughtSignature(item.Get("encrypted_content").String()))
+				thoughtText := item.Get("summary.0.text").String()
+				signature := openAIResponsesGeminiThoughtSignature(item.Get("encrypted_content").String())
 
-				thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", thought)
-				out, _ = sjson.SetRawBytes(out, "contents.-1", thoughtContent)
+				visibleText := ""
+				if useGeminiNativeReasoningLayout && i+1 < len(normalized) {
+					next := normalized[i+1]
+					if visible, ok := openAIResponsesAssistantVisibleText(next); ok {
+						visibleText = visible
+						i++
+					}
+				}
+
+				modelContent := buildOpenAIResponsesReasoningModelContent(thoughtText, visibleText, signature, useGeminiNativeReasoningLayout)
+				out, _ = sjson.SetRawBytes(out, "contents.-1", modelContent)
 			}
 		}
 	} else if input.Exists() && input.Type == gjson.String {
@@ -372,10 +380,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Gemini/Vertex accepts assistant/model turns in history, but some model
 	// surfaces reject requests whose final turn is model-authored prefill.
+	// Preserve reasoning history (thought parts); only strip trailing plain model text.
 	contents := gjson.GetBytes(out, "contents")
 	if contents.Exists() && contents.IsArray() {
 		arr := contents.Array()
-		if len(arr) > 0 && arr[len(arr)-1].Get("role").String() == "model" {
+		if len(arr) > 0 && shouldStripTrailingOpenAIResponsesModelPrefill(arr[len(arr)-1]) {
 			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
 		}
 	}
@@ -467,6 +476,114 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	result := out
 	result = common.AttachDefaultSafetySettings(result, "safetySettings")
 	return result
+}
+
+func shouldStripTrailingOpenAIResponsesModelPrefill(lastContent gjson.Result) bool {
+	if lastContent.Get("role").String() != "model" {
+		return false
+	}
+	parts := lastContent.Get("parts")
+	if !parts.IsArray() {
+		return false
+	}
+	for _, part := range parts.Array() {
+		if part.Get("thought").Bool() {
+			return false
+		}
+	}
+	return true
+}
+
+func isTrailingOpenAIResponsesAssistantPrefill(items []gjson.Result, assistantIndex int) bool {
+	if assistantIndex < 0 || assistantIndex >= len(items) {
+		return false
+	}
+	for j := assistantIndex + 1; j < len(items); j++ {
+		itemType := items[j].Get("type").String()
+		itemRole := items[j].Get("role").String()
+		if itemType == "" && itemRole != "" {
+			itemType = "message"
+		}
+		switch itemType {
+		case "reasoning", "function_call", "function_call_output":
+			return false
+		case "message":
+			if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
+				continue
+			}
+			return false
+		}
+	}
+	_, ok := openAIResponsesAssistantVisibleText(items[assistantIndex])
+	return ok
+}
+
+func openAIResponsesAssistantVisibleText(item gjson.Result) (string, bool) {
+	itemType := item.Get("type").String()
+	itemRole := item.Get("role").String()
+	if itemType == "" && itemRole != "" {
+		itemType = "message"
+	}
+	if itemType != "message" {
+		return "", false
+	}
+
+	content := item.Get("content")
+	if !content.Exists() {
+		return "", false
+	}
+	if content.Type == gjson.String {
+		switch strings.ToLower(strings.TrimSpace(itemRole)) {
+		case "assistant", "model":
+			return content.String(), true
+		default:
+			return "", false
+		}
+	}
+	if !content.IsArray() {
+		return "", false
+	}
+
+	var textParts []string
+	hasOutputText := false
+	content.ForEach(func(_, contentItem gjson.Result) bool {
+		contentType := contentItem.Get("type").String()
+		if contentType == "" {
+			contentType = "input_text"
+		}
+		if contentType != "output_text" {
+			return true
+		}
+		hasOutputText = true
+		textParts = append(textParts, contentItem.Get("text").String())
+		return true
+	})
+	if !hasOutputText {
+		return "", false
+	}
+	// output_text marks model-visible content even when message.role is "user".
+	return strings.Join(textParts, "\n"), true
+}
+
+func buildOpenAIResponsesReasoningModelContent(thoughtText, visibleText, signature string, useGeminiNativeReasoningLayout bool) []byte {
+	modelContent := []byte(`{"role":"model","parts":[]}`)
+	if useGeminiNativeReasoningLayout {
+		thought := []byte(`{"text":"","thought":true}`)
+		thought, _ = sjson.SetBytes(thought, "text", thoughtText)
+		modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", thought)
+
+		visible := []byte(`{"text":"","thoughtSignature":""}`)
+		visible, _ = sjson.SetBytes(visible, "text", visibleText)
+		visible, _ = sjson.SetBytes(visible, "thoughtSignature", signature)
+		modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", visible)
+		return modelContent
+	}
+
+	thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
+	thought, _ = sjson.SetBytes(thought, "text", thoughtText)
+	thought, _ = sjson.SetBytes(thought, "thoughtSignature", signature)
+	modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", thought)
+	return modelContent
 }
 
 func openAIResponsesGeminiThoughtSignature(rawSignature string) string {
