@@ -102,6 +102,8 @@ func NewObjectTokenStore(cfg ObjectStoreConfig) (*ObjectTokenStore, error) {
 	}
 	if cfg.PathStyle {
 		options.BucketLookup = minio.BucketLookupPath
+	} else {
+		options.BucketLookup = minio.BucketLookupDNS
 	}
 
 	client, err := minio.New(cfg.Endpoint, options)

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -153,26 +154,28 @@ func main() {
 	var homeClient *home.Client
 	var homePluginSyncReport homeplugins.SyncReport
 	var (
-		usePostgresStore     bool
-		pgStoreDSN           string
-		pgStoreSchema        string
-		pgStoreLocalPath     string
-		pgStoreInst          *store.PostgresStore
-		useGitStore          bool
-		gitStoreRemoteURL    string
-		gitStoreUser         string
-		gitStorePassword     string
-		gitStoreBranch       string
-		gitStoreLocalPath    string
-		gitStoreInst         *store.GitTokenStore
-		gitStoreRoot         string
-		useObjectStore       bool
-		objectStoreEndpoint  string
-		objectStoreAccess    string
-		objectStoreSecret    string
-		objectStoreBucket    string
-		objectStoreLocalPath string
-		objectStoreInst      *store.ObjectTokenStore
+		usePostgresStore              bool
+		pgStoreDSN                    string
+		pgStoreSchema                 string
+		pgStoreLocalPath              string
+		pgStoreInst                   *store.PostgresStore
+		useGitStore                   bool
+		gitStoreRemoteURL             string
+		gitStoreUser                  string
+		gitStorePassword              string
+		gitStoreBranch                string
+		gitStoreLocalPath             string
+		gitStoreInst                  *store.GitTokenStore
+		gitStoreRoot                  string
+		useObjectStore                bool
+		objectStoreEndpoint           string
+		objectStoreAccess             string
+		objectStoreSecret             string
+		objectStoreBucket             string
+		objectStoreVirtualHostedStyle bool
+		objectStorePrefix             string
+		objectStoreLocalPath          string
+		objectStoreInst               *store.ObjectTokenStore
 	)
 
 	wd, err := os.Getwd()
@@ -254,6 +257,17 @@ func main() {
 	}
 	if value, ok := lookupEnv("OBJECTSTORE_BUCKET", "objectstore_bucket"); ok {
 		objectStoreBucket = value
+	}
+	if value, ok := lookupEnv("OBJECTSTORE_VIRTUAL_HOSTED_STYLE", "objectstore_virtual_hosted_style"); ok {
+		valueBool, errParse := strconv.ParseBool(value)
+		if errParse != nil {
+			log.Errorf("invalid OBJECTSTORE_VIRTUAL_HOSTED_STYLE value %q: %v", value, err)
+			return
+		}
+		objectStoreVirtualHostedStyle = valueBool
+	}
+	if value, ok := lookupEnv("OBJECTSTORE_PREFIX", "objectstore_prefix"); ok {
+		objectStorePrefix = value
 	}
 	if value, ok := lookupEnv("OBJECTSTORE_LOCAL_PATH", "objectstore_local_path"); ok {
 		objectStoreLocalPath = value
@@ -402,9 +416,10 @@ func main() {
 			Bucket:    objectStoreBucket,
 			AccessKey: objectStoreAccess,
 			SecretKey: objectStoreSecret,
+			Prefix:    objectStorePrefix,
 			LocalRoot: objectStoreRoot,
 			UseSSL:    useSSL,
-			PathStyle: true,
+			PathStyle: !objectStoreVirtualHostedStyle,
 		}
 		objectStoreInst, err = store.NewObjectTokenStore(objCfg)
 		if err != nil {
