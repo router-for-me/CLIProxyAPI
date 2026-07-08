@@ -3,7 +3,7 @@
 host: ""
 
 # Server port
-port: 8318
+port: 8317
 
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
