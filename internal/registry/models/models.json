@@ -2147,11 +2147,9 @@
       "thinking": {
         "zero_allowed": true,
         "levels": [
-          "none",
           "low",
           "medium",
-          "high",
-          "xhigh"
+          "high"
         ]
       }
     },
