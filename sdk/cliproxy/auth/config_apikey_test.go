@@ -31,3 +31,31 @@ func TestIsConfigAPIKeyAuth(t *testing.T) {
 		t.Fatal("expected config api key auth")
 	}
 }
+
+func TestIsConfigProviderAuth(t *testing.T) {
+	if IsConfigProviderAuth(nil) {
+		t.Fatal("expected nil auth to be false")
+	}
+	if !IsConfigProviderAuth(&Auth{Attributes: map[string]string{"source": "config:openai-compatibility[x]"}}) {
+		t.Fatal("expected keyless config provider auth")
+	}
+	if !IsConfigProviderAuth(&Auth{
+		Attributes: map[string]string{
+			"api_key": "k",
+			"source":  "config:openai-compatibility[x]",
+		},
+	}) {
+		t.Fatal("expected keyed config provider auth")
+	}
+	if IsConfigProviderAuth(&Auth{
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"source":    "config:codex[x]",
+		},
+	}) {
+		t.Fatal("expected config oauth auth to be false")
+	}
+	if IsConfigProviderAuth(&Auth{Attributes: map[string]string{"source": "/tmp/auth.json"}}) {
+		t.Fatal("expected file auth to be false")
+	}
+}

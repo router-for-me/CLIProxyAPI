@@ -13,3 +13,14 @@ func IsConfigAPIKeyAuth(auth *Auth) bool {
 	}
 	return authAttribute(auth, AttributeAPIKey) != ""
 }
+
+// IsConfigProviderAuth reports whether the auth entry is synthesized from provider config.
+func IsConfigProviderAuth(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.AuthKind() == AuthKindOAuth {
+		return false
+	}
+	return auth.AuthSourceKind() == AuthSourceConfig
+}

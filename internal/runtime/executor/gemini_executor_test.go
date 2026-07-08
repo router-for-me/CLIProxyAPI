@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -673,6 +675,35 @@ func TestGeminiExecutorNativeInteractionsAppliesThinkingSuffix(t *testing.T) {
 	}
 	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_summaries").String(); got != "auto" {
 		t.Fatalf("thinking_summaries = %q, want auto. Body: %s", got, string(upstreamBody))
+	}
+}
+
+func TestGeminiInteractionsThinkingUsesSelectedProviderKey(t *testing.T) {
+	const model = "shared-alias"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("gemini-shared-alias", "gemini", []*registry.ModelInfo{{
+		ID:       model,
+		Object:   "model",
+		OwnedBy:  "gemini",
+		Type:     "test",
+		Thinking: &registry.ThinkingSupport{Levels: []string{string(thinking.LevelLow)}},
+	}})
+	reg.RegisterClient("gemini-interactions-shared-alias", "gemini-interactions", []*registry.ModelInfo{{
+		ID:       model,
+		Object:   "model",
+		OwnedBy:  "gemini-interactions",
+		Type:     "test",
+		Thinking: &registry.ThinkingSupport{Levels: []string{string(thinking.LevelHigh)}},
+	}})
+	t.Cleanup(func() { reg.UnregisterClient("gemini-shared-alias") })
+	t.Cleanup(func() { reg.UnregisterClient("gemini-interactions-shared-alias") })
+
+	body, err := applyGeminiInteractionsThinking([]byte(`{"input":"hi"}`), model+"(high)", "gemini-interactions")
+	if err != nil {
+		t.Fatalf("applyGeminiInteractionsThinking() error = %v", err)
+	}
+	if got := gjson.GetBytes(body, "generation_config.thinking_level").String(); got != "high" {
+		t.Fatalf("thinking_level = %q, want high. Body: %s", got, string(body))
 	}
 }
 

@@ -148,7 +148,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, helps.ThinkingLookupModelForAuth(auth, e.Identifier(), req.Model, opts), from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -261,7 +261,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, helps.ThinkingLookupModelForAuth(auth, e.Identifier(), req.Model, opts), from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +390,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body, _ = sjson.SetBytes(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req.Model)
+	body, err = applyGeminiInteractionsThinking(body, helps.ThinkingLookupModelForAuth(auth, e.Identifier(), req.Model, opts), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -466,7 +466,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body, _ = sjson.SetBytes(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req.Model)
+	body, err = applyGeminiInteractionsThinking(body, helps.ThinkingLookupModelForAuth(auth, e.Identifier(), req.Model, opts), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -615,7 +615,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("gemini")
 	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
+	translatedReq, err := thinking.ApplyThinking(translatedReq, helps.ThinkingLookupModelForAuth(auth, e.Identifier(), req.Model, opts), from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -795,8 +795,8 @@ func isNativeInteractionsAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "gemini-interactions")
 }
 
-func applyGeminiInteractionsThinking(body []byte, model string) ([]byte, error) {
-	return thinking.ApplyThinking(body, model, sdktranslator.FormatInteractions.String(), sdktranslator.FormatInteractions.String(), "gemini")
+func applyGeminiInteractionsThinking(body []byte, model string, providerKey string) ([]byte, error) {
+	return thinking.ApplyThinking(body, model, sdktranslator.FormatInteractions.String(), sdktranslator.FormatInteractions.String(), providerKey)
 }
 
 func applyGeminiInteractionsRevisionHeader(req *http.Request) {

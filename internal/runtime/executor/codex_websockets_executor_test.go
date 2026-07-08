@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -163,6 +164,102 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
+}
+
+func TestCodexWebsocketsUsesPrefixedThinkingLookup(t *testing.T) {
+	const provider = "codex"
+	const requestedModel = "free-provider/gpt-5-codex"
+	const upstreamModel = "gpt-5-codex"
+
+	reg := registry.GetGlobalRegistry()
+	clientID := "codex-websocket-prefixed-thinking-" + strings.ReplaceAll(t.Name(), "/", "-")
+	reg.RegisterClient(clientID, provider, []*registry.ModelInfo{
+		{
+			ID:      requestedModel,
+			Object:  "model",
+			Created: time.Now().Unix(),
+			OwnedBy: provider,
+			Type:    "codex",
+			Thinking: &registry.ThinkingSupport{
+				Levels: []string{"xhigh"},
+			},
+		},
+	})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	run := func(t *testing.T, stream bool) {
+		t.Helper()
+
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		capturedPayload := make(chan []byte, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Errorf("upgrade websocket: %v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+
+			_, payload, errRead := conn.ReadMessage()
+			if errRead != nil {
+				t.Errorf("read upstream websocket message: %v", errRead)
+				return
+			}
+			capturedPayload <- bytes.Clone(payload)
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+			}
+		}))
+		defer server.Close()
+
+		exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{
+			cliproxyauth.AttributeAuthKind: cliproxyauth.AuthKindAPIKey,
+			cliproxyauth.AttributeSource:   "config:codex[test]",
+			"api_key":                      "sk-test",
+			"base_url":                     server.URL,
+		}}
+		req := cliproxyexecutor.Request{
+			Model:   upstreamModel,
+			Payload: []byte(`{"model":"free-provider/gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}],"reasoning":{"effort":"xhigh"}}`),
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FromString("openai-response"),
+			ResponseFormat: sdktranslator.FromString("openai-response"),
+			Metadata: map[string]any{
+				cliproxyexecutor.ThinkingLookupModelMetadataKey: requestedModel,
+			},
+		}
+
+		if stream {
+			result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+			if err != nil {
+				t.Fatalf("ExecuteStream() error = %v", err)
+			}
+			for range result.Chunks {
+			}
+		} else {
+			if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+		}
+
+		select {
+		case payload := <-capturedPayload:
+			if got := gjson.GetBytes(payload, "model").String(); got != upstreamModel {
+				t.Fatalf("upstream model = %s, want %s; payload=%s", got, upstreamModel, payload)
+			}
+			if got := gjson.GetBytes(payload, "reasoning.effort").String(); got != "xhigh" {
+				t.Fatalf("reasoning.effort = %s, want xhigh; payload=%s", got, payload)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for upstream websocket payload")
+		}
+	}
+
+	t.Run("execute", func(t *testing.T) { run(t, false) })
+	t.Run("stream", func(t *testing.T) { run(t, true) })
 }
 
 func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsocket(t *testing.T) {
