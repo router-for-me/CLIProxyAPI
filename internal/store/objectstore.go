@@ -146,7 +146,7 @@ func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath stri
 		return fmt.Errorf("object store: not initialized")
 	}
 	if err := s.ensureBucket(ctx); err != nil {
-		return err
+		log.WithError(err).Warnf("object store: skip ensure bucket %s", s.cfg.Bucket)
 	}
 	if err := s.syncConfigFromBucket(ctx, exampleConfigPath); err != nil {
 		return err
