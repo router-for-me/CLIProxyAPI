@@ -7,7 +7,6 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api
     environment:
       DEPLOY: cloud
       PGSTORE_DSN: "postgresql://lijiahua%40looplaygame.com:LOOPLAY2026@cpa-cpa-db-hofpqp:5432/CPADB?sslmode=disable"
