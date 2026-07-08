@@ -26,6 +26,7 @@ const (
 
 // Antigravity API configuration
 const (
-	APIEndpoint = "https://cloudcode-pa.googleapis.com"
-	APIVersion  = "v1internal"
+	APIEndpoint      = "https://cloudcode-pa.googleapis.com"
+	DailyAPIEndpoint = "https://daily-cloudcode-pa.googleapis.com"
+	APIVersion       = "v1internal"
 )

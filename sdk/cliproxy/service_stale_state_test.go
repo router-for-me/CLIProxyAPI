@@ -40,37 +40,8 @@ func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeSt
 
 	service.applyCoreAuthRemoval(context.Background(), authID)
 
-	disabled, ok := service.coreManager.GetByID(authID)
-	if !ok || disabled == nil {
-		t.Fatalf("expected disabled auth after removal")
-	}
-	if !disabled.Disabled || disabled.Status != coreauth.StatusDisabled {
-		t.Fatalf("expected disabled auth after removal, got disabled=%v status=%v", disabled.Disabled, disabled.Status)
-	}
-	if disabled.LastRefreshedAt.IsZero() {
-		t.Fatalf("expected disabled auth to still carry prior LastRefreshedAt for regression setup")
-	}
-	if disabled.NextRefreshAfter.IsZero() {
-		t.Fatalf("expected disabled auth to still carry prior NextRefreshAfter for regression setup")
-	}
-
-	// Reconcile prunes unsupported model state during registration, so seed the
-	// disabled snapshot explicitly before exercising delete -> re-add behavior.
-	disabled.ModelStates = map[string]*coreauth.ModelState{
-		modelID: {
-			Quota: coreauth.QuotaState{BackoffLevel: 7},
-		},
-	}
-	if _, err := service.coreManager.Update(context.Background(), disabled); err != nil {
-		t.Fatalf("seed disabled auth stale ModelStates: %v", err)
-	}
-
-	disabled, ok = service.coreManager.GetByID(authID)
-	if !ok || disabled == nil {
-		t.Fatalf("expected disabled auth after stale state seeding")
-	}
-	if len(disabled.ModelStates) == 0 {
-		t.Fatalf("expected disabled auth to carry seeded ModelStates for regression setup")
+	if _, ok := service.coreManager.GetByID(authID); ok {
+		t.Fatalf("expected auth %q to be removed from runtime state", authID)
 	}
 
 	service.applyCoreAuthAddOrUpdate(context.Background(), &coreauth.Auth{
@@ -103,12 +74,16 @@ func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeSt
 func TestForceHomeRuntimeConfigEnablesUsageStatistics(t *testing.T) {
 	cfg := &config.Config{
 		UsageStatisticsEnabled: false,
+		SaveCooldownStatus:     true,
 	}
 
 	forceHomeRuntimeConfig(cfg)
 
 	if !cfg.UsageStatisticsEnabled {
 		t.Fatal("expected home runtime config to force usage statistics enabled")
+	}
+	if cfg.SaveCooldownStatus {
+		t.Fatal("expected home runtime config to force cooldown status persistence disabled")
 	}
 }
 
@@ -119,6 +94,7 @@ func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
 
 	service.applyHomeOverlay(&config.Config{
 		UsageStatisticsEnabled: false,
+		SaveCooldownStatus:     true,
 	})
 
 	if service.cfg == nil || !service.cfg.UsageStatisticsEnabled {
@@ -126,5 +102,8 @@ func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
 	}
 	if !service.cfg.Home.Enabled {
 		t.Fatal("expected home overlay to preserve local home settings")
+	}
+	if service.cfg.SaveCooldownStatus {
+		t.Fatal("expected home overlay to force cooldown status persistence disabled")
 	}
 }

@@ -15,9 +15,10 @@ import (
 type schedulerStrategy int
 
 const (
-	schedulerStrategyCustom schedulerStrategy = iota
-	schedulerStrategyRoundRobin
-	schedulerStrategyFillFirst
+	schedulerStrategyCurrent    schedulerStrategy = -1
+	schedulerStrategyCustom     schedulerStrategy = 0
+	schedulerStrategyRoundRobin schedulerStrategy = 1
+	schedulerStrategyFillFirst  schedulerStrategy = 2
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -51,7 +52,6 @@ type scheduledAuthMeta struct {
 	auth              *Auth
 	providerKey       string
 	priority          int
-	virtualParent     string
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
 }
@@ -79,18 +79,9 @@ type readyBucket struct {
 	ws  readyView
 }
 
-// readyView holds the selection order for flat or grouped round-robin traversal.
+// readyView holds the selection order for flat round-robin traversal.
 type readyView struct {
-	flat         []*scheduledAuth
-	cursor       int
-	parentOrder  []string
-	parentCursor int
-	children     map[string]*childBucket
-}
-
-// childBucket keeps the per-parent rotation state for grouped Gemini virtual auths.
-type childBucket struct {
-	items  []*scheduledAuth
+	flat   []*scheduledAuth
 	cursor int
 }
 
@@ -98,9 +89,7 @@ type childBucket struct {
 type cooldownQueue []*scheduledAuth
 
 type readyViewCursorState struct {
-	cursor       int
-	parentCursor int
-	childCursors map[string]int
+	cursor int
 }
 
 type readyBucketCursorState struct {
@@ -109,21 +98,7 @@ type readyBucketCursorState struct {
 }
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
-	state := readyViewCursorState{
-		cursor:       view.cursor,
-		parentCursor: view.parentCursor,
-	}
-	if len(view.children) == 0 {
-		return state
-	}
-	state.childCursors = make(map[string]int, len(view.children))
-	for parent, child := range view.children {
-		if child == nil {
-			continue
-		}
-		state.childCursors[parent] = child.cursor
-	}
-	return state
+	return readyViewCursorState{cursor: view.cursor}
 }
 
 func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
@@ -132,23 +107,6 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 	}
 	if len(view.flat) > 0 {
 		view.cursor = normalizeCursor(state.cursor, len(view.flat))
-	}
-	if len(view.parentOrder) == 0 || len(view.children) == 0 {
-		return
-	}
-	view.parentCursor = normalizeCursor(state.parentCursor, len(view.parentOrder))
-	if len(state.childCursors) == 0 {
-		return
-	}
-	for parent, child := range view.children {
-		if child == nil || len(child.items) == 0 {
-			continue
-		}
-		cursor, ok := state.childCursors[parent]
-		if !ok {
-			continue
-		}
-		child.cursor = normalizeCursor(cursor, len(child.items))
 	}
 }
 
@@ -238,16 +196,23 @@ func (s *authScheduler) removeAuth(authID string) {
 
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
 func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
+	return s.pickSingleWithStrategy(ctx, provider, model, opts, tried, schedulerStrategyCurrent)
+}
+
+func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerPrefersWebsocketTransport(providerKey) && pinnedAuthID == ""
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strategy == schedulerStrategyCurrent {
+		strategy = s.strategy
+	}
 	providerState := s.providers[providerKey]
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -270,14 +235,27 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
 }
 
+func providerPrefersWebsocketTransport(providerKey string) bool {
+	switch strings.ToLower(strings.TrimSpace(providerKey)) {
+	case "codex", "xai":
+		return true
+	default:
+		return false
+	}
+}
+
 // pickMixed returns the next auth and provider for a mixed-provider request.
 func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
+	return s.pickMixedWithStrategy(ctx, providers, model, opts, tried, schedulerStrategyCurrent)
+}
+
+func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, string, error) {
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -289,7 +267,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		// When a single provider is eligible, reuse pickSingle so provider-specific preferences
 		// (for example Codex websocket transport) are applied consistently.
 		providerKey := normalized[0]
-		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
+		picked, errPick := s.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 		if errPick != nil {
 			return nil, "", errPick
 		}
@@ -303,6 +281,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strategy == schedulerStrategyCurrent {
+		strategy = s.strategy
+	}
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
@@ -323,7 +304,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -357,13 +338,13 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	if s.strategy == schedulerStrategyFillFirst {
+	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -510,7 +491,7 @@ func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(auth)
 	if authID == "" || providerKey == "" || auth.Disabled {
 		s.removeAuthLocked(authID)
 		return
@@ -557,16 +538,11 @@ func (s *authScheduler) ensureProviderLocked(providerKey string) *providerSchedu
 
 // buildScheduledAuthMeta extracts the scheduling metadata needed for shard bookkeeping.
 func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
-	virtualParent := ""
-	if auth.Attributes != nil {
-		virtualParent = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])
-	}
+	providerKey := executorKeyFromAuth(auth)
 	return &scheduledAuthMeta{
 		auth:              auth,
 		providerKey:       providerKey,
 		priority:          authPriority(auth),
-		virtualParent:     virtualParent,
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: supportedModelSetForAuth(auth.ID),
 	}
@@ -678,11 +654,9 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
 	previousPriority := 0
-	previousParent := ""
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
 		previousPriority = entry.meta.priority
-		previousParent = entry.meta.virtualParent
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
 
@@ -703,7 +677,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -965,32 +939,9 @@ func buildReadyBucket(entries []*scheduledAuth) *readyBucket {
 	return bucket
 }
 
-// buildReadyView creates either a flat view or a grouped parent/child view for rotation.
+// buildReadyView creates a flat view for rotation.
 func buildReadyView(entries []*scheduledAuth) readyView {
-	view := readyView{flat: append([]*scheduledAuth(nil), entries...)}
-	if len(entries) == 0 {
-		return view
-	}
-	groups := make(map[string][]*scheduledAuth)
-	for _, entry := range entries {
-		if entry == nil || entry.meta == nil || entry.meta.virtualParent == "" {
-			return view
-		}
-		groups[entry.meta.virtualParent] = append(groups[entry.meta.virtualParent], entry)
-	}
-	if len(groups) <= 1 {
-		return view
-	}
-	view.children = make(map[string]*childBucket, len(groups))
-	view.parentOrder = make([]string, 0, len(groups))
-	for parent := range groups {
-		view.parentOrder = append(view.parentOrder, parent)
-	}
-	sort.Strings(view.parentOrder)
-	for _, parent := range view.parentOrder {
-		view.children[parent] = &childBucket{items: append([]*scheduledAuth(nil), groups[parent]...)}
-	}
-	return view
+	return readyView{flat: append([]*scheduledAuth(nil), entries...)}
 }
 
 // pickFirst returns the first ready entry that satisfies predicate without advancing cursors.
@@ -1003,11 +954,8 @@ func (v *readyView) pickFirst(predicate func(*scheduledAuth) bool) *scheduledAut
 	return nil
 }
 
-// pickRoundRobin returns the next ready entry using flat or grouped round-robin traversal.
+// pickRoundRobin returns the next ready entry using flat round-robin traversal.
 func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
-	if len(v.parentOrder) > 1 && len(v.children) > 0 {
-		return v.pickGroupedRoundRobin(predicate)
-	}
 	if len(v.flat) == 0 {
 		return nil
 	}
@@ -1023,34 +971,6 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 		}
 		v.cursor = index + 1
 		return entry
-	}
-	return nil
-}
-
-// pickGroupedRoundRobin rotates across parents first and then within the selected parent.
-func (v *readyView) pickGroupedRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
-	start := 0
-	if len(v.parentOrder) > 0 {
-		start = v.parentCursor % len(v.parentOrder)
-	}
-	for offset := 0; offset < len(v.parentOrder); offset++ {
-		parentIndex := (start + offset) % len(v.parentOrder)
-		parent := v.parentOrder[parentIndex]
-		child := v.children[parent]
-		if child == nil || len(child.items) == 0 {
-			continue
-		}
-		itemStart := child.cursor % len(child.items)
-		for itemOffset := 0; itemOffset < len(child.items); itemOffset++ {
-			itemIndex := (itemStart + itemOffset) % len(child.items)
-			entry := child.items[itemIndex]
-			if predicate != nil && !predicate(entry) {
-				continue
-			}
-			child.cursor = itemIndex + 1
-			v.parentCursor = parentIndex + 1
-			return entry
-		}
 	}
 	return nil
 }

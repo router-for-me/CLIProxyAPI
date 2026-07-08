@@ -24,7 +24,6 @@ func sumRecentRequestBuckets(buckets []coreauth.RecentRequestBucket) (int64, int
 
 func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	if _, err := manager.Register(context.Background(), &coreauth.Auth{
@@ -91,5 +90,53 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 	claudeSuccess, claudeFailed := sumRecentRequestBuckets(claudeEntry.RecentRequests)
 	if claudeSuccess != 1 || claudeFailed != 0 {
 		t.Fatalf("claude totals = %d/%d, want 1/0", claudeSuccess, claudeFailed)
+	}
+}
+
+func TestGetAPIKeyUsage_GroupsOpenAICompatibleByCompatName(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "vast-auth",
+		Provider: "openai-compatible-vast",
+		Attributes: map[string]string{
+			"api_key":     "vast-key",
+			"base_url":    "https://www.vastnum.com/v1",
+			"compat_name": "VAST",
+		},
+	}); err != nil {
+		t.Fatalf("register vast auth: %v", err)
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "vast-auth", Provider: "openai-compatible-vast", Model: "gpt-5", Success: true})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/api-key-usage", nil)
+	ginCtx.Request = req
+	h.GetAPIKeyUsage(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload map[string]map[string]apiKeyUsageEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	if _, exists := payload["openai-compatible-vast"]; exists {
+		t.Fatalf("unexpected namespaced provider bucket in payload: %#v", payload)
+	}
+	vastBucket, exists := payload["vast"]
+	if !exists {
+		t.Fatalf("missing compat provider bucket in payload: %#v", payload)
+	}
+	vastEntry := vastBucket["https://www.vastnum.com/v1|vast-key"]
+	if vastEntry.Success != 1 || vastEntry.Failed != 0 {
+		t.Fatalf("vast totals = %d/%d, want 1/0", vastEntry.Success, vastEntry.Failed)
 	}
 }

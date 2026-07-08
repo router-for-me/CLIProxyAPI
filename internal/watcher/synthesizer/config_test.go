@@ -169,16 +169,64 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_InteractionsKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			InteractionsKey: []config.GeminiKey{{
+				APIKey:   "interactions-key",
+				BaseURL:  "https://interactions.example.com",
+				ProxyURL: "http://proxy.local:8080",
+				Prefix:   "native",
+				Headers:  map[string]string{"X-Custom": "value"},
+			}},
+		},
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "gemini-interactions" {
+		t.Fatalf("provider = %q, want gemini-interactions", auth.Provider)
+	}
+	if auth.Label != "interactions-apikey" {
+		t.Fatalf("label = %q, want interactions-apikey", auth.Label)
+	}
+	if auth.Prefix != "native" {
+		t.Fatalf("prefix = %q, want native", auth.Prefix)
+	}
+	if auth.ProxyURL != "http://proxy.local:8080" {
+		t.Fatalf("proxy URL = %q, want http://proxy.local:8080", auth.ProxyURL)
+	}
+	if got := auth.Attributes["api_key"]; got != "interactions-key" {
+		t.Fatalf("api_key = %q, want interactions-key", got)
+	}
+	if got := auth.Attributes["base_url"]; got != "https://interactions.example.com" {
+		t.Fatalf("base_url = %q, want https://interactions.example.com", got)
+	}
+	if got := auth.Attributes["header:X-Custom"]; got != "value" {
+		t.Fatalf("header:X-Custom = %q, want value", got)
+	}
+}
+
 func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
 		Config: &config.Config{
 			ClaudeKey: []config.ClaudeKey{
 				{
-					APIKey:         "sk-ant-api-xxx",
-					Prefix:         "main",
-					BaseURL:        "https://api.anthropic.com",
-					DisableCooling: true,
+					APIKey:                  "sk-ant-api-xxx",
+					Prefix:                  "main",
+					BaseURL:                 "https://api.anthropic.com",
+					DisableCooling:          true,
+					RebuildMidSystemMessage: true,
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -212,6 +260,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")
+	}
+	if got := auths[0].Attributes["rebuild_mid_system_message"]; got != "true" {
+		t.Errorf("expected rebuild_mid_system_message=true, got %s", got)
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
@@ -397,6 +448,43 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "kimi",
+					BaseURL: "https://kimi-compatible.example.com/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "test-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "openai-compatible-kimi" {
+		t.Fatalf("provider = %q, want openai-compatible-kimi", auth.Provider)
+	}
+	if auth.Attributes["provider_key"] != "openai-compatible-kimi" {
+		t.Fatalf("provider_key = %q, want openai-compatible-kimi", auth.Attributes["provider_key"])
+	}
+	if auth.Attributes["compat_name"] != "kimi" {
+		t.Fatalf("compat_name = %q, want kimi", auth.Attributes["compat_name"])
 	}
 }
 
@@ -639,7 +727,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

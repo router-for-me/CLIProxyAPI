@@ -19,11 +19,11 @@ type oauthProvider struct {
 }
 
 var oauthProviders = []oauthProvider{
-	{"Gemini CLI", "gemini-cli-auth-url", "🟦"},
 	{"Claude (Anthropic)", "anthropic-auth-url", "🟧"},
 	{"Codex (OpenAI)", "codex-auth-url", "🟩"},
 	{"Antigravity", "antigravity-auth-url", "🟪"},
 	{"Kimi", "kimi-auth-url", "🟫"},
+	{"xAI", "xai-auth-url", "⬛"},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -270,8 +270,6 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 			if p.name == m.providerName {
 				// Map provider name to the canonical key the API expects
 				switch p.apiPath {
-				case "gemini-cli-auth-url":
-					providerKey = "gemini"
 				case "anthropic-auth-url":
 					providerKey = "anthropic"
 				case "codex-auth-url":
@@ -280,6 +278,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "antigravity"
 				case "kimi-auth-url":
 					providerKey = "kimi"
+				case "xai-auth-url":
+					providerKey = "xai"
 				}
 				break
 			}

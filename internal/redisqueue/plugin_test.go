@@ -19,9 +19,73 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
+		responseHeaders := http.Header{}
+		responseHeaders.Add("X-Upstream-Request-Id", "upstream-req-1")
+		responseHeaders.Add("Retry-After", "30")
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:        "openai",
+			ExecutorType:    "KimiExecutor",
+			Model:           "gpt-5.4",
+			Alias:           "client-gpt",
+			APIKey:          "test-key",
+			AuthIndex:       "0",
+			AuthType:        "apikey",
+			Source:          "user@example.com",
+			ReasoningEffort: "medium",
+			ServiceTier:     "priority",
+			RequestedAt:     time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:         1500 * time.Millisecond,
+			Detail: coreusage.Detail{
+				InputTokens:  10,
+				OutputTokens: 20,
+				TotalTokens:  30,
+			},
+			ResponseHeaders: responseHeaders.Clone(),
+		})
+		responseHeaders.Set("Retry-After", "999")
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "provider", "openai")
+		requireStringField(t, payload, "executor_type", "KimiExecutor")
+		requireStringField(t, payload, "model", "gpt-5.4")
+		requireStringField(t, payload, "alias", "client-gpt")
+		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
+		requireStringField(t, payload, "auth_type", "apikey")
+		requireMissingField(t, payload, "user_api_key")
+		requireStringField(t, payload, "request_id", "ctx-request-id")
+		requireStringField(t, payload, "reasoning_effort", "medium")
+		requireStringField(t, payload, "service_tier", "priority")
+		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
+		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
+		requireBoolField(t, payload, "failed", false)
+		requireFailField(t, payload, http.StatusOK, "")
+	})
+}
+
+func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		ctx = internallogging.WithResponseHeadersHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+		initialHeaders := http.Header{}
+		initialHeaders.Set("X-Upstream-Request-Id", "upstream-req-1")
+		internallogging.SetResponseHeaders(ctx, initialHeaders)
+
+		mgr := coreusage.NewManager(16)
+		defer mgr.Stop()
+
+		mgr.Register(pluginFunc(func(ctx context.Context, _ coreusage.Record) {
+			nextHeaders := http.Header{}
+			nextHeaders.Set("X-Upstream-Request-Id", "upstream-req-2")
+			internallogging.SetResponseHeaders(ctx, nextHeaders)
+		}))
+		mgr.Register(&usageQueuePlugin{})
+
+		mgr.Publish(ctx, coreusage.Record{
 			Provider:    "openai",
 			Model:       "gpt-5.4",
 			Alias:       "client-gpt",
@@ -36,18 +100,11 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 				OutputTokens: 20,
 				TotalTokens:  30,
 			},
+			ResponseHeaders: internallogging.GetResponseHeaders(ctx),
 		})
 
-		payload := popSinglePayload(t)
-		requireStringField(t, payload, "provider", "openai")
-		requireStringField(t, payload, "model", "gpt-5.4")
-		requireStringField(t, payload, "alias", "client-gpt")
-		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
-		requireStringField(t, payload, "auth_type", "apikey")
-		requireMissingField(t, payload, "user_api_key")
-		requireStringField(t, payload, "request_id", "ctx-request-id")
-		requireBoolField(t, payload, "failed", false)
-		requireFailField(t, payload, http.StatusOK, "")
+		payload := waitForSinglePayload(t, 2*time.Second)
+		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 	})
 }
 
@@ -274,5 +331,30 @@ func requireFailField(t *testing.T, payload map[string]json.RawMessage, wantStat
 	}
 	if got.StatusCode != wantStatus || got.Body != wantBody {
 		t.Fatalf("fail = {status_code:%d body:%q}, want {status_code:%d body:%q}", got.StatusCode, got.Body, wantStatus, wantBody)
+	}
+}
+
+func requireHeaderField(t *testing.T, payload map[string]json.RawMessage, field, key string, want []string) {
+	t.Helper()
+
+	raw, ok := payload[field]
+	if !ok {
+		t.Fatalf("payload missing %q", field)
+	}
+	var headers map[string][]string
+	if err := json.Unmarshal(raw, &headers); err != nil {
+		t.Fatalf("unmarshal %q: %v", field, err)
+	}
+	got, ok := headers[key]
+	if !ok {
+		t.Fatalf("%s missing header %q", field, key)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%s[%q] = %v, want %v", field, key, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s[%q] = %v, want %v", field, key, got, want)
+		}
 	}
 }
