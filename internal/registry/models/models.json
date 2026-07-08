@@ -2150,7 +2150,8 @@
           "none",
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh"
         ]
       }
     },
