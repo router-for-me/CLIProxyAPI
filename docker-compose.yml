@@ -9,7 +9,7 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     environment:
       DEPLOY: cloud
-      PGSTORE_DSN: "postgresql://lijiahua%40looplaygame.com:LooPlay2026@cpaupdate-cpadb-ffnby0:5432/postgres?sslmode=disable"
+      PGSTORE_DSN: "postgresql://lijiahua%40looplaygame.com:LooPlay2026@cpaupdate-cpadb-ziwqd5:5432/postgres?sslmode=disable"
       PGSTORE_SCHEMA: "public"
     ports:
       - "8318:8318"
