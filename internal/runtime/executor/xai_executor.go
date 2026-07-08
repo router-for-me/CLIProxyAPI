@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -1019,6 +1020,9 @@ func xaiMetadataString(meta map[string]any, key string) string {
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
+		if gjson.GetBytes(body, "reasoning.effort").Exists() {
+			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
+		}
 		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
 		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
 			body, _ = sjson.DeleteBytes(body, "reasoning")
@@ -1342,21 +1346,22 @@ func removeXAIEncryptedReasoningInclude(body []byte) []byte {
 	return body
 }
 
+// xaiSupportsReasoningEffort reports whether the model accepts Responses API
+// reasoning.effort. Capability comes from model registry thinking metadata
+// (static models.json and dynamic registrations), not a hard-coded name allowlist.
 func xaiSupportsReasoningEffort(model string) bool {
 	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
 	if idx := strings.LastIndex(name, "/"); idx >= 0 {
 		name = name[idx+1:]
 	}
-	switch {
-	case strings.HasPrefix(name, "grok-3-mini"):
-		return true
-	case strings.HasPrefix(name, "grok-4.20-multi-agent"):
-		return true
-	case strings.HasPrefix(name, "grok-4.3"):
-		return true
-	default:
+	if name == "" {
 		return false
 	}
+	info := registry.LookupModelInfo(name, "xai")
+	if info == nil || info.Thinking == nil {
+		return false
+	}
+	return len(info.Thinking.Levels) > 0
 }
 
 func xaiNormalizeReasoningSummaryEventLine(line []byte, eventName string) []byte {
