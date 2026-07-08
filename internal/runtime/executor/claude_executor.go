@@ -1849,6 +1849,12 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 			if value, ok := auth.Metadata[key].(string); ok {
 				return strings.TrimSpace(value)
 			}
+			if value, ok := auth.Metadata[key].(bool); ok {
+				if value {
+					return "true"
+				}
+				return "false"
+			}
 		}
 		return ""
 	}

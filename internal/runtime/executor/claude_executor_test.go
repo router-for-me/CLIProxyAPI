@@ -2792,7 +2792,7 @@ func TestApplyCloaking_RelaxedSystemPromptFromAuthMetadata(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{"api_key": "key-123"},
 		Metadata: map[string]any{
-			"cloak_relaxed_system_prompt": "true",
+			"cloak_relaxed_system_prompt": true,
 		},
 	}
 	payload := []byte(`{"system":[{"type":"text","text":"Client rule"}],"messages":[{"role":"user","content":"hi"}]}`)
