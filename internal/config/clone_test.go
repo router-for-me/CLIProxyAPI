@@ -145,8 +145,9 @@ func sampleCloneRuntimeConfig() *Config {
 			Headers:        map[string]string{"X-Claude": "one"},
 			ExcludedModels: []string{"claude-hidden"},
 			Cloak: &CloakConfig{
-				SensitiveWords: []string{"secret"},
-				CacheUserID:    &cacheUserID,
+				RelaxedSystemPrompt: true,
+				SensitiveWords:      []string{"secret"},
+				CacheUserID:         &cacheUserID,
 			},
 		}},
 		OpenAICompatibility: []OpenAICompatibility{{

@@ -2449,6 +2449,44 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	}
 }
 
+func TestCheckSystemInstructionsWithSigningMode_RelaxedSystemPromptPreservesTopLevelSystem(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"Be concise.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"   "},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}},{"type":"text","text":"Prefer JSON."}],"messages":[{"role":"assistant","content":[{"type":"text","text":"ready"}]},{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, true, false, false, "2.1.63", "", "")
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 4 {
+		t.Fatalf("relaxed system prompt should produce 2 injected blocks plus 2 client blocks, got %d: %s", len(blocks), gjson.GetBytes(out, "system").Raw)
+	}
+	if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
+		t.Fatalf("blocks[0] should be billing header, got %q", blocks[0].Get("text").String())
+	}
+	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
+	}
+	if got := blocks[2].Get("text").String(); got != "Be concise." {
+		t.Fatalf("blocks[2].text = %q, want client system prompt", got)
+	}
+	if got := blocks[2].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("blocks[2].cache_control.type = %q, want ephemeral", got)
+	}
+	if got := blocks[3].Get("text").String(); got != "Prefer JSON." {
+		t.Fatalf("blocks[3].text = %q, want second client system prompt", got)
+	}
+	if strings.Contains(gjson.GetBytes(out, "system").Raw, expectedClaudeCodeStaticPrompt()) {
+		t.Fatalf("relaxed system prompt should not include the static Claude Code prompt")
+	}
+	if strings.Contains(string(out), "<system-reminder>") {
+		t.Fatalf("relaxed system prompt should not prepend client system prompts into user messages: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want original assistant first message preserved", got)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.text").String(); got != "hi" {
+		t.Fatalf("messages.1.content.0.text = %q, want original user text", got)
+	}
+}
+
 // Test case 3: Empty string system prompt does not alter the first user message
 func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) {
 	payload := []byte(`{"system":"","messages":[{"role":"user","content":"hi"}]}`)
@@ -2709,6 +2747,70 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "\u200B") {
 		t.Fatalf("expected configured sensitive word obfuscation to apply, got %q", got)
+	}
+}
+
+func TestApplyCloaking_RelaxedSystemPromptFromClaudeKeyConfig(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "key-123",
+			Cloak: &config.CloakConfig{
+				RelaxedSystemPrompt: true,
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{"system":"Client rule","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("relaxed system prompt should keep 2 injected blocks plus the client system block, got %d: %s", len(blocks), gjson.GetBytes(out, "system").Raw)
+	}
+	if got := blocks[2].Get("text").String(); got != "Client rule" {
+		t.Fatalf("blocks[2].text = %q, want client system prompt", got)
+	}
+	if strings.Contains(gjson.GetBytes(out, "system").Raw, expectedClaudeCodeStaticPrompt()) {
+		t.Fatalf("relaxed system prompt should not include the static Claude Code prompt")
+	}
+	if strings.Contains(string(out), "<system-reminder>") {
+		t.Fatalf("relaxed system prompt should not forward client system prompt into messages: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "hi" {
+		t.Fatalf("messages.0.content.0.text = %q, want original user text", got)
+	}
+	if got := gjson.GetBytes(out, "metadata.user_id").String(); got == "" {
+		t.Fatal("expected cloaking to keep injecting metadata.user_id")
+	}
+}
+
+func TestApplyCloaking_RelaxedSystemPromptFromAuthMetadata(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "key-123"},
+		Metadata: map[string]any{
+			"cloak_relaxed_system_prompt": "true",
+		},
+	}
+	payload := []byte(`{"system":[{"type":"text","text":"Client rule"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out, errCloaking := applyCloaking(context.Background(), &config.Config{}, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("relaxed system prompt from auth metadata should produce 3 system blocks, got %d", len(blocks))
+	}
+	if got := blocks[2].Get("text").String(); got != "Client rule" {
+		t.Fatalf("blocks[2].text = %q, want client system prompt", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("messages.0.content = %q, want original user text", got)
 	}
 }
 

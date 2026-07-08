@@ -1264,7 +1264,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, false, "2.1.63", "", "")
 }
 
 func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
@@ -1829,11 +1829,11 @@ func getWorkloadFromContext(ctx context.Context) string {
 
 // getCloakConfigFromAuth extracts cloak configuration from the auth's attributes,
 // falling back to its stored metadata (the raw OAuth/token JSON). Returns
-// (cloakMode, strictMode, sensitiveWords, cacheUserID); an empty cloakMode means
-// the credential did not explicitly configure a mode.
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, sensitiveWords []string, cacheUserID bool) {
+// (cloakMode, strictMode, relaxedSystemPrompt, sensitiveWords, cacheUserID);
+// an empty cloakMode means the credential did not explicitly configure a mode.
+func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMode bool, relaxedSystemPrompt bool, sensitiveWords []string, cacheUserID bool) {
 	if auth == nil {
-		return "", false, nil, false
+		return "", false, false, nil, false
 	}
 
 	// lookupCloakAttr prefers the executor-facing Attributes, then falls back to the
@@ -1858,6 +1858,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 	cloakMode = lookupCloakAttr("cloak_mode")
 
 	strictMode = strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
+	relaxedSystemPrompt = strings.EqualFold(lookupCloakAttr("cloak_relaxed_system_prompt"), "true")
 
 	if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
 		sensitiveWords = strings.Split(wordsStr, ",")
@@ -1868,7 +1869,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 
 	cacheUserID = strings.EqualFold(lookupCloakAttr("cloak_cache_user_id"), "true")
 
-	return cloakMode, strictMode, sensitiveWords, cacheUserID
+	return cloakMode, strictMode, relaxedSystemPrompt, sensitiveWords, cacheUserID
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
@@ -1947,18 +1948,19 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, false, "2.1.63", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
 //
 //	system[0]: billing header (no cache_control)
 //	system[1]: agent identifier (cache_control ephemeral, scope=org)
-//	system[2]: core intro prompt (cache_control ephemeral, scope=global)
-//	system[3]: system instructions (no cache_control)
-//	system[4]: doing tasks (no cache_control)
-//	system[5]: user system messages moved to first user message
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
+//	system[2]: core intro prompt (cache_control ephemeral, scope=global), unless relaxedSystemPrompt is enabled
+//	system[3+]: client system blocks when relaxedSystemPrompt is enabled
+//
+// In the default mode, client system messages are moved to the first user message
+// to keep the upstream payload closer to the official Claude Code request shape.
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, relaxedSystemPrompt bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
@@ -2000,10 +2002,17 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	staticBlock := buildTextBlock(staticPrompt, nil)
 
 	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	if relaxedSystemPrompt {
+		systemResult = "[" + billingBlock + "," + agentBlock
+		if preservedSystem := buildRelaxedSystemPromptBlocks(system); preservedSystem != "" {
+			systemResult += "," + preservedSystem
+		}
+		systemResult += "]"
+	}
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
-	if !strictMode {
+	if !strictMode && !relaxedSystemPrompt {
 		var userSystemParts []string
 		if system.IsArray() {
 			system.ForEach(func(_, part gjson.Result) bool {
@@ -2031,6 +2040,25 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	}
 
 	return payload
+}
+
+func buildRelaxedSystemPromptBlocks(system gjson.Result) string {
+	var blocks []string
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() != "text" {
+				return true
+			}
+			if strings.TrimSpace(part.Get("text").String()) == "" {
+				return true
+			}
+			blocks = append(blocks, part.Raw)
+			return true
+		})
+	} else if system.Type == gjson.String && strings.TrimSpace(system.String()) != "" {
+		blocks = append(blocks, buildTextBlock(system.String(), nil))
+	}
+	return strings.Join(blocks, ",")
 }
 
 // sanitizeForwardedSystemPrompt reduces forwarded third-party system context to a
@@ -2126,7 +2154,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	attrMode, attrStrict, attrRelaxedSystemPrompt, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
 	// Determine cloak settings. Precedence (low -> high):
 	//   built-in "auto" default
@@ -2138,6 +2166,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		cloakMode = "never"
 	}
 	strictMode := attrStrict
+	relaxedSystemPrompt := attrRelaxedSystemPrompt
 	sensitiveWords := attrWords
 	cacheUserID := attrCache
 
@@ -2151,6 +2180,9 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		}
 		if cloakCfg.StrictMode {
 			strictMode = true
+		}
+		if cloakCfg.RelaxedSystemPrompt {
+			relaxedSystemPrompt = true
 		}
 		if len(cloakCfg.SensitiveWords) > 0 {
 			sensitiveWords = cloakCfg.SensitiveWords
@@ -2170,7 +2202,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, relaxedSystemPrompt, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID

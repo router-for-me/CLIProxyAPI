@@ -351,7 +351,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			{APIKey: "g-old", BaseURL: "http://g-old", ProxyURL: "http://gp-old", Headers: map[string]string{"A": "1"}},
 		},
 		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "c-old", BaseURL: "http://c-old", ProxyURL: "http://cp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}},
+			{APIKey: "c-old", BaseURL: "http://c-old", ProxyURL: "http://cp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}, Cloak: &config.CloakConfig{Mode: "auto", SensitiveWords: []string{"old"}}},
 		},
 		CodexKey: []config.CodexKey{
 			{APIKey: "x-old", BaseURL: "http://x-old", ProxyURL: "http://xp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}},
@@ -400,7 +400,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			{APIKey: "g-new", BaseURL: "http://g-new", ProxyURL: "http://gp-new", Headers: map[string]string{"A": "2"}, ExcludedModels: []string{"x", "y"}},
 		},
 		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "c-new", BaseURL: "http://c-new", ProxyURL: "http://cp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}},
+			{APIKey: "c-new", BaseURL: "http://c-new", ProxyURL: "http://cp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}, Cloak: &config.CloakConfig{Mode: "always", StrictMode: true, RelaxedSystemPrompt: true, SensitiveWords: []string{"new", "secret"}}},
 		},
 		CodexKey: []config.CodexKey{
 			{APIKey: "x-new", BaseURL: "http://x-new", ProxyURL: "http://xp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}},
@@ -467,6 +467,10 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "claude[0].api-key: updated")
 	expectContains(t, changes, "claude[0].headers: updated")
 	expectContains(t, changes, "claude[0].excluded-models: updated (1 -> 2 entries)")
+	expectContains(t, changes, "claude[0].cloak.mode: auto -> always")
+	expectContains(t, changes, "claude[0].cloak.strict-mode: false -> true")
+	expectContains(t, changes, "claude[0].cloak.relaxed-system-prompt: false -> true")
+	expectContains(t, changes, "claude[0].cloak.sensitive-words: 1 -> 2")
 	expectContains(t, changes, "codex[0].base-url: http://x-old -> http://x-new")
 	expectContains(t, changes, "codex[0].proxy-url: http://xp-old -> http://xp-new")
 	expectContains(t, changes, "codex[0].api-key: updated")
