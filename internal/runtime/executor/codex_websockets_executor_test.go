@@ -1970,7 +1970,7 @@ func TestCodexWebsocketsFreshContextResetsUpstreamSession(t *testing.T) {
 
 	freshReq := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
-		Payload: []byte(`{"type":"response.create","model":"gpt-5-codex","input":[{"type":"compaction_summary","summary":"compressed history"},{"type":"message","role":"user","content":"after compaction"}]}`),
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"compaction_summary","summary":"compressed history"},{"type":"message","role":"user","content":"after compaction"}]}`),
 	}
 	result, err = exec.ExecuteStream(ctx, auth, freshReq, opts)
 	if err != nil {
@@ -1980,6 +1980,9 @@ func TestCodexWebsocketsFreshContextResetsUpstreamSession(t *testing.T) {
 	freshPayload := readCodexWebsocketUpstreamPayload(t, payloadCh)
 	if freshPayload.connection != 2 {
 		t.Fatalf("fresh context payload connection = %d, want 2", freshPayload.connection)
+	}
+	if got := gjson.GetBytes(freshPayload.payload, "type").String(); got != "response.create" {
+		t.Fatalf("fresh context type = %s, want response.create: %s", got, freshPayload.payload)
 	}
 	if got := gjson.GetBytes(freshPayload.payload, "input.0.type").String(); got != "compaction_summary" {
 		t.Fatalf("fresh context input.0.type = %s, want compaction_summary: %s", got, freshPayload.payload)

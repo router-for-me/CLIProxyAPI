@@ -1527,7 +1527,7 @@ func codexWebsocketRequestStartsFreshContext(body []byte) bool {
 
 func codexWebsocketRequestResetsUpstreamContext(body []byte) bool {
 	requestType := strings.TrimSpace(gjson.GetBytes(body, "type").String())
-	if requestType != "response.create" && requestType != "response.append" {
+	if requestType != "" && requestType != "response.create" && requestType != "response.append" {
 		return false
 	}
 	if codexWebsocketRequestUsesPreviousResponseID(body) || codexWebsocketRequestIsAppendOnly(body) {
