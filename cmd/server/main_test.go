@@ -6,7 +6,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
-func TestShouldStartExampleAPIKeyWarningServer(t *testing.T) {
+func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	cfgWithExampleKey := &config.Config{
 		SDKConfig: config.SDKConfig{
 			APIKeys: []string{"real-key", " your-api-key-1 "},
@@ -80,9 +80,9 @@ func TestShouldStartExampleAPIKeyWarningServer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldStartExampleAPIKeyWarningServer(tt.cfg, tt.commandMode, tt.tuiMode, tt.standalone, tt.cloudConfigMissing, tt.homeMode)
+			got := shouldEnableExampleAPIKeySafeMode(tt.cfg, tt.commandMode, tt.tuiMode, tt.standalone, tt.cloudConfigMissing, tt.homeMode)
 			if got != tt.want {
-				t.Fatalf("shouldStartExampleAPIKeyWarningServer() = %t, want %t", got, tt.want)
+				t.Fatalf("shouldEnableExampleAPIKeySafeMode() = %t, want %t", got, tt.want)
 			}
 		})
 	}

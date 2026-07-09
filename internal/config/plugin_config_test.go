@@ -51,6 +51,33 @@ plugins:
 	}
 }
 
+func TestParseConfigBytes_PluginStoreAuth(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+plugins:
+  store-auth:
+    - match: " https://plugins.example.com/ "
+      apply-to: ["registry", "artifact", "registry"]
+      type: bearer
+      token-env: " CLIPROXY_PLUGIN_STORE_TOKEN "
+    - match: ""
+      type: bearer
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+
+	if len(cfg.Plugins.StoreAuth) != 1 {
+		t.Fatalf("Plugins.StoreAuth len = %d, want 1", len(cfg.Plugins.StoreAuth))
+	}
+	auth := cfg.Plugins.StoreAuth[0]
+	if auth.Match != "https://plugins.example.com/" || auth.Type != "bearer" || auth.TokenEnv != "CLIPROXY_PLUGIN_STORE_TOKEN" {
+		t.Fatalf("Plugins.StoreAuth[0] = %#v", auth)
+	}
+	if len(auth.ApplyTo) != 2 || auth.ApplyTo[0] != "registry" || auth.ApplyTo[1] != "artifact" {
+		t.Fatalf("Plugins.StoreAuth[0].ApplyTo = %#v", auth.ApplyTo)
+	}
+}
+
 func TestParseConfigBytes_PluginInstanceEmptyRawYAML(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`
 plugins:

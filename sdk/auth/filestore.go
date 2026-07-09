@@ -254,6 +254,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 			if len(auths) == 0 {
 				return nil, nil
 			}
+			disabled, _ := metadata["disabled"].(bool)
 			for index, auth := range auths {
 				if auth == nil {
 					continue
@@ -269,6 +270,14 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 				auth.Attributes[cliproxyauth.AttributePath] = path
 				auth.Attributes[cliproxyauth.AttributeSource] = path
 				auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceFile
+				if disabled {
+					auth.Disabled = true
+					auth.Status = cliproxyauth.StatusDisabled
+					if auth.Metadata == nil {
+						auth.Metadata = make(map[string]any)
+					}
+					auth.Metadata["disabled"] = true
+				}
 				cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 			}
 			return auths, nil

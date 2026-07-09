@@ -56,15 +56,31 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	// allowClampUnsupported determines whether to clamp unsupported levels instead of returning an error.
 	// This applies when crossing provider families (e.g., openai→gemini, claude→gemini) and the target
 	// model supports discrete levels. Same-family conversions require strict validation.
+	//
+	// modelFamilyMismatch covers providers that reuse another protocol on the wire
+	// (e.g. Kimi serving Claude-compatible /v1/messages). In that path fromFormat and
+	// toFormat both look like "claude", but the model itself is not Claude-family, so
+	// unsupported levels such as "max" should clamp to the nearest supported level
+	// (typically "high") instead of failing validation.
 	toCapability := detectModelCapability(modelInfo)
 	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
-	allowClampUnsupported := toHasLevelSupport && !isSameProviderFamily(fromFormat, toFormat)
+	modelFamilyMismatch := false
+	if modelInfo != nil {
+		modelType := strings.ToLower(strings.TrimSpace(modelInfo.Type))
+		if modelType != "" {
+			if (fromFormat != "" && !isSameProviderFamily(fromFormat, modelType)) ||
+				(toFormat != "" && !isSameProviderFamily(toFormat, modelType)) {
+				modelFamilyMismatch = true
+			}
+		}
+	}
+	allowClampUnsupported := toHasLevelSupport && (!isSameProviderFamily(fromFormat, toFormat) || modelFamilyMismatch)
 
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,
 	// and (3) source and target are in the same provider family. Cross-family or suffix-based configs
 	// are clamped instead of rejected to improve interoperability.
-	strictBudget := !fromSuffix && fromFormat != "" && isSameProviderFamily(fromFormat, toFormat)
+	strictBudget := !fromSuffix && fromFormat != "" && isSameProviderFamily(fromFormat, toFormat) && !modelFamilyMismatch
 	budgetDerivedFromLevel := false
 
 	capability := detectModelCapability(modelInfo)

@@ -8,4 +8,5 @@ const (
 	FormatGemini         Format = "gemini"
 	FormatCodex          Format = "codex"
 	FormatAntigravity    Format = "antigravity"
+	FormatInteractions   Format = "interactions"
 )

@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -221,6 +222,68 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 		}
 		if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
 			t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for error stream chunk")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		deadline := time.Now().Add(time.Second)
+		closeMessage := websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "message too big")
+		if errWrite := conn.WriteControl(websocket.CloseMessage, closeMessage, deadline); errWrite != nil {
+			t.Errorf("write close websocket message: %v", errWrite)
+			return
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before error chunk")
+		}
+		if chunk.Err == nil {
+			t.Fatal("error chunk Err = nil, want message-too-big error")
+		}
+		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("error type %T does not expose StatusCode", chunk.Err)
+		}
+		if got := statusErr.StatusCode(); got != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want %d", got, http.StatusRequestEntityTooLarge)
+		}
+		if got := gjson.Get(chunk.Err.Error(), "error.code").String(); got != "message_too_big" {
+			t.Fatalf("error code = %q, want message_too_big; err=%v", got, chunk.Err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for error stream chunk")
@@ -804,6 +867,71 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	}
 	if got := req.Header.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	}
+}
+
+func TestApplyModelHeaderOverridesFromModelConfig(t *testing.T) {
+	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
+	applyModelHeaderOverrides(req.Header, "gpt-5.6-luna")
+
+	if got := req.Header.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := codexSessionHeaderValue(req.Header); got == "" {
+		t.Fatal("expected Session_id to be set for Mac OS User-Agent override")
+	}
+
+	applyModelHeaderOverrides(req.Header, "gpt-5.4")
+	if got := req.Header.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent after no-op override = %q, want %q", got, wantUA)
+	}
+}
+
+func TestApplyModelHeaderOverridesMultipleHeaders(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-model-header-override"
+	reg.RegisterClient(clientID, "codex", []*registry.ModelInfo{{
+		ID: "test-override-headers-model",
+		Config: &registry.ModelConfig{
+			OverrideHeader: map[string]string{
+				"user-agent":    "custom-ua/1.0",
+				"originator":    "custom-origin",
+				"x-test-header": "forced-value",
+			},
+		},
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	headers := http.Header{}
+	headers.Set("User-Agent", "old-ua")
+	headers.Set("Originator", "old-origin")
+	headers.Set("X-Test-Header", "old-value")
+
+	applyModelHeaderOverrides(headers, "test-override-headers-model")
+
+	if got := headers.Get("User-Agent"); got != "custom-ua/1.0" {
+		t.Fatalf("User-Agent = %q, want custom-ua/1.0", got)
+	}
+	if got := headers.Get("Originator"); got != "custom-origin" {
+		t.Fatalf("Originator = %q, want custom-origin", got)
+	}
+	if got := headers.Get("X-Test-Header"); got != "forced-value" {
+		t.Fatalf("X-Test-Header = %q, want forced-value", got)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -237,6 +238,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								textAggregate.WriteString(txt)
 								contentPart := []byte(`{"type":"text","text":""}`)
 								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+								contentPart = common.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, string(contentPart))
 							}
 							if ptype == "input_text" {
@@ -272,6 +274,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 									contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
 								}
 								if len(contentPart) > 0 {
+									contentPart = common.AttachCacheControl(contentPart, part)
 									partsJSON = append(partsJSON, string(contentPart))
 									if role == "" {
 										role = "user"
@@ -297,6 +300,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 								contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
 								contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								contentPart = common.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, string(contentPart))
 								if role == "" {
 									role = "user"
@@ -343,21 +347,24 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if len(partsJSON) > 0 {
 					msg := []byte(`{"role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasReasoningParts {
-						// Preserve legacy behavior for single text content
+					textPart := gjson.Parse(partsJSON[0])
+					hasPartCacheControl := textPart.Get("cache_control").Exists()
+					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasReasoningParts && !hasPartCacheControl && !item.Get("cache_control").Exists() {
+						// Preserve legacy behavior for single text content without cache markers.
 						msg, _ = sjson.DeleteBytes(msg, "content")
-						textPart := gjson.Parse(partsJSON[0])
 						msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
 					} else {
 						for _, partJSON := range partsJSON {
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
 						}
 					}
+					msg = common.AttachMessageCacheControl(msg, item)
 					appendMessage(msg)
 				} else if textAggregate.Len() > 0 || role == "system" {
 					msg := []byte(`{"role":"","content":""}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
 					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
+					msg = common.AttachMessageCacheControl(msg, item)
 					appendMessage(msg)
 				}
 
@@ -403,10 +410,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				callID := item.Get("call_id").String()
 				callID = util.SanitizeClaudeToolID(callID)
 				flushPendingToolUseFor(callID)
-				outputStr := item.Get("output").String()
+				output := item.Get("output")
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+				toolResult = applyResponsesToolResultContent(toolResult, output)
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
@@ -505,6 +512,111 @@ func responsesReasoningSummaryText(item gjson.Result) string {
 	return builder.String()
 }
 
+func applyResponsesToolResultContent(toolResult []byte, output gjson.Result) []byte {
+	if output.Exists() && output.IsArray() {
+		var partsJSON []string
+		hasImage := false
+		hasFile := false
+		output.ForEach(func(_, part gjson.Result) bool {
+			if partJSON := convertResponsesContentPartToClaude(part); len(partJSON) > 0 {
+				partsJSON = append(partsJSON, string(partJSON))
+				partType := gjson.ParseBytes(partJSON).Get("type").String()
+				if partType == "image" {
+					hasImage = true
+				}
+				if partType == "document" {
+					hasFile = true
+				}
+			}
+			return true
+		})
+		if len(partsJSON) == 0 {
+			toolResult, _ = sjson.SetBytes(toolResult, "content", output.Raw)
+			return toolResult
+		}
+		if len(partsJSON) == 1 && !hasImage && !hasFile {
+			textPart := gjson.Parse(partsJSON[0])
+			if textPart.Get("type").String() == "text" {
+				toolResult, _ = sjson.SetBytes(toolResult, "content", textPart.Get("text").String())
+				return toolResult
+			}
+		}
+		contentJSON := []byte("[]")
+		for _, partJSON := range partsJSON {
+			contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(partJSON))
+		}
+		toolResult, _ = sjson.DeleteBytes(toolResult, "content")
+		toolResult, _ = sjson.SetRawBytes(toolResult, "content", contentJSON)
+		return toolResult
+	}
+	toolResult, _ = sjson.SetBytes(toolResult, "content", output.String())
+	return toolResult
+}
+
+func convertResponsesContentPartToClaude(part gjson.Result) []byte {
+	ptype := part.Get("type").String()
+	switch ptype {
+	case "input_text", "output_text":
+		if t := part.Get("text"); t.Exists() {
+			contentPart := []byte(`{"type":"text","text":""}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "text", t.String())
+			return contentPart
+		}
+	case "input_image":
+		url := part.Get("image_url").String()
+		if url == "" {
+			url = part.Get("url").String()
+		}
+		if url == "" {
+			return nil
+		}
+		if strings.HasPrefix(url, "data:") {
+			trimmed := strings.TrimPrefix(url, "data:")
+			mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+			mediaType := "application/octet-stream"
+			data := ""
+			if len(mediaAndData) == 2 {
+				if mediaAndData[0] != "" {
+					mediaType = mediaAndData[0]
+				}
+				data = mediaAndData[1]
+			}
+			if data == "" {
+				return nil
+			}
+			contentPart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+			contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+			return contentPart
+		}
+		contentPart := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+		return contentPart
+	case "input_file":
+		fileData := part.Get("file_data").String()
+		if fileData == "" {
+			return nil
+		}
+		mediaType := "application/octet-stream"
+		data := fileData
+		if strings.HasPrefix(fileData, "data:") {
+			trimmed := strings.TrimPrefix(fileData, "data:")
+			mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+			if len(mediaAndData) == 2 {
+				if mediaAndData[0] != "" {
+					mediaType = mediaAndData[0]
+				}
+				data = mediaAndData[1]
+			}
+		}
+		contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+		return contentPart
+	}
+	return nil
+}
+
 func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {
 	toolType := strings.TrimSpace(tool.Get("type").String())
 	switch toolType {
@@ -577,6 +689,10 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
 	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", normalizeClaudeToolInputSchema(responsesToolParameters(tool)))
+	tJSON = common.AttachCacheControl(tJSON, tool)
+	if !gjson.GetBytes(tJSON, "cache_control").Exists() {
+		tJSON = common.AttachCacheControl(tJSON, tool.Get("function"))
+	}
 	return tJSON, true
 }
 

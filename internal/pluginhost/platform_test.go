@@ -9,26 +9,9 @@ import (
 )
 
 func TestCandidateDirs(t *testing.T) {
-	got := candidateDirs("plugins", "darwin", "arm64", "v3")
+	got := candidateDirs("plugins", "darwin", "arm64")
 	want := []string{
-		filepath.Join("plugins", "darwin", "arm64-v3"),
 		filepath.Join("plugins", "darwin", "arm64"),
-		"plugins",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("len(candidateDirs) = %d, want %d", len(got), len(want))
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("candidateDirs[%d] = %q, want %q", index, got[index], want[index])
-		}
-	}
-}
-
-func TestCandidateDirsOmitsEmptyVariant(t *testing.T) {
-	got := candidateDirs("plugins", "linux", "arm64", "")
-	want := []string{
-		filepath.Join("plugins", "linux", "arm64"),
 		"plugins",
 	}
 	if len(got) != len(want) {
@@ -234,40 +217,5 @@ func TestSelectPluginFilesSkipsPluginWhenConfiguredVersionIsMissing(t *testing.T
 	}
 	if len(files) != 0 {
 		t.Fatalf("selectPluginFiles() = %v, want no selected alpha plugin", files)
-	}
-}
-
-func TestSelectPluginFilesPrefersCPUVariantOverGenericArchDir(t *testing.T) {
-	variant := cpuVariant()
-	if variant == "" {
-		t.Skip("current GOARCH has no plugin CPU variant")
-	}
-	root := t.TempDir()
-	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
-	variantDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH+"-"+variant)
-	for _, dir := range []string{archDir, variantDir} {
-		if errMkdirAll := os.MkdirAll(dir, 0o755); errMkdirAll != nil {
-			t.Fatalf("MkdirAll(%s) error = %v", dir, errMkdirAll)
-		}
-	}
-
-	extension := pluginExtension(runtime.GOOS)
-	genericPath := filepath.Join(archDir, "alpha"+extension)
-	variantPath := filepath.Join(variantDir, "alpha"+extension)
-	for _, path := range []string{genericPath, variantPath} {
-		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
-			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
-		}
-	}
-
-	files, errSelect := selectPluginFiles(root)
-	if errSelect != nil {
-		t.Fatalf("selectPluginFiles() error = %v", errSelect)
-	}
-	if len(files) != 1 {
-		t.Fatalf("selectPluginFiles() = %v, want exactly one alpha plugin", files)
-	}
-	if files[0] != (pluginFile{ID: "alpha", Path: variantPath}) {
-		t.Fatalf("selectPluginFiles()[0] = %v, want CPU variant plugin %s", files[0], variantPath)
 	}
 }

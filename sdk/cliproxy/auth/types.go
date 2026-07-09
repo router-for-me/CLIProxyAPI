@@ -357,6 +357,8 @@ func (a *Auth) indexSeed() string {
 			apiPrefix = "openai-compatibility"
 		case strings.EqualFold(provider, "gemini"):
 			apiPrefix = "gemini-api-key"
+		case strings.EqualFold(provider, "gemini-interactions"):
+			apiPrefix = "interactions-api-key"
 		case strings.EqualFold(provider, "codex"):
 			apiPrefix = "codex-api-key"
 		case strings.EqualFold(provider, "claude"):

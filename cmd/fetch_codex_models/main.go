@@ -42,8 +42,8 @@ import (
 const (
 	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
 	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.133.0"
-	defaultCodexUserAgent    = "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultClientVersion     = "0.144.0"
+	defaultCodexUserAgent    = "codex_cli_rs/0.144.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	defaultCodexOriginator   = "codex_cli_rs"
 	accessTokenRefreshLeeway = 30 * time.Second
 )

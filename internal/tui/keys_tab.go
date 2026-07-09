@@ -13,21 +13,22 @@ import (
 
 // keysTabModel displays and manages API keys.
 type keysTabModel struct {
-	client   *Client
-	viewport viewport.Model
-	keys     []string
-	gemini   []map[string]any
-	claude   []map[string]any
-	codex    []map[string]any
-	vertex   []map[string]any
-	openai   []map[string]any
-	err      error
-	width    int
-	height   int
-	ready    bool
-	cursor   int
-	confirm  int // -1 = no deletion pending
-	status   string
+	client       *Client
+	viewport     viewport.Model
+	keys         []string
+	gemini       []map[string]any
+	interactions []map[string]any
+	claude       []map[string]any
+	codex        []map[string]any
+	vertex       []map[string]any
+	openai       []map[string]any
+	err          error
+	width        int
+	height       int
+	ready        bool
+	cursor       int
+	confirm      int // -1 = no deletion pending
+	status       string
 
 	// Editing / Adding
 	editing   bool
@@ -37,13 +38,14 @@ type keysTabModel struct {
 }
 
 type keysDataMsg struct {
-	apiKeys []string
-	gemini  []map[string]any
-	claude  []map[string]any
-	codex   []map[string]any
-	vertex  []map[string]any
-	openai  []map[string]any
-	err     error
+	apiKeys      []string
+	gemini       []map[string]any
+	interactions []map[string]any
+	claude       []map[string]any
+	codex        []map[string]any
+	vertex       []map[string]any
+	openai       []map[string]any
+	err          error
 }
 
 type keyActionMsg struct {
@@ -75,6 +77,7 @@ func (m keysTabModel) fetchKeys() tea.Msg {
 	}
 	result.apiKeys = apiKeys
 	result.gemini, _ = m.client.GetGeminiKeys()
+	result.interactions, _ = m.client.GetInteractionsKeys()
 	result.claude, _ = m.client.GetClaudeKeys()
 	result.codex, _ = m.client.GetCodexKeys()
 	result.vertex, _ = m.client.GetVertexKeys()
@@ -94,6 +97,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			m.err = nil
 			m.keys = msg.apiKeys
 			m.gemini = msg.gemini
+			m.interactions = msg.interactions
 			m.claude = msg.claude
 			m.codex = msg.codex
 			m.vertex = msg.vertex
@@ -340,6 +344,7 @@ func (m keysTabModel) renderContent() string {
 
 	// ━━━ Provider Keys (read-only display) ━━━
 	renderProviderKeys(&sb, "Gemini API Keys", m.gemini)
+	renderProviderKeys(&sb, "Interactions API Keys", m.interactions)
 	renderProviderKeys(&sb, "Claude API Keys", m.claude)
 	renderProviderKeys(&sb, "Codex API Keys", m.codex)
 	renderProviderKeys(&sb, "Vertex API Keys", m.vertex)

@@ -126,3 +126,40 @@ func TestNoFinishReasonOnIntermediateChunks(t *testing.T) {
 		t.Errorf("Expected no finish_reason on intermediate chunk, got: %v", fr2)
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAINonStreamIncludesReasoningContent(t *testing.T) {
+	ctx := context.Background()
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"index": 0,
+				"content": {
+					"parts": [
+						{"text": "I need to multiply 17 by 24.", "thought": true},
+						{"text": "408", "thoughtSignature": "sig-final-answer"}
+					]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {
+				"promptTokenCount": 16,
+				"candidatesTokenCount": 3,
+				"thoughtsTokenCount": 42,
+				"totalTokenCount": 61
+			},
+			"modelVersion": "gemini-3.1-pro-low",
+			"responseId": "resp-reasoning"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToOpenAINonStream(ctx, "gemini-3.1-pro-low", nil, nil, responseJSON, nil)
+	if got := gjson.GetBytes(output, "choices.0.message.reasoning_content").String(); got != "I need to multiply 17 by 24." {
+		t.Fatalf("reasoning_content = %q, want thought text. Output: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "choices.0.message.content").String(); got != "408" {
+		t.Fatalf("content = %q, want final answer. Output: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 42 {
+		t.Fatalf("reasoning_tokens = %d, want 42. Output: %s", got, output)
+	}
+}

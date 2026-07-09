@@ -357,6 +357,119 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	})
 }
 
+func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	staticDir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", staticDir)
+	if err := os.WriteFile(filepath.Join(staticDir, "management.html"), []byte("<html>management app</html>"), 0o600); err != nil {
+		t.Fatalf("failed to write management asset: %v", err)
+	}
+
+	server := newTestServerWithOptions(t, WithExampleAPIKeySafeMode())
+	cfg := *server.cfg
+	cfg.APIKeys = []string{"your-api-key-1"}
+	server.UpdateClients(&cfg)
+
+	t.Run("root warning page includes management link", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		body := rr.Body.String()
+		for _, want := range []string{"Example API key detected", "Open Management", `href="/management.html?safe-mode=configure"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("warning page missing %q: %s", want, body)
+			}
+		}
+	})
+
+	t.Run("management html defaults to warning page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "Example API key detected") {
+			t.Fatalf("management.html did not show warning page: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("management html head stops at warning page", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("HEAD body length = %d, want 0", rr.Body.Len())
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q, want no-store", got)
+		}
+	})
+
+	t.Run("management button query opens control panel", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/management.html?safe-mode=configure", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "management app") {
+			t.Fatalf("management panel body missing: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("proxy endpoints are blocked", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+		}
+		if got := rr.Header().Get("X-CPA-SAFE-MODE"); got != "example-api-key" {
+			t.Fatalf("X-CPA-SAFE-MODE = %q, want example-api-key", got)
+		}
+		if !strings.Contains(rr.Body.String(), "unsafe_example_api_key") {
+			t.Fatalf("body missing safe-mode error: %s", rr.Body.String())
+		}
+		if strings.Contains(rr.Body.String(), "management_url") {
+			t.Fatalf("body should not include management_url field: %s", rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "/management.html?safe-mode=configure") {
+			t.Fatalf("body missing management link in message: %s", rr.Body.String())
+		}
+	})
+
+	t.Run("management endpoints still work", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+	})
+
+	t.Run("safe mode clears after key update", func(t *testing.T) {
+		nextCfg := cfg
+		nextCfg.APIKeys = []string{"real-key"}
+		server.UpdateClients(&nextCfg)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer real-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code == http.StatusForbidden && strings.Contains(rr.Body.String(), "unsafe_example_api_key") {
+			t.Fatalf("proxy endpoint still blocked after key update: %s", rr.Body.String())
+		}
+	})
+}
+
 func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-anthropic-version-dispatch"
@@ -369,6 +482,12 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 			DisplayName:         "Claude 4.6 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:      "gpt-4o",
+			Object:  "model",
+			OwnedBy: "openai",
+			Type:    "openai",
 		},
 	})
 	t.Cleanup(func() {
@@ -406,13 +525,23 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 		}
 
 		var claudeModel map[string]any
+		var rewrittenModel map[string]any
 		for _, m := range resp.Data {
-			if id, _ := m["id"].(string); id == "claude-sonnet-4-6" {
+			id, _ := m["id"].(string)
+			switch id {
+			case "claude-sonnet-4-6":
 				claudeModel = m
+			case "claude-fable-5-dd-o4-tpg":
+				rewrittenModel = m
+			case "gpt-4o", "claude-gpt-4o":
+				t.Fatalf("expected non-claude model id to be rewritten as claude-fable-5-dd-<reversed>, got %q", id)
 			}
 		}
 		if claudeModel == nil {
 			t.Fatalf("expected claude-sonnet-4-6 in response, got %s", rr.Body.String())
+		}
+		if rewrittenModel == nil {
+			t.Fatalf("expected claude-fable-5-dd-o4-tpg in response, got %s", rr.Body.String())
 		}
 		for _, field := range []string{"max_input_tokens", "max_tokens", "display_name"} {
 			if _, ok := claudeModel[field]; !ok {
@@ -443,10 +572,20 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 		if resp.Object != "list" {
 			t.Fatalf("expected OpenAI format (object=list), got %s", rr.Body.String())
 		}
+		foundRawGPT := false
 		for _, m := range resp.Data {
 			if _, ok := m["max_input_tokens"]; ok {
 				t.Fatalf("did not expect max_input_tokens in OpenAI format, got %v", m)
 			}
+			if id, _ := m["id"].(string); id == "gpt-4o" {
+				foundRawGPT = true
+			}
+			if id, _ := m["id"].(string); id == "claude-gpt-4o" || id == "claude-fable-5-dd-o4-tpg" {
+				t.Fatalf("did not expect Anthropic id rewrite on OpenAI format models, got %v", m)
+			}
+		}
+		if !foundRawGPT {
+			t.Fatalf("expected raw gpt-4o in OpenAI format response, got %s", rr.Body.String())
 		}
 	})
 }
@@ -757,6 +896,14 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	if got := withDefaults["display_name"]; got != "claude-no-limits" {
 		t.Fatalf("display_name fallback = %v, want claude-no-limits", got)
 	}
+
+	prefixed := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
+	if got := prefixed["id"]; got != "claude-fable-5-dd-o4-tpg" {
+		t.Fatalf("id = %v, want claude-fable-5-dd-o4-tpg", got)
+	}
+	if got := prefixed["display_name"]; got != "GPT-4o" {
+		t.Fatalf("display_name = %v, want GPT-4o", got)
+	}
 	if got := withDefaults["max_input_tokens"]; got != registry.DefaultClaudeMaxInputTokens {
 		t.Fatalf("max_input_tokens fallback = %v, want %d", got, registry.DefaultClaudeMaxInputTokens)
 	}
@@ -765,6 +912,24 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	}
 	if _, ok := withDefaults["created_at"]; ok {
 		t.Fatalf("created_at should be omitted when source created is missing, got %v", withDefaults)
+	}
+}
+
+func TestFormatHomeClaudeModelsSortsByDisplayName(t *testing.T) {
+	out := formatHomeClaudeModels([]homeModelEntry{
+		{id: "claude-z", displayName: "Zebra"},
+		{id: "gpt-4o", displayName: "Alpha"},
+		{id: "claude-b", displayName: "Beta"},
+	})
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	wantNames := []string{"Alpha", "Beta", "Zebra"}
+	for i, want := range wantNames {
+		got, _ := out[i]["display_name"].(string)
+		if got != want {
+			t.Fatalf("out[%d].display_name = %q, want %q", i, got, want)
+		}
 	}
 }
 
@@ -844,5 +1009,16 @@ func TestHomeModelsErrorMessage(t *testing.T) {
 	}
 	if msg := homeModelsErrorMessage([]byte(`{"openai":[]}`)); msg != "home models request failed" {
 		t.Fatalf("default message = %q, want fallback", msg)
+	}
+}
+
+func TestInteractionsRouteRegistered(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{"model":"gemini-3.5-flash","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
 	}
 }

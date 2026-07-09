@@ -152,6 +152,39 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 		}
 	}
+	if len(oldCfg.InteractionsKey) != len(newCfg.InteractionsKey) {
+		changes = append(changes, fmt.Sprintf("interactions-api-key count: %d -> %d", len(oldCfg.InteractionsKey), len(newCfg.InteractionsKey)))
+	} else {
+		for i := range oldCfg.InteractionsKey {
+			o := oldCfg.InteractionsKey[i]
+			n := newCfg.InteractionsKey[i]
+			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+			}
+			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
+			}
+			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].api-key: updated", i))
+			}
+			if !equalStringMap(o.Headers, n.Headers) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].headers: updated", i))
+			}
+			oldModels := SummarizeGeminiModels(o.Models)
+			newModels := SummarizeGeminiModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("interactions[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
+			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("interactions[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
+		}
+	}
 
 	// Claude keys (do not print key material)
 	if len(oldCfg.ClaudeKey) != len(newCfg.ClaudeKey) {

@@ -63,7 +63,8 @@ func TestApplyAuthExcludedModelsMeta_OAuthProvider(t *testing.T) {
 
 func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	cfg := &config.Config{
-		GeminiKey: []config.GeminiKey{{APIKey: "g1"}, {APIKey: "g2"}},
+		GeminiKey:       []config.GeminiKey{{APIKey: "g1"}, {APIKey: "g2"}},
+		InteractionsKey: []config.GeminiKey{{APIKey: "i1"}},
 		VertexCompatAPIKey: []config.VertexCompatKey{
 			{APIKey: "v1"},
 		},
@@ -75,7 +76,7 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	}
 
 	gemini, vertex, claude, codex, compat := BuildAPIKeyClients(cfg)
-	if gemini != 2 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
+	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
 		t.Fatalf("unexpected counts: %d %d %d %d %d", gemini, vertex, claude, codex, compat)
 	}
 }

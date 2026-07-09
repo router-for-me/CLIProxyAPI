@@ -587,6 +587,225 @@ func TestConvertCodexResponseToClaude_StreamFunctionCallDefersStartUntilDoneName
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamUnnamedFunctionCallDoneByCallIDKeepsPendingSlots(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_first"},"output_index":1}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_second"},"output_index":2}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{\"id\":1}"}}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_second","name":"lookup","arguments":"{\"id\":2}"}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	var toolIDs []string
+	var startIndices []int64
+	var stopIndices []int64
+	var argumentDeltas []string
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if data.Get("content_block.type").String() == "tool_use" {
+					toolIDs = append(toolIDs, data.Get("content_block.id").String())
+					startIndices = append(startIndices, data.Get("index").Int())
+				}
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" {
+					argumentDeltas = append(argumentDeltas, data.Get("delta.partial_json").String())
+				}
+			case "content_block_stop":
+				stopIndices = append(stopIndices, data.Get("index").Int())
+			}
+		}
+	}
+
+	if len(toolIDs) != 2 || toolIDs[0] != "call_first" || toolIDs[1] != "call_second" {
+		t.Fatalf("unexpected tool IDs: %v; outputs=%q", toolIDs, outputs)
+	}
+	if len(startIndices) != 2 || startIndices[0] != 0 || startIndices[1] != 1 {
+		t.Fatalf("unexpected start indices: %v; outputs=%q", startIndices, outputs)
+	}
+	if len(stopIndices) != 2 || stopIndices[0] != 0 || stopIndices[1] != 1 {
+		t.Fatalf("unexpected stop indices: %v; outputs=%q", stopIndices, outputs)
+	}
+	if len(argumentDeltas) != 2 || argumentDeltas[0] != `{"id":1}` || argumentDeltas[1] != `{"id":2}` {
+		t.Fatalf("unexpected argument deltas: %v; outputs=%q", argumentDeltas, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamDeferredUnnamedFunctionCallDoesNotReserveBlockIndex(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_hidden"},"output_index":1}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":2}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "text" {
+				if got := data.Get("index").Int(); got != 0 {
+					t.Fatalf("text block index = %d, want 0; outputs=%q", got, outputs)
+				}
+				return
+			}
+		}
+	}
+
+	t.Fatalf("missing text content_block_start; outputs=%q", outputs)
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalOutputHydratesOpenFunctionCallArguments(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup"},"output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"example\"}"}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	var finalArgumentPosition = -1
+	var stopPosition = -1
+	var messageDeltaPosition = -1
+	position := 0
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			position++
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" && data.Get("delta.partial_json").String() == `{"query":"example"}` {
+					finalArgumentPosition = position
+				}
+			case "content_block_stop":
+				if data.Get("index").Int() == 0 {
+					stopPosition = position
+				}
+			case "message_delta":
+				messageDeltaPosition = position
+			}
+		}
+	}
+
+	if finalArgumentPosition == -1 {
+		t.Fatalf("missing terminal argument delta; outputs=%q", outputs)
+	}
+	if stopPosition == -1 {
+		t.Fatalf("missing content_block_stop for open function call; outputs=%q", outputs)
+	}
+	if messageDeltaPosition == -1 {
+		t.Fatalf("missing message_delta; outputs=%q", outputs)
+	}
+	if !(finalArgumentPosition < stopPosition && stopPosition < messageDeltaPosition) {
+		t.Fatalf("unexpected event order: args=%d stop=%d message_delta=%d; outputs=%q", finalArgumentPosition, stopPosition, messageDeltaPosition, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalOutputEmitsPendingUnnamedFunctionCall(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1"},"output_index":1}`),
+		[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"query\":\"example\"}","output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"example\"}"}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	if strings.Count(outputText, `"type":"tool_use"`) != 1 {
+		t.Fatalf("expected one terminal tool_use block, got output:\n%s", outputText)
+	}
+	if !strings.Contains(outputText, `"name":"lookup"`) || !strings.Contains(outputText, `"partial_json":"{\"query\":\"example\"}"`) {
+		t.Fatalf("expected terminal tool name and arguments, got output:\n%s", outputText)
+	}
+	gotReason, ok := findClaudeStreamStopReason(outputs)
+	if !ok {
+		t.Fatalf("missing message_delta; outputs=%q", outputs)
+	}
+	if gotReason != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use. Outputs=%q", gotReason, outputs)
+	}
+	toolUsePosition := strings.Index(outputText, `"type":"tool_use"`)
+	messageDeltaPosition := strings.Index(outputText, `"type":"message_delta"`)
+	if toolUsePosition < 0 || messageDeltaPosition < 0 || toolUsePosition > messageDeltaPosition {
+		t.Fatalf("terminal tool_use must be emitted before message_delta:\n%s", outputText)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamUnresolvedPendingFunctionCallDoesNotForceToolUseStopReason(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_hidden"},"output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	if strings.Contains(outputText, `"type":"tool_use"`) {
+		t.Fatalf("unresolved pending function_call must not emit tool_use:\n%s", outputText)
+	}
+	gotReason, ok := findClaudeStreamStopReason(outputs)
+	if !ok {
+		t.Fatalf("missing message_delta; outputs=%q", outputs)
+	}
+	if gotReason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn. Outputs=%q", gotReason, outputs)
+	}
+	params, ok := param.(*ConvertCodexResponseToClaudeParams)
+	if !ok || len(params.PendingFunctionCalls) != 0 || params.LastPendingFunctionCallKey != "" {
+		t.Fatalf("pending function calls were not cleared: %#v", param)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessageFallback(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"tools":[]}`)

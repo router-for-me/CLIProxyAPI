@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -118,6 +119,9 @@ type Config struct {
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
+	// InteractionsKey defines native Google Interactions API key configurations.
+	InteractionsKey []GeminiKey `yaml:"interactions-api-key" json:"interactions-api-key"`
+
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
@@ -158,7 +162,7 @@ type Config struct {
 	// vertex, aistudio, antigravity, claude, codex, kimi, xai.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
-	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
+	// gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
@@ -173,6 +177,8 @@ type PluginsConfig struct {
 	Dir string `yaml:"dir" json:"dir"`
 	// StoreSources appends third-party plugin store registries to the built-in official source.
 	StoreSources []string `yaml:"store-sources,omitempty" json:"store-sources,omitempty"`
+	// StoreAuth defines optional auth rules for plugin store registry, metadata, and artifact requests.
+	StoreAuth []sdkpluginstore.AuthConfig `yaml:"store-auth,omitempty" json:"store-auth,omitempty"`
 	// Configs stores per-plugin instance configuration by plugin ID.
 	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
 }
@@ -665,6 +671,13 @@ type OpenAICompatibilityModel struct {
 	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
 	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
 
+	// InputModalities declares chat/responses input capabilities (e.g. text, image) for Codex and other clients.
+	// This is separate from Image, which only enables /v1/images/* endpoints.
+	InputModalities []string `yaml:"input-modalities,omitempty" json:"input-modalities,omitempty"`
+
+	// OutputModalities declares supported output modalities when known (e.g. text, image).
+	OutputModalities []string `yaml:"output-modalities,omitempty" json:"output-modalities,omitempty"`
+
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
@@ -726,6 +739,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.SaveCooldownStatus = false
 	cfg.TransientErrorCooldownSeconds = 0
 	cfg.DisableImageGeneration = DisableImageGenerationOff
+	cfg.WebsocketAuth = true
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
@@ -787,6 +801,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
+	// Sanitize native Interactions API key configuration.
+	cfg.SanitizeInteractionsKeys()
+
 	// Sanitize Vertex-compatible API keys.
 	cfg.SanitizeVertexCompatKeys()
 
@@ -838,6 +855,7 @@ func (cfg *Config) NormalizePluginsConfig() {
 		}
 		cfg.Plugins.StoreSources = sources
 	}
+	cfg.Plugins.StoreAuth = sdkpluginstore.NormalizeAuthConfigs(cfg.Plugins.StoreAuth)
 	if cfg.Plugins.Configs == nil {
 		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
 	}
@@ -1017,17 +1035,11 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 }
 
-// SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
-// It uses API key + base URL as the uniqueness key.
-func (cfg *Config) SanitizeGeminiKeys() {
-	if cfg == nil {
-		return
-	}
-
-	seen := make(map[string]struct{}, len(cfg.GeminiKey))
-	out := cfg.GeminiKey[:0]
-	for i := range cfg.GeminiKey {
-		entry := cfg.GeminiKey[i]
+func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
+	seen := make(map[string]struct{}, len(entries))
+	out := entries[:0]
+	for i := range entries {
+		entry := entries[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
 		if entry.APIKey == "" {
 			continue
@@ -1044,7 +1056,25 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		seen[uniqueKey] = struct{}{}
 		out = append(out, entry)
 	}
-	cfg.GeminiKey = out
+	return out
+}
+
+// SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
+// It uses API key + base URL as the uniqueness key.
+func (cfg *Config) SanitizeGeminiKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.GeminiKey = sanitizeGeminiKeyEntries(cfg.GeminiKey)
+}
+
+// SanitizeInteractionsKeys deduplicates and normalizes native Interactions credentials.
+// It uses API key + base URL as the uniqueness key.
+func (cfg *Config) SanitizeInteractionsKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.InteractionsKey = sanitizeGeminiKeyEntries(cfg.InteractionsKey)
 }
 
 func normalizeModelPrefix(prefix string) string {
@@ -1188,6 +1218,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "plugins", "configs")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -1769,8 +1800,41 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 	}
 }
 
-func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
-	if key == "" || dstRoot == nil || srcRoot == nil {
+func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, keyPath ...string) {
+	if len(keyPath) == 0 || dstRoot == nil || srcRoot == nil {
+		return
+	}
+	if len(keyPath) > 1 {
+		dstParent := dstRoot
+		srcParent := srcRoot
+		for _, key := range keyPath[:len(keyPath)-1] {
+			if key == "" || dstParent == nil || dstParent.Kind != yaml.MappingNode {
+				return
+			}
+			dstIdx := findMapKeyIndex(dstParent, key)
+			if dstIdx < 0 || dstIdx+1 >= len(dstParent.Content) {
+				return
+			}
+			dstParent = dstParent.Content[dstIdx+1]
+
+			if srcParent != nil && srcParent.Kind == yaml.MappingNode {
+				srcIdx := findMapKeyIndex(srcParent, key)
+				if srcIdx >= 0 && srcIdx+1 < len(srcParent.Content) {
+					srcParent = srcParent.Content[srcIdx+1]
+				} else {
+					srcParent = nil
+				}
+			}
+		}
+		if srcParent == nil || srcParent.Kind != yaml.MappingNode {
+			removeMapKey(dstParent, keyPath[len(keyPath)-1])
+			return
+		}
+		pruneMappingToGeneratedKeys(dstParent, srcParent, keyPath[len(keyPath)-1])
+		return
+	}
+	key := keyPath[0]
+	if key == "" {
 		return
 	}
 	if dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {

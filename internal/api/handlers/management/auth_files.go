@@ -1281,7 +1281,21 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 	if coreauth.IsPluginVirtualAuth(targetAuth) {
-		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
+		// Allow status changes only when targeting the source auth file name, matching delete semantics.
+		// Expanded virtual project auths still cannot be modified independently.
+		if !isPluginVirtualSourceDelete(name, targetAuth) {
+			c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
+			return
+		}
+		if errPatch := h.patchPluginVirtualSourceStatus(ctx, targetAuth, *req.Disabled); errPatch != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(errPatch, errAuthFileNotFound) || os.IsNotExist(errPatch) {
+				status = http.StatusNotFound
+			}
+			c.JSON(status, gin.H{"error": errPatch.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 		return
 	}
 
@@ -1316,23 +1330,98 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
-	// Update disabled state
-	targetAuth.Disabled = *req.Disabled
-	if *req.Disabled {
-		targetAuth.Status = coreauth.StatusDisabled
-		targetAuth.StatusMessage = "disabled via management API"
-	} else {
-		targetAuth.Status = coreauth.StatusActive
-		targetAuth.StatusMessage = ""
-	}
-	targetAuth.UpdatedAt = time.Now()
-
+	applyAuthDisabledState(targetAuth, *req.Disabled)
 	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
+}
+
+// patchPluginVirtualSourceStatus toggles disabled on a plugin multi-auth source file and all
+// runtime auths expanded from it. Virtual project children cannot be toggled independently.
+func (h *Handler) patchPluginVirtualSourceStatus(ctx context.Context, targetAuth *coreauth.Auth, disabled bool) error {
+	if h == nil || h.authManager == nil || targetAuth == nil {
+		return fmt.Errorf("core auth manager unavailable")
+	}
+	sourcePath := strings.TrimSpace(authAttribute(targetAuth, coreauth.AttributeVirtualSource))
+	if sourcePath == "" {
+		sourcePath = strings.TrimSpace(authAttribute(targetAuth, "path"))
+	}
+	if sourcePath == "" {
+		return errPluginVirtualAuth
+	}
+	if errWrite := setSourceAuthFileDisabled(sourcePath, disabled); errWrite != nil {
+		if os.IsNotExist(errWrite) {
+			return errAuthFileNotFound
+		}
+		return fmt.Errorf("failed to update source auth file: %w", errWrite)
+	}
+	now := time.Now()
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		if !sameAuthFilePath(authAttribute(auth, "path"), sourcePath) &&
+			!sameAuthFilePath(authAttribute(auth, coreauth.AttributeVirtualSource), sourcePath) {
+			continue
+		}
+		applyAuthDisabledState(auth, disabled)
+		auth.UpdatedAt = now
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			return fmt.Errorf("failed to update auth %s: %w", auth.ID, errUpdate)
+		}
+	}
+	return nil
+}
+
+func setSourceAuthFileDisabled(path string, disabled bool) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("source auth path is empty")
+	}
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return errRead
+	}
+	metadata := make(map[string]any)
+	if len(bytes.TrimSpace(data)) > 0 {
+		if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+			return fmt.Errorf("invalid auth file: %w", errUnmarshal)
+		}
+	}
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadata["disabled"] = disabled
+	raw, errMarshal := json.Marshal(metadata)
+	if errMarshal != nil {
+		return fmt.Errorf("marshal auth file: %w", errMarshal)
+	}
+	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+		return errWrite
+	}
+	return nil
+}
+
+func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
+	if auth == nil {
+		return
+	}
+	auth.Disabled = disabled
+	if disabled {
+		auth.Status = coreauth.StatusDisabled
+		auth.StatusMessage = "disabled via management API"
+	} else {
+		auth.Status = coreauth.StatusActive
+		auth.StatusMessage = ""
+	}
+	auth.UpdatedAt = time.Now()
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["disabled"] = disabled
 }
 
 // PatchAuthFileFields updates arbitrary metadata fields of an auth file.
