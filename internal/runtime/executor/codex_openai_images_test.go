@@ -315,3 +315,35 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForMultipart(t 
 		t.Fatalf("mask.image_url = %q, want mask-data data URL; body=%s", maskURL, string(gotBody))
 	}
 }
+
+func TestCodexExecutorWrappedOpenAIImageDoesNotForwardDownstreamUA(t *testing.T) {
+	var gotUA string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp_1","output":[{"type":"image_generation_call","result":"AA=="}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "Python-urllib/3.9",
+	})
+	executor := NewCodexExecutor(&config.Config{})
+	// Use a model name that is NOT gpt-image-1.5 / gpt-image-2 so the request
+	// takes the wrapped (/responses) path instead of the direct (/images/*) path.
+	_, _ = executor.Execute(ctx, newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "codex/dall-e-3",
+		Payload: []byte(`{"model":"codex/dall-e-3","prompt":"A cute otter","stream":false}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+
+	if gotUA == "" {
+		t.Fatal("upstream request was never made (User-Agent not captured)")
+	}
+	if gotUA == "Python-urllib/3.9" {
+		t.Fatalf("downstream User-Agent leaked to upstream: %q", gotUA)
+	}
+	if gotUA != codexUserAgent {
+		t.Fatalf("User-Agent = %q, want codex default %q", gotUA, codexUserAgent)
+	}
+}
