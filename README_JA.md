@@ -98,7 +98,7 @@ CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/
 
 ## 管理API
 
-[MANAGEMENT_API.md](https://help.router-for.me/management/api)を参照
+[管理APIドキュメント](https://help.router-for.me/management/api)を参照
 
 ## 使用量統計
 
