@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -866,6 +867,71 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	}
 	if got := req.Header.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	}
+}
+
+func TestApplyModelHeaderOverridesFromModelConfig(t *testing.T) {
+	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
+	applyModelHeaderOverrides(req.Header, "gpt-5.6-luna")
+
+	if got := req.Header.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := codexSessionHeaderValue(req.Header); got == "" {
+		t.Fatal("expected Session_id to be set for Mac OS User-Agent override")
+	}
+
+	applyModelHeaderOverrides(req.Header, "gpt-5.4")
+	if got := req.Header.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent after no-op override = %q, want %q", got, wantUA)
+	}
+}
+
+func TestApplyModelHeaderOverridesMultipleHeaders(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-model-header-override"
+	reg.RegisterClient(clientID, "codex", []*registry.ModelInfo{{
+		ID: "test-override-headers-model",
+		Config: &registry.ModelConfig{
+			OverrideHeader: map[string]string{
+				"user-agent":    "custom-ua/1.0",
+				"originator":    "custom-origin",
+				"x-test-header": "forced-value",
+			},
+		},
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	headers := http.Header{}
+	headers.Set("User-Agent", "old-ua")
+	headers.Set("Originator", "old-origin")
+	headers.Set("X-Test-Header", "old-value")
+
+	applyModelHeaderOverrides(headers, "test-override-headers-model")
+
+	if got := headers.Get("User-Agent"); got != "custom-ua/1.0" {
+		t.Fatalf("User-Agent = %q, want custom-ua/1.0", got)
+	}
+	if got := headers.Get("Originator"); got != "custom-origin" {
+		t.Fatalf("Originator = %q, want custom-origin", got)
+	}
+	if got := headers.Get("X-Test-Header"); got != "forced-value" {
+		t.Fatalf("X-Test-Header = %q, want forced-value", got)
 	}
 }
 
