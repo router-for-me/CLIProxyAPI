@@ -258,6 +258,14 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				}
 
 				msg = common.AttachMessageCacheControl(msg, message)
+
+				// Skip messages that end up with empty content. Anthropic rejects
+				// user/assistant messages with empty content ("messages: ... must have
+				// non-empty content"); this guards against dropped/unrecognized parts.
+				if content := gjson.GetBytes(msg, "content"); !content.IsArray() || len(content.Array()) == 0 {
+					return true
+				}
+
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
 
@@ -297,7 +305,28 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		hasAnthropicTools := false
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
+			toolType := tool.Get("type").String()
+			// Some clients (e.g. Cursor via the OpenAI endpoint) send tools already in
+			// Anthropic-native shape: a bare object with name + input_schema and no "type".
+			// Pass these through directly instead of dropping them.
+			if toolType == "" && tool.Get("name").Exists() {
+				name := tool.Get("name").String()
+				if name == "" {
+					return true
+				}
+				anthropicTool := []byte(`{"name":"","description":""}`)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", tool.Get("description").String())
+				if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(inputSchema.Raw))
+				} else if parameters := tool.Get("parameters"); parameters.Exists() {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+				}
+				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
+				hasAnthropicTools = true
+				return true
+			}
+			if toolType == "function" {
 				function := tool.Get("function")
 				anthropicTool := []byte(`{"name":"","description":""}`)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
@@ -313,6 +342,28 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
 					anthropicTool = common.AttachCacheControl(anthropicTool, function)
 				}
+
+				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
+				hasAnthropicTools = true
+			} else if toolType == "custom" {
+				// OpenAI "custom" tools (e.g. Cursor's ApplyPatch, grammar/freeform tools)
+				// carry a grammar/format rather than a JSON parameters schema. Anthropic
+				// requires an input_schema, so map them to a permissive object-typed tool
+				// that accepts a single freeform "input" string. Without this the tool is
+				// dropped and Claude leaks the raw call as XML text into content instead of
+				// emitting a structured tool_use.
+				name := tool.Get("name").String()
+				if name == "" {
+					name = tool.Get("custom.name").String()
+				}
+				description := tool.Get("description").String()
+				if description == "" {
+					description = tool.Get("custom.description").String()
+				}
+
+				anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", description)
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
 				hasAnthropicTools = true
@@ -378,6 +429,14 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 				claudePart = docPart
 			}
 		}
+
+	case "tool_use", "tool_result":
+		// Some clients (e.g. Cursor via the OpenAI endpoint) send assistant/user
+		// content already as Anthropic-native tool_use / tool_result blocks. Pass
+		// them through unchanged instead of dropping them, which would otherwise
+		// leave the message with empty content and trigger an Anthropic
+		// "messages: user messages must have non-empty content" error.
+		return part.Raw
 	}
 
 	if len(claudePart) == 0 {
