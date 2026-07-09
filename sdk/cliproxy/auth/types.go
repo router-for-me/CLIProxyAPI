@@ -69,6 +69,10 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// implicitProxyURL stores the runtime-only proxy bound from the global proxy_urls list.
+	implicitProxyURL string `json:"-"`
+	// implicitProxyOrder stores a runtime-only stable ordering hint used when binding global proxies.
+	implicitProxyOrder string `json:"-"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).

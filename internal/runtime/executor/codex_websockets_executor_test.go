@@ -944,3 +944,28 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
 	}
 }
+
+func TestNewProxyAwareWebsocketDialerUsesImplicitProxyBeforeGlobalList(t *testing.T) {
+	t.Parallel()
+
+	auth := &cliproxyauth.Auth{}
+	auth.SetImplicitProxyURL("http://implicit-proxy.example.com:8080")
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://fallback-proxy.example.com:8080"}},
+		auth,
+	)
+	if dialer.Proxy == nil {
+		t.Fatal("expected websocket proxy function")
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	proxyURL, errProxy := dialer.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("dialer.Proxy() error = %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://implicit-proxy.example.com:8080" {
+		t.Fatalf("dialer.Proxy() = %v, want implicit proxy", proxyURL)
+	}
+}

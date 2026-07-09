@@ -593,7 +593,11 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		return auth, nil
 	}
 
-	client := kimiauth.NewDeviceFlowClientWithDeviceIDAndProxyURL(e.cfg, resolveKimiDeviceID(auth), auth.ProxyURL)
+	globalProxyURL := ""
+	if e.cfg != nil {
+		globalProxyURL = e.cfg.ProxyURL
+	}
+	client := kimiauth.NewDeviceFlowClientWithDeviceIDAndProxyURL(e.cfg, resolveKimiDeviceID(auth), cliproxyauth.EffectiveProxyURL(globalProxyURL, auth))
 	td, err := client.RefreshToken(ctx, refreshToken)
 	if err != nil {
 		return nil, err

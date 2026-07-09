@@ -75,15 +75,11 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 }
 
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
-	if auth != nil {
-		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
-			return proxyURL
-		}
-	}
+	globalProxyURL := ""
 	if s != nil && s.cfg != nil {
-		return strings.TrimSpace(s.cfg.ProxyURL)
+		globalProxyURL = strings.TrimSpace(s.cfg.ProxyURL)
 	}
-	return ""
+	return coreauth.EffectiveProxyURL(globalProxyURL, auth)
 }
 
 func antigravityModelBaseURLs(auth *coreauth.Auth) []string {

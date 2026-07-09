@@ -73,8 +73,10 @@ type apiCallResponse struct {
 //
 // Proxy selection (highest priority first):
 //  1. Selected credential proxy_url
-//  2. Global config proxy-url
-//  3. Direct connect (environment proxies are not used)
+//  2. Config API key proxy-url for the selected credential
+//  3. Runtime proxy_urls binding
+//  4. Global config proxy-url fallback
+//  5. Direct connect (environment proxies are not used)
 //
 // Response JSON (returned with HTTP 200 when the APICall itself succeeds):
 //   - status_code: Upstream HTTP status code.
@@ -479,6 +481,9 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg, auth)); proxyStr != "" {
 				proxyCandidates = append(proxyCandidates, proxyStr)
 			}
+		}
+		if proxyStr := auth.ImplicitProxyURL(); proxyStr != "" {
+			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
 	}
 	if h != nil && h.cfg != nil {

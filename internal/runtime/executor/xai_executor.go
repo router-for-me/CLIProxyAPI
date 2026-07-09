@@ -746,7 +746,11 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 		return auth, nil
 	}
 	tokenEndpoint := xaiMetadataString(auth.Metadata, "token_endpoint")
-	svc := xaiauth.NewXAIAuthWithProxyURL(e.cfg, auth.ProxyURL)
+	globalProxyURL := ""
+	if e.cfg != nil {
+		globalProxyURL = e.cfg.ProxyURL
+	}
+	svc := xaiauth.NewXAIAuthWithProxyURL(e.cfg, cliproxyauth.EffectiveProxyURL(globalProxyURL, auth))
 	td, err := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
 	if err != nil {
 		return nil, err
