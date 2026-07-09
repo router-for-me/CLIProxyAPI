@@ -302,3 +302,107 @@ func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t 
 		t.Fatalf("Expected fallback text %q, got %q", "", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_PreservesContentPartCacheControl(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "cached prefix", "cache_control": {"type": "ephemeral"}},
+					{"type": "text", "text": "fresh question"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content.0.cache_control.type = %q, want ephemeral. Output: %s", got, result)
+	}
+	if resultJSON.Get("messages.0.content.1.cache_control").Exists() {
+		t.Fatalf("content.1 should not have cache_control. Output: %s", result)
+	}
+	if got := resultJSON.Get("messages.0.content.0.text").String(); got != "cached prefix" {
+		t.Fatalf("content.0.text = %q, want %q", got, "cached prefix")
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesMessageLevelCacheControl(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "user",
+				"content": "cache me",
+				"cache_control": {"type": "ephemeral", "ttl": "1h"}
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content.0.cache_control.type = %q, want ephemeral. Output: %s", got, result)
+	}
+	if got := resultJSON.Get("messages.0.content.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("content.0.cache_control.ttl = %q, want 1h. Output: %s", got, result)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesToolCacheControl(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "lookup",
+					"description": "Lookup something",
+					"parameters": {"type": "object", "properties": {}}
+				},
+				"cache_control": {"type": "ephemeral"}
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools.0.cache_control.type = %q, want ephemeral. Output: %s", got, result)
+	}
+	if got := resultJSON.Get("tools.0.name").String(); got != "lookup" {
+		t.Fatalf("tools.0.name = %q, want lookup", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "user",
+				"cache_control": {"type": "ephemeral", "ttl": "1h"},
+				"content": [
+					{"type": "text", "text": "part cached", "cache_control": {"type": "ephemeral"}}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content.0.cache_control.type = %q, want ephemeral. Output: %s", got, result)
+	}
+	if resultJSON.Get("messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("part-level cache_control should win; unexpected ttl: %s", result)
+	}
+}

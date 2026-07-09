@@ -231,6 +231,37 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	}
 }
 
+func TestSynthesizeAuthFileAppliesSourceDisabledToPluginMultiAuths(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "geminicli.json")
+	raw := []byte(`{"type":"gemini-cli","disabled":true}`)
+
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "geminicli.json", Provider: "gemini-cli", Metadata: map[string]any{"type": "gemini-cli"}},
+				{ID: "geminicli-project-a.json", Provider: "gemini-cli", Metadata: map[string]any{"type": "gemini-cli", "project_id": "project-a"}},
+			}, true, nil
+		}),
+	}
+
+	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	if len(auths) != 2 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want two plugin auths", len(auths))
+	}
+	for _, auth := range auths {
+		if !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+			t.Fatalf("auth %s disabled/status = %v/%s, want disabled", auth.ID, auth.Disabled, auth.Status)
+		}
+		if got, _ := auth.Metadata["disabled"].(bool); !got {
+			t.Fatalf("auth %s metadata disabled = %#v, want true", auth.ID, auth.Metadata["disabled"])
+		}
+	}
+}
+
 func TestSynthesizeAuthFilePluginHandledEmptySuppressesBuiltin(t *testing.T) {
 	tempDir := t.TempDir()
 	fullPath := filepath.Join(tempDir, "codex.json")
