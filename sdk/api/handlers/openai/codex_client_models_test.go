@@ -28,6 +28,14 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 			SupportedInputModalities: []string{"text"},
 		},
 		{
+			ID:                       "mimo-mixed-modalities-codex-test",
+			Object:                   "model",
+			OwnedBy:                  "mimo",
+			Type:                     "openai-compatibility",
+			DisplayName:              "mimo-mixed-modalities-codex-test",
+			SupportedInputModalities: []string{"text", "image", "audio", "video", "TEXT", "IMAGE"},
+		},
+		{
 			ID:      "compat-image-only-codex-test",
 			Object:  "model",
 			OwnedBy: "mimo",
@@ -47,6 +55,7 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 
 	var visionEntry map[string]any
 	var textOnlyEntry map[string]any
+	var mixedEntry map[string]any
 	var imageEntry map[string]any
 	for _, entry := range models {
 		slug := stringModelValue(entry, "slug")
@@ -55,6 +64,8 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 			visionEntry = entry
 		case textOnlyModelID:
 			textOnlyEntry = entry
+		case "mimo-mixed-modalities-codex-test":
+			mixedEntry = entry
 		case "compat-image-only-codex-test":
 			imageEntry = entry
 		}
@@ -88,6 +99,23 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	}
 	if _, exists := textOnlyEntry["supports_image_detail_original"]; exists {
 		t.Fatalf("text-only model should not expose supports_image_detail_original: %#v", textOnlyEntry["supports_image_detail_original"])
+	}
+
+	if mixedEntry == nil {
+		t.Fatal("expected codex entry for mixed-modalities model")
+	}
+	mixedModalities, ok := mixedEntry["input_modalities"].([]any)
+	if !ok || len(mixedModalities) != 2 {
+		t.Fatalf("mixed input_modalities = %#v, want [text image]", mixedEntry["input_modalities"])
+	}
+	if got, _ := mixedModalities[0].(string); got != "text" {
+		t.Fatalf("mixed input_modalities[0] = %q, want text", got)
+	}
+	if got, _ := mixedModalities[1].(string); got != "image" {
+		t.Fatalf("mixed input_modalities[1] = %q, want image", got)
+	}
+	if got, ok := mixedEntry["supports_image_detail_original"].(bool); !ok || !got {
+		t.Fatalf("mixed supports_image_detail_original = %#v, want true", mixedEntry["supports_image_detail_original"])
 	}
 
 	if imageEntry == nil {
