@@ -165,6 +165,175 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorGrokCLISessionUsesProxyHeaders(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	var gotTokenAuth string
+	var gotClientVersion string
+	var gotUserAgent string
+	var gotModelOverride string
+	var gotClientIdentifier string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotTokenAuth = r.Header.Get("X-XAI-Token-Auth")
+		gotClientVersion = r.Header.Get("x-grok-client-version")
+		gotUserAgent = r.Header.Get("User-Agent")
+		gotModelOverride = r.Header.Get("x-grok-model-override")
+		gotClientIdentifier = r.Header.Get("x-grok-client-identifier")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.5-build-free\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-grok-cli-session",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"auth_kind":              "grok_cli_session",
+			"access_token":           "session-token",
+			"base_url":               server.URL,
+			"grok_cli_version":       "0.2.93",
+			"grok_client_identifier": "agent-test",
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5(high)",
+		Payload: []byte(`{"model":"grok-4.5(high)","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotPath != "/responses" {
+		t.Fatalf("path = %q, want /responses", gotPath)
+	}
+	if gotAuth != "Bearer session-token" {
+		t.Fatalf("Authorization = %q, want Bearer session-token", gotAuth)
+	}
+	if gotTokenAuth != "xai-grok-cli" {
+		t.Fatalf("X-XAI-Token-Auth = %q, want xai-grok-cli", gotTokenAuth)
+	}
+	if gotClientVersion != "0.2.93" {
+		t.Fatalf("x-grok-client-version = %q, want 0.2.93", gotClientVersion)
+	}
+	if gotUserAgent != "xai-grok-workspace/0.2.93" {
+		t.Fatalf("User-Agent = %q, want xai-grok-workspace/0.2.93", gotUserAgent)
+	}
+	if gotModelOverride != "grok-4.5" {
+		t.Fatalf("x-grok-model-override = %q, want grok-4.5", gotModelOverride)
+	}
+	if gotClientIdentifier != "agent-test" {
+		t.Fatalf("x-grok-client-identifier = %q, want agent-test", gotClientIdentifier)
+	}
+}
+
+func TestXAIExecutorSanitizesUndefinedStringFields(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		Payload: []byte(`{
+			"model": "grok-4.5",
+			"input": [{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
+			"temperature": "[undefined]",
+			"top_p": "[undefined]",
+			"max_output_tokens": "[undefined]",
+			"conversation": "[undefined]",
+			"max_tool_calls": "[undefined]",
+			"metadata": "[undefined]",
+			"parallel_tool_calls": "[undefined]",
+			"previous_response_id": "[undefined]",
+			"store": false,
+			"user": "[undefined]",
+			"instructions": "[undefined]",
+			"service_tier": "[undefined]",
+			"include": "[undefined]",
+			"prompt_cache_key": "[undefined]",
+			"prompt_cache_retention": "[undefined]",
+			"safety_identifier": "[undefined]",
+			"top_logprobs": "[undefined]",
+			"truncation": "[undefined]",
+			"tools": "[undefined]",
+			"tool_choice": "[undefined]",
+			"stream": true
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	for _, field := range []string{
+		"temperature",
+		"top_p",
+		"max_output_tokens",
+		"conversation",
+		"max_tool_calls",
+		"metadata",
+		"parallel_tool_calls",
+		"user",
+		"instructions",
+		"service_tier",
+		"include",
+		"prompt_cache_key",
+		"top_logprobs",
+		"truncation",
+		"tools",
+		"tool_choice",
+		"prompt_cache_key",
+	} {
+		if value := gjson.GetBytes(prepared.body, field); value.Exists() && value.Type == gjson.String && value.String() == "[undefined]" {
+			t.Fatalf("%s still has [undefined] string after sanitize; body=%s", field, string(prepared.body))
+		}
+	}
+	if got := gjson.GetBytes(prepared.body, "model").String(); got != "grok-4.5" {
+		t.Fatalf("model = %q, want grok-4.5; body=%s", got, string(prepared.body))
+	}
+	if !gjson.GetBytes(prepared.body, "stream").Bool() {
+		t.Fatalf("stream = false, want true; body=%s", string(prepared.body))
+	}
+}
+
+func TestXAIGrokCLISessionDefaultsToCLIProxy(t *testing.T) {
+	_, baseURL := xaiRequestCreds(&cliproxyauth.Auth{
+		Provider: "xai",
+		Metadata: map[string]any{"auth_kind": "grok-cli-session"},
+	})
+	if baseURL != xaiGrokCLIProxyBaseURL {
+		t.Fatalf("baseURL = %q, want %q", baseURL, xaiGrokCLIProxyBaseURL)
+	}
+
+	_, baseURL = xaiRequestCreds(&cliproxyauth.Auth{Provider: "xai", Metadata: map[string]any{"auth_kind": "oauth"}})
+	if baseURL != "https://api.x.ai/v1" {
+		t.Fatalf("oauth baseURL = %q, want https://api.x.ai/v1", baseURL)
+	}
+}
+
+func TestXAIExecutorRefreshRejectsGrokCLISession(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	_, err := exec.Refresh(context.Background(), &cliproxyauth.Auth{
+		Provider: "xai",
+		Metadata: map[string]any{
+			"auth_kind":     "grok_cli_session",
+			"refresh_token": "should-not-be-used",
+		},
+	})
+	if err == nil {
+		t.Fatal("Refresh() error = nil, want grok cli session refresh error")
+	}
+	if !strings.Contains(err.Error(), "grok cli session expired") {
+		t.Fatalf("Refresh() error = %q, want grok cli session expired", err.Error())
+	}
+}
+
 func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
@@ -217,7 +386,7 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 			if errRequest != nil {
 				t.Fatalf("NewRequest() error = %v", errRequest)
 			}
-			applyXAIHeaders(httpReq, auth, "xai-token", true, gotSession)
+			applyXAIHeaders(httpReq, auth, "xai-token", true, gotSession, tt.model)
 			gotGrokConvID := httpReq.Header.Get("x-grok-conv-id")
 
 			if tt.wantGenerated {
@@ -1146,7 +1315,7 @@ func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	if errRequest != nil {
 		t.Fatalf("NewRequest() error = %v", errRequest)
 	}
-	applyXAIHeaders(httpReq, auth, "xai-token", true, first.sessionID)
+	applyXAIHeaders(httpReq, auth, "xai-token", true, first.sessionID, "grok-composer-2.5-fast")
 	if got := httpReq.Header.Get("x-grok-conv-id"); got != firstKey {
 		t.Fatalf("x-grok-conv-id = %q, want %q", got, firstKey)
 	}

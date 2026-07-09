@@ -6,6 +6,10 @@ import "time"
 const (
 	// DefaultAPIBaseURL is the default xAI Responses API base URL.
 	DefaultAPIBaseURL = "https://api.x.ai/v1"
+	// GrokCLIProxyBaseURL is the Grok Build CLI session API base URL.
+	GrokCLIProxyBaseURL = "https://cli-chat-proxy.grok.com/v1"
+	// DefaultGrokCLIVersion is the fallback client version for Grok CLI session credentials.
+	DefaultGrokCLIVersion = "0.2.93"
 	// Issuer is xAI's OAuth issuer.
 	Issuer = "https://auth.x.ai"
 	// DiscoveryURL is the OIDC discovery endpoint used to resolve OAuth endpoints.
