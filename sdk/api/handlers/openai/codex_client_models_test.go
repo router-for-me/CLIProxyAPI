@@ -100,3 +100,35 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 		t.Fatalf("image endpoint model should not expose input_modalities from registry: %#v", imageEntry["input_modalities"])
 	}
 }
+
+func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
+	resp := CodexClientModelsResponse([]map[string]any{{"id": "gpt-5.6-sol"}})
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	var sol map[string]any
+	for _, entry := range models {
+		if stringModelValue(entry, "slug") == "gpt-5.6-sol" {
+			sol = entry
+			break
+		}
+	}
+	if sol == nil {
+		t.Fatal("expected codex client entry for gpt-5.6-sol")
+	}
+
+	levels, ok := sol["supported_reasoning_levels"].([]any)
+	if !ok {
+		t.Fatalf("supported_reasoning_levels = %T, want []any", sol["supported_reasoning_levels"])
+	}
+	for _, rawLevel := range levels {
+		level, ok := rawLevel.(map[string]any)
+		if ok && stringModelValue(level, "effort") == "ultra" {
+			return
+		}
+	}
+
+	t.Fatalf("supported_reasoning_levels = %#v, want ultra", levels)
+}
