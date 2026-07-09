@@ -483,6 +483,12 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 		},
+		{
+			ID:      "gpt-4o",
+			Object:  "model",
+			OwnedBy: "openai",
+			Type:    "openai",
+		},
 	})
 	t.Cleanup(func() {
 		modelRegistry.UnregisterClient(clientID)
@@ -519,13 +525,23 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 		}
 
 		var claudeModel map[string]any
+		var rewrittenModel map[string]any
 		for _, m := range resp.Data {
-			if id, _ := m["id"].(string); id == "claude-sonnet-4-6" {
+			id, _ := m["id"].(string)
+			switch id {
+			case "claude-sonnet-4-6":
 				claudeModel = m
+			case "claude-fable-5-dd-o4-tpg":
+				rewrittenModel = m
+			case "gpt-4o", "claude-gpt-4o":
+				t.Fatalf("expected non-claude model id to be rewritten as claude-fable-5-dd-<reversed>, got %q", id)
 			}
 		}
 		if claudeModel == nil {
 			t.Fatalf("expected claude-sonnet-4-6 in response, got %s", rr.Body.String())
+		}
+		if rewrittenModel == nil {
+			t.Fatalf("expected claude-fable-5-dd-o4-tpg in response, got %s", rr.Body.String())
 		}
 		for _, field := range []string{"max_input_tokens", "max_tokens", "display_name"} {
 			if _, ok := claudeModel[field]; !ok {
@@ -556,10 +572,20 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 		if resp.Object != "list" {
 			t.Fatalf("expected OpenAI format (object=list), got %s", rr.Body.String())
 		}
+		foundRawGPT := false
 		for _, m := range resp.Data {
 			if _, ok := m["max_input_tokens"]; ok {
 				t.Fatalf("did not expect max_input_tokens in OpenAI format, got %v", m)
 			}
+			if id, _ := m["id"].(string); id == "gpt-4o" {
+				foundRawGPT = true
+			}
+			if id, _ := m["id"].(string); id == "claude-gpt-4o" || id == "claude-fable-5-dd-o4-tpg" {
+				t.Fatalf("did not expect Anthropic id rewrite on OpenAI format models, got %v", m)
+			}
+		}
+		if !foundRawGPT {
+			t.Fatalf("expected raw gpt-4o in OpenAI format response, got %s", rr.Body.String())
 		}
 	})
 }
@@ -870,6 +896,14 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	if got := withDefaults["display_name"]; got != "claude-no-limits" {
 		t.Fatalf("display_name fallback = %v, want claude-no-limits", got)
 	}
+
+	prefixed := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
+	if got := prefixed["id"]; got != "claude-fable-5-dd-o4-tpg" {
+		t.Fatalf("id = %v, want claude-fable-5-dd-o4-tpg", got)
+	}
+	if got := prefixed["display_name"]; got != "GPT-4o" {
+		t.Fatalf("display_name = %v, want GPT-4o", got)
+	}
 	if got := withDefaults["max_input_tokens"]; got != registry.DefaultClaudeMaxInputTokens {
 		t.Fatalf("max_input_tokens fallback = %v, want %d", got, registry.DefaultClaudeMaxInputTokens)
 	}
@@ -878,6 +912,24 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	}
 	if _, ok := withDefaults["created_at"]; ok {
 		t.Fatalf("created_at should be omitted when source created is missing, got %v", withDefaults)
+	}
+}
+
+func TestFormatHomeClaudeModelsSortsByDisplayName(t *testing.T) {
+	out := formatHomeClaudeModels([]homeModelEntry{
+		{id: "claude-z", displayName: "Zebra"},
+		{id: "gpt-4o", displayName: "Alpha"},
+		{id: "claude-b", displayName: "Beta"},
+	})
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	wantNames := []string{"Alpha", "Beta", "Zebra"}
+	for i, want := range wantNames {
+		got, _ := out[i]["display_name"].(string)
+		if got != want {
+			t.Fatalf("out[%d].display_name = %q, want %q", i, got, want)
+		}
 	}
 }
 
