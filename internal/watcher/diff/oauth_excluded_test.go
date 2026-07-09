@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestSummarizeExcludedModels_NormalizesAndDedupes(t *testing.T) {
@@ -75,6 +76,26 @@ func TestSummarizeVertexModels(t *testing.T) {
 	}
 	if blank := SummarizeVertexModels([]config.VertexCompatModel{{Name: " "}}); blank.count != 0 || blank.hash != "" {
 		t.Fatalf("expected blank model ignored, got %+v", blank)
+	}
+}
+
+func TestSummarizeModelsIncludesThinkingSupport(t *testing.T) {
+	oldSummary := SummarizeClaudeModels([]config.ClaudeModel{{
+		Name:     "claude-test",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+	}})
+	newSummary := SummarizeClaudeModels([]config.ClaudeModel{{
+		Name:     "claude-test",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"xhigh"}},
+	}})
+	if oldSummary.hash == "" || newSummary.hash == "" {
+		t.Fatalf("expected non-empty hashes, got %q / %q", oldSummary.hash, newSummary.hash)
+	}
+	if oldSummary.hash == newSummary.hash {
+		t.Fatal("summary hash should change when thinking support changes")
+	}
+	if oldSummary.count != newSummary.count {
+		t.Fatalf("summary count changed with thinking only: %d / %d", oldSummary.count, newSummary.count)
 	}
 }
 

@@ -70,7 +70,8 @@ func init() {
 //	  }
 //	}
 func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
-	if thinking.IsUserDefinedModel(modelInfo) {
+	if thinking.IsUserDefinedModel(modelInfo) &&
+		(config.Mode != thinking.ModeAuto || !thinking.HasExplicitThinkingSupport(modelInfo)) {
 		return applyCompatibleClaude(body, config)
 	}
 	if modelInfo.Thinking == nil {

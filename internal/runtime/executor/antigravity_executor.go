@@ -318,6 +318,23 @@ func validateAntigravityRequestSignatures(ctx context.Context, modelName string,
 	return rawJSON, nil
 }
 
+func translateAntigravityRequest(from sdktranslator.Format, to sdktranslator.Format, model string, capabilityModel string, modelInfo *registry.ModelInfo, rawJSON []byte, stream bool) []byte {
+	translateModel := model
+	if from == sdktranslator.FormatClaude &&
+		to == sdktranslator.FormatAntigravity &&
+		modelInfo != nil &&
+		modelInfo.SupportsWebSearch &&
+		strings.TrimSpace(capabilityModel) != "" &&
+		hasAntigravityClaudeTypedWebSearchTool(rawJSON) {
+		translateModel = capabilityModel
+	}
+	out := sdktranslator.TranslateRequest(from, to, translateModel, rawJSON, stream)
+	if translateModel != model {
+		out, _ = sjson.SetBytes(out, "model", model)
+	}
+	return out
+}
+
 func hasAntigravityClaudeTypedWebSearchTool(payload []byte) bool {
 	tools := gjson.GetBytes(payload, "tools")
 	if !tools.IsArray() {
@@ -653,10 +670,11 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	originalTranslated := translateAntigravityRequest(from, to, baseModel, modelInfo.Model, modelInfo.Info, originalPayload, false)
+	translated := translateAntigravityRequest(from, to, baseModel, modelInfo.Model, modelInfo.Info, req.Payload, false)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinkingWithResolvedModelInfo(translated, originalPayloadSource, modelInfo.Model, from.String(), to.String(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return resp, err
 	}
@@ -697,7 +715,7 @@ attemptLoop:
 				}
 			}
 
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
+			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, modelInfo.Info)
 			if errReq != nil {
 				err = errReq
 				return resp, err
@@ -874,10 +892,11 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	originalTranslated := translateAntigravityRequest(from, to, baseModel, modelInfo.Model, modelInfo.Info, originalPayload, true)
+	translated := translateAntigravityRequest(from, to, baseModel, modelInfo.Model, modelInfo.Info, req.Payload, true)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinkingWithResolvedModelInfo(translated, originalPayloadSource, modelInfo.Model, from.String(), to.String(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return resp, err
 	}
@@ -909,7 +928,7 @@ attemptLoop:
 					helps.MarkCreditsUsed(ctx)
 				}
 			}
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, modelInfo.Info)
 			if errReq != nil {
 				err = errReq
 				return resp, err
@@ -1344,10 +1363,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		auth = updatedAuth
 	}
 
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	originalTranslated := translateAntigravityRequest(from, to, baseModel, modelInfo.Model, modelInfo.Info, originalPayload, true)
+	translated := translateAntigravityRequest(from, to, baseModel, modelInfo.Model, modelInfo.Info, req.Payload, true)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinkingWithResolvedModelInfo(translated, originalPayloadSource, modelInfo.Model, from.String(), to.String(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -1389,7 +1409,7 @@ attemptLoop:
 					return nil, err
 				}
 			}
-			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, modelInfo.Info)
 			if errReq != nil {
 				err = errReq
 				return nil, err
@@ -1679,9 +1699,14 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 
 	// Prepare payload once (doesn't depend on baseURL)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	sourcePayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		sourcePayload = opts.OriginalRequest
+	}
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	payload := translateAntigravityRequest(from, to, baseModel, modelInfo.Model, modelInfo.Info, req.Payload, false)
 
-	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+	payload, err := thinking.ApplyThinkingWithResolvedModelInfo(payload, sourcePayload, modelInfo.Model, from.String(), to.String(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -2190,7 +2215,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	}
 }
 
-func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {
+func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string, modelInfo *registry.ModelInfo) (*http.Request, error) {
 	if token == "" {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
@@ -2227,10 +2252,20 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
-			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
-				payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+		if modelInfo == nil {
+			modelInfo = registry.LookupModelInfo(modelName, "antigravity")
+		}
+		limit := 0
+		if modelInfo != nil {
+			limit = modelInfo.MaxCompletionTokens
+		}
+		if limit <= 0 {
+			if info := registry.LookupModelInfo(modelName, "antigravity"); info != nil {
+				limit = info.MaxCompletionTokens
 			}
+		}
+		if limit > 0 && int(maxOut.Int()) > limit {
+			payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", limit)
 		}
 	}
 

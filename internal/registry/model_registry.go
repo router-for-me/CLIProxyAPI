@@ -66,10 +66,15 @@ type ModelInfo struct {
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
+	// ThinkingExplicit indicates Thinking was explicitly provided by user config,
+	// rather than inferred from static upstream metadata.
+	ThinkingExplicit bool `json:"-"`
 
 	// UserDefined indicates this model was defined through config file's models[]
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
-	// UserDefined models have thinking configuration passed through without validation.
+	// UserDefined models with no Thinking metadata pass thinking configuration
+	// through without validation. When ThinkingExplicit is set, source-format
+	// thinking configuration is validated against the configured capabilities.
 	UserDefined bool `json:"-"`
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -200,7 +201,7 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+			prepared, err := exec.prepareResponsesRequest(context.Background(), auth, cliproxyexecutor.Request{
 				Model:   tt.model,
 				Payload: tt.payload,
 			}, cliproxyexecutor.Options{
@@ -453,10 +454,22 @@ func TestXAISupportsReasoningEffortUsesModelRegistry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := xaiSupportsReasoningEffort(tt.model); got != tt.want {
+			if got := xaiSupportsReasoningEffort(tt.model, nil); got != tt.want {
 				t.Fatalf("xaiSupportsReasoningEffort(%q) = %v, want %v", tt.model, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestXAISupportsReasoningEffortUsesResolvedModelInfo(t *testing.T) {
+	info := &registry.ModelInfo{
+		ID: "free-provider/custom-xai-model",
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"xhigh", "high"},
+		},
+	}
+	if !xaiSupportsReasoningEffort("custom-xai-model", info) {
+		t.Fatal("expected resolved ModelInfo thinking levels to enable xAI reasoning effort")
 	}
 }
 
@@ -1124,11 +1137,11 @@ func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "grok-composer-2.5-fast", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true}
 
-	first, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	first, err := exec.prepareResponsesRequest(context.Background(), auth, req, opts, true)
 	if err != nil {
 		t.Fatalf("prepareResponsesRequest first error: %v", err)
 	}
-	second, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	second, err := exec.prepareResponsesRequest(context.Background(), auth, req, opts, true)
 	if err != nil {
 		t.Fatalf("prepareResponsesRequest second error: %v", err)
 	}

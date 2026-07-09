@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -37,6 +39,38 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 		t.Fatalf("parameters missing or invalid type")
 	}
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
+}
+
+func TestTranslateAntigravityRequestUsesPrefixedCapabilityModelForWebSearch(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-antigravity-executor-prefixed-websearch"
+	modelInfo := &registry.ModelInfo{
+		ID:                "free-provider/gemini-3.1-flash-lite",
+		SupportsWebSearch: true,
+	}
+	reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{modelInfo})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+	inputJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [{"role": "user", "content": "Search current weather"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+
+	output := translateAntigravityRequest(
+		sdktranslator.FormatClaude,
+		sdktranslator.FormatAntigravity,
+		"gemini-3.1-flash-lite",
+		"free-provider/gemini-3.1-flash-lite",
+		modelInfo,
+		inputJSON,
+		true,
+	)
+	if got := gjson.GetBytes(output, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "model").String(); got != "gemini-3.1-flash-lite" {
+		t.Fatalf("request model = %q, want unprefixed upstream model: %s", got, output)
+	}
 }
 
 func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithoutToolsField(t *testing.T) {
@@ -237,7 +271,7 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{}}
 
-	_, err := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", []byte(`{"request":{}}`), false, "", "https://example.com")
+	_, err := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", []byte(`{"request":{}}`), false, "", "https://example.com", nil)
 	if err == nil {
 		t.Fatalf("buildRequest should fail when auth has no project_id")
 	}
@@ -337,7 +371,7 @@ func buildRequestBodyFromRawPayload(t *testing.T, modelName string, payload []by
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
 
-	req, err := executor.buildRequest(context.Background(), auth, "token", modelName, payload, false, "", "https://example.com")
+	req, err := executor.buildRequest(context.Background(), auth, "token", modelName, payload, false, "", "https://example.com", nil)
 	if err != nil {
 		t.Fatalf("buildRequest error: %v", err)
 	}

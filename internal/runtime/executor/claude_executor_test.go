@@ -1940,7 +1940,7 @@ func TestEnsureModelMaxTokens_UsesRegisteredMaxCompletionTokens(t *testing.T) {
 	defer reg.UnregisterClient(clientID)
 
 	input := []byte(`{"model":"test-claude-max-completion-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
-	out := ensureModelMaxTokens(input, modelID)
+	out := ensureModelMaxTokens(input, modelID, nil)
 
 	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 4096 {
 		t.Fatalf("max_tokens = %d, want %d", got, 4096)
@@ -1962,7 +1962,7 @@ func TestEnsureModelMaxTokens_DefaultsMissingValue(t *testing.T) {
 	defer reg.UnregisterClient(clientID)
 
 	input := []byte(`{"model":"test-claude-default-max-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
-	out := ensureModelMaxTokens(input, modelID)
+	out := ensureModelMaxTokens(input, modelID, nil)
 
 	if got := gjson.GetBytes(out, "max_tokens").Int(); got != defaultModelMaxTokens {
 		t.Fatalf("max_tokens = %d, want %d", got, defaultModelMaxTokens)
@@ -1985,7 +1985,7 @@ func TestEnsureModelMaxTokens_PreservesExplicitValue(t *testing.T) {
 	defer reg.UnregisterClient(clientID)
 
 	input := []byte(`{"model":"test-claude-preserve-max-tokens-model","max_tokens":2048,"messages":[{"role":"user","content":"hi"}]}`)
-	out := ensureModelMaxTokens(input, modelID)
+	out := ensureModelMaxTokens(input, modelID, nil)
 
 	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 2048 {
 		t.Fatalf("max_tokens = %d, want %d", got, 2048)
@@ -1994,7 +1994,7 @@ func TestEnsureModelMaxTokens_PreservesExplicitValue(t *testing.T) {
 
 func TestEnsureModelMaxTokens_SkipsUnregisteredModel(t *testing.T) {
 	input := []byte(`{"model":"test-claude-unregistered-model","messages":[{"role":"user","content":"hi"}]}`)
-	out := ensureModelMaxTokens(input, "test-claude-unregistered-model")
+	out := ensureModelMaxTokens(input, "test-claude-unregistered-model", nil)
 
 	if gjson.GetBytes(out, "max_tokens").Exists() {
 		t.Fatalf("max_tokens should remain unset, got %s", gjson.GetBytes(out, "max_tokens").Raw)
@@ -2950,6 +2950,459 @@ func TestEnsureClaudeThinkingDisplay_SetsSummarizedWhenMissing(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
 		t.Fatalf("thinking.type = %q, want adaptive", got)
+	}
+}
+
+func TestClaudeThinkingUsesOriginalOpenAIReasoningEffortWithPrefixedModelInfo(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-prefixed-claude-thinking-client"
+	upstreamModel := "claude-sonnet-4-6"
+	prefixedModel := "sp-anthropic/" + upstreamModel
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:               prefixedModel,
+		Type:             "claude",
+		OwnedBy:          "anthropic",
+		Object:           "model",
+		Created:          time.Now().Unix(),
+		UserDefined:      true,
+		ThinkingExplicit: true,
+		Thinking: &registry.ThinkingSupport{
+			ZeroAllowed:    true,
+			DynamicAllowed: true,
+			Levels:         []string{"minimal", "low", "medium", "high", "xhigh", "none", "auto"},
+		},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	source := []byte(`{"model":"sp-anthropic/claude-sonnet-4-6","reasoning_effort":"xhigh","messages":[{"role":"user","content":"hi"}]}`)
+	translated := sdktranslator.TranslateRequest(
+		sdktranslator.FromString("openai"),
+		sdktranslator.FromString("claude"),
+		upstreamModel,
+		source,
+		false,
+	)
+	translated, _ = sjson.SetBytes(translated, "thinking.type", "adaptive")
+	translated, _ = sjson.SetBytes(translated, "output_config.effort", "max")
+
+	auth := &cliproxyauth.Auth{
+		ID:       clientID,
+		Provider: "claude",
+		Prefix:   "sp-anthropic",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: prefixedModel,
+		},
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		auth,
+		"claude",
+		upstreamModel,
+		opts,
+		"openai",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "xhigh" {
+		t.Fatalf("output_config.effort = %q, want xhigh; body=%s", got, out)
+	}
+}
+
+func TestClaudeThinkingUsesOriginalOpenAIResponsesReasoningWithPrefixedModelInfo(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-prefixed-claude-responses-thinking-client"
+	upstreamModel := "claude-sonnet-4-6"
+	prefixedModel := "sp-responses/" + upstreamModel
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:               prefixedModel,
+		Type:             "claude",
+		OwnedBy:          "anthropic",
+		Object:           "model",
+		Created:          time.Now().Unix(),
+		UserDefined:      true,
+		ThinkingExplicit: true,
+		Thinking: &registry.ThinkingSupport{
+			ZeroAllowed:    true,
+			DynamicAllowed: true,
+			Levels:         []string{"minimal", "low", "medium", "high", "xhigh", "none", "auto"},
+		},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	source := []byte(`{"model":"sp-responses/claude-sonnet-4-6","reasoning":{"effort":"xhigh"},"input":"hi"}`)
+	translated := sdktranslator.TranslateRequest(
+		sdktranslator.FromString("openai-response"),
+		sdktranslator.FromString("claude"),
+		upstreamModel,
+		source,
+		false,
+	)
+	translated, _ = sjson.SetBytes(translated, "thinking.type", "adaptive")
+	translated, _ = sjson.SetBytes(translated, "output_config.effort", "max")
+
+	auth := &cliproxyauth.Auth{
+		ID:       clientID,
+		Provider: "claude",
+		Prefix:   "sp-responses",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: prefixedModel,
+		},
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		auth,
+		"claude",
+		upstreamModel,
+		opts,
+		"openai-response",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "xhigh" {
+		t.Fatalf("output_config.effort = %q, want xhigh; body=%s", got, out)
+	}
+}
+
+func TestClaudeThinkingMapsUnsupportedOpenAIHighIntentWithPrefixedModelInfo(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-prefixed-claude-thinking-reject-client"
+	upstreamModel := "claude-opus-4-6"
+	prefixedModel := "sp-anthropic/" + upstreamModel
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:               prefixedModel,
+		Type:             "claude",
+		OwnedBy:          "anthropic",
+		Object:           "model",
+		Created:          time.Now().Unix(),
+		UserDefined:      true,
+		ThinkingExplicit: true,
+		Thinking: &registry.ThinkingSupport{
+			ZeroAllowed: true,
+			Levels:      []string{"high", "medium", "low", "minimal", "none", "auto"},
+		},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	source := []byte(`{"model":"sp-anthropic/claude-opus-4-6","reasoning_effort":"xhigh","messages":[{"role":"user","content":"hi"}]}`)
+	translated := sdktranslator.TranslateRequest(
+		sdktranslator.FromString("openai"),
+		sdktranslator.FromString("claude"),
+		upstreamModel,
+		source,
+		false,
+	)
+	translated, _ = sjson.SetBytes(translated, "thinking.type", "adaptive")
+	translated, _ = sjson.SetBytes(translated, "output_config.effort", "max")
+
+	auth := &cliproxyauth.Auth{
+		ID:       clientID,
+		Provider: "claude",
+		Prefix:   "sp-anthropic",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: prefixedModel,
+		},
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		auth,
+		"claude",
+		upstreamModel,
+		opts,
+		"openai",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high; body=%s", got, out)
+	}
+}
+
+func TestClaudeThinkingClampsExplicitAutoDefaultToSupportedLevel(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-prefixed-claude-thinking-auto-explicit-client"
+	upstreamModel := "claude-sonnet-4-6"
+	prefixedModel := "sp-anthropic/" + upstreamModel
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:               prefixedModel,
+		Type:             "claude",
+		OwnedBy:          "anthropic",
+		Object:           "model",
+		Created:          time.Now().Unix(),
+		UserDefined:      true,
+		ThinkingExplicit: true,
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"low", "high"},
+		},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	source := []byte(`{"model":"sp-anthropic/claude-sonnet-4-6","reasoning_effort":"auto","messages":[{"role":"user","content":"hi"}]}`)
+	translated := []byte(`{"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`)
+
+	auth := &cliproxyauth.Auth{
+		ID:       clientID,
+		Provider: "claude",
+		Prefix:   "sp-anthropic",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: prefixedModel,
+		},
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		auth,
+		"claude",
+		upstreamModel,
+		opts,
+		"openai",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "low" {
+		t.Fatalf("output_config.effort = %q, want low; body=%s", got, out)
+	}
+}
+
+func TestClaudeThinkingKeepsExplicitAutoAdaptiveDefault(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-prefixed-claude-thinking-auto-supported-client"
+	upstreamModel := "claude-sonnet-4-6"
+	prefixedModel := "sp-anthropic/" + upstreamModel
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:               prefixedModel,
+		Type:             "claude",
+		OwnedBy:          "anthropic",
+		Object:           "model",
+		Created:          time.Now().Unix(),
+		UserDefined:      true,
+		ThinkingExplicit: true,
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"low", "high", "auto"},
+		},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	source := []byte(`{"model":"sp-anthropic/claude-sonnet-4-6","reasoning_effort":"auto","messages":[{"role":"user","content":"hi"}]}`)
+	translated := []byte(`{"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`)
+
+	auth := &cliproxyauth.Auth{
+		ID:       clientID,
+		Provider: "claude",
+		Prefix:   "sp-anthropic",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: prefixedModel,
+		},
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		auth,
+		"claude",
+		upstreamModel,
+		opts,
+		"openai",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
+		t.Fatalf("thinking.budget_tokens should remain omitted; body=%s", out)
+	}
+	if gjson.GetBytes(out, "output_config.effort").Exists() {
+		t.Fatalf("output_config.effort should remain omitted; body=%s", out)
+	}
+}
+
+func TestClaudeThinkingPreservesTranslatedEffortForInferredAliasThinking(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-prefixed-claude-inferred-thinking-client"
+	upstreamModel := "claude-sonnet-4-6"
+	prefixedModel := "sp-inferred/" + upstreamModel
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:          prefixedModel,
+		Type:        "claude",
+		OwnedBy:     "anthropic",
+		Object:      "model",
+		Created:     time.Now().Unix(),
+		UserDefined: true,
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "max"},
+		},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	source := []byte(`{"model":"sp-inferred/claude-sonnet-4-6","reasoning_effort":"minimal","messages":[{"role":"user","content":"hi"}]}`)
+	translated := sdktranslator.TranslateRequest(
+		sdktranslator.FromString("openai"),
+		sdktranslator.FromString("claude"),
+		upstreamModel,
+		source,
+		false,
+	)
+	translated, _ = sjson.SetBytes(translated, "thinking.type", "adaptive")
+	translated, _ = sjson.SetBytes(translated, "output_config.effort", "low")
+
+	auth := &cliproxyauth.Auth{
+		ID:       clientID,
+		Provider: "claude",
+		Prefix:   "sp-inferred",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: prefixedModel,
+		},
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		auth,
+		"claude",
+		upstreamModel,
+		opts,
+		"openai",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "low" {
+		t.Fatalf("output_config.effort = %q, want translated low; body=%s", got, out)
+	}
+}
+
+func TestClaudeThinkingPreservesProviderBudgetForUserDefinedModelWithoutThinkingMetadata(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-prefixed-claude-user-defined-no-thinking-client"
+	upstreamModel := "claude-custom-model"
+	prefixedModel := "sp-unknown/" + upstreamModel
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:          prefixedModel,
+		Type:        "claude",
+		OwnedBy:     "anthropic",
+		Object:      "model",
+		Created:     time.Now().Unix(),
+		UserDefined: true,
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	source := []byte(`{"model":"sp-unknown/claude-custom-model","reasoning_effort":"xhigh","messages":[{"role":"user","content":"hi"}]}`)
+	translated := []byte(`{"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":32768}}`)
+
+	auth := &cliproxyauth.Auth{
+		ID:       clientID,
+		Provider: "claude",
+		Prefix:   "sp-unknown",
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: prefixedModel,
+		},
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		auth,
+		"claude",
+		upstreamModel,
+		opts,
+		"openai",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want enabled; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "thinking.budget_tokens").Int(); got != 32768 {
+		t.Fatalf("thinking.budget_tokens = %d, want 32768; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "output_config.effort").Exists() {
+		t.Fatalf("output_config.effort should remain omitted; body=%s", out)
+	}
+}
+
+func TestClaudeThinkingPreservesTranslatedAutoAdaptiveDefault(t *testing.T) {
+	source := []byte(`{"model":"claude-sonnet-4-6","reasoning_effort":"auto","messages":[{"role":"user","content":"hi"}]}`)
+	translated := sdktranslator.TranslateRequest(
+		sdktranslator.FromString("openai"),
+		sdktranslator.FromString("claude"),
+		"claude-sonnet-4-6",
+		source,
+		false,
+	)
+	translated, _ = sjson.SetBytes(translated, "thinking.type", "adaptive")
+	translated, _ = sjson.DeleteBytes(translated, "thinking.budget_tokens")
+	translated, _ = sjson.DeleteBytes(translated, "output_config.effort")
+
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	}
+	out, err := helps.ApplyRequestThinkingWithSource(
+		translated,
+		source,
+		nil,
+		"claude",
+		"claude-sonnet-4-6",
+		opts,
+		"openai",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinkingWithSource() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "output_config.effort").Exists() {
+		t.Fatalf("output_config.effort should remain omitted; body=%s", out)
+	}
+	if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
+		t.Fatalf("thinking.budget_tokens should remain omitted; body=%s", out)
 	}
 }
 

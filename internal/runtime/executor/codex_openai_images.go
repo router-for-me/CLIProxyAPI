@@ -100,7 +100,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	reporter := helps.NewExecutorUsageReporter(ctx, e, mainModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts, mainModel)
+	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, auth, req, opts, mainModel)
 	if errBuild != nil {
 		return resp, errBuild
 	}
@@ -196,7 +196,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	reporter := helps.NewExecutorUsageReporter(ctx, e, mainModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, req, opts, mainModel)
+	body, errBuild := e.prepareCodexOpenAIImageBody(prepared.Body, auth, req, opts, mainModel)
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -641,14 +641,15 @@ func codexIsDirectOpenAIImageModel(model string) bool {
 	}
 }
 
-func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, mainModel string) ([]byte, error) {
+func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, mainModel string) ([]byte, error) {
 	out := body
 	mainModel = strings.TrimSpace(mainModel)
 	if mainModel == "" {
 		mainModel = codexOpenAIImagesMainModel
 	}
 	var errThinking error
-	out, errThinking = thinking.ApplyThinking(out, mainModel, codexOpenAIImageSourceFormat, "codex", e.Identifier())
+	mainModelOpts := withoutModelInfoLookupModelMetadata(opts)
+	out, errThinking = helps.ApplyRequestThinking(out, auth, e.Identifier(), mainModel, mainModelOpts, codexOpenAIImageSourceFormat, "codex")
 	if errThinking != nil {
 		return nil, errThinking
 	}
@@ -663,6 +664,24 @@ func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexe
 	out, _ = sjson.DeleteBytes(out, "safety_identifier")
 	out, _ = sjson.DeleteBytes(out, "stream_options")
 	return normalizeCodexInstructions(out), nil
+}
+
+func withoutModelInfoLookupModelMetadata(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	if len(opts.Metadata) == 0 {
+		return opts
+	}
+	if _, ok := opts.Metadata[cliproxyexecutor.ModelInfoLookupModelMetadataKey]; !ok {
+		return opts
+	}
+	meta := make(map[string]any, len(opts.Metadata)-1)
+	for key, value := range opts.Metadata {
+		if key == cliproxyexecutor.ModelInfoLookupModelMetadataKey {
+			continue
+		}
+		meta[key] = value
+	}
+	opts.Metadata = meta
+	return opts
 }
 
 func recordCodexOpenAIImageRequest(ctx context.Context, cfg *config.Config, provider string, auth *cliproxyauth.Auth, url string, headers http.Header, body []byte) {

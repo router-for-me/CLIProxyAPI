@@ -2474,6 +2474,10 @@ type modelEntry interface {
 	GetAlias() string
 }
 
+type modelThinkingEntry interface {
+	GetThinking() *registry.ThinkingSupport
+}
+
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
 	if compat == nil || len(compat.Models) == 0 {
 		return nil
@@ -2497,6 +2501,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if thinking == nil && !model.Image {
 			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
+		thinkingExplicit := model.Thinking != nil
 		inputModalities := normalizeCompatConfigModalities(model.InputModalities)
 		outputModalities := normalizeCompatConfigModalities(model.OutputModalities)
 		models = append(models, &ModelInfo{
@@ -2508,6 +2513,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			DisplayName:               modelID,
 			UserDefined:               false,
 			Thinking:                  thinking,
+			ThinkingExplicit:          thinkingExplicit,
 			SupportedInputModalities:  inputModalities,
 			SupportedOutputModalities: outputModalities,
 		})
@@ -2573,7 +2579,13 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			DisplayName: display,
 			UserDefined: true,
 		}
-		if name != "" {
+		if thinkingEntry, ok := any(model).(modelThinkingEntry); ok {
+			if thinking := thinkingEntry.GetThinking(); thinking != nil {
+				info.Thinking = thinking
+				info.ThinkingExplicit = true
+			}
+		}
+		if info.Thinking == nil && name != "" {
 			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
 				info.Thinking = upstream.Thinking
 			}

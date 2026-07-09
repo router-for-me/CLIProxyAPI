@@ -108,20 +108,30 @@ func normalizedProviderName(provider string) string {
 	return strings.ToLower(strings.TrimSpace(provider))
 }
 
-// IsUserDefinedModel reports whether the model is a user-defined model that should
-// have thinking configuration passed through without validation.
+// IsUserDefinedModel reports whether the model is a user-defined model.
 //
 // User-defined models are configured via config file's models[] array
 // (e.g., openai-compatibility.*.models[], *-api-key.models[]). These models
 // are marked with UserDefined=true at registration time.
 //
-// User-defined models should have their thinking configuration applied directly,
-// letting the upstream service validate the configuration.
+// User-defined models with no Thinking metadata have their thinking configuration
+// applied directly, letting the upstream service validate it. When explicit
+// Thinking support is configured, source-format thinking is validated against it.
+// Inferred static Thinking keeps provider-translated thinking parameters.
 func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 	if modelInfo == nil {
 		return true
 	}
 	return modelInfo.UserDefined
+}
+
+// HasExplicitThinkingSupport reports whether thinking metadata was explicitly
+// configured by the user instead of inferred from static upstream metadata.
+func HasExplicitThinkingSupport(modelInfo *registry.ModelInfo) bool {
+	if modelInfo == nil {
+		return false
+	}
+	return modelInfo.ThinkingExplicit
 }
 
 // ApplyThinking applies thinking configuration to a request body.
@@ -162,6 +172,28 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //	// Without suffix - uses body config
 //	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
 func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
+	return ApplyThinkingWithModelInfo(body, model, fromFormat, toFormat, providerKey, nil)
+}
+
+// ApplyThinkingWithModelInfo applies thinking configuration using a pre-resolved
+// model registry entry when provided.
+func ApplyThinkingWithModelInfo(body []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo) ([]byte, error) {
+	return ApplyThinkingWithSourceAndModelInfo(body, nil, model, fromFormat, toFormat, providerKey, modelInfo)
+}
+
+// ApplyThinkingWithSourceAndModelInfo applies thinking configuration to body
+// while preferring thinking parameters from sourceBody when the request was
+// translated before provider-specific thinking validation.
+func ApplyThinkingWithSourceAndModelInfo(body []byte, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo) ([]byte, error) {
+	return ApplyThinkingWithResolvedModelInfo(body, sourceBody, model, fromFormat, toFormat, providerKey, modelInfo, modelInfo != nil)
+}
+
+// ApplyThinkingWithResolvedModelInfo applies thinking configuration using an
+// optional pre-resolved model registry entry. When modelInfoResolved is true,
+// nil modelInfo means the caller already performed a guarded lookup and found
+// no matching model, so this function must not fall back to a global registry
+// lookup.
+func ApplyThinkingWithResolvedModelInfo(body []byte, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo, modelInfoResolved bool) ([]byte, error) {
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	if providerKey == "" {
@@ -185,16 +217,19 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	suffixResult := ParseSuffix(model)
 	baseModel := suffixResult.ModelName
 	// Use provider-specific lookup to handle capability differences across providers.
-	modelInfo := registry.LookupModelInfo(baseModel, providerKey)
+	if modelInfo == nil && !modelInfoResolved {
+		modelInfo = registry.LookupModelInfo(baseModel, providerKey)
+	}
 
 	// 3. Model capability check
-	// Unknown models are treated as user-defined so thinking config can still be applied.
-	// The upstream service is responsible for validating the configuration.
-	if IsUserDefinedModel(modelInfo) {
-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
+	// Unknown models and user-defined models without explicit Thinking metadata
+	// are passed through so the upstream service can validate them. User-defined
+	// models with explicit Thinking metadata use that metadata for validation.
+	if IsUserDefinedModel(modelInfo) && (modelInfo == nil || modelInfo.Thinking == nil) {
+		return applyUserDefinedModel(body, sourceBody, modelInfo, fromFormat, providerFormat, suffixResult)
 	}
 	if modelInfo.Thinking == nil {
-		config := extractThinkingConfig(body, providerFormat)
+		config := extractTranslatedThinkingConfig(body, sourceBody, fromFormat, providerFormat, false)
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"model":    baseModel,
@@ -221,7 +256,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"level":    config.Level,
 		}).Debug("thinking: config from model suffix |")
 	} else {
-		config = extractThinkingConfig(body, providerFormat)
+		config = extractTranslatedThinkingConfig(body, sourceBody, fromFormat, providerFormat, HasExplicitThinkingSupport(modelInfo))
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
@@ -317,9 +352,9 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 	return ThinkingConfig{}
 }
 
-// applyUserDefinedModel applies thinking configuration for user-defined models
-// without ThinkingSupport validation.
-func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult) ([]byte, error) {
+// applyUserDefinedModel applies thinking configuration for unknown or
+// user-defined models without explicit ThinkingSupport validation.
+func applyUserDefinedModel(body []byte, sourceBody []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult) ([]byte, error) {
 	// Get model ID for logging
 	modelID := ""
 	if modelInfo != nil {
@@ -340,10 +375,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 			"level":    config.Level,
 		}).Debug("thinking: config from model suffix |")
 	} else {
-		config = extractThinkingConfig(body, fromFormat)
-		if !hasThinkingConfig(config) && fromFormat != toFormat {
-			config = extractThinkingConfig(body, toFormat)
-		}
+		config = extractTranslatedUserDefinedThinkingConfig(body, sourceBody, fromFormat, toFormat)
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"provider": toFormat,
@@ -383,6 +415,58 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	return applier.Apply(body, config, modelInfo)
 }
 
+func extractTranslatedThinkingConfig(body []byte, sourceBody []byte, fromFormat, providerFormat string, preferSource bool) ThinkingConfig {
+	providerConfig := extractThinkingConfig(body, providerFormat)
+	if len(sourceBody) > 0 {
+		sourceConfig := extractThinkingConfig(sourceBody, fromFormat)
+		if hasThinkingConfig(sourceConfig) {
+			if !preferSource && isAutoConfig(sourceConfig) && hasProviderAdaptiveDefault(body, providerFormat) {
+				return ThinkingConfig{}
+			}
+			if preferSource || !hasThinkingConfig(providerConfig) {
+				return sourceConfig
+			}
+		}
+	}
+	return providerConfig
+}
+
+func extractTranslatedUserDefinedThinkingConfig(body []byte, sourceBody []byte, fromFormat, toFormat string) ThinkingConfig {
+	providerConfig := extractThinkingConfig(body, toFormat)
+	if len(sourceBody) > 0 {
+		sourceConfig := extractThinkingConfig(sourceBody, fromFormat)
+		if hasThinkingConfig(sourceConfig) {
+			if isAutoConfig(sourceConfig) && hasProviderAdaptiveDefault(body, toFormat) {
+				return ThinkingConfig{}
+			}
+			if !hasThinkingConfig(providerConfig) {
+				return sourceConfig
+			}
+		}
+	}
+	if hasThinkingConfig(providerConfig) {
+		return providerConfig
+	}
+	config := extractThinkingConfig(body, fromFormat)
+	return config
+}
+
+func hasProviderAdaptiveDefault(body []byte, providerFormat string) bool {
+	if providerFormat != "claude" {
+		return false
+	}
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	if thinkingType != "adaptive" && thinkingType != "auto" {
+		return false
+	}
+	effort := gjson.GetBytes(body, "output_config.effort")
+	return !effort.Exists() || strings.TrimSpace(effort.String()) == ""
+}
+
+func isAutoConfig(config ThinkingConfig) bool {
+	return config.Mode == ModeAuto || (config.Mode == ModeLevel && config.Level == LevelAuto)
+}
+
 func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat string) ThinkingConfig {
 	if config.Mode != ModeLevel {
 		return config
@@ -418,6 +502,8 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractInteractionsConfig(body)
 	case "openai":
 		return extractOpenAIConfig(body)
+	case "openai-response":
+		return extractCodexConfig(body)
 	case "codex", "xai":
 		return extractCodexConfig(body)
 	case "kimi":

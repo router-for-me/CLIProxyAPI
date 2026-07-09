@@ -331,7 +331,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 		body = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-		body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+		body, err = helps.ApplyRequestThinkingWithSource(body, originalPayloadSource, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 		if err != nil {
 			return resp, err
 		}
@@ -456,7 +456,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinkingWithSource(body, originalPayloadSource, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return resp, err
 	}
@@ -571,7 +571,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinkingWithSource(body, originalPayloadSource, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +716,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinkingWithSource(body, originalPayloadSource, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return nil, err
 	}
@@ -849,10 +849,14 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
+	sourcePayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		sourcePayload = opts.OriginalRequest
+	}
 
 	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
+	translatedReq, err := helps.ApplyRequestThinkingWithSource(translatedReq, sourcePayload, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -940,10 +944,14 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
+	sourcePayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		sourcePayload = opts.OriginalRequest
+	}
 
 	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
+	translatedReq, err := helps.ApplyRequestThinkingWithSource(translatedReq, sourcePayload, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

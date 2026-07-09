@@ -148,7 +148,8 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	body, err = thinking.ApplyThinkingWithResolvedModelInfo(body, originalPayloadSource, modelInfo.Model, from.String(), to.String(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return resp, err
 	}
@@ -158,7 +159,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = capGeminiMaxOutputTokens(body, baseModel)
+	body = capGeminiMaxOutputTokens(body, baseModel, modelInfo.Info)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -261,7 +262,8 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	body, err = thinking.ApplyThinkingWithResolvedModelInfo(body, originalPayloadSource, modelInfo.Model, from.String(), to.String(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +273,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = capGeminiMaxOutputTokens(body, baseModel)
+	body = capGeminiMaxOutputTokens(body, baseModel, modelInfo.Info)
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")
@@ -390,7 +392,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body, _ = sjson.SetBytes(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req.Model)
+	body, err = applyGeminiInteractionsThinking(body, auth, req.Model, opts)
 	if err != nil {
 		return resp, err
 	}
@@ -466,7 +468,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body, _ = sjson.SetBytes(body, "model", targetName)
 	}
-	body, err = applyGeminiInteractionsThinking(body, req.Model)
+	body, err = applyGeminiInteractionsThinking(body, auth, req.Model, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -613,9 +615,14 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
+	sourcePayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		sourcePayload = opts.OriginalRequest
+	}
 	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	translatedReq, err := thinking.ApplyThinkingWithResolvedModelInfo(translatedReq, sourcePayload, modelInfo.Model, from.String(), to.String(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -795,8 +802,12 @@ func isNativeInteractionsAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "gemini-interactions")
 }
 
-func applyGeminiInteractionsThinking(body []byte, model string) ([]byte, error) {
-	return thinking.ApplyThinking(body, model, sdktranslator.FormatInteractions.String(), sdktranslator.FormatInteractions.String(), "gemini")
+func applyGeminiInteractionsThinking(body []byte, auth *cliproxyauth.Auth, model string, opts cliproxyexecutor.Options) ([]byte, error) {
+	providerKey := "gemini"
+	if auth != nil && strings.TrimSpace(auth.Provider) != "" {
+		providerKey = strings.TrimSpace(auth.Provider)
+	}
+	return helps.ApplyRequestThinking(body, auth, providerKey, model, opts, sdktranslator.FormatInteractions.String(), sdktranslator.FormatInteractions.String())
 }
 
 func applyGeminiInteractionsRevisionHeader(req *http.Request) {
@@ -886,24 +897,36 @@ func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 }
 
-func capGeminiMaxOutputTokens(body []byte, modelName string) []byte {
+func capGeminiMaxOutputTokens(body []byte, modelName string, modelInfo *registry.ModelInfo) []byte {
 	maxOut := gjson.GetBytes(body, "generationConfig.maxOutputTokens")
 	if !maxOut.Exists() || maxOut.Type != gjson.Number {
 		return body
 	}
-	modelInfo := registry.LookupModelInfo(modelName, "gemini")
 	if modelInfo == nil {
+		modelInfo = registry.LookupModelInfo(modelName, "gemini")
+	}
+	limit := geminiOutputTokenLimit(modelInfo)
+	if limit <= 0 {
+		limit = geminiOutputTokenLimit(registry.LookupModelInfo(modelName, "gemini"))
+	}
+	if limit <= 0 {
 		return body
 	}
-	limit := modelInfo.OutputTokenLimit
-	if limit <= 0 {
-		limit = modelInfo.MaxCompletionTokens
-	}
-	if limit <= 0 || maxOut.Int() <= int64(limit) {
+	if maxOut.Int() <= int64(limit) {
 		return body
 	}
 	body, _ = sjson.SetBytes(body, "generationConfig.maxOutputTokens", limit)
 	return body
+}
+
+func geminiOutputTokenLimit(modelInfo *registry.ModelInfo) int {
+	if modelInfo == nil {
+		return 0
+	}
+	if modelInfo.OutputTokenLimit > 0 {
+		return modelInfo.OutputTokenLimit
+	}
+	return modelInfo.MaxCompletionTokens
 }
 
 func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {

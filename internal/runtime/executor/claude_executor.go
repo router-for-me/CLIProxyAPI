@@ -222,7 +222,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinkingWithSource(body, originalPayloadSource, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return resp, err
 	}
@@ -240,7 +240,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body = ensureModelMaxTokens(body, baseModel)
+	body = ensureModelMaxTokens(body, baseModel, helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts).Info)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -415,7 +415,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinkingWithSource(body, originalPayloadSource, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +433,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body = ensureModelMaxTokens(body, baseModel)
+	body = ensureModelMaxTokens(body, baseModel, helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts).Info)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -2631,7 +2631,7 @@ func injectSystemCacheControl(payload []byte) []byte {
 	return payload
 }
 
-func ensureModelMaxTokens(body []byte, modelID string) []byte {
+func ensureModelMaxTokens(body []byte, modelID string, modelInfo *registry.ModelInfo) []byte {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
@@ -2640,11 +2640,27 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 		return body
 	}
 
+	maxTokens := 0
+	if modelInfo != nil {
+		maxTokens = modelInfo.MaxCompletionTokens
+	}
+	if maxTokens <= 0 {
+		if info := registry.LookupModelInfo(strings.TrimSpace(modelID), "claude"); info != nil {
+			maxTokens = info.MaxCompletionTokens
+		}
+	}
+	if modelInfo != nil {
+		if maxTokens <= 0 {
+			maxTokens = defaultModelMaxTokens
+		}
+		body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
+		return body
+	}
+
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(strings.TrimSpace(modelID)) {
 		if strings.EqualFold(provider, "claude") {
-			maxTokens := defaultModelMaxTokens
-			if info := registry.GetGlobalRegistry().GetModelInfo(strings.TrimSpace(modelID), "claude"); info != nil && info.MaxCompletionTokens > 0 {
-				maxTokens = info.MaxCompletionTokens
+			if maxTokens <= 0 {
+				maxTokens = defaultModelMaxTokens
 			}
 			body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
 			return body

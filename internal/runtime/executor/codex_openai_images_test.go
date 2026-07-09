@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -35,6 +36,36 @@ func codexOpenAIImageTestOptions(path string, stream bool) cliproxyexecutor.Opti
 		Metadata: map[string]any{
 			cliproxyexecutor.RequestPathMetadataKey: path,
 		},
+	}
+}
+
+func TestPrepareCodexOpenAIImageBodyDoesNotUseRouteImageModelInfoForMainModelThinking(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-codex-openai-image-route-model-info"
+	reg.RegisterClient(clientID, "codex", []*registry.ModelInfo{{
+		ID: "pref/gpt-image-1.5",
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex", Prefix: "pref"}
+	opts := codexOpenAIImageTestOptions(codexImagesGenerationsPath, false)
+	opts.Metadata[cliproxyexecutor.ModelInfoLookupModelMetadataKey] = "pref/gpt-image-1.5"
+	body := codexBuildImagesResponsesRequest("draw", nil, []byte(`{"type":"image_generation","action":"generate"}`))
+
+	out, err := executor.prepareCodexOpenAIImageBody(body, auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-1.5",
+		Payload: []byte(`{"model":"gpt-image-1.5","prompt":"draw"}`),
+	}, opts, codexOpenAIImagesMainModel)
+	if err != nil {
+		t.Fatalf("prepareCodexOpenAIImageBody() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "model").String(); got != codexOpenAIImagesMainModel {
+		t.Fatalf("model = %q, want %q; body=%s", got, codexOpenAIImagesMainModel, out)
+	}
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "medium" {
+		t.Fatalf("reasoning.effort = %q, want medium; body=%s", got, out)
 	}
 }
 

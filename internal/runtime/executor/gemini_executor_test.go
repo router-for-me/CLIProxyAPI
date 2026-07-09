@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -19,7 +21,7 @@ import (
 func TestCapGeminiMaxOutputTokensUsesOutputTokenLimit(t *testing.T) {
 	body := []byte(`{"generationConfig":{"maxOutputTokens":500000,"temperature":0.2},"contents":[]}`)
 
-	out := capGeminiMaxOutputTokens(body, "gemini-3.1-pro-preview")
+	out := capGeminiMaxOutputTokens(body, "gemini-3.1-pro-preview", nil)
 
 	if got := gjson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != 65536 {
 		t.Fatalf("maxOutputTokens = %d, want 65536", got)
@@ -52,11 +54,56 @@ func TestCapGeminiMaxOutputTokensLeavesAllowedOrUnknown(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := capGeminiMaxOutputTokens(tt.body, tt.model)
+			out := capGeminiMaxOutputTokens(tt.body, tt.model, nil)
 			if got := gjson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != tt.want {
 				t.Fatalf("maxOutputTokens = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCapGeminiMaxOutputTokensFallsBackToStaticLimitWhenResolvedInfoHasNoLimit(t *testing.T) {
+	body := []byte(`{"generationConfig":{"maxOutputTokens":500000},"contents":[]}`)
+	modelInfo := &registry.ModelInfo{
+		ID: "free-provider/gemini-3.1-pro-preview",
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"xhigh", "high"},
+		},
+	}
+
+	out := capGeminiMaxOutputTokens(body, "gemini-3.1-pro-preview", modelInfo)
+
+	if got := gjson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != 65536 {
+		t.Fatalf("maxOutputTokens = %d, want static fallback 65536", got)
+	}
+}
+
+func TestApplyGeminiInteractionsThinkingUsesAuthProviderForPrefixedModelInfo(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-gemini-interactions-prefixed-thinking"
+	reg.RegisterClient(clientID, "gemini-interactions", []*registry.ModelInfo{{
+		ID: "free-provider/gemini-interactions-model",
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"xhigh", "high"},
+		},
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	body := []byte(`{"model":"gemini-interactions-model","reasoning_effort":"xhigh","messages":[{"role":"user","content":"hi"}]}`)
+	out, err := applyGeminiInteractionsThinking(body, &cliproxyauth.Auth{
+		Provider: "gemini-interactions",
+		Prefix:   "free-provider",
+	}, "gemini-interactions-model", cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ModelInfoLookupModelMetadataKey: "free-provider/gemini-interactions-model",
+		},
+	})
+	if err != nil {
+		t.Fatalf("applyGeminiInteractionsThinking() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != string(thinking.LevelXHigh) {
+		t.Fatalf("reasoning_effort = %q, want xhigh; body=%s", got, out)
 	}
 }
 

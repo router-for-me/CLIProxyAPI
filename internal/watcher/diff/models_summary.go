@@ -1,9 +1,6 @@
 package diff
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -45,7 +42,7 @@ func SummarizeGeminiModels(models []config.GeminiModel) GeminiModelsSummary {
 		}
 	})
 	return GeminiModelsSummary{
-		hash:  hashJoined(keys),
+		hash:  ComputeGeminiModelsHash(models),
 		count: len(keys),
 	}
 }
@@ -66,7 +63,7 @@ func SummarizeClaudeModels(models []config.ClaudeModel) ClaudeModelsSummary {
 		}
 	})
 	return ClaudeModelsSummary{
-		hash:  hashJoined(keys),
+		hash:  ComputeClaudeModelsHash(models),
 		count: len(keys),
 	}
 }
@@ -87,7 +84,7 @@ func SummarizeCodexModels(models []config.CodexModel) CodexModelsSummary {
 		}
 	})
 	return CodexModelsSummary{
-		hash:  hashJoined(keys),
+		hash:  ComputeCodexModelsHash(models),
 		count: len(keys),
 	}
 }
@@ -97,25 +94,21 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 	if len(models) == 0 {
 		return VertexModelsSummary{}
 	}
-	names := make([]string, 0, len(models))
-	for _, model := range models {
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
-		if name == "" && alias == "" {
-			continue
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
 		}
-		if alias != "" {
-			name = alias
-		}
-		names = append(names, name)
-	}
-	if len(names) == 0 {
+	})
+	if len(keys) == 0 {
 		return VertexModelsSummary{}
 	}
-	sort.Strings(names)
-	sum := sha256.Sum256([]byte(strings.Join(names, "|")))
 	return VertexModelsSummary{
-		hash:  hex.EncodeToString(sum[:]),
-		count: len(names),
+		hash:  ComputeVertexCompatModelsHash(models),
+		count: len(keys),
 	}
 }

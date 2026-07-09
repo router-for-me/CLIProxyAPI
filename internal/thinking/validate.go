@@ -53,17 +53,9 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		return &config, nil
 	}
 
-	// allowClampUnsupported determines whether to clamp unsupported levels instead of returning an error.
-	// This applies when crossing provider families (e.g., openai→gemini, claude→gemini) and the target
-	// model supports discrete levels. Same-family conversions require strict validation.
-	//
 	// modelFamilyMismatch covers providers that reuse another protocol on the wire
 	// (e.g. Kimi serving Claude-compatible /v1/messages). In that path fromFormat and
-	// toFormat both look like "claude", but the model itself is not Claude-family, so
-	// unsupported levels such as "max" should clamp to the nearest supported level
-	// (typically "high") instead of failing validation.
-	toCapability := detectModelCapability(modelInfo)
-	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
+	// toFormat both look like "claude", but the model itself is not Claude-family.
 	modelFamilyMismatch := false
 	if modelInfo != nil {
 		modelType := strings.ToLower(strings.TrimSpace(modelInfo.Type))
@@ -74,7 +66,14 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 			}
 		}
 	}
-	allowClampUnsupported := toHasLevelSupport && (!isSameProviderFamily(fromFormat, toFormat) || modelFamilyMismatch)
+
+	// Clamp unsupported levels across effective provider-family boundaries when the
+	// target has discrete levels and no explicit Thinking capability was configured.
+	// Explicit capabilities remain strict except for the high-intent mapping below.
+	toCapability := detectModelCapability(modelInfo)
+	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
+	crossProviderFamily := !isSameProviderFamily(fromFormat, toFormat) || modelFamilyMismatch
+	allowClampUnsupported := toHasLevelSupport && crossProviderFamily && !HasExplicitThinkingSupport(modelInfo)
 
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,
@@ -129,9 +128,22 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Level = ""
 	}
 
+	if config.Mode == ModeNone && HasExplicitThinkingSupport(modelInfo) && !supportsThinkingDisable(support) {
+		validLevels := normalizeLevels(support.Levels)
+		message := `level "none" not supported`
+		if len(validLevels) > 0 {
+			message += ", valid levels: " + strings.Join(validLevels, ", ")
+		}
+		return nil, NewThinkingError(ErrLevelNotSupported, message)
+	}
+
 	if len(support.Levels) > 0 && config.Mode == ModeLevel {
 		if !isLevelSupported(string(config.Level), support.Levels) {
-			if allowClampUnsupported {
+			highIntent := crossProviderFamily && isHighIntentLevel(config.Level)
+			if mapped, ok := mapHighIntentLevel(config.Level, support.Levels, crossProviderFamily); ok {
+				logLevelMapping(toFormat, model, config.Level, mapped)
+				config.Level = mapped
+			} else if allowClampUnsupported && !highIntent {
 				config.Level = clampLevel(config.Level, modelInfo, toFormat)
 			}
 			if !isLevelSupported(string(config.Level), support.Levels) {
@@ -154,9 +166,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 
-	// Convert ModeAuto to mid-range if dynamic not allowed
-	if config.Mode == ModeAuto && !support.DynamicAllowed {
-		config = convertAutoToMidRange(config, support, toFormat, model)
+	// Convert ModeAuto to mid-range if dynamic not allowed. An explicit "auto"
+	// level also means auto is accepted for level-based model configs.
+	if config.Mode == ModeAuto && !support.DynamicAllowed && !isLevelSupported(string(LevelAuto), support.Levels) {
+		config = convertAutoToMidRange(config, modelInfo, support, toFormat, model)
 	}
 
 	if config.Mode == ModeNone && toFormat == "claude" {
@@ -184,24 +197,25 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 //
 // This function handles the case where a model does not support dynamic/auto thinking.
 // The auto mode is silently converted to a fixed value based on model capability:
-//   - Level-only models: convert to ModeLevel with LevelMedium
+//   - Level-only models: convert to ModeLevel with the supported level closest to LevelMedium
 //   - Budget models: convert to ModeBudget with mid = (Min + Max) / 2
 //
 // Logging:
 //   - Debug level when conversion occurs
 //   - Fields: original_mode, clamped_to, reason
-func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupport, provider, model string) ThinkingConfig {
-	// For level-only models (has Levels but no Min/Max range), use ModeLevel with medium
+func convertAutoToMidRange(config ThinkingConfig, modelInfo *registry.ModelInfo, support *registry.ThinkingSupport, provider, model string) ThinkingConfig {
+	// For level-only models (has Levels but no Min/Max range), use the supported level closest to medium.
 	if len(support.Levels) > 0 && support.Min == 0 && support.Max == 0 {
+		level := clampLevel(LevelMedium, modelInfo, provider)
 		config.Mode = ModeLevel
-		config.Level = LevelMedium
+		config.Level = level
 		config.Budget = 0
 		log.WithFields(log.Fields{
 			"provider":      provider,
 			"model":         model,
 			"original_mode": "auto",
-			"clamped_to":    string(LevelMedium),
-		}).Debug("thinking: mode converted, dynamic not allowed, using medium level |")
+			"clamped_to":    string(level),
+		}).Debug("thinking: mode converted, dynamic not allowed, using supported midpoint level |")
 		return config
 	}
 
@@ -228,6 +242,48 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
 var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax}
+
+func mapHighIntentLevel(level ThinkingLevel, supported []string, crossProvider bool) (ThinkingLevel, bool) {
+	if !crossProvider {
+		return "", false
+	}
+	var candidates []ThinkingLevel
+	switch level {
+	case LevelXHigh:
+		candidates = []ThinkingLevel{LevelXHigh, LevelMax, LevelHigh}
+	case LevelMax:
+		candidates = []ThinkingLevel{LevelMax, LevelXHigh, LevelHigh}
+	default:
+		return "", false
+	}
+	for _, candidate := range candidates {
+		if isLevelSupported(string(candidate), supported) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func isHighIntentLevel(level ThinkingLevel) bool {
+	switch level {
+	case LevelXHigh, LevelMax:
+		return true
+	default:
+		return false
+	}
+}
+
+func logLevelMapping(provider, model string, original, mapped ThinkingLevel) {
+	if original == mapped {
+		return
+	}
+	log.WithFields(log.Fields{
+		"provider":       provider,
+		"model":          model,
+		"original_value": string(original),
+		"mapped_to":      string(mapped),
+	}).Debug("thinking: high-intent level mapped |")
+}
 
 // clampLevel clamps the given level to the nearest supported level.
 // On tie, prefers the lower level.
@@ -349,6 +405,13 @@ func normalizeLevels(levels []string) []string {
 		out[i] = strings.ToLower(strings.TrimSpace(l))
 	}
 	return out
+}
+
+func supportsThinkingDisable(support *registry.ThinkingSupport) bool {
+	if support == nil {
+		return false
+	}
+	return support.ZeroAllowed || isLevelSupported(string(LevelNone), support.Levels)
 }
 
 // isBudgetCapableProvider returns true if the provider supports budget-based thinking.

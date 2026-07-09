@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -33,6 +34,81 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 	if textModel == imageModel {
 		t.Fatal("hash should change when image flag changes")
+	}
+}
+
+func TestComputeModelsHash_IncludesThinkingSupport(t *testing.T) {
+	tests := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{
+			name: "openai compatibility",
+			a: ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+			}}),
+			b: ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"xhigh"}},
+			}}),
+		},
+		{
+			name: "vertex compatibility",
+			a: ComputeVertexCompatModelsHash([]config.VertexCompatModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+			}}),
+			b: ComputeVertexCompatModelsHash([]config.VertexCompatModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"xhigh"}},
+			}}),
+		},
+		{
+			name: "claude",
+			a: ComputeClaudeModelsHash([]config.ClaudeModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+			}}),
+			b: ComputeClaudeModelsHash([]config.ClaudeModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"xhigh"}},
+			}}),
+		},
+		{
+			name: "codex",
+			a: ComputeCodexModelsHash([]config.CodexModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+			}}),
+			b: ComputeCodexModelsHash([]config.CodexModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"xhigh"}},
+			}}),
+		},
+		{
+			name: "gemini",
+			a: ComputeGeminiModelsHash([]config.GeminiModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+			}}),
+			b: ComputeGeminiModelsHash([]config.GeminiModel{{
+				Name:     "m1",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"xhigh"}},
+			}}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.a == "" || tt.b == "" {
+				t.Fatalf("hashes should not be empty, got %q / %q", tt.a, tt.b)
+			}
+			if tt.a == tt.b {
+				t.Fatal("hash should change when thinking support changes")
+			}
+		})
 	}
 }
 

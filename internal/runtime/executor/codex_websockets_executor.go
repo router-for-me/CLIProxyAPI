@@ -198,7 +198,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinkingWithSource(body, originalPayloadSource, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return resp, err
 	}
@@ -422,7 +422,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		userPayload = opts.OriginalRequest
 	}
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyRequestThinkingWithSource(body, userPayload, auth, e.Identifier(), req.Model, opts, from.String(), to.String())
 	if err != nil {
 		return nil, err
 	}

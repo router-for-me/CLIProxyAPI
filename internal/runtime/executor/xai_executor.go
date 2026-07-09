@@ -119,7 +119,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
 
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return resp, err
 	}
@@ -210,7 +210,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
 
-	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
+	prepared, err := e.prepareResponsesRequestTo(ctx, auth, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -577,7 +577,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
 
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return nil, err
 	}
@@ -715,7 +715,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 
 // CountTokens estimates token count for xAI Responses requests.
 func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, false)
+	prepared, err := e.prepareResponsesRequest(ctx, auth, req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -806,11 +806,11 @@ type xaiPreparedRequest struct {
 	replayScope     xaiReasoningReplayScope
 }
 
-func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
-	return e.prepareResponsesRequestTo(ctx, req, opts, stream, sdktranslator.FormatCodex)
+func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
+	return e.prepareResponsesRequestTo(ctx, auth, req, opts, stream, sdktranslator.FormatCodex)
 }
 
-func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
+func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -823,7 +823,8 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
 
 	var err error
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
+	modelInfo := helps.RequestModelInfo(auth, e.Identifier(), req.Model, opts)
+	body, err = thinking.ApplyThinkingWithResolvedModelInfo(body, originalPayloadSource, modelInfo.Model, from.String(), e.Identifier(), e.Identifier(), modelInfo.Info, modelInfo.Resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -847,7 +848,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
-	body = sanitizeXAIResponsesBody(body, baseModel)
+	body = sanitizeXAIResponsesBody(body, baseModel, modelInfo.Info)
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
 	if errSession != nil {
@@ -1017,9 +1018,9 @@ func xaiMetadataString(meta map[string]any, key string) string {
 	}
 }
 
-func sanitizeXAIResponsesBody(body []byte, model string) []byte {
+func sanitizeXAIResponsesBody(body []byte, model string, modelInfo *registry.ModelInfo) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
-	if !xaiSupportsReasoningEffort(model) {
+	if !xaiSupportsReasoningEffort(model, modelInfo) {
 		if gjson.GetBytes(body, "reasoning.effort").Exists() {
 			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
 		}
@@ -1349,7 +1350,10 @@ func removeXAIEncryptedReasoningInclude(body []byte) []byte {
 // xaiSupportsReasoningEffort reports whether the model accepts Responses API
 // reasoning.effort. Capability comes from model registry thinking metadata
 // (static models.json and dynamic registrations), not a hard-coded name allowlist.
-func xaiSupportsReasoningEffort(model string) bool {
+func xaiSupportsReasoningEffort(model string, modelInfo *registry.ModelInfo) bool {
+	if modelInfo != nil && modelInfo.Thinking != nil {
+		return len(modelInfo.Thinking.Levels) > 0
+	}
 	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
 	if idx := strings.LastIndex(name, "/"); idx >= 0 {
 		name = name[idx+1:]

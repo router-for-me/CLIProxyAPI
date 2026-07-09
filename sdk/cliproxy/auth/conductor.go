@@ -1842,6 +1842,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		execOpts := opts
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		execOpts = withModelInfoLookupModelMetadata(execOpts, modelInfoLookupModelForExecution(routeModel, execReq, executionModel != ""))
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
@@ -2586,6 +2587,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execOpts = withModelInfoLookupModelMetadata(execOpts, modelInfoLookupModelForExecution(routeModel, execReq, restoreExecutionModel))
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2705,6 +2707,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execOpts = withModelInfoLookupModelMetadata(execOpts, modelInfoLookupModelForExecution(routeModel, execReq, restoreExecutionModel))
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2865,6 +2868,43 @@ func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel 
 	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
 	opts.Metadata = meta
 	return opts
+}
+
+func withModelInfoLookupModelMetadata(opts cliproxyexecutor.Options, lookupModel string) cliproxyexecutor.Options {
+	lookupModel = strings.TrimSpace(lookupModel)
+	if lookupModel == "" {
+		return opts
+	}
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for k, v := range opts.Metadata {
+		meta[k] = v
+	}
+	meta[cliproxyexecutor.ModelInfoLookupModelMetadataKey] = lookupModel
+	opts.Metadata = meta
+	return opts
+}
+
+func modelInfoLookupModelForExecution(routeModel string, execReq cliproxyexecutor.Request, useExecutionModel bool) string {
+	routeModel = strings.TrimSpace(routeModel)
+	executionModel := strings.TrimSpace(execReq.Model)
+	if useExecutionModel {
+		if executionModel != "" {
+			return executionModel
+		}
+	}
+	if routeModel == "" {
+		return executionModel
+	}
+	executionResult := thinking.ParseSuffix(executionModel)
+	if executionResult.HasSuffix && strings.TrimSpace(executionResult.RawSuffix) != "" {
+		routeResult := thinking.ParseSuffix(routeModel)
+		routeBase := strings.TrimSpace(routeResult.ModelName)
+		if routeBase == "" {
+			routeBase = routeModel
+		}
+		return routeBase + "(" + strings.TrimSpace(executionResult.RawSuffix) + ")"
+	}
+	return routeModel
 }
 
 func authSelectionModelFromOptions(opts cliproxyexecutor.Options, fallback string) string {
@@ -5364,7 +5404,8 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			execOpts := withModelInfoLookupModelMetadata(creditsOpts, modelInfoLookupModelForExecution(routeModel, execReq, false))
+			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				result.Error = &Error{Message: errExec.Error()}

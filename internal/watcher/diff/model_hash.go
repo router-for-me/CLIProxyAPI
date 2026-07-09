@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.
@@ -21,7 +22,7 @@ func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + fmt.Sprintf("image=%t", model.Image))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + fmt.Sprintf("image=%t", model.Image) + "|" + thinkingHashPart(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -36,7 +37,7 @@ func ComputeVertexCompatModelsHash(models []config.VertexCompatModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + thinkingHashPart(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -51,7 +52,7 @@ func ComputeClaudeModelsHash(models []config.ClaudeModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + thinkingHashPart(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -66,7 +67,7 @@ func ComputeCodexModelsHash(models []config.CodexModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + thinkingHashPart(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -81,7 +82,7 @@ func ComputeGeminiModelsHash(models []config.GeminiModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + thinkingHashPart(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -122,6 +123,33 @@ func normalizeModelPairs(collect func(out func(key string))) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func thinkingHashPart(thinking *registry.ThinkingSupport) string {
+	if thinking == nil {
+		return "thinking="
+	}
+	normalizedLevels := make([]string, 0, len(thinking.Levels))
+	for _, level := range thinking.Levels {
+		if trimmed := strings.ToLower(strings.TrimSpace(level)); trimmed != "" {
+			normalizedLevels = append(normalizedLevels, trimmed)
+		}
+	}
+	sort.Strings(normalizedLevels)
+	data, _ := json.Marshal(struct {
+		Min            int      `json:"min"`
+		Max            int      `json:"max"`
+		ZeroAllowed    bool     `json:"zero_allowed"`
+		DynamicAllowed bool     `json:"dynamic_allowed"`
+		Levels         []string `json:"levels"`
+	}{
+		Min:            thinking.Min,
+		Max:            thinking.Max,
+		ZeroAllowed:    thinking.ZeroAllowed,
+		DynamicAllowed: thinking.DynamicAllowed,
+		Levels:         normalizedLevels,
+	})
+	return "thinking=" + string(data)
 }
 
 func hashJoined(keys []string) string {
