@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,35 @@ func writeTestConfigFile(t *testing.T) string {
 		t.Fatalf("failed to write test config: %v", errWrite)
 	}
 	return path
+}
+
+func TestPatchCodexKey_UpdatesPriority(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			CodexKey: []config.CodexKey{
+				{APIKey: "codex-key", BaseURL: "https://api.openai.com", Priority: 1},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"match":"codex-key","value":{"priority":42}}`
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/codex-api-key", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchCodexKey(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := h.cfg.CodexKey[0].Priority; got != 42 {
+		t.Fatalf("priority = %d, want 42", got)
+	}
 }
 
 func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {

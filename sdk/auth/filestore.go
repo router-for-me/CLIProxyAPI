@@ -117,7 +117,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
+		auth.Metadata = normalizeAuthMetadataForSave(auth.Metadata, auth.Provider, auth.Disabled)
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
@@ -160,6 +160,28 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	}
 
 	return path, nil
+}
+
+// normalizeAuthMetadataForSave prepares metadata for persistence without
+// reading the existing file. The store writes exactly the metadata it is
+// given (so callers that intentionally drop a key have it removed), while the
+// provider type is backfilled when missing and the disabled flag is set.
+//
+// Field preservation across a partial update is the caller's responsibility:
+// the management handlers merge on-disk metadata into the record before save
+// (see mergeAuthFileStatusMetadata). Merging here as well would resurrect keys
+// a caller intentionally deleted (e.g. clearing all custom headers).
+func normalizeAuthMetadataForSave(metadata map[string]any, provider string, disabled bool) map[string]any {
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	if provider = strings.TrimSpace(provider); provider != "" && !strings.EqualFold(provider, "unknown") {
+		if rawType, _ := metadata["type"].(string); strings.TrimSpace(rawType) == "" || strings.EqualFold(strings.TrimSpace(rawType), "unknown") {
+			metadata["type"] = provider
+		}
+	}
+	metadata["disabled"] = disabled
+	return metadata
 }
 
 // List enumerates all auth JSON files under the configured directory.
