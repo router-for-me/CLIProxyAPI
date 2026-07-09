@@ -2887,6 +2887,33 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON: `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
 			expectErr: true,
 		},
+		// Kimi models exposed via Claude-compatible /v1/messages keep wire format
+		// claude→claude, but the model type is kimi. Claude Code often sends
+		// effort=max; clamp to the highest Kimi-supported level (high).
+		{
+			name:         "C28",
+			from:         "claude",
+			to:           "claude",
+			model:        "kimi-level-model",
+			inputJSON:    `{"model":"kimi-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "adaptive",
+			expectField2: "output_config.effort",
+			expectValue2: "high",
+			expectErr:    false,
+		},
+		{
+			name:         "C29",
+			from:         "claude",
+			to:           "claude",
+			model:        "kimi-level-model",
+			inputJSON:    `{"model":"kimi-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "adaptive",
+			expectField2: "output_config.effort",
+			expectValue2: "high",
+			expectErr:    false,
+		},
 	}
 
 	runThinkingTests(t, cases)
