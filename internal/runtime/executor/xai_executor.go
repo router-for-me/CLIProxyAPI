@@ -940,6 +940,11 @@ func xaiIsCLIChatProxyBaseURL(baseURL string) bool {
 }
 
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+	applyXAIDefaultHeaders(r, token, stream, sessionID)
+	applyXAICustomHeaders(r, auth)
+}
+
+func applyXAIDefaultHeaders(r *http.Request, token string, stream bool, sessionID string) {
 	r.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -953,6 +958,9 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 	if sessionID != "" {
 		r.Header.Set("x-grok-conv-id", sessionID)
 	}
+}
+
+func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -964,12 +972,12 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 // requests. CLI chat-proxy identity headers are only attached when the resolved
 // chat base URL is the official CLI chat-proxy endpoint.
 func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
-	applyXAIHeaders(r, auth, token, stream, sessionID)
-	if !xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
-		return
+	applyXAIDefaultHeaders(r, token, stream, sessionID)
+	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
+		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
+		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
 	}
-	r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
-	r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
+	applyXAICustomHeaders(r, auth)
 }
 
 func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {

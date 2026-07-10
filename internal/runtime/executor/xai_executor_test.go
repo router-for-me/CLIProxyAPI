@@ -1672,6 +1672,25 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 	})
 
+	t.Run("custom headers override cli chat proxy defaults", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":                         xaiauth.CLIChatProxyBaseURL,
+				"header:" + xaiTokenAuthHeader:     "custom-token-auth",
+				"header:" + xaiClientVersionHeader: "custom-client-version",
+			},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", true, "")
+
+		if got := req.Header.Get(xaiTokenAuthHeader); got != "custom-token-auth" {
+			t.Fatalf("%s = %q, want custom-token-auth", xaiTokenAuthHeader, got)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != "custom-client-version" {
+			t.Fatalf("%s = %q, want custom-client-version", xaiClientVersionHeader, got)
+		}
+	})
+
 	t.Run("cli headers on explicit chat proxy base", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
 		auth := &cliproxyauth.Auth{
