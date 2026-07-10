@@ -1060,10 +1060,10 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 	}
 }
 
-func TestNormalizeXAITools_SimplifiesAutomationUpdateSchema(t *testing.T) {
+func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T) {
 	// Large oneOf+$ref schema mimicking Codex Desktop codex_app.automation_update.
 	params := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
-	body := []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":false,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
+	body := []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":true,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
 	out := normalizeXAITools(body)
 
 	tools := gjson.GetBytes(out, "tools")
@@ -1086,6 +1086,9 @@ func TestNormalizeXAITools_SimplifiesAutomationUpdateSchema(t *testing.T) {
 			if tool.Get("parameters.additionalProperties").Type != gjson.True {
 				t.Fatalf("automation_update parameters should allow additionalProperties: %s", paramsRaw)
 			}
+			if tool.Get("strict").Type != gjson.False {
+				t.Fatalf("automation_update strict = %s, want false", tool.Get("strict").Raw)
+			}
 		case "exec_command":
 			foundExec = true
 			if got := tool.Get("parameters.properties.cmd.type").String(); got != "string" {
@@ -1101,14 +1104,72 @@ func TestNormalizeXAITools_SimplifiesAutomationUpdateSchema(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAITools_PreservesUnrelatedSchemas(t *testing.T) {
+	largeParams := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "top-level automation_update",
+			body: []byte(`{"tools":[{"type":"function","name":"automation_update","strict":true,"parameters":{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"],"additionalProperties":false}}]}`),
+		},
+		{
+			name: "automation_update in another namespace",
+			body: []byte(`{"tools":[{"type":"namespace","name":"calendar","tools":[{"type":"function","name":"automation_update","strict":true,"parameters":{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"],"additionalProperties":false}}]}]}`),
+		},
+		{
+			name: "custom automation_update in codex_app",
+			body: []byte(`{"tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"custom","name":"automation_update","strict":true,"parameters":{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"],"additionalProperties":false}}]}]}`),
+		},
+		{
+			name: "large schema on another codex_app function",
+			body: []byte(`{"tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"exec_command","strict":true,"parameters":` + largeParams + `}]}]}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := normalizeXAITools(tt.body)
+			tool := gjson.GetBytes(out, "tools.0")
+			if tool.Get("strict").Type != gjson.True {
+				t.Fatalf("strict changed for unrelated tool: %s", string(out))
+			}
+			params := tool.Get("parameters")
+			if tt.name == "large schema on another codex_app function" {
+				if !params.Get("oneOf").Exists() || !params.Get("$defs").Exists() {
+					t.Fatalf("large schema was simplified: %s", string(out))
+				}
+				return
+			}
+			if got := params.Get("properties.cron.type").String(); got != "string" {
+				t.Fatalf("schema was simplified, cron type = %q: %s", got, string(out))
+			}
+			if params.Get("additionalProperties").Type != gjson.False {
+				t.Fatalf("additionalProperties changed: %s", string(out))
+			}
+		})
+	}
+}
+
 func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	auto := gjson.Parse(`{"type":"function","name":"automation_update","parameters":{"type":"object"}}`)
-	if !xaiFunctionParametersNeedSimplification(auto) {
-		t.Fatal("automation_update should always need simplification")
+	if !xaiFunctionParametersNeedSimplification(auto, "codex_app") {
+		t.Fatal("codex_app.automation_update should need simplification")
+	}
+	if xaiFunctionParametersNeedSimplification(auto, "calendar") {
+		t.Fatal("automation_update outside codex_app should not need simplification")
+	}
+	if xaiFunctionParametersNeedSimplification(auto, "") {
+		t.Fatal("top-level automation_update should not need simplification")
+	}
+	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
+	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
+		t.Fatal("custom codex_app.automation_update should not need simplification")
 	}
 	safe := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)
-	if xaiFunctionParametersNeedSimplification(safe) {
-		t.Fatal("simple schema should not need simplification")
+	if xaiFunctionParametersNeedSimplification(safe, "codex_app") {
+		t.Fatal("unrelated codex_app function should not need simplification")
 	}
 }
 

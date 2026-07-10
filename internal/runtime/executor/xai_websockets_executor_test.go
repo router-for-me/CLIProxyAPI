@@ -712,6 +712,102 @@ func TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup(t *testing.T) {
 	}
 }
 
+func TestXAIWebsocketsExecuteStreamHandshakeFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	body := []byte(`{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for now."}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		if _, errWrite := w.Write(body); errWrite != nil {
+			t.Errorf("write handshake rejection: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-free-usage",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":"hello"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	_, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err == nil {
+		t.Fatal("ExecuteStream() error = nil, want handshake rejection")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("status = %#v, want 429", err)
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for free-usage-exhausted handshake error: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
+	}
+	if got := err.Error(); got != string(body) {
+		t.Fatalf("error payload = %q, want %q", got, body)
+	}
+}
+
+func TestParseXAIWebsocketErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	payload := []byte(`{"type":"error","status":429,"error":{"code":"subscription:free-usage-exhausted","message":"You've used all the included free usage for now."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected xAI websocket error")
+	}
+
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for free-usage-exhausted websocket event: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
+	}
+	parsed := gjson.Parse(err.Error())
+	if got := parsed.Get("status").Int(); got != http.StatusTooManyRequests {
+		t.Fatalf("error status = %d, want 429; payload=%s", got, err)
+	}
+	if got := parsed.Get("error.code").String(); got != "subscription:free-usage-exhausted" {
+		t.Fatalf("error code = %q, want free-usage-exhausted; payload=%s", got, err)
+	}
+}
+
+func TestParseXAIWebsocketBareErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	payload := []byte(`{"status":429,"error":{"code":"subscription:free-usage-exhausted","message":"You've used all the included free usage for now."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected bare xAI websocket error")
+	}
+
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for bare free-usage-exhausted websocket event: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
+	}
+	parsed := gjson.Parse(err.Error())
+	if got := parsed.Get("type").String(); got != "error" {
+		t.Fatalf("error type = %q, want error; payload=%s", got, err)
+	}
+	if got := parsed.Get("error.code").String(); got != "subscription:free-usage-exhausted" {
+		t.Fatalf("error code = %q, want free-usage-exhausted; payload=%s", got, err)
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamStopsOnBareErrorPayload(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	releaseServer := make(chan struct{})

@@ -36,17 +36,18 @@ var (
 )
 
 const (
-	xaiImageHandlerType         = "openai-image"
-	xaiVideoHandlerType         = "openai-video"
-	xaiCustomToolType           = "custom"
-	xaiFunctionToolType         = "function"
-	xaiImageGenerationToolType  = "image_generation"
-	xaiNamespaceToolType        = "namespace"
-	xaiToolSearchType           = "tool_search"
-	xaiWebSearchToolType        = "web_search"
+	xaiImageHandlerType        = "openai-image"
+	xaiVideoHandlerType        = "openai-video"
+	xaiCustomToolType          = "custom"
+	xaiFunctionToolType        = "function"
+	xaiImageGenerationToolType = "image_generation"
+	xaiNamespaceToolType       = "namespace"
+	xaiToolSearchType          = "tool_search"
+	xaiWebSearchToolType       = "web_search"
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
 	// schema. xAI's free/build Responses path accepts the HTTP request but never
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".
+	xaiCodexAppNamespaceName    = "codex_app"
 	xaiAutomationUpdateToolName = "automation_update"
 	// Permissive placeholder schema: keeps the tool callable without the hang.
 	xaiSafeFunctionParameters   = `{"type":"object","properties":{},"additionalProperties":true}`
@@ -1049,9 +1050,10 @@ func normalizeXAITools(body []byte) []byte {
 		toolType := tool.Get("type").String()
 		if toolType == xaiNamespaceToolType {
 			changed = true
+			namespaceName := tool.Get("name").String()
 			if namespaceTools := tool.Get("tools"); namespaceTools.IsArray() {
 				for _, nestedTool := range namespaceTools.Array() {
-					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool)
+					nestedRaw, nestedChanged, ok := normalizeXAITool(nestedTool, namespaceName)
 					if !ok {
 						return body
 					}
@@ -1068,7 +1070,7 @@ func normalizeXAITools(body []byte) []byte {
 			}
 			continue
 		}
-		raw, toolChanged, ok := normalizeXAITool(tool)
+		raw, toolChanged, ok := normalizeXAITool(tool, "")
 		if !ok {
 			return body
 		}
@@ -1114,7 +1116,7 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	return body
 }
 
-func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
+func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {
 	toolType := tool.Get("type").String()
 	changed := false
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
@@ -1149,41 +1151,34 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		raw = updatedTool
 		changed = true
 	}
-	// Codex Desktop's automation_update schema (and similar large oneOf+$ref
-	// function schemas) hang xAI free/build streaming. Simplify parameters so
-	// the request still carries the tool name but does not stall the stream.
-	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool) {
+	// Codex Desktop's codex_app.automation_update schema hangs xAI free/build
+	// streaming. Limit the workaround to that exact namespaced tool so unrelated
+	// tools keep their parameter contracts.
+	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool, namespaceName) {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
 		if errSet != nil {
 			return nil, false, false
 		}
 		raw = updatedTool
+		if strict := tool.Get("strict"); strict.Exists() && strict.Bool() {
+			updatedTool, errSet = sjson.SetBytes(raw, "strict", false)
+			if errSet != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+		}
 		changed = true
-		log.Debugf("xai: simplified parameters for tool %s to avoid upstream hang", tool.Get("name").String())
+		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream hang", namespaceName, tool.Get("name").String())
 	}
 	return raw, changed, true
 }
 
-// xaiFunctionParametersNeedSimplification reports whether a function tool's
-// JSON Schema is known/likely to hang xAI Responses streaming.
-func xaiFunctionParametersNeedSimplification(tool gjson.Result) bool {
-	name := strings.TrimSpace(tool.Get("name").String())
-	if strings.EqualFold(name, xaiAutomationUpdateToolName) {
-		return true
-	}
-	params := tool.Get("parameters")
-	if !params.Exists() {
-		return false
-	}
-	raw := params.Raw
-	// Heuristic: large schemas combining oneOf with $ref/$defs hang the free
-	// Grok Responses path (no SSE events until client cancel).
-	if len(raw) < 1500 {
-		return false
-	}
-	hasOneOf := strings.Contains(raw, `"oneOf"`)
-	hasRef := strings.Contains(raw, `"$ref"`) || strings.Contains(raw, `"$defs"`)
-	return hasOneOf && hasRef
+// xaiFunctionParametersNeedSimplification reports whether a function tool is
+// the Codex Desktop automation tool known to hang xAI Responses streaming.
+func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
+	return strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) &&
+		strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+		strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), xaiAutomationUpdateToolName)
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {
