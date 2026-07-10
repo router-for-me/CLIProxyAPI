@@ -181,3 +181,40 @@ func TestManager_ReconcileRegistryModelStatesDoesNotSuspendCloudflareChallenge(t
 		t.Fatalf("registry model count after reconciliation = %d, want 1", count)
 	}
 }
+
+func TestManager_RestoreRegistryCooldownRechecksClearedState(t *testing.T) {
+	const (
+		authID = "reconcile-stale-cooldown-auth"
+		model  = "reconcile-stale-cooldown-model"
+	)
+	ctx := context.Background()
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	if _, err := manager.Register(ctx, &Auth{ID: authID, Provider: "codex"}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: "codex",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+	})
+
+	// Simulate a candidate captured before a concurrent successful result.
+	candidate := registryCooldownCandidate{stateKey: model, model: model}
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	manager.MarkResult(ctx, Result{AuthID: authID, Provider: "codex", Model: model, Success: true})
+	manager.restoreRegistryCooldown(authID, candidate)
+
+	after, ok := manager.GetByID(authID)
+	if !ok || !modelStateIsClean(after.ModelStates[model]) {
+		t.Fatalf("model state after success = %+v, want clean", after.ModelStates[model])
+	}
+	if count := reg.GetModelCount(model); count != 1 {
+		t.Fatalf("registry model count after stale restore = %d, want 1", count)
+	}
+}

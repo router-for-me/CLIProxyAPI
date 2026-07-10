@@ -384,6 +384,11 @@ func (m *Manager) RefreshSchedulerAll() {
 	}
 }
 
+type registryCooldownCandidate struct {
+	stateKey string
+	model    string
+}
+
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
@@ -409,14 +414,8 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		supported[modelKey] = struct{}{}
 	}
 
-	type registryCooldown struct {
-		model  string
-		reason string
-		quota  bool
-	}
-
 	var snapshot *Auth
-	var cooldowns []registryCooldown
+	var cooldowns []registryCooldownCandidate
 	now := time.Now()
 
 	m.mu.Lock()
@@ -445,11 +444,10 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			}
 			if state.Unavailable && state.NextRetryAfter.After(now) {
 				preserved = true
-				if reason, quota, suspend := registrySuspensionForModelState(state); suspend {
-					cooldowns = append(cooldowns, registryCooldown{
-						model:  baseModel,
-						reason: reason,
-						quota:  quota,
+				if _, _, suspend := registrySuspensionForModelState(state); suspend {
+					cooldowns = append(cooldowns, registryCooldownCandidate{
+						stateKey: modelKey,
+						model:    baseModel,
 					})
 				}
 				continue
@@ -485,19 +483,46 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			}
 		}
 	}
-	m.mu.Unlock()
-
-	reg := registry.GetGlobalRegistry()
-	for _, cooldown := range cooldowns {
-		if cooldown.quota {
-			reg.SetModelQuotaExceeded(authID, cooldown.model)
-		}
-		reg.SuspendClientModel(authID, cooldown.model, cooldown.reason)
-	}
-
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}
+	m.mu.Unlock()
+
+	for _, cooldown := range cooldowns {
+		m.restoreRegistryCooldown(authID, cooldown)
+	}
+}
+
+// restoreRegistryCooldown revalidates a reconciliation candidate before
+// changing the registry. Holding m.mu for the registry writes orders them with
+// concurrent MarkResult, ResetQuota, and Remove state changes so a stale
+// snapshot cannot re-suspend a model that has already recovered.
+func (m *Manager) restoreRegistryCooldown(authID string, cooldown registryCooldownCandidate) {
+	if m == nil || authID == "" || cooldown.stateKey == "" || cooldown.model == "" {
+		return
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	auth := m.auths[authID]
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return
+	}
+	state := auth.ModelStates[cooldown.stateKey]
+	if state == nil || !state.Unavailable || !state.NextRetryAfter.After(time.Now()) {
+		return
+	}
+	reason, quota, suspend := registrySuspensionForModelState(state)
+	if !suspend {
+		return
+	}
+
+	reg := registry.GetGlobalRegistry()
+	if quota {
+		reg.SetModelQuotaExceeded(authID, cooldown.model)
+	}
+	reg.SuspendClientModel(authID, cooldown.model, reason)
 }
 
 func updateAggregatedModelError(auth *Auth, now time.Time) {
