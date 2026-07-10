@@ -17,7 +17,7 @@ func TestFingerprintObserveDisabledIsNoop(t *testing.T) {
 		t.Fatal("expected observe disabled by default")
 	}
 	req, _ := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
-	req.Header.Set("User-Agent", "codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.144.1)")
 	// Must be a safe no-op (no panic) even with nil auth when disabled.
 	observeCodexFingerprint(cfg, nil, req)
 	observeClaudeFingerprint(cfg, nil, req)
@@ -79,13 +79,13 @@ func TestFingerprintObserveEnabledEmitsThrottledLog(t *testing.T) {
 	defer func() { logrus.SetOutput(oldOut); logrus.SetLevel(oldLevel) }()
 
 	req, _ := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
-	req.Header.Set("User-Agent", "codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.144.1)")
 	req.Header["session-id"] = []string{"sid"}
 	auth := &cliproxyauth.Auth{ID: "acc-fp-observe-test", Provider: "codex", Metadata: map[string]any{"account_id": "x"}}
 
 	observeCodexFingerprint(cfg, auth, req)
 	out := buf.String()
-	if !strings.Contains(out, "FP-OBSERVE") || !strings.Contains(out, "codex_cli_rs/0.142.5") {
+	if !strings.Contains(out, "FP-OBSERVE") || !strings.Contains(out, "codex_cli_rs/0.144.1") {
 		t.Fatalf("expected FP-OBSERVE codex log with UA, got: %s", out)
 	}
 	if !strings.Contains(out, "session-id") {

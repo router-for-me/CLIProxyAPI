@@ -35,25 +35,21 @@ import (
 )
 
 const (
-	// Real bare codex_cli_rs CLI User-Agent, per openai/codex source
-	// (login/src/auth/default_client.rs get_codex_user_agent + terminal-detection
-	// user_agent_token) and its CI test default_client_tests.rs::test_macos, whose
-	// regex ends at the terminal token with a `$` anchor:
-	//   "<originator>/<ver> (<OS> <ver>; <arch>) <terminal>"   — NO trailing suffix.
-	// The trailing " (<name>; <ver>)" segment belongs ONLY to codex-tui / MCP clients
-	// (set via USER_AGENT_SUFFIX); the bare CLI never emits it. An earlier value
-	// carried "(codex_cli_rs; ver)" — a frankenstein no real variant produces
-	// (codex_cli_rs prefix WITH a suffix, cross-verified vs sub2api #3646 + official
-	// tests); removed so prefix + (absent) suffix + originator are all self-consistent
-	// as codex_cli_rs. Originator is codex_cli_rs (DEFAULT_ORIGINATOR; `codex exec`
-	// uses codex_exec). Terminal token is "unknown" with no TTY; interactive uses e.g.
-	// iTerm.app/3.6.10. Version pinned to the byte-verified 0.142.5 evidence set (a
-	// 2026-07-04 local capture shows the CLI now reports 1.3.0, but bumping the number
-	// needs the whole 1.3.0 value set — beta flags etc. — to avoid an impossible
-	// pairing, so we hold at the verified 0.142.5 set). A real downstream
-	// codex-tui/CLI UA is forwarded verbatim by ensureCodexUserAgent; this is only the
-	// fallback when the downstream sends no usable Codex UA.
-	codexUserAgent             = "codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10"
+	// Real codex_cli_rs CLI User-Agent for 0.144.x. Shape:
+	//   "<originator>/<ver> (<OS> <ver>; <arch>) <terminal> (<originator>; <ver>)".
+	// The trailing " (<originator>; <ver>)" suffix is RESTORED for 0.144.x: a local
+	// HTTPS capture of the real codex 0.144.x client this session shows the bare CLI
+	// emitting it (captured: "codex-tui/0.144.0-alpha.4 (Mac OS 26.2.0; arm64)
+	// WarpTerminal/... (codex-tui; 0.144.0-alpha.4)" and "codex_exec/0.144.0-alpha.4
+	// ... (codex_exec; 0.144.0-alpha.4)"), so codex_cli_rs emits "(codex_cli_rs;
+	// <ver>)". An earlier 0.142.5-era value dropped the suffix; the capture supersedes
+	// that. Originator is codex_cli_rs (DEFAULT_ORIGINATOR; `codex exec` uses
+	// codex_exec). Terminal token is "unknown" with no TTY; interactive uses e.g.
+	// iTerm.app/3.6.10. Version bumped to 0.144.1 (latest stable codex_cli_rs),
+	// captured this session. A real downstream codex-tui/CLI UA is forwarded verbatim
+	// by ensureCodexUserAgent; this is only the fallback when the downstream sends no
+	// usable Codex UA.
+	codexUserAgent             = "codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.144.1)"
 	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
 )

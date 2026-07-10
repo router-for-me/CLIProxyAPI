@@ -93,7 +93,9 @@ func TestCodexShouldZstdBody(t *testing.T) {
 		auth *cliproxyauth.Auth
 		want bool
 	}{
-		{"oauth compresses", oauth, true},
+		// Real codex 0.144.x sends a PLAIN body over HTTP and HTTPS (captured this
+		// session), so compression is now disabled for every credential type.
+		{"oauth stays plaintext", oauth, false},
 		{"api-key stays plaintext", apiKey, false},
 		{"nil stays plaintext", nil, false},
 	}
@@ -111,11 +113,14 @@ func oauthCodexAuth() *cliproxyauth.Auth {
 	return &cliproxyauth.Auth{ID: "auth-oauth", Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
 }
 
-func TestCacheHelper_OAuthBodyZstdCompressed(t *testing.T) {
+// Real codex 0.144.x sends a PLAIN body with no content-encoding on the OAuth path
+// (captured this session); this asserts the wire body stays plaintext and matches
+// the plaintext upstreamBody verbatim.
+func TestCacheHelper_OAuthBodyPlaintext(t *testing.T) {
 	executor := &CodexExecutor{}
 	ctx := context.Background()
 	url := "https://chatgpt.com/backend-api/codex/responses"
-	rawJSON := []byte(`{"model":"gpt-5-codex","stream":true,"input":[{"role":"user","content":"compress me compress me"}]}`)
+	rawJSON := []byte(`{"model":"gpt-5-codex","stream":true,"input":[{"role":"user","content":"plain body plain body"}]}`)
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"model":"gpt-5-codex"}`)}
 
 	httpReq, upstreamBody, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, oauthCodexAuth(), req, req.Payload, rawJSON)
@@ -127,27 +132,22 @@ func TestCacheHelper_OAuthBodyZstdCompressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read wire body: %v", err)
 	}
-	if !bytes.HasPrefix(wireBody, zstdMagic) {
-		t.Fatalf("OAuth wire body is not zstd-compressed: % x", wireBody[:min(4, len(wireBody))])
+	if bytes.HasPrefix(wireBody, zstdMagic) {
+		t.Fatalf("OAuth wire body must NOT be zstd-compressed (real 0.144.x sends plaintext): % x", wireBody[:min(4, len(wireBody))])
 	}
-	if got := httpReq.Header.Get("Content-Encoding"); got != "zstd" {
-		t.Fatalf("Content-Encoding = %q, want %q", got, "zstd")
+	if got := httpReq.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want empty (real 0.144.x sends no content-encoding)", got)
 	}
-	// ContentLength must reflect the compressed body so h2 sends the right frame.
-	if httpReq.ContentLength != int64(len(wireBody)) {
-		t.Fatalf("ContentLength = %d, want %d (compressed length)", httpReq.ContentLength, len(wireBody))
+	// The plaintext wire body must be valid JSON identical to the upstreamBody used
+	// for logging.
+	if !gjson.ValidBytes(wireBody) {
+		t.Fatalf("wire body is not valid JSON: %s", wireBody)
 	}
-	// The compressed wire body must decode to valid JSON identical to the plaintext
-	// upstreamBody returned for logging.
-	decoded := zstdDecodeAll(t, wireBody)
-	if !gjson.ValidBytes(decoded) {
-		t.Fatalf("decoded wire body is not valid JSON: %s", decoded)
+	if !bytes.Equal(wireBody, upstreamBody) {
+		t.Fatalf("wire body != plaintext upstreamBody:\n wire=%s\n upstream=%s", wireBody, upstreamBody)
 	}
-	if !bytes.Equal(decoded, upstreamBody) {
-		t.Fatalf("decoded wire body != plaintext upstreamBody:\n decoded=%s\n upstream=%s", decoded, upstreamBody)
-	}
-	if got := gjson.GetBytes(decoded, "model").String(); got != "gpt-5-codex" {
-		t.Fatalf("decoded model = %q, want gpt-5-codex", got)
+	if got := gjson.GetBytes(wireBody, "model").String(); got != "gpt-5-codex" {
+		t.Fatalf("wire body model = %q, want gpt-5-codex", got)
 	}
 }
 
@@ -201,14 +201,13 @@ func TestCacheHelper_NilAuthBodyPlaintext(t *testing.T) {
 	}
 }
 
-// TestCacheHelper_OAuthWireBodyReachesServerAsZstd is the end-to-end wire check:
+// TestCacheHelper_OAuthWireBodyReachesServerAsPlaintext is the end-to-end wire check:
 // it drives the real cacheHelper output through a real http.Client.Do over a real
-// TCP connection to a local server, then asserts the SERVER received a zstd body
-// advertised via content-encoding: zstd that decodes back to the plaintext. This
-// proves the transport puts the compressed body on the socket verbatim (the
-// segment the pure unit tests can't reach) — stronger evidence than sniffing an
-// encrypted capture of the chatgpt.com connection, which would only show ciphertext.
-func TestCacheHelper_OAuthWireBodyReachesServerAsZstd(t *testing.T) {
+// TCP connection to a local server, then asserts the SERVER received a PLAIN body
+// with no content-encoding — matching what the real codex 0.144.x client sends
+// (captured this session over HTTP and HTTPS). This proves the transport puts the
+// plaintext body on the socket verbatim (the segment the pure unit tests can't reach).
+func TestCacheHelper_OAuthWireBodyReachesServerAsPlaintext(t *testing.T) {
 	var (
 		gotEncoding string
 		gotBody     []byte
@@ -224,7 +223,7 @@ func TestCacheHelper_OAuthWireBodyReachesServerAsZstd(t *testing.T) {
 
 	executor := &CodexExecutor{}
 	ctx := context.Background()
-	rawJSON := []byte(`{"model":"gpt-5-codex","stream":false,"input":[{"role":"user","content":"end to end zstd wire check"}]}`)
+	rawJSON := []byte(`{"model":"gpt-5-codex","stream":false,"input":[{"role":"user","content":"end to end plaintext wire check"}]}`)
 	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"model":"gpt-5-codex"}`)}
 
 	httpReq, upstreamBody, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), srv.URL+"/responses", oauthCodexAuth(), req, req.Payload, rawJSON)
@@ -238,17 +237,16 @@ func TestCacheHelper_OAuthWireBodyReachesServerAsZstd(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	if gotEncoding != "zstd" {
-		t.Fatalf("server saw Content-Encoding = %q, want zstd", gotEncoding)
+	if gotEncoding != "" {
+		t.Fatalf("server saw Content-Encoding = %q, want empty (real 0.144.x sends plaintext)", gotEncoding)
 	}
-	if !bytes.HasPrefix(gotBody, zstdMagic) {
-		t.Fatalf("server received non-zstd body: % x", gotBody[:min(4, len(gotBody))])
+	if bytes.HasPrefix(gotBody, zstdMagic) {
+		t.Fatalf("server received zstd body, want plaintext: % x", gotBody[:min(4, len(gotBody))])
 	}
-	decoded := zstdDecodeAll(t, gotBody)
-	if !bytes.Equal(decoded, upstreamBody) {
-		t.Fatalf("server body decoded != plaintext upstreamBody:\n decoded=%s\n upstream=%s", decoded, upstreamBody)
+	if !bytes.Equal(gotBody, upstreamBody) {
+		t.Fatalf("server body != plaintext upstreamBody:\n server=%s\n upstream=%s", gotBody, upstreamBody)
 	}
-	if got := gjson.GetBytes(decoded, "model").String(); got != "gpt-5-codex" {
-		t.Fatalf("server decoded model = %q, want gpt-5-codex", got)
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-5-codex" {
+		t.Fatalf("server body model = %q, want gpt-5-codex", got)
 	}
 }

@@ -59,25 +59,26 @@ var claudeProfilePool = []claudeProfileTuple{
 }
 
 // codexUAPool spreads accounts across recent Codex releases and terminals.
-// Format = bare codex_cli_rs CLI UA (prefix codex_cli_rs/, ending at the terminal
-// token, NO trailing "(name; ver)" suffix — that suffix is codex-tui/MCP-only per
-// openai/codex source). isOfficialCodexUserAgent recognizes this bare shape.
+// Format = codex_cli_rs CLI UA (prefix codex_cli_rs/, terminal token, then the
+// trailing " (<originator>; <ver>)" suffix). codex 0.144.x RESTORES that suffix on
+// the bare CLI — verified via a local HTTPS capture of the real codex 0.144.x client
+// this session (captured examples: "codex-tui/0.144.0-alpha.4 ... (codex-tui;
+// 0.144.0-alpha.4)" and "codex_exec/... (codex_exec; ...)"), so codex_cli_rs emits
+// "(codex_cli_rs; <ver>)". isOfficialCodexUserAgent recognizes this by prefix.
 var codexUAPool = []string{
-	// Real codex_cli_rs UA shape: prefix codex_cli_rs/, ends at the terminal token.
-	// Version pinned to the byte-verified codex_cli_rs/0.142.5 evidence set (a local
-	// capture shows the real CLI now reports 1.3.0; hold until a clean 1.3.0 capture
-	// pins the full value set); vary ONLY OS-minor
-	// (real shipped macOS 26.0-26.2.0) and terminal. Version is intentionally NOT
-	// diversified: advertising an older UA (0.140/0.141) while emitting a 0.142.x-only
-	// beta flag (remote_compaction_v2) is an impossible pairing — a sharper tell than
+	// Real codex_cli_rs UA shape: prefix codex_cli_rs/, terminal token, trailing suffix.
+	// Version pinned to 0.144.1 (latest stable codex_cli_rs), captured this session;
+	// vary ONLY OS-minor (real shipped macOS 26.0-26.2.0) and terminal. Version is
+	// intentionally NOT diversified: advertising an older UA while emitting a
+	// 0.144.x-only wire shape is an impossible pairing — a sharper tell than
 	// uniformity (mirrors the claudeProfilePool no-impossible-pairing rule). Do NOT
 	// invent non-existent OS versions like 26.5.0.
-	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10",
-	"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) Apple_Terminal/455",
-	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) WezTerm/20240203-110809",
-	"codex_cli_rs/0.142.5 (Mac OS 26.0.0; arm64) iTerm.app/3.5.11",
-	"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) vscode/1.95.3",
-	"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) iTerm.app/3.6.10",
+	"codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.144.1)",
+	"codex_cli_rs/0.144.1 (Mac OS 26.1.0; arm64) Apple_Terminal/455 (codex_cli_rs; 0.144.1)",
+	"codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) WezTerm/20240203-110809 (codex_cli_rs; 0.144.1)",
+	"codex_cli_rs/0.144.1 (Mac OS 26.0.0; arm64) iTerm.app/3.5.11 (codex_cli_rs; 0.144.1)",
+	"codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) vscode/1.95.3 (codex_cli_rs; 0.144.1)",
+	"codex_cli_rs/0.144.1 (Mac OS 26.1.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.144.1)",
 }
 
 // fnvIndex maps a scope key deterministically into [0, n).

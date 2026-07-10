@@ -43,13 +43,14 @@ func codexAuthIsAPIKey(auth *cliproxyauth.Auth) bool {
 }
 
 // codexShouldZstdBody reports whether the outbound codex request body should be
-// zstd-compressed to match the real CLI. Only genuine OAuth (ChatGPT-backend)
-// requests are compressed; API-key requests stay plaintext. A nil auth is NOT a
-// real OAuth session (it carries no token/account) — it only appears in tests or
-// as an anomaly — so it stays plaintext too: never fake a real-client body
-// encoding for a request with no authenticated identity.
+// zstd-compressed. It now always returns false: a local capture of the real codex
+// 0.144.x client this session shows it sends a PLAIN request body (no zstd, no
+// content-encoding) over BOTH HTTP and HTTPS. The 0.142.5-era zstd compression is
+// therefore a fingerprint tell against a genuine 0.144 client — the body
+// entropy/size AND the content-encoding header would all mismatch — so it is
+// disabled. The signature is kept so the codex_executor.go call site still compiles.
 func codexShouldZstdBody(auth *cliproxyauth.Auth) bool {
-	return auth != nil && !codexAuthIsAPIKey(auth)
+	return false
 }
 
 // codexZstdCompress returns the zstd-encoded form of src and true, or (nil, false)
