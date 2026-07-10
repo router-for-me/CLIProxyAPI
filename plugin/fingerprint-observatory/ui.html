@@ -144,11 +144,11 @@ const KEYNAME='fp_observe_key';
 let fProv='all',fStat='all',STATE=[],SRC='demo';
 
 const DEMO=[
- {account:"acct-1a2b3c4d",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1284},
- {account:"acct-5e6f7a80",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.1.0; arm64) Apple_Terminal/455",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:963},
- {account:"acct-9b0c1d2e",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) WezTerm/20240203-110809",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1531},
- {account:"acct-3f4a5b6c",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.0.0; arm64) iTerm.app/3.5.11",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:640},
- {account:"acct-7d8e9f01",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.142.5 (Mac OS 26.2.0; arm64) vscode/1.95.3",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1120},
+ {account:"acct-1a2b3c4d",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) iTerm.app/3.6.10 (codex_cli_rs; 0.144.1)",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1284},
+ {account:"acct-5e6f7a80",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.144.1 (Mac OS 26.1.0; arm64) Apple_Terminal/455 (codex_cli_rs; 0.144.1)",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:963},
+ {account:"acct-9b0c1d2e",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) WezTerm/20240203-110809 (codex_cli_rs; 0.144.1)",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1531},
+ {account:"acct-3f4a5b6c",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.144.1 (Mac OS 26.0.0; arm64) iTerm.app/3.5.11 (codex_cli_rs; 0.144.1)",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:640},
+ {account:"acct-7d8e9f01",provider:"codex",host:"chatgpt.com",tls_profile:"chrome-h2",user_agent:"codex_cli_rs/0.144.1 (Mac OS 26.2.0; arm64) vscode/1.95.3 (codex_cli_rs; 0.144.1)",originator:"codex_cli_rs",session_hdr:"session-id",account_id:"present",accept_enc:"",last_seen_unix:0,count:1120},
  {account:"acct-a1b2c3d4",provider:"claude",host:"api.anthropic.com",tls_profile:"node-h1",user_agent:"claude-cli/2.1.153",accept_enc:"gzip, deflate, br, zstd",stainless_pkg:"0.94.0",stainless_os:"MacOS",arch:"arm64",stainless_rt:"v24.3.0",last_seen_unix:0,count:2210},
  {account:"acct-b5c6d7e8",provider:"claude",host:"api.anthropic.com",tls_profile:"node-h1",user_agent:"claude-cli/2.1.153",accept_enc:"gzip, deflate, br, zstd",stainless_pkg:"0.94.0",stainless_os:"Windows",arch:"x64",stainless_rt:"v24.3.0",last_seen_unix:0,count:1876},
  {account:"acct-f0e1d2c3",provider:"antigravity",host:"api.antigravity.google",tls_profile:"stdlib",user_agent:"antigravity (default reqwest)",accept_enc:"gzip, br",last_seen_unix:0,count:305},
@@ -162,6 +162,9 @@ const DEMO=[
 function relTime(u){if(!u)return'—';const s=Math.max(0,Math.floor(Date.now()/1000-u));if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';return Math.floor(s/3600)+'h ago';}
 var FIRST_PARTY=['codex_cli_rs','codex-tui','codex_exec','codex_vscode'];
 function uaPrefixOf(ua){return (ua||'').split('/')[0];}
+function codexVer(ua){const m=/codex[a-z_-]*\/([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9a-z.]+)?)/i.exec(ua||'');return m?m[1]:'';}
+function codexSuffix(ua){const m=/\(([a-z][a-z0-9_-]*);\s*([0-9][0-9a-z.\-]*)\)\s*$/i.exec(ua||'');return m?{orig:m[1],ver:m[2]}:null;}
+function pinnedVer(){const c={};STATE.filter(a=>a.provider==='codex').forEach(a=>{const v=codexVer(a.user_agent);if(v)c[v]=(c[v]||0)+1;});const ks=Object.keys(c).sort((a,b)=>c[b]-c[a]);return ks[0]||'0.144.1';}
 function statusOf(r){
   if(r.provider==='codex'){
     if(r.originator&&FIRST_PARTY.indexOf(r.originator)<0)return'crit';
@@ -189,7 +192,7 @@ function renderSummary(){
   if(critAccts.length)$('#advText').innerHTML=`<b>跨层身份矛盾 · ${critAccts.length} 账号</b> — originator 与 UA 前缀不一致,或非一方客户端(<code>codex_cli_rs / codex-tui / codex_exec / codex_vscode</code> 之外,如 <code>Codex Desktop</code>),下游客户端标识与 UA 冲突,易被服务端聚类识别。魔改核心已收紧 originator 归一化,重启后该账号下一次请求即自动恢复一致。`;
 }
 function card(r){
-  const st=statusOf(r);const ua=(r.user_agent||'—').replace(/(0\.142\.5|2\.1\.153)/,'<span class="v">$1</span>');
+  const st=statusOf(r);const ua=(r.user_agent||'—').replace(/(codex[a-z_-]*\/|claude-cli\/)([0-9][0-9a-z.\-]*)/,'$1<span class="v">$2</span>');
   const kv=r.provider==='codex'?`<dt>originator</dt><dd class="hi">${r.originator||'—'}</dd><dt>session 头</dt><dd>${r.session_hdr==='session_id'?chip('session_id','warn'):r.session_hdr?chip(r.session_hdr):'<span class="tag dim">—</span>'}</dd><dt>account-id</dt><dd>${chip(r.account_id||'—')}</dd><dt>accept-enc</dt><dd>${r.accept_enc?chip(r.accept_enc):'<span class="tag dim">(空·符合真实codex)</span>'}</dd>`
     :r.provider==='claude'?`<dt>x-app</dt><dd class="hi">cli</dd><dt>stainless</dt><dd class="hi">${r.stainless_pkg||'?'} · ${r.stainless_os||'?'} ${r.arch||''}</dd><dt>runtime</dt><dd>${r.stainless_rt||'—'}</dd><dt>accept-enc</dt><dd>${chip(r.accept_enc||'—')}</dd>`
     :`<dt>类型</dt><dd class="hi">Go/reqwest 原生</dd><dt>accept-enc</dt><dd>${chip(r.accept_enc||'—')}</dd>`;
@@ -203,7 +206,10 @@ function render(){
 function renderDist(){
   const cod=STATE.filter(a=>a.provider==='codex');const term=k=>cod.filter(a=>(a.user_agent||'').includes(k)).length;const osv=k=>cod.filter(a=>(a.user_agent||'').includes('Mac OS '+k)).length;
   const blk=(t,n,ps,pin)=>{const mx=Math.max(1,...ps.map(p=>p[1]));return `<div class="dpanel"><h3>${t}</h3><p class="note">${n}</p>${ps.map(([l,v])=>`<div class="bar"><span class="lab ${l===pin?'pinned':''}">${l}</span><span class="track"><span class="fill" style="width:${Math.round(v/mx*100)}%"></span></span><span class="n">${v}</span></div>`).join('')}</div>`};
-  $('#dist').innerHTML=[blk('CLI 版本','刻意锁定单版本(反破绽)',[['0.142.5',cod.length],['0.140 / 0.141',0]],'0.142.5'),
+  const vc={};cod.forEach(a=>{const v=codexVer(a.user_agent);if(v)vc[v]=(vc[v]||0)+1;});
+  const vers=Object.keys(vc).sort((a,b)=>vc[b]-vc[a]);const pin=vers[0]||'0.144.1';
+  const verBars=vers.length?vers.map(v=>[v,vc[v]]):[['0.144.1',0]];
+  $('#dist').innerHTML=[blk('CLI 版本','锁定单版本(反破绽)· 出现第二行=有账号版本离群,需校准',verBars,pin),
     blk('macOS minor','散在真实发行区间',[['26.2.0',osv('26.2.0')],['26.1.0',osv('26.1.0')],['26.0.0',osv('26.0.0')]]),
     blk('终端','铺开避免同签名',[['iTerm.app',term('iTerm')],['Apple_Terminal',term('Apple_Terminal')],['WezTerm',term('WezTerm')],['vscode',term('vscode')]])].join('');
 }
@@ -211,10 +217,12 @@ function checks(r){const o=[];
   if(r.provider==='codex'){
     const uaPref=uaPrefixOf(r.user_agent);const origVal=r.originator||'';const consistent=FIRST_PARTY.indexOf(uaPref)>=0&&FIRST_PARTY.indexOf(origVal)>=0&&uaPref===origVal;
     o.push([consistent?'pass':'fail',consistent?'✓':'✗',consistent?`originator <b>${origVal}</b> 与 UA 前缀 <b>${uaPref}</b> 一致(一方客户端)`:`originator <b>${origVal||'—'}</b> 与 UA 前缀 <b>${uaPref||'—'}</b> <b>不一致或非一方客户端</b> —— 跨层身份矛盾,易被检测`]);
-    o.push([r.session_hdr==='session-id'?'pass':'warn',r.session_hdr==='session-id'?'✓':'!',`session 头为 <b>${r.session_hdr||'—'}</b>(实机 0.142.5 = 连字符)`]);
+    o.push([r.session_hdr==='session-id'?'pass':'warn',r.session_hdr==='session-id'?'✓':'!',`session 头为 <b>${r.session_hdr||'—'}</b>(实机 ${codexVer(r.user_agent)||'0.144.x'} = 连字符)`]);
     o.push([r.accept_enc?'warn':'pass',r.accept_enc?'!':'✓',`accept-encoding <b>${r.accept_enc||'为空'}</b> —— 真实 codex 不发`]);
     o.push(['pass','✓',`TLS profile <b>${r.tls_profile}</b> 与 chatgpt.com 路径匹配`]);
-    o.push(['pass','✓',`CLI 版本 <b>0.142.5</b> —— 刻意锁定的真实版本(homebrew codex 当前版),反同签名聚类`]);}
+    o.push(['pass','✓',`CLI 版本 <b>${codexVer(r.user_agent)||'0.144.1'}</b> —— 刻意锁定的真实版本(codex_cli_rs 当前稳定版),反同签名聚类`]);
+    const sfx=codexSuffix(r.user_agent);const sfxOk=sfx&&sfx.orig===uaPref&&sfx.ver===codexVer(r.user_agent);
+    o.push([sfx?(sfxOk?'pass':'warn'):'warn',sfx?(sfxOk?'✓':'!'):'!',sfx?`UA 尾缀 <b>(${sfx.orig}; ${sfx.ver})</b> 与前缀 originator/版本 ${sfxOk?'一致':'<b>不一致</b>'} —— 0.144.x 真实形状`:`UA 缺尾缀 <b>(codex_cli_rs; 版本)</b> —— 0.144.x 应带`]);}
   else if(r.provider==='claude'){o.push(['pass','✓',`UA <b>${r.user_agent}</b> 与 pkg <b>${r.stainless_pkg||'?'}</b> 组自洽`]);
     o.push([r.tls_profile==='node-h1'?'pass':'warn',r.tls_profile==='node-h1'?'✓':'!',`TLS profile <b>${r.tls_profile}</b>(node-h1=JA3 44f88fca…)与 UA 声称 Node 一致`]);
     o.push(['pass','✓',`accept-encoding <b>${r.accept_enc}</b> —— 实测 claude-cli 2.1.153 默认值`]);
