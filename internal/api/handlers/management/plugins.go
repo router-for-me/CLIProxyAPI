@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/plugini18n"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
@@ -57,6 +58,7 @@ type pluginConfigFieldInfo struct {
 
 type pluginMenuInfo struct {
 	Path        string `json:"path"`
+	LaunchURL   string `json:"launch_url,omitempty"`
 	Menu        string `json:"menu"`
 	Description string `json:"description"`
 }
@@ -70,6 +72,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		})
 		return
 	}
+	locales := plugini18n.PreferredLocales(c.Request.Header, c.Request.URL.Query())
 
 	h.mu.Lock()
 	pluginsEnabled := h.cfg.Plugins.Enabled
@@ -117,9 +120,9 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.SupportsOAuth = info.SupportsOAuth
 			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
 			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
-			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
-			entry.Menus = pluginMenus(info.Menus)
-			entry.Metadata = pluginMetadata(info.Metadata)
+			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields, locales...)
+			entry.Menus = pluginMenus(info.Menus, locales...)
+			entry.Metadata = pluginMetadata(info.Metadata, locales...)
 			entries[info.ID] = entry
 		}
 	}
@@ -442,39 +445,71 @@ func pluginFilePath(pluginsDir string, id string, desiredVersions ...map[string]
 	return "", nil
 }
 
-func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo {
+func pluginConfigFields(fields []pluginapi.ConfigField, locales ...string) []pluginConfigFieldInfo {
 	out := make([]pluginConfigFieldInfo, 0, len(fields))
 	for _, field := range fields {
+		description := field.Description
+		if localized, ok := plugini18n.Lookup(field.Locales, locales...); ok && strings.TrimSpace(localized.Description) != "" {
+			description = localized.Description
+		}
 		out = append(out, pluginConfigFieldInfo{
 			Name:        htmlsanitize.String(field.Name),
 			Type:        htmlsanitize.String(string(field.Type)),
 			EnumValues:  htmlsanitize.Strings(field.EnumValues),
-			Description: htmlsanitize.String(field.Description),
+			Description: htmlsanitize.String(description),
 		})
 	}
 	return out
 }
 
-func pluginMenus(menus []pluginhost.RegisteredPluginMenu) []pluginMenuInfo {
+func pluginMenus(menus []pluginhost.RegisteredPluginMenu, locales ...string) []pluginMenuInfo {
 	out := make([]pluginMenuInfo, 0, len(menus))
 	for _, menu := range menus {
+		label := menu.Menu
+		description := menu.Description
+		launchLocale := ""
+		if len(locales) > 0 {
+			launchLocale = locales[0]
+		}
+		if localized, matchedLocale, ok := plugini18n.LookupMatch(menu.Locales, locales...); ok {
+			if strings.TrimSpace(matchedLocale) != "" {
+				launchLocale = matchedLocale
+			}
+			if strings.TrimSpace(localized.Menu) != "" {
+				label = localized.Menu
+			}
+			if strings.TrimSpace(localized.Description) != "" {
+				description = localized.Description
+			}
+		}
 		out = append(out, pluginMenuInfo{
 			Path:        htmlsanitize.String(menu.Path),
-			Menu:        htmlsanitize.String(menu.Menu),
-			Description: htmlsanitize.String(menu.Description),
+			LaunchURL:   plugini18n.AppendLocale(menu.Path, launchLocale),
+			Menu:        htmlsanitize.String(label),
+			Description: htmlsanitize.String(description),
 		})
 	}
 	return out
 }
 
-func pluginMetadata(meta pluginapi.Metadata) *pluginMetadataInfo {
+func pluginMetadata(meta pluginapi.Metadata, locales ...string) *pluginMetadataInfo {
+	name := meta.Name
+	author := meta.Author
+	if localized, ok := plugini18n.Lookup(meta.Locales, locales...); ok {
+		if strings.TrimSpace(localized.Name) != "" {
+			name = localized.Name
+		}
+		if strings.TrimSpace(localized.Author) != "" {
+			author = localized.Author
+		}
+	}
 	return &pluginMetadataInfo{
-		Name:             htmlsanitize.String(meta.Name),
+		Name:             htmlsanitize.String(name),
 		Version:          htmlsanitize.String(meta.Version),
-		Author:           htmlsanitize.String(meta.Author),
+		Author:           htmlsanitize.String(author),
 		GitHubRepository: htmlsanitize.String(meta.GitHubRepository),
 		Logo:             htmlsanitize.String(meta.Logo),
-		ConfigFields:     pluginConfigFields(meta.ConfigFields),
+		ConfigFields:     pluginConfigFields(meta.ConfigFields, locales...),
 	}
 }
 

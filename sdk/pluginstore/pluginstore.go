@@ -34,6 +34,7 @@ const (
 type Source = internalpluginstore.Source
 type Registry = internalpluginstore.Registry
 type Plugin = internalpluginstore.Plugin
+type PluginLocale = internalpluginstore.PluginLocale
 type Version = internalpluginstore.Version
 type Release = internalpluginstore.Release
 type ReleaseAsset = internalpluginstore.ReleaseAsset

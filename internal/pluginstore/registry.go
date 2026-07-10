@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -37,24 +38,34 @@ type Registry struct {
 }
 
 type Plugin struct {
-	ID           string      `json:"id"`
-	Name         string      `json:"name"`
-	Description  string      `json:"description"`
-	Author       string      `json:"author"`
-	Version      string      `json:"version"`
-	Versions     []Version   `json:"versions,omitempty"`
-	Repository   string      `json:"repository,omitempty"`
-	Logo         string      `json:"logo,omitempty"`
-	Homepage     string      `json:"homepage,omitempty"`
-	License      string      `json:"license,omitempty"`
-	Tags         []string    `json:"tags,omitempty"`
-	Install      InstallPlan `json:"install,omitempty"`
-	AuthRequired bool        `json:"auth_required,omitempty"`
+	ID           string                  `json:"id"`
+	Name         string                  `json:"name"`
+	Description  string                  `json:"description"`
+	Author       string                  `json:"author"`
+	Version      string                  `json:"version"`
+	Versions     []Version               `json:"versions,omitempty"`
+	Repository   string                  `json:"repository,omitempty"`
+	Logo         string                  `json:"logo,omitempty"`
+	Homepage     string                  `json:"homepage,omitempty"`
+	License      string                  `json:"license,omitempty"`
+	Tags         []string                `json:"tags,omitempty"`
+	Install      InstallPlan             `json:"install,omitempty"`
+	AuthRequired bool                    `json:"auth_required,omitempty"`
+	Locales      map[string]PluginLocale `json:"locales,omitempty"`
 }
 
 type Version struct {
 	Version string      `json:"version"`
 	Install InstallPlan `json:"install,omitempty"`
+}
+
+type PluginLocale struct {
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Author      string   `json:"author,omitempty"`
+	Homepage    string   `json:"homepage,omitempty"`
+	License     string   `json:"license,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
 }
 
 type InstallPlan struct {
@@ -152,6 +163,7 @@ func normalizeRegistry(registry *Registry) {
 		plugin.Homepage = strings.TrimSpace(plugin.Homepage)
 		plugin.License = strings.TrimSpace(plugin.License)
 		plugin.Install = NormalizeInstallPlan(plugin.Install)
+		plugin.Locales = normalizePluginLocales(plugin.Locales)
 		for versionIndex := range plugin.Versions {
 			version := &plugin.Versions[versionIndex]
 			version.Version = normalizeVersion(version.Version)
@@ -161,6 +173,121 @@ func normalizeRegistry(registry *Registry) {
 			plugin.Tags[tagIndex] = strings.TrimSpace(plugin.Tags[tagIndex])
 		}
 	}
+}
+
+func normalizePluginLocales(locales map[string]PluginLocale) map[string]PluginLocale {
+	if len(locales) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(locales))
+	for locale := range locales {
+		keys = append(keys, locale)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left := normalizePluginLocaleKey(keys[i])
+		right := normalizePluginLocaleKey(keys[j])
+		if left == right {
+			leftScore := canonicalPluginLocaleScore(keys[i])
+			rightScore := canonicalPluginLocaleScore(keys[j])
+			if leftScore != rightScore {
+				return leftScore < rightScore
+			}
+			leftRaw := normalizedPluginLocaleRawKey(keys[i])
+			rightRaw := normalizedPluginLocaleRawKey(keys[j])
+			if leftRaw == rightRaw {
+				return keys[i] < keys[j]
+			}
+			return leftRaw < rightRaw
+		}
+		return left < right
+	})
+	out := make(map[string]PluginLocale, len(locales))
+	for _, rawLocale := range keys {
+		locale := normalizePluginLocaleKey(rawLocale)
+		if locale == "" {
+			continue
+		}
+		if _, exists := out[locale]; exists {
+			continue
+		}
+		value := locales[rawLocale]
+		value.Name = strings.TrimSpace(value.Name)
+		value.Description = strings.TrimSpace(value.Description)
+		value.Author = strings.TrimSpace(value.Author)
+		value.Homepage = strings.TrimSpace(value.Homepage)
+		value.License = strings.TrimSpace(value.License)
+		if len(value.Tags) > 0 {
+			tags := make([]string, len(value.Tags))
+			for index, tag := range value.Tags {
+				tags[index] = strings.TrimSpace(tag)
+			}
+			value.Tags = tags
+		}
+		out[locale] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func canonicalPluginLocaleScore(locale string) int {
+	raw := normalizedPluginLocaleRawKey(locale)
+	if raw == "" {
+		return 1 << 30
+	}
+	score := 0
+	for index, part := range strings.Split(raw, "-") {
+		if part == "" {
+			score += 8
+			continue
+		}
+		switch {
+		case index == 0:
+			if part != strings.ToLower(part) {
+				score += 4
+			}
+		case (len(part) == 2 || len(part) == 3) && isASCIIAlpha(part):
+			if part != strings.ToUpper(part) {
+				score += 3
+			}
+		case len(part) == 4 && isASCIIAlpha(part):
+			want := strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+			if part != want {
+				score += 3
+			}
+		default:
+			if part != strings.ToLower(part) {
+				score++
+			}
+		}
+	}
+	return score
+}
+
+func isASCIIAlpha(value string) bool {
+	for _, ch := range value {
+		if (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func normalizePluginLocaleKey(locale string) string {
+	return strings.ToLower(normalizedPluginLocaleRawKey(locale))
+}
+
+func normalizedPluginLocaleRawKey(locale string) string {
+	locale = strings.TrimSpace(locale)
+	if locale == "" {
+		return ""
+	}
+	locale = strings.ReplaceAll(locale, "_", "-")
+	if strings.ContainsAny(locale, " \t\r\n") {
+		return ""
+	}
+	return locale
 }
 
 func ValidateRegistry(registry Registry) error {

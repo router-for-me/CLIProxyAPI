@@ -68,6 +68,149 @@ func TestParseRegistryNormalizesPluginFields(t *testing.T) {
 	}
 }
 
+func TestParseRegistryNormalizesPluginLocales(t *testing.T) {
+	t.Parallel()
+
+	registry, errParse := ParseRegistry([]byte(`{
+		"schema_version": 1,
+		"plugins": [{
+			"id": "sample-provider",
+			"name": "Sample Provider",
+			"description": "Adds sample provider support.",
+			"author": "author-name",
+			"repository": "https://github.com/author-name/cliproxy-sample-provider-plugin",
+			"locales": {
+				" zh-CN ": {
+					"name": " 示例插件 ",
+					"description": " 增加示例提供商支持。 ",
+					"author": " 作者 ",
+					"tags": [" 工具 "]
+				}
+			}
+		}]
+	}`))
+	if errParse != nil {
+		t.Fatalf("ParseRegistry() error = %v", errParse)
+	}
+	plugin, ok := registry.PluginByID("sample-provider")
+	if !ok {
+		t.Fatal("PluginByID(sample-provider) missing")
+	}
+	localized, ok := plugin.Locales["zh-cn"]
+	if !ok {
+		t.Fatalf("plugin locales = %#v, want zh-cn", plugin.Locales)
+	}
+	if localized.Name != "示例插件" || localized.Description != "增加示例提供商支持。" || localized.Author != "作者" || localized.Tags[0] != "工具" {
+		t.Fatalf("localized plugin = %#v, want trimmed locale fields", localized)
+	}
+}
+
+func TestParseRegistryNormalizesDuplicatePluginLocaleKeysDeterministically(t *testing.T) {
+	t.Parallel()
+
+	registry, errParse := ParseRegistry([]byte(`{
+		"schema_version": 1,
+		"plugins": [{
+			"id": "sample-provider",
+			"name": "Sample Provider",
+			"description": "Adds sample provider support.",
+			"author": "author-name",
+			"repository": "https://github.com/author-name/cliproxy-sample-provider-plugin",
+			"locales": {
+				"ZH-cn": {"name": "uppercase"},
+				"zh-cn": {"name": "lower"},
+				"zh-CN": {"name": "canonical"}
+			}
+		}]
+	}`))
+	if errParse != nil {
+		t.Fatalf("ParseRegistry() error = %v", errParse)
+	}
+	plugin, ok := registry.PluginByID("sample-provider")
+	if !ok {
+		t.Fatal("PluginByID(sample-provider) missing")
+	}
+	if len(plugin.Locales) != 1 || plugin.Locales["zh-cn"].Name != "canonical" {
+		t.Fatalf("plugin locales = %#v, want deterministic canonical value", plugin.Locales)
+	}
+}
+
+func TestParseRegistryCanonicalPluginLocaleScoreSubtags(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		locales   string
+		localeKey string
+		wantName  string
+	}{
+		{
+			name:      "numeric region",
+			locales:   `"en-419": {"name": "latin america"}, "en_419": {"name": "underscore"}`,
+			localeKey: "en-419",
+			wantName:  "latin america",
+		},
+		{
+			name:      "script subtag",
+			locales:   `"zh-Hant": {"name": "traditional"}, "zh-hant": {"name": "lower script"}`,
+			localeKey: "zh-hant",
+			wantName:  "traditional",
+		},
+		{
+			name:      "alpha three region",
+			locales:   `"en-USA": {"name": "upper region"}, "en-usa": {"name": "lower region"}`,
+			localeKey: "en-usa",
+			wantName:  "upper region",
+		},
+		{
+			name:      "variant subtag",
+			locales:   `"sl-rozaj": {"name": "lower variant"}, "sl-ROZAJ": {"name": "upper variant"}`,
+			localeKey: "sl-rozaj",
+			wantName:  "lower variant",
+		},
+		{
+			name:      "private subtag",
+			locales:   `"en-x-private": {"name": "lower private"}, "en-X-private": {"name": "upper private"}`,
+			localeKey: "en-x-private",
+			wantName:  "lower private",
+		},
+		{
+			name:      "dash beats underscore",
+			locales:   `"zh-CN": {"name": "dash"}, "zh_CN": {"name": "underscore"}`,
+			localeKey: "zh-cn",
+			wantName:  "dash",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			registry, errParse := ParseRegistry([]byte(`{
+				"schema_version": 1,
+				"plugins": [{
+					"id": "sample-provider",
+					"name": "Sample Provider",
+					"description": "Adds sample provider support.",
+					"author": "author-name",
+					"repository": "https://github.com/author-name/cliproxy-sample-provider-plugin",
+					"locales": {` + tt.locales + `}
+				}]
+			}`))
+			if errParse != nil {
+				t.Fatalf("ParseRegistry() error = %v", errParse)
+			}
+			plugin, ok := registry.PluginByID("sample-provider")
+			if !ok {
+				t.Fatal("PluginByID(sample-provider) missing")
+			}
+			if len(plugin.Locales) != 1 || plugin.Locales[tt.localeKey].Name != tt.wantName {
+				t.Fatalf("plugin locales = %#v, want %s => %q", plugin.Locales, tt.localeKey, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestValidateRegistryAllowsMissingVersion(t *testing.T) {
 	t.Parallel()
 
