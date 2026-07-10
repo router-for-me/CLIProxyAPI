@@ -315,6 +315,10 @@ nonstream-keepalive-interval: 0
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
+#     extra-body: # optional: provider-specific fields merged into the upstream request body after translation
+#       tags: # example: Nous Portal requires a tags array (undocumented)
+#         - "product=hermes-agent"
+#         - "user={{api_key}}" # {{api_key}} is replaced with the resolved API key at runtime
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override

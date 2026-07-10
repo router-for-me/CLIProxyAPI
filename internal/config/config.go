@@ -631,6 +631,10 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// ExtraBody is merged into the upstream request body after translation.
+	// Use for provider-specific fields not part of the OpenAI API spec.
+	ExtraBody map[string]any `yaml:"extra-body,omitempty" json:"extra-body,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

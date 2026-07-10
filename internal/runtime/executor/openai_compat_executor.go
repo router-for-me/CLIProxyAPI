@@ -130,6 +130,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
+	translated = e.injectExtraBody(translated, auth)
+
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -328,6 +330,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+
+	translated = e.injectExtraBody(translated, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -741,6 +745,27 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	return
+}
+
+// injectExtraBody merges provider-specific fields from the extra_body config
+// into the upstream request payload after translation. String values support
+// the {{api_key}} placeholder, replaced with the resolved API key at runtime.
+func (e *OpenAICompatExecutor) injectExtraBody(payload []byte, auth *cliproxyauth.Auth) []byte {
+	if len(payload) == 0 || auth == nil {
+		return payload
+	}
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil || len(compat.ExtraBody) == 0 {
+		return payload
+	}
+	_, apiKey := e.resolveCredentials(auth)
+	for key, value := range compat.ExtraBody {
+		if s, ok := value.(string); ok && strings.Contains(s, "{{api_key}}") {
+			value = strings.ReplaceAll(s, "{{api_key}}", apiKey)
+		}
+		payload, _ = sjson.SetBytes(payload, key, value)
+	}
+	return payload
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
