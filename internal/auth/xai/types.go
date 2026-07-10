@@ -4,8 +4,12 @@ package xai
 import "time"
 
 const (
-	// DefaultAPIBaseURL is the default xAI Responses API base URL.
+	// DefaultAPIBaseURL is the default official xAI API base URL.
+	// Used for OAuth credential defaults, websocket, and media (image/video).
+	// Non-media HTTP chat is rewritten to CLIChatProxyBaseURL by the executor.
 	DefaultAPIBaseURL = "https://api.x.ai/v1"
+	// CLIChatProxyBaseURL is the Grok CLI chat-proxy base URL for non-image/video HTTP chat.
+	CLIChatProxyBaseURL = "https://cli-chat-proxy.grok.com/v1"
 	// Issuer is xAI's OAuth issuer.
 	Issuer = "https://auth.x.ai"
 	// DiscoveryURL is the OIDC discovery endpoint used to resolve OAuth endpoints.
@@ -14,12 +18,14 @@ const (
 	ClientID = "b1a00492-073a-47ea-816f-4c329264a828"
 	// Scope is the OAuth scope set required for xAI API access.
 	Scope = "openid profile email offline_access grok-cli:access api:access"
-	// RedirectHost is the loopback host used by xAI OAuth.
-	RedirectHost = "127.0.0.1"
-	// CallbackPort is the preferred loopback callback port.
-	CallbackPort = 56121
-	// RedirectPath is the loopback callback path registered by the xAI client.
-	RedirectPath = "/callback"
+	// DeviceCodeGrantType is the OAuth2 device authorization grant type (RFC 8628).
+	DeviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+	// defaultPollInterval is used when the device endpoint omits interval.
+	defaultPollInterval = 5 * time.Second
+	// httpClientTimeout bounds credential-acquisition HTTP calls (device/token/refresh).
+	httpClientTimeout = 30 * time.Second
+	// MaxPollDuration is the upper bound for waiting on user authorization.
+	MaxPollDuration = 30 * time.Minute
 )
 
 var refreshLead = 5 * time.Minute
@@ -29,25 +35,21 @@ func RefreshLead() time.Duration {
 	return refreshLead
 }
 
-// PKCECodes holds the PKCE verifier/challenge pair.
-type PKCECodes struct {
-	CodeVerifier  string
-	CodeChallenge string
-}
-
-// AuthorizeURLParams contains the values used to build the xAI OAuth URL.
-type AuthorizeURLParams struct {
-	AuthorizationEndpoint string
-	RedirectURI           string
-	CodeChallenge         string
-	State                 string
-	Nonce                 string
-}
-
 // Discovery contains OAuth endpoints resolved from xAI OIDC discovery.
 type Discovery struct {
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
+	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+	TokenEndpoint               string `json:"token_endpoint"`
+}
+
+// DeviceCodeResponse represents xAI's device authorization response.
+type DeviceCodeResponse struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int    `json:"expires_in"`
+	Interval                int    `json:"interval"`
+	TokenEndpoint           string `json:"-"`
 }
 
 // TokenData holds xAI OAuth token data.
