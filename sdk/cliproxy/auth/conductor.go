@@ -500,6 +500,9 @@ func registrySuspensionForModelState(state *ModelState) (reason string, quota, s
 	if isInvalidGrantResultError(state.LastError) {
 		return "invalid_grant", false, true
 	}
+	if isCloudflareChallengeResultError(state.LastError) {
+		return "", false, false
+	}
 	switch statusCodeFromResult(state.LastError) {
 	case http.StatusUnauthorized:
 		return "unauthorized", false, true

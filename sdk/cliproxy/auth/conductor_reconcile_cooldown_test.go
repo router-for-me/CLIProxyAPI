@@ -112,3 +112,47 @@ func TestManager_ReconcileRegistryModelStatesPreservesQuotaCooldown(t *testing.T
 		t.Fatalf("registry model count after reconciliation = %d, want 0", count)
 	}
 }
+
+func TestManager_ReconcileRegistryModelStatesDoesNotSuspendCloudflareChallenge(t *testing.T) {
+	const (
+		authID = "reconcile-cloudflare-auth"
+		model  = "reconcile-cloudflare-model"
+	)
+	ctx := context.Background()
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	if _, err := manager.Register(ctx, &Auth{ID: authID, Provider: "claude"}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: "claude",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "cf-mitigated: challenge"},
+	})
+
+	before, ok := manager.GetByID(authID)
+	if !ok || before.ModelStates[model] == nil {
+		t.Fatal("cloudflare challenge cooldown was not recorded")
+	}
+	wantRetryAfter := before.ModelStates[model].NextRetryAfter
+
+	reg.RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+	manager.ReconcileRegistryModelStates(ctx, authID)
+
+	after, ok := manager.GetByID(authID)
+	if !ok || after.ModelStates[model] == nil {
+		t.Fatal("cloudflare challenge cooldown was removed during reconciliation")
+	}
+	state := after.ModelStates[model]
+	if !state.Unavailable || !state.NextRetryAfter.Equal(wantRetryAfter) {
+		t.Fatalf("reconciled model state = %+v, want transient cooldown until %v", state, wantRetryAfter)
+	}
+	if count := reg.GetModelCount(model); count != 1 {
+		t.Fatalf("registry model count after reconciliation = %d, want 1", count)
+	}
+}
