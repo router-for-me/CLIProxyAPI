@@ -41,6 +41,7 @@ func TestManager_ReconcileRegistryModelStatesPreservesUnauthorizedCooldown(t *te
 	if !wantRetryAfter.After(time.Now()) {
 		t.Fatalf("NextRetryAfter = %v, want future cooldown", wantRetryAfter)
 	}
+	resetAggregatedAuthStateForReconcileTest(t, manager, before)
 
 	// RegisterClient replaces the registry-side suspension snapshot.
 	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
@@ -56,6 +57,12 @@ func TestManager_ReconcileRegistryModelStatesPreservesUnauthorizedCooldown(t *te
 	state := after.ModelStates[model]
 	if !state.Unavailable || !state.NextRetryAfter.Equal(wantRetryAfter) {
 		t.Fatalf("reconciled model state = %+v, want active cooldown until %v", state, wantRetryAfter)
+	}
+	if after.Status != StatusError || !after.Unavailable || !after.NextRetryAfter.Equal(wantRetryAfter) {
+		t.Fatalf("reconciled auth state = status %q unavailable %v next %v", after.Status, after.Unavailable, after.NextRetryAfter)
+	}
+	if after.LastError == nil || after.LastError.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("reconciled auth error = %+v, want unauthorized", after.LastError)
 	}
 	if count := reg.GetModelCount(model); count != 0 {
 		t.Fatalf("registry model count after reconciliation = %d, want 0", count)
@@ -93,6 +100,7 @@ func TestManager_ReconcileRegistryModelStatesPreservesQuotaCooldown(t *testing.T
 		t.Fatal("quota model cooldown was not recorded")
 	}
 	wantRetryAfter := before.ModelStates[model].NextRetryAfter
+	resetAggregatedAuthStateForReconcileTest(t, manager, before)
 
 	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
 	if count := reg.GetModelCount(model); count != 1 {
@@ -108,8 +116,25 @@ func TestManager_ReconcileRegistryModelStatesPreservesQuotaCooldown(t *testing.T
 	if !state.Unavailable || !state.Quota.Exceeded || !state.NextRetryAfter.Equal(wantRetryAfter) {
 		t.Fatalf("reconciled model state = %+v, want active quota cooldown until %v", state, wantRetryAfter)
 	}
+	if after.Status != StatusError || !after.Unavailable || !after.Quota.Exceeded || !after.NextRetryAfter.Equal(wantRetryAfter) {
+		t.Fatalf("reconciled auth state = status %q unavailable %v quota %+v next %v", after.Status, after.Unavailable, after.Quota, after.NextRetryAfter)
+	}
 	if count := reg.GetModelCount(model); count != 0 {
 		t.Fatalf("registry model count after reconciliation = %d, want 0", count)
+	}
+}
+
+func resetAggregatedAuthStateForReconcileTest(t *testing.T, manager *Manager, auth *Auth) {
+	t.Helper()
+	incoming := auth.Clone()
+	incoming.Status = StatusActive
+	incoming.StatusMessage = ""
+	incoming.Unavailable = false
+	incoming.NextRetryAfter = time.Time{}
+	incoming.Quota = QuotaState{}
+	incoming.LastError = nil
+	if _, err := manager.Update(context.Background(), incoming); err != nil {
+		t.Fatalf("Update() error = %v", err)
 	}
 }
 

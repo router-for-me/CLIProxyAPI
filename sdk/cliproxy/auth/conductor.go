@@ -423,6 +423,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	auth, ok := m.auths[authID]
 	if ok && auth != nil && len(auth.ModelStates) > 0 {
 		changed := false
+		preserved := false
 		for modelKey, state := range auth.ModelStates {
 			baseModel := canonicalModelKey(modelKey)
 			if baseModel == "" {
@@ -443,6 +444,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				continue
 			}
 			if state.Unavailable && state.NextRetryAfter.After(now) {
+				preserved = true
 				if reason, quota, suspend := registrySuspensionForModelState(state); suspend {
 					cooldowns = append(cooldowns, registryCooldown{
 						model:  baseModel,
@@ -458,18 +460,29 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		if len(auth.ModelStates) == 0 {
 			auth.ModelStates = nil
 		}
-		if changed {
+		if changed || preserved {
+			previousUnavailable := auth.Unavailable
+			previousNextRetryAfter := auth.NextRetryAfter
+			previousQuota := auth.Quota
+			previousStatus := auth.Status
+			previousStatusMessage := auth.StatusMessage
+			previousLastError := cloneError(auth.LastError)
+
 			updateAggregatedAvailability(auth, now)
-			if !hasModelError(auth, now) {
-				auth.LastError = nil
-				auth.StatusMessage = ""
-				auth.Status = StatusActive
+			updateAggregatedModelError(auth, now)
+			aggregateChanged := previousUnavailable != auth.Unavailable ||
+				!previousNextRetryAfter.Equal(auth.NextRetryAfter) ||
+				!cooldownQuotaEqual(previousQuota, auth.Quota) ||
+				previousStatus != auth.Status ||
+				previousStatusMessage != auth.StatusMessage ||
+				!cooldownErrorEqual(previousLastError, auth.LastError)
+			if changed || aggregateChanged {
+				auth.UpdatedAt = now
+				if errPersist := m.persist(ctx, auth); errPersist != nil {
+					logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
+				}
+				snapshot = auth.Clone()
 			}
-			auth.UpdatedAt = now
-			if errPersist := m.persist(ctx, auth); errPersist != nil {
-				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
-			}
-			snapshot = auth.Clone()
 		}
 	}
 	m.mu.Unlock()
@@ -485,6 +498,40 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}
+}
+
+func updateAggregatedModelError(auth *Auth, now time.Time) {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return
+	}
+	var latest *ModelState
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		activeError := state.LastError != nil
+		if !activeError && state.Status == StatusError {
+			activeError = state.Unavailable && state.NextRetryAfter.After(now)
+		}
+		if !activeError {
+			continue
+		}
+		if latest == nil || state.UpdatedAt.After(latest.UpdatedAt) {
+			latest = state
+		}
+	}
+	if latest == nil {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		auth.Status = StatusActive
+		return
+	}
+	auth.LastError = cloneError(latest.LastError)
+	auth.StatusMessage = latest.StatusMessage
+	if auth.StatusMessage == "" && auth.LastError != nil {
+		auth.StatusMessage = auth.LastError.Message
+	}
+	auth.Status = StatusError
 }
 
 func registrySuspensionForModelState(state *ModelState) (reason string, quota, suspend bool) {
