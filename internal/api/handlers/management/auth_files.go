@@ -2177,8 +2177,14 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
+				"type":          "codex",
+				"id_token":      tokenStorage.IDToken,
+				"access_token":  tokenStorage.AccessToken,
+				"refresh_token": tokenStorage.RefreshToken,
+				"account_id":    tokenStorage.AccountID,
+				"last_refresh":  tokenStorage.LastRefresh,
+				"email":         tokenStorage.Email,
+				"expired":       tokenStorage.Expire,
 			},
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
