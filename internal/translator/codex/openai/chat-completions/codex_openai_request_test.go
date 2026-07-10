@@ -842,3 +842,58 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
 	}
 }
+
+func TestWebSearchOptionsTranslatedToResponsesTool(t *testing.T) {
+	input := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"Search for current news"}],
+		"web_search_options":{
+			"search_context_size":"high",
+			"user_location":{"type":"approximate","approximate":{"city":"Shanghai","country":"CN"}}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("grok-4.5", input, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", len(tools), string(out))
+	}
+	tool := tools[0]
+	if got := tool.Get("type").String(); got != "web_search" {
+		t.Fatalf("tool type = %q, want web_search: %s", got, string(out))
+	}
+	if got := tool.Get("search_context_size").String(); got != "high" {
+		t.Fatalf("search_context_size = %q, want high: %s", got, string(out))
+	}
+	if got := tool.Get("user_location.city").String(); got != "Shanghai" {
+		t.Fatalf("user_location.city = %q, want Shanghai: %s", got, string(out))
+	}
+	if tool.Get("user_location.approximate").Exists() {
+		t.Fatalf("Chat user_location should be flattened for Responses: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "required" {
+		t.Fatalf("tool_choice = %q, want required for search-only request: %s", got, string(out))
+	}
+}
+
+func TestWebSearchOptionsDoNotDuplicateExplicitTool(t *testing.T) {
+	input := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"Search"}],
+		"tools":[{"type":"web_search_preview_2025_03_11"}],
+		"tool_choice":{"type":"web_search_preview_2025_03_11"},
+		"web_search_options":{"search_context_size":"low"}
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("grok-4.5", input, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", len(tools), string(out))
+	}
+	if got := tools[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tool type = %q, want web_search: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.type = %q, want web_search: %s", got, string(out))
+	}
+}

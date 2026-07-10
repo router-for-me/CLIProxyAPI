@@ -296,12 +296,24 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Map tools (flatten function fields)
 	tools := gjson.GetBytes(rawJSON, "tools")
+	hasWebSearchTool := false
+	synthesizedWebSearchTool := false
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		out, _ = sjson.SetRawBytes(out, "tools", []byte(`[]`))
 		arr := tools.Array()
 		for i := 0; i < len(arr); i++ {
 			t := arr[i]
 			toolType := t.Get("type").String()
+			if normalizedType := normalizeOpenAIChatBuiltinToolType(toolType); normalizedType != "" {
+				toolType = normalizedType
+				tRaw, errSet := sjson.SetBytes([]byte(t.Raw), "type", normalizedType)
+				if errSet == nil {
+					t = gjson.ParseBytes(tRaw)
+				}
+			}
+			if toolType == "web_search" {
+				hasWebSearchTool = true
+			}
 			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
 			// Only "function" needs structural conversion because Chat Completions nests details under "function".
 			if toolType != "" && toolType != "function" && t.IsObject() {
@@ -338,6 +350,33 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		}
 	}
 
+	// Search-enabled Chat Completions clients use web_search_options instead of
+	// a built-in tools entry. Convert it to the equivalent Responses tool while
+	// avoiding a duplicate when the caller supplied both forms.
+	if webSearchOptions := gjson.GetBytes(rawJSON, "web_search_options"); webSearchOptions.IsObject() && !hasWebSearchTool {
+		if !gjson.GetBytes(out, "tools").IsArray() {
+			out, _ = sjson.SetRawBytes(out, "tools", []byte(`[]`))
+		}
+		webSearchTool := []byte(`{"type":"web_search"}`)
+		if contextSize := webSearchOptions.Get("search_context_size"); contextSize.Exists() {
+			webSearchTool, _ = sjson.SetBytes(webSearchTool, "search_context_size", contextSize.Value())
+		}
+		if userLocation := webSearchOptions.Get("user_location"); userLocation.IsObject() {
+			responsesLocation := userLocation
+			if approximate := userLocation.Get("approximate"); approximate.IsObject() {
+				responsesLocation = approximate
+			}
+			location := []byte(responsesLocation.Raw)
+			location, _ = sjson.SetBytes(location, "type", "approximate")
+			webSearchTool, _ = sjson.SetRawBytes(webSearchTool, "user_location", location)
+		}
+		out, _ = sjson.SetRawBytes(out, "tools.-1", webSearchTool)
+		synthesizedWebSearchTool = true
+	}
+	if synthesizedWebSearchTool && !gjson.GetBytes(rawJSON, "tool_choice").Exists() && len(gjson.GetBytes(out, "tools").Array()) == 1 {
+		out, _ = sjson.SetBytes(out, "tool_choice", "required")
+	}
+
 	// Map tool_choice when present.
 	// Chat Completions: "tool_choice" can be a string ("auto"/"none") or an object (e.g. {"type":"function","function":{"name":"..."}}).
 	// Responses API: keep built-in tool choices as-is; flatten function choice to {"type":"function","name":"..."}.
@@ -347,6 +386,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			out, _ = sjson.SetBytes(out, "tool_choice", tc.String())
 		case tc.IsObject():
 			tcType := tc.Get("type").String()
+			if normalizedType := normalizeOpenAIChatBuiltinToolType(tcType); normalizedType != "" {
+				tcType = normalizedType
+			}
 			if tcType == "function" {
 				name := tc.Get("function.name").String()
 				if name != "" {
@@ -364,13 +406,26 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
 			} else if tcType != "" {
 				// Built-in tool choices (e.g. {"type":"web_search"}) are already Responses-compatible.
-				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(tc.Raw))
+				choice := []byte(tc.Raw)
+				if tcType != tc.Get("type").String() {
+					choice, _ = sjson.SetBytes(choice, "type", tcType)
+				}
+				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
 			}
 		}
 	}
 
 	out, _ = sjson.SetBytes(out, "store", false)
 	return out
+}
+
+func normalizeOpenAIChatBuiltinToolType(toolType string) string {
+	switch toolType {
+	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+		return "web_search"
+	default:
+		return ""
+	}
 }
 
 func setToolCallOutputContent(funcOutput []byte, content gjson.Result) []byte {

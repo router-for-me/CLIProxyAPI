@@ -1151,19 +1151,51 @@ func normalizeXAITools(body []byte) []byte {
 func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
-	if hasTools {
+	if !hasTools {
+		if tools.Exists() {
+			body, _ = sjson.DeleteBytes(body, "tools")
+		}
+		if gjson.GetBytes(body, "tool_choice").Exists() {
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
+		}
+		if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
+			body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+		}
 		return body
 	}
-	if tools.Exists() {
-		body, _ = sjson.DeleteBytes(body, "tools")
-	}
-	if gjson.GetBytes(body, "tool_choice").Exists() {
-		body, _ = sjson.DeleteBytes(body, "tool_choice")
-	}
-	if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
-		body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+
+	// xAI Build currently rejects Responses-style object choices for built-in
+	// web search. Preserve the required-search intent using the supported
+	// string form. Leave function and mixed allowed-tools choices untouched.
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if xaiToolChoiceRequiresWebSearch(toolChoice) {
+		body, _ = sjson.SetBytes(body, "tool_choice", "required")
 	}
 	return body
+}
+
+func xaiToolChoiceRequiresWebSearch(toolChoice gjson.Result) bool {
+	if !toolChoice.IsObject() {
+		return false
+	}
+	if xaiWebSearchToolTypeAlias(toolChoice.Get("type").String()) {
+		return true
+	}
+	if toolChoice.Get("type").String() != "allowed_tools" {
+		return false
+	}
+	allowedTools := toolChoice.Get("tools")
+	return allowedTools.IsArray() && len(allowedTools.Array()) == 1 &&
+		xaiWebSearchToolTypeAlias(allowedTools.Get("0.type").String())
+}
+
+func xaiWebSearchToolTypeAlias(toolType string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolType)) {
+	case xaiWebSearchToolType, "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {
@@ -1173,6 +1205,15 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		return nil, true, true
 	}
 	raw := []byte(tool.Raw)
+	if toolType != xaiWebSearchToolType && xaiWebSearchToolTypeAlias(toolType) {
+		updatedTool, errSet := sjson.SetBytes(raw, "type", xaiWebSearchToolType)
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		toolType = xaiWebSearchToolType
+		changed = true
+	}
 	if toolType == xaiCustomToolType {
 		if tool.Get("name").String() == "apply_patch" {
 			return nil, true, true
@@ -1185,13 +1226,20 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		toolType = xaiFunctionToolType
 		changed = true
 	}
-	if toolType == xaiWebSearchToolType && tool.Get("external_web_access").Exists() {
-		updatedTool, errDel := sjson.DeleteBytes(raw, "external_web_access")
-		if errDel != nil {
-			return nil, false, false
+	if toolType == xaiWebSearchToolType {
+		// These OpenAI Chat search options are not accepted reliably by the xAI
+		// Build endpoint. The tool itself still enables server-side web search.
+		for _, field := range []string{"external_web_access", "search_context_size", "user_location"} {
+			if !gjson.GetBytes(raw, field).Exists() {
+				continue
+			}
+			updatedTool, errDel := sjson.DeleteBytes(raw, field)
+			if errDel != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+			changed = true
 		}
-		raw = updatedTool
-		changed = true
 	}
 	if toolType == xaiFunctionToolType && !tool.Get("parameters").Exists() {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))

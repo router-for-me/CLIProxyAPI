@@ -150,6 +150,43 @@ func TestConvertCodexResponseToOpenAI_NonStreamImageGenerationCallAddsMessageIma
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_NonStreamAddsURLCitationAnnotations(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"grok-4.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"See source","annotations":[{"type":"url_citation","url":"https://example.com/source","start_index":4,"end_index":10,"title":"Example"}]}]}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "grok-4.5", nil, nil, raw, nil)
+
+	annotation := gjson.GetBytes(out, "choices.0.message.annotations.0")
+	if got := annotation.Get("type").String(); got != "url_citation" {
+		t.Fatalf("annotation type = %q, want url_citation: %s", got, string(out))
+	}
+	if got := annotation.Get("url_citation.url").String(); got != "https://example.com/source" {
+		t.Fatalf("citation URL = %q: %s", got, string(out))
+	}
+	if got := annotation.Get("url_citation.title").String(); got != "Example" {
+		t.Fatalf("citation title = %q: %s", got, string(out))
+	}
+	if got := annotation.Get("url_citation.start_index").Int(); got != 4 {
+		t.Fatalf("start_index = %d, want 4: %s", got, string(out))
+	}
+	if got := annotation.Get("url_citation.end_index").Int(); got != 10 {
+		t.Fatalf("end_index = %d, want 10: %s", got, string(out))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamOffsetsLaterMessageCitations(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","model":"grok-4.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"你好","annotations":[]}]},{"type":"message","content":[{"type":"output_text","text":" source","annotations":[{"type":"url_citation","url":"https://example.com","start_index":1,"end_index":7,"title":"Example"}]}]}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "grok-4.5", nil, nil, raw, nil)
+
+	annotation := gjson.GetBytes(out, "choices.0.message.annotations.0.url_citation")
+	if got := annotation.Get("start_index").Int(); got != 3 {
+		t.Fatalf("start_index = %d, want 3 after rune offset: %s", got, string(out))
+	}
+	if got := annotation.Get("end_index").Int(); got != 9 {
+		t.Fatalf("end_index = %d, want 9 after rune offset: %s", got, string(out))
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamForwardsCacheWriteTokens(t *testing.T) {
 	ctx := context.Background()
 	var param any

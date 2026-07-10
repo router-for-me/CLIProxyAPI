@@ -1229,6 +1229,56 @@ func TestNormalizeXAIToolChoiceForTools_KeepsWhenToolsPresent(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAIToolChoiceForTools_WebSearchObjectBecomesRequired(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolChoice string
+	}{
+		{name: "web search", toolChoice: `{"type":"web_search"}`},
+		{name: "preview alias", toolChoice: `{"type":"web_search_preview"}`},
+		{name: "single allowed web search", toolChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search"}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"grok-4","tools":[{"type":"web_search"}],"tool_choice":` + tt.toolChoice + `,"input":"hi"}`)
+			out := normalizeXAIToolChoiceForTools(body)
+			if got := gjson.GetBytes(out, "tool_choice").String(); got != "required" {
+				t.Fatalf("tool_choice = %q, want required: %s", got, string(out))
+			}
+		})
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_LeavesOtherObjectsUntouched(t *testing.T) {
+	tests := []string{
+		`{"type":"function","name":"lookup"}`,
+		`{"type":"allowed_tools","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}]}`,
+	}
+	for _, toolChoice := range tests {
+		body := []byte(`{"model":"grok-4","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}],"tool_choice":` + toolChoice + `,"input":"hi"}`)
+		out := normalizeXAIToolChoiceForTools(body)
+		if got := gjson.GetBytes(out, "tool_choice").Raw; got != toolChoice {
+			t.Fatalf("tool_choice changed from %s to %s", toolChoice, got)
+		}
+	}
+}
+
+func TestNormalizeXAITools_NormalizesChatWebSearchOptions(t *testing.T) {
+	body := []byte(`{"model":"grok-4","tools":[{"type":"web_search_preview_2025_03_11","search_context_size":"high","user_location":{"type":"approximate","city":"Shanghai"},"external_web_access":true}],"input":"hi"}`)
+	out := normalizeXAITools(body)
+
+	tool := gjson.GetBytes(out, "tools.0")
+	if got := tool.Get("type").String(); got != "web_search" {
+		t.Fatalf("tool type = %q, want web_search: %s", got, string(out))
+	}
+	for _, field := range []string{"search_context_size", "user_location", "external_web_access"} {
+		if tool.Get(field).Exists() {
+			t.Fatalf("%s should be removed for xAI Build: %s", field, string(out))
+		}
+	}
+}
+
 func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
 	body := []byte(`{"model":"grok-4","input":"hi"}`)
 	out := normalizeXAIToolChoiceForTools(body)
