@@ -32,7 +32,7 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 }
 
 func TestParseOpenAIUsageResponses(t *testing.T) {
-	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
+	data := []byte(`{"service_tier":"default","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)
 	if detail.InputTokens != 10 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
@@ -49,10 +49,13 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
 	}
+	if detail.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want default", detail.ResponseServiceTier)
+	}
 }
 
 func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
-	data := []byte(`{"response":{"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40}}}}`)
+	data := []byte(`{"response":{"service_tier":"priority","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40}}}}`)
 	detail, ok := ParseCodexUsage(data)
 	if !ok {
 		t.Fatal("ParseCodexUsage() ok = false, want true")
@@ -72,6 +75,9 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	if detail.TotalTokens != 120 {
 		t.Fatalf("total tokens = %d, want 120", detail.TotalTokens)
 	}
+	if detail.ResponseServiceTier != "priority" {
+		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
 }
 
 func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
@@ -90,7 +96,7 @@ func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
 }
 
 func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
-	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","service_tier":"flex","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
 	detail, ok := ParseOpenAIStreamUsage(line)
 	if !ok {
 		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
@@ -109,6 +115,9 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
+	}
+	if detail.ResponseServiceTier != "flex" {
+		t.Fatalf("response service tier = %q, want flex", detail.ResponseServiceTier)
 	}
 }
 
@@ -324,9 +333,15 @@ func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "priority")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
 	if record.ServiceTier != "priority" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "priority")
+	}
+	if record.RequestServiceTier != "priority" {
+		t.Fatalf("request service tier = %q, want priority", record.RequestServiceTier)
+	}
+	if record.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want default", record.ResponseServiceTier)
 	}
 }
 
