@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
@@ -317,15 +318,23 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	defer sessionCancel()
 	go cursorH2Heartbeat(sessionCtx, stream)
 
-	// Collect full text from streaming response
+	// Collect full text from streaming response, keeping thinking separate so
+	// it can be reported as `reasoning_content` instead of polluting `content`.
 	var fullText strings.Builder
+	var thinkingText strings.Builder
+	usage := &cursorTokenUsage{}
+	usage.setInputEstimate(len(payload))
 	if streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, nil,
 		func(text string, isThinking bool) {
-			fullText.WriteString(text)
+			if isThinking {
+				thinkingText.WriteString(text)
+			} else {
+				fullText.WriteString(text)
+			}
 		},
 		nil,
 		nil,
-		nil, // tokenUsage - non-streaming
+		usage,
 		nil, // onCheckpoint - non-streaming doesn't persist
 	); streamErr != nil && fullText.Len() == 0 {
 		return resp, classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
@@ -333,8 +342,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	id := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
-	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-		id, created, parsed.Model, jsonString(fullText.String()))
+	inputTok, outputTok := usage.get()
+	reasoningField := ""
+	if thinkingText.Len() > 0 {
+		reasoningField = fmt.Sprintf(`,"reasoning_content":%s`, jsonString(thinkingText.String()))
+	}
+	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+		id, created, parsed.Model, jsonString(fullText.String()), reasoningField, inputTok, outputTok, inputTok+outputTok)
 
 	// Translate response back to source format if needed
 	result := []byte(openaiResp)
@@ -560,9 +574,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for _, d := range done {
 				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(d)})
 			}
-		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte("[DONE]")})
 		}
+		// No explicit [DONE] in the non-translated (OpenAI) case: the HTTP
+		// handler already writes `data: [DONE]` when the chunk channel closes,
+		// so emitting one here produced a duplicated [DONE] marker downstream.
 	}
 
 	// Pre-response error detection for transparent failover:
@@ -590,27 +605,27 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
+				// Emit thinking as the standard OpenAI `reasoning_content` delta
+				// field instead of inline <think>...</think> tags. Inline tags
+				// pollute `content` for OpenAI clients and end up rendered as
+				// literal text in Anthropic/Claude clients; `reasoning_content`
+				// is understood by the translators (mapped to thinking blocks
+				// for Claude) and by downstream proxies.
 				if isThinking {
 					if !thinkingActive {
 						thinkingActive = true
-						sendChunkSwitchable(`{"role":"assistant","content":"<think>"}`, "")
+						sendChunkSwitchable(`{"role":"assistant","content":""}`, "")
 					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+					sendChunkSwitchable(fmt.Sprintf(`{"reasoning_content":%s}`, jsonString(text)), "")
 				} else {
-					if thinkingActive {
-						thinkingActive = false
-						sendChunkSwitchable(`{"content":"</think>"}`, "")
-					}
+					thinkingActive = false
 					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
 				}
 			},
 			func(exec pendingMcpExec) {
-				if thinkingActive {
-					thinkingActive = false
-					sendChunkSwitchable(`{"content":"</think>"}`, "")
-				}
-				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
-					toolCallIndex, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
+				thinkingActive = false
+				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":%s,"type":"function","function":{"name":%s,"arguments":%s}}]}`,
+					toolCallIndex, jsonString(exec.ToolCallId), jsonString(exec.ToolName), jsonString(exec.Args))
 				toolCallIndex++
 				sendChunkSwitchable(toolCallJSON, "")
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
@@ -696,9 +711,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
-		if thinkingActive {
-			sendChunkSwitchable(`{"content":"</think>"}`, "")
-		}
 		// Include token usage in the final stop chunk
 		inputTok, outputTok := usage.get()
 		stopDelta := fmt.Sprintf(`{},"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`,
@@ -958,7 +970,7 @@ func processH2SessionFrames(
 				case cursorproto.ServerMsgExecMcpArgs:
 					if onMcpExec != nil {
 						decodedArgs := decodeMcpArgsToJSON(msg.McpArgs)
-						toolCallId := msg.McpToolCallId
+						toolCallId := normalizeToolCallID(msg.McpToolCallId)
 						if toolCallId == "" {
 							toolCallId = uuid.New().String()
 						}
@@ -1127,7 +1139,7 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 			continue
 		case "tool":
 			p.ToolResults = append(p.ToolResults, toolResultInfo{
-				ToolCallId: msg.Get("tool_call_id").String(),
+				ToolCallId: normalizeToolCallID(msg.Get("tool_call_id").String()),
 				Content:    extractTextContent(msg.Get("content")),
 			})
 		case "user":
@@ -1459,6 +1471,15 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func normalizeToolCallID(id string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, id)
 }
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {
