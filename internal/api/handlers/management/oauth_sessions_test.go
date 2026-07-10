@@ -26,6 +26,23 @@ func TestOAuthSessionStoreCompleteKeepsShortLivedSession(t *testing.T) {
 	}
 }
 
+func TestGetOAuthSessionHidesCompletedSession(t *testing.T) {
+	store := newOAuthSessionStore(time.Minute)
+	replaceOAuthSessionStoreForTest(t, store)
+	store.Register("completed-state", "codex")
+	store.Complete("completed-state")
+
+	provider, status, ok := GetOAuthSession("completed-state")
+	if ok {
+		t.Fatalf("GetOAuthSession() = (%q, %q, true), want completed session hidden", provider, status)
+	}
+
+	_, _, _, _, completed, detailsOK := GetOAuthSessionDetails("completed-state")
+	if !detailsOK || !completed {
+		t.Fatalf("GetOAuthSessionDetails() completed/ok = %t/%t, want true/true", completed, detailsOK)
+	}
+}
+
 func TestGetAuthStatusRejectsUnknownStateAndAcceptsCompletedState(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	replaceOAuthSessionStoreForTest(t, store)

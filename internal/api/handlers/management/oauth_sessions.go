@@ -259,7 +259,7 @@ func CompletePluginOAuthSessionsByProvider(provider string) int {
 
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	session, ok := oauthSessions.Get(state)
-	if !ok {
+	if !ok || session.Completed {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
