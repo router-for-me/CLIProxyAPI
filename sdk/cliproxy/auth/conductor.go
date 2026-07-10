@@ -3744,6 +3744,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							suspendReason = "invalid_grant"
 							shouldSuspendModel = true
 						}
+					} else if isXaiBadCredentialsResultError(auth.Provider, result.Error) {
+						if state.LastError != nil {
+							state.LastError.Code = "unauthorized"
+						}
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(30 * time.Minute)
+							state.NextRetryAfter = next
+							suspendReason = "unauthorized"
+							shouldSuspendModel = true
+						}
 					} else {
 						switch statusCode {
 						case 401:
@@ -4162,6 +4174,31 @@ func isInvalidGrantResultError(err *Error) bool {
 	return isInvalidGrantErrorMessage(err.Code) || isInvalidGrantErrorMessage(err.Message)
 }
 
+func isXaiBadCredentialsMessage(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "bad-credentials") || strings.Contains(lower, "could not be validated")
+}
+
+func isXaiBadCredentialsError(provider string, err error) bool {
+	if err == nil || !strings.EqualFold(strings.TrimSpace(provider), "xai") {
+		return false
+	}
+	if statusCodeFromError(err) != http.StatusForbidden {
+		return false
+	}
+	return isXaiBadCredentialsMessage(err.Error())
+}
+
+func isXaiBadCredentialsResultError(provider string, err *Error) bool {
+	if err == nil || !strings.EqualFold(strings.TrimSpace(provider), "xai") {
+		return false
+	}
+	if statusCodeFromResult(err) != http.StatusForbidden {
+		return false
+	}
+	return isXaiBadCredentialsMessage(err.Code) || isXaiBadCredentialsMessage(err.Message)
+}
+
 func isModelSupportResultError(err *Error) bool {
 	if err == nil {
 		return false
@@ -4296,6 +4333,18 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 	if isInvalidGrantResultError(resultErr) {
 		auth.StatusMessage = "invalid_grant"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
+		return
+	}
+	if isXaiBadCredentialsResultError(auth.Provider, resultErr) {
+		auth.StatusMessage = "unauthorized"
+		if auth.LastError != nil {
+			auth.LastError.Code = "unauthorized"
+		}
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
@@ -5795,13 +5844,14 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	return resumed
 }
 
-// tryRefreshAfterUnauthorized refreshes OAuth credentials once after a 401 so the
-// current auth can be retried before fallback/suspend.
+// tryRefreshAfterUnauthorized refreshes OAuth credentials once after a 401, or an
+// xAI 403 bad-credentials response, so the current auth can be retried before
+// fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool) (*Auth, bool) {
 	if m == nil || auth == nil || alreadyTried || execErr == nil {
 		return auth, false
 	}
-	if !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
+	if !(isUnauthorizedError(execErr) || isXaiBadCredentialsError(auth.Provider, execErr)) || !authHasRefreshCredential(auth) {
 		return auth, false
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
