@@ -197,36 +197,6 @@ func xaiInputLastAssistantMessage(inputItems []gjson.Result) (gjson.Result, bool
 	return gjson.Result{}, false
 }
 
-func xaiAssistantMessageContentEqual(left, right gjson.Result) bool {
-	if !left.IsArray() || !right.IsArray() {
-		return false
-	}
-	leftParts := left.Array()
-	rightParts := right.Array()
-	if len(leftParts) != len(rightParts) {
-		return false
-	}
-	for i := range leftParts {
-		if strings.TrimSpace(leftParts[i].Get("type").String()) != strings.TrimSpace(rightParts[i].Get("type").String()) ||
-			xaiAssistantMessagePartValue(leftParts[i]) != xaiAssistantMessagePartValue(rightParts[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func xaiAssistantMessagePartValue(part gjson.Result) string {
-	switch strings.TrimSpace(part.Get("type").String()) {
-	case "refusal":
-		if refusal := part.Get("refusal"); refusal.Type == gjson.String {
-			return refusal.String()
-		}
-		return part.Get("text").String()
-	default:
-		return part.Get("text").String()
-	}
-}
-
 func cacheXAIReasoningReplayFromCompleted(ctx context.Context, scope xaiReasoningReplayScope, completedData []byte) {
 	if !scope.valid() {
 		return
