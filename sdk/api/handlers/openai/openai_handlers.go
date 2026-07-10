@@ -124,6 +124,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
+	rawJSON = normalizeChatWebSearchRequest(rawJSON)
 
 	if stream {
 		h.handleStreamingResponse(c, rawJSON)
@@ -443,6 +444,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	resp = addChatWebSearchAnnotations(rawJSON, resp)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }

@@ -11,7 +11,6 @@ import (
 	"crypto/sha256"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -372,7 +371,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	// Process the output array for content and function calls
 	var toolCalls [][]byte
 	var images [][]byte
-	var annotations [][]byte
 	outputResult := responseResult.Get("output")
 	if outputResult.IsArray() {
 		outputArray := outputResult.Array()
@@ -402,14 +400,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 					contentArray := contentResult.Array()
 					for _, contentItem := range contentArray {
 						if contentItem.Get("type").String() == "output_text" {
-							offset := int64(utf8.RuneCountInString(contentText))
-							if annotationResult := contentItem.Get("annotations"); annotationResult.IsArray() {
-								for _, annotation := range annotationResult.Array() {
-									if converted := convertCodexURLCitation(annotation, offset); len(converted) > 0 {
-										annotations = append(annotations, converted)
-									}
-								}
-							}
 							if text := contentItem.Get("text").String(); text != "" {
 								contentText += text
 							}
@@ -466,14 +456,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
 		}
 
-		if len(annotations) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.annotations", []byte(`[]`))
-			for _, annotation := range annotations {
-				template, _ = sjson.SetRawBytes(template, "choices.0.message.annotations.-1", annotation)
-			}
-			template, _ = sjson.SetBytes(template, "choices.0.message.role", "assistant")
-		}
-
 		// Add tool calls if any
 		if len(toolCalls) > 0 {
 			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
@@ -507,31 +489,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	}
 
 	return template
-}
-
-func convertCodexURLCitation(annotation gjson.Result, indexOffset int64) []byte {
-	if !annotation.IsObject() || annotation.Get("type").String() != "url_citation" {
-		return nil
-	}
-
-	citation := annotation
-	if nested := annotation.Get("url_citation"); nested.IsObject() {
-		citation = nested
-	}
-	url := citation.Get("url")
-	title := citation.Get("title")
-	startIndex := citation.Get("start_index")
-	endIndex := citation.Get("end_index")
-	if !url.Exists() || strings.TrimSpace(url.String()) == "" || !title.Exists() || !startIndex.Exists() || !endIndex.Exists() {
-		return nil
-	}
-
-	out := []byte(`{"type":"url_citation","url_citation":{"url":"","title":"","start_index":0,"end_index":0}}`)
-	out, _ = sjson.SetBytes(out, "url_citation.url", url.String())
-	out, _ = sjson.SetBytes(out, "url_citation.title", title.String())
-	out, _ = sjson.SetBytes(out, "url_citation.start_index", startIndex.Int()+indexOffset)
-	out, _ = sjson.SetBytes(out, "url_citation.end_index", endIndex.Int()+indexOffset)
-	return out
 }
 
 // buildReverseMapFromOriginalOpenAI builds a map of shortened tool name -> original tool name
