@@ -2145,9 +2145,6 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 }
 
 func scopeXAIModelsForAuth(auth *coreauth.Auth, authKind string, models []*ModelInfo) []*ModelInfo {
-	if !strings.EqualFold(strings.TrimSpace(authKind), coreauth.AuthKindOAuth) {
-		return models
-	}
 	baseURL := ""
 	if auth != nil && auth.Attributes != nil {
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
@@ -2158,6 +2155,19 @@ func scopeXAIModelsForAuth(auth *coreauth.Auth, authKind string, models []*Model
 		}
 	}
 	if baseURL != "" && !strings.EqualFold(strings.TrimRight(baseURL, "/"), strings.TrimRight(xaiauth.DefaultAPIBaseURL, "/")) {
+		return models
+	}
+	if strings.EqualFold(strings.TrimSpace(authKind), coreauth.AuthKindAPIKey) {
+		standardModels := make([]*ModelInfo, 0, len(models))
+		for _, model := range models {
+			if model != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(model.ID)), xaiauth.ComposerModelPrefix) {
+				continue
+			}
+			standardModels = append(standardModels, model)
+		}
+		return standardModels
+	}
+	if !strings.EqualFold(strings.TrimSpace(authKind), coreauth.AuthKindOAuth) {
 		return models
 	}
 	accessToken := ""
