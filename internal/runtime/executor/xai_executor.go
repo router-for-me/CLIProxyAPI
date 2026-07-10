@@ -44,6 +44,12 @@ const (
 	xaiNamespaceToolType        = "namespace"
 	xaiToolSearchType           = "tool_search"
 	xaiWebSearchToolType        = "web_search"
+	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
+	// schema. xAI's free/build Responses path accepts the HTTP request but never
+	// emits SSE when that schema is present, so Desktop hangs on "thinking".
+	xaiAutomationUpdateToolName = "automation_update"
+	// Permissive placeholder schema: keeps the tool callable without the hang.
+	xaiSafeFunctionParameters   = `{"type":"object","properties":{},"additionalProperties":true}`
 	xaiImagesGenerationsPath    = "/images/generations"
 	xaiImagesEditsPath          = "/images/edits"
 	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
@@ -157,7 +163,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
@@ -253,7 +259,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		err = xaiStatusErr(httpResp.StatusCode, data)
 		return nil, nil, nil, err
 	}
 
@@ -493,7 +499,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -558,7 +564,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -613,7 +619,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return nil, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1143,7 +1149,41 @@ func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {
 		raw = updatedTool
 		changed = true
 	}
+	// Codex Desktop's automation_update schema (and similar large oneOf+$ref
+	// function schemas) hang xAI free/build streaming. Simplify parameters so
+	// the request still carries the tool name but does not stall the stream.
+	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool) {
+		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
+		log.Debugf("xai: simplified parameters for tool %s to avoid upstream hang", tool.Get("name").String())
+	}
 	return raw, changed, true
+}
+
+// xaiFunctionParametersNeedSimplification reports whether a function tool's
+// JSON Schema is known/likely to hang xAI Responses streaming.
+func xaiFunctionParametersNeedSimplification(tool gjson.Result) bool {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if strings.EqualFold(name, xaiAutomationUpdateToolName) {
+		return true
+	}
+	params := tool.Get("parameters")
+	if !params.Exists() {
+		return false
+	}
+	raw := params.Raw
+	// Heuristic: large schemas combining oneOf with $ref/$defs hang the free
+	// Grok Responses path (no SSE events until client cancel).
+	if len(raw) < 1500 {
+		return false
+	}
+	hasOneOf := strings.Contains(raw, `"oneOf"`)
+	hasRef := strings.Contains(raw, `"$ref"`) || strings.Contains(raw, `"$defs"`)
+	return hasOneOf && hasRef
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {
@@ -1584,4 +1624,31 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 
 	patched, _ := sjson.SetRawBytes(eventData, "response.output", outputArray)
 	return patched
+}
+
+// xaiFreeUsageExhaustedCooldown is the free-tier rolling window advertised by
+// cli-chat-proxy ("Usage resets over a rolling 24-hour window").
+const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
+
+// xaiStatusErr wraps upstream error bodies so free-tier exhaustion
+// (subscription:free-usage-exhausted) carries a 24h RetryAfter hint for
+// auth cooldown / account rotation. Generic 429s stay without an explicit
+// retry hint so conductor backoff still applies.
+func xaiStatusErr(code int, body []byte) statusErr {
+	err := statusErr{code: code, msg: string(body)}
+	if code != http.StatusTooManyRequests || len(body) == 0 {
+		return err
+	}
+	codeStr := strings.ToLower(gjson.GetBytes(body, "code").String())
+	msg := strings.ToLower(gjson.GetBytes(body, "error").String())
+	if msg == "" {
+		msg = strings.ToLower(string(body))
+	}
+	if strings.Contains(codeStr, "free-usage-exhausted") ||
+		strings.Contains(msg, "free-usage-exhausted") ||
+		strings.Contains(msg, "included free usage") {
+		d := xaiFreeUsageExhaustedCooldown
+		err.retryAfter = &d
+	}
+	return err
 }

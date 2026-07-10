@@ -1060,6 +1060,58 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 	}
 }
 
+func TestNormalizeXAITools_SimplifiesAutomationUpdateSchema(t *testing.T) {
+	// Large oneOf+$ref schema mimicking Codex Desktop codex_app.automation_update.
+	params := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
+	body := []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":false,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
+	out := normalizeXAITools(body)
+
+	tools := gjson.GetBytes(out, "tools")
+	if !tools.IsArray() {
+		t.Fatalf("tools missing: %s", string(out))
+	}
+	foundAuto := false
+	foundExec := false
+	for _, tool := range tools.Array() {
+		switch tool.Get("name").String() {
+		case "automation_update":
+			foundAuto = true
+			paramsRaw := tool.Get("parameters").Raw
+			if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) {
+				t.Fatalf("automation_update parameters were not simplified: %s", paramsRaw)
+			}
+			if tool.Get("parameters.type").String() != "object" {
+				t.Fatalf("automation_update parameters.type = %q, want object", tool.Get("parameters.type").String())
+			}
+			if tool.Get("parameters.additionalProperties").Type != gjson.True {
+				t.Fatalf("automation_update parameters should allow additionalProperties: %s", paramsRaw)
+			}
+		case "exec_command":
+			foundExec = true
+			if got := tool.Get("parameters.properties.cmd.type").String(); got != "string" {
+				t.Fatalf("exec_command schema should be preserved, got %q in %s", got, tool.Raw)
+			}
+		}
+	}
+	if !foundAuto {
+		t.Fatalf("automation_update tool missing after normalize: %s", string(out))
+	}
+	if !foundExec {
+		t.Fatalf("exec_command tool missing after normalize: %s", string(out))
+	}
+}
+
+func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
+	auto := gjson.Parse(`{"type":"function","name":"automation_update","parameters":{"type":"object"}}`)
+	if !xaiFunctionParametersNeedSimplification(auto) {
+		t.Fatal("automation_update should always need simplification")
+	}
+	safe := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)
+	if xaiFunctionParametersNeedSimplification(safe) {
+		t.Fatal("simple schema should not need simplification")
+	}
+}
+
 func TestNormalizeXAIToolChoiceForTools_DropsWhenToolsEmpty(t *testing.T) {
 	body := []byte(`{"model":"grok-4","tools":[],"tool_choice":"auto","parallel_tool_calls":true,"input":"hi"}`)
 	out := normalizeXAIToolChoiceForTools(body)
