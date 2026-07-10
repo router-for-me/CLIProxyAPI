@@ -460,7 +460,16 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	if b == nil || !ok {
 		return
 	}
-	b.detail = detail
+	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
+	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
+		preservedTier := b.detail.ResponseServiceTier
+		b.detail = detail
+		if b.detail.ResponseServiceTier == "" {
+			b.detail.ResponseServiceTier = preservedTier
+		}
+	} else {
+		b.detail.ResponseServiceTier = responseServiceTier
+	}
 	b.ok = true
 }
 
@@ -482,12 +491,16 @@ func (b *StreamUsageBuffer) Detail() (usage.Detail, bool) {
 }
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
+	responseServiceTier := extractResponseServiceTier(data)
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
-		return usage.Detail{}, false
+		if responseServiceTier == "" {
+			return usage.Detail{}, false
+		}
+		return usage.Detail{ResponseServiceTier: responseServiceTier}, true
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
-	detail.ResponseServiceTier = extractResponseServiceTier(data)
+	detail.ResponseServiceTier = responseServiceTier
 	return detail, true
 }
 
@@ -500,12 +513,13 @@ func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 }
 
 func ParseOpenAIUsage(data []byte) usage.Detail {
+	responseServiceTier := extractResponseServiceTier(data)
 	usageNode := gjson.ParseBytes(data).Get("usage")
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
-		return usage.Detail{}
+		return usage.Detail{ResponseServiceTier: responseServiceTier}
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
-	detail.ResponseServiceTier = extractResponseServiceTier(data)
+	detail.ResponseServiceTier = responseServiceTier
 	return detail
 }
 
@@ -564,12 +578,16 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
+	responseServiceTier := extractResponseServiceTier(payload)
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
-		return usage.Detail{}, false
+		if responseServiceTier == "" {
+			return usage.Detail{}, false
+		}
+		return usage.Detail{ResponseServiceTier: responseServiceTier}, true
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
-	detail.ResponseServiceTier = extractResponseServiceTier(payload)
+	detail.ResponseServiceTier = responseServiceTier
 	return detail, true
 }
 
