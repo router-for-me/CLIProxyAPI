@@ -12,7 +12,8 @@ import (
 )
 
 const (
-	oauthSessionTTL          = 10 * time.Minute
+	// oauthSessionTTL must cover device-code flows (xAI ~30m, Kimi ~15m).
+	oauthSessionTTL          = 30 * time.Minute
 	oauthCompletedSessionTTL = time.Minute
 	maxOAuthStateLength      = 128
 )
@@ -226,6 +227,27 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	return strings.EqualFold(session.Provider, provider)
 }
 
+// Cancel removes a pending OAuth session so background waiters exit without saving credentials.
+// Returns true when a pending session was cancelled.
+func (s *oauthSessionStore) Cancel(state string) bool {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return false
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed || session.Status != "" {
+		return false
+	}
+	delete(s.sessions, state)
+	return true
+}
+
 func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return nil
@@ -275,6 +297,23 @@ func GetOAuthSessionDetails(state string) (provider string, status string, isPlu
 
 func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)
+}
+
+// guardOAuthSessionPendingForSave returns errOAuthSessionNotPending when the session
+// is no longer pending (cancelled, completed, errored, or expired).
+// Call immediately before persisting credentials so a cancel that races with token
+// exchange or metadata fetch cannot save credentials for a cancelled flow.
+func guardOAuthSessionPendingForSave(state, provider string) error {
+	if IsOAuthSessionPending(state, provider) {
+		return nil
+	}
+	return errOAuthSessionNotPending
+}
+
+// CancelOAuthSession cancels a pending OAuth session by state.
+// Background callback and device-code waiters observe IsOAuthSessionPending as false and exit without saving credentials.
+func CancelOAuthSession(state string) bool {
+	return oauthSessions.Cancel(state)
 }
 
 func oauthSessionErrorWithCause(message string, cause error) string {
