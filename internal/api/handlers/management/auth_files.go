@@ -806,6 +806,11 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
+	name, data, err = h.normalizeUploadedAuthFile(name, data)
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
 	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
@@ -936,6 +941,10 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 	data, err := io.ReadAll(src)
 	if err != nil {
 		return "", fmt.Errorf("failed to read uploaded file: %w", err)
+	}
+	name, data, err = h.normalizeUploadedAuthFile(name, data)
+	if err != nil {
+		return "", err
 	}
 	if err := h.writeAuthFile(ctx, name, data); err != nil {
 		return "", err

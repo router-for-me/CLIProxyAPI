@@ -60,6 +60,9 @@ const (
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 	xaiComposerModelPrefix      = "grok-composer-"
+	xaiGrokCLIProxyBaseURL      = xaiauth.GrokCLIProxyBaseURL
+	xaiGrokCLIUserAgentPrefix   = "xai-grok-workspace/"
+	xaiDefaultGrokCLIVersion    = xaiauth.DefaultGrokCLIVersion
 	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
 	xaiTokenAuthValue           = "xai-grok-cli"
 	xaiClientVersionHeader      = "x-grok-client-version"
@@ -91,6 +94,7 @@ func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth)
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	applyXAIGrokCLISessionHeaders(req, auth, "")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -126,6 +130,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return e.executeVideos(ctx, auth, req, opts)
 	}
 
+	token, baseURL := xaiRequestCreds(auth)
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
 
@@ -143,6 +148,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
+	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID, prepared.baseModel)
 	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
@@ -215,6 +221,7 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
+	token, baseURL := xaiRequestCreds(auth)
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
 
@@ -235,6 +242,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID, prepared.baseModel)
 	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
@@ -463,10 +471,7 @@ func xaiBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, baseURL := xaiRequestCreds(auth)
 	if endpointPath == "" {
 		endpointPath = xaiDefaultImageEndpointPath
 	}
@@ -476,7 +481,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
+	applyXAIHeaders(httpReq, auth, token, false, "", req.Model)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -508,10 +513,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, baseURL := xaiRequestCreds(auth)
 
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
@@ -532,7 +534,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
+	applyXAIHeaders(httpReq, auth, token, false, "", req.Model)
 	if method == http.MethodPost {
 		key := xaiMetadataString(opts.Metadata, xaiIdempotencyKeyMetaKey)
 		if key == "" && opts.Headers != nil {
@@ -580,6 +582,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		return e.executeCompactionTriggerStream(ctx, auth, req, opts)
 	}
 
+	token, baseURL := xaiRequestCreds(auth)
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
 
@@ -597,6 +600,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, err
 	}
+	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID, prepared.baseModel)
 	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
@@ -746,6 +750,9 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	}
 	if auth == nil {
 		return nil, statusErr{code: http.StatusInternalServerError, msg: "xai executor: auth is nil"}
+	}
+	if xaiIsGrokCLISession(auth) {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "xai grok cli session expired; run grok login and re-import"}
 	}
 	refreshToken := xaiMetadataString(auth.Metadata, "refresh_token")
 	if refreshToken == "" {
@@ -914,6 +921,88 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
+func xaiRequestCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
+	token, baseURL = xaiCreds(auth)
+	if baseURL == "" {
+		if xaiIsGrokCLISession(auth) {
+			baseURL = xaiGrokCLIProxyBaseURL
+		} else {
+			baseURL = xaiauth.DefaultAPIBaseURL
+		}
+	}
+	return token, baseURL
+}
+
+func xaiAuthMetadataOrAttribute(auth *cliproxyauth.Auth, key string) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if value := xaiMetadataString(auth.Metadata, key); value != "" {
+			return value
+		}
+	}
+	if auth.Attributes != nil {
+		return strings.TrimSpace(auth.Attributes[key])
+	}
+	return ""
+}
+
+func xaiAuthKind(auth *cliproxyauth.Auth) string {
+	kind := strings.ToLower(strings.TrimSpace(xaiAuthMetadataOrAttribute(auth, "auth_kind")))
+	kind = strings.ReplaceAll(kind, "-", "_")
+	return kind
+}
+
+func xaiIsGrokCLISession(auth *cliproxyauth.Auth) bool {
+	switch xaiAuthKind(auth) {
+	case "grok_cli_session", "grok_build_session", "cli_session":
+		return true
+	default:
+		return false
+	}
+}
+
+func xaiGrokCLIVersion(auth *cliproxyauth.Auth) string {
+	for _, key := range []string{"grok_cli_version", "grok_version", "x_grok_client_version"} {
+		if value := xaiAuthMetadataOrAttribute(auth, key); value != "" {
+			return value
+		}
+	}
+	return xaiDefaultGrokCLIVersion
+}
+
+func xaiGrokCLIModelOverride(auth *cliproxyauth.Auth, model string) string {
+	if parsed := thinking.ParseSuffix(strings.TrimSpace(model)); parsed.ModelName != "" {
+		return strings.TrimSpace(parsed.ModelName)
+	}
+	for _, key := range []string{"grok_model_override", "x_grok_model_override"} {
+		if value := xaiAuthMetadataOrAttribute(auth, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func applyXAIGrokCLISessionHeaders(r *http.Request, auth *cliproxyauth.Auth, model string) {
+	if r == nil || !xaiIsGrokCLISession(auth) {
+		return
+	}
+	version := xaiGrokCLIVersion(auth)
+	r.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	r.Header.Set("x-grok-client-version", version)
+	r.Header.Set("User-Agent", xaiGrokCLIUserAgentPrefix+version)
+	if clientID := xaiAuthMetadataOrAttribute(auth, "grok_client_identifier"); clientID != "" {
+		r.Header.Set("x-grok-client-identifier", clientID)
+	} else if clientID := xaiAuthMetadataOrAttribute(auth, "grok_agent_id"); clientID != "" {
+		r.Header.Set("x-grok-client-identifier", clientID)
+	}
+	if modelOverride := xaiGrokCLIModelOverride(auth, model); modelOverride != "" {
+		r.Header.Set("x-grok-model-override", modelOverride)
+	}
+}
+
+func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, model string) {
 // xaiChatBaseURL returns the base URL for non-image/video xAI HTTP chat requests.
 // Empty or official default base_url is rewritten to the CLI chat-proxy endpoint.
 // An explicit non-default base_url (tests / custom gateways) is still honored.
@@ -958,6 +1047,7 @@ func applyXAIDefaultHeaders(r *http.Request, token string, stream bool, sessionI
 	if sessionID != "" {
 		r.Header.Set("x-grok-conv-id", sessionID)
 	}
+	applyXAIGrokCLISessionHeaders(r, auth, model)
 }
 
 func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
@@ -998,16 +1088,24 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 }
 
 func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
-	if value := xaiMetadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+	if value := xaiCleanUndefinedString(xaiMetadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)); value != "" {
 		return value
 	}
-	if value := xaiMetadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+	if value := xaiCleanUndefinedString(xaiMetadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)); value != "" {
 		return value
 	}
 	if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
-		return strings.TrimSpace(promptCacheKey.String())
+		return xaiCleanUndefinedString(promptCacheKey.String())
 	}
 	return ""
+}
+
+func xaiCleanUndefinedString(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "[undefined]" {
+		return ""
+	}
+	return value
 }
 
 func xaiRequiresIsolatedConversation(model string) bool {
@@ -1069,6 +1167,7 @@ func xaiMetadataString(meta map[string]any, key string) string {
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
+	body = sanitizeXAIUndefinedStringFields(body)
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
 		if gjson.GetBytes(body, "reasoning.effort").Exists() {
@@ -1078,6 +1177,23 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
 			body, _ = sjson.DeleteBytes(body, "reasoning")
 		}
+	}
+	return body
+}
+
+func sanitizeXAIUndefinedStringFields(body []byte) []byte {
+	root := gjson.ParseBytes(body)
+	if !root.IsObject() {
+		return body
+	}
+	for key, value := range root.Map() {
+		if value.Type != gjson.String {
+			continue
+		}
+		if strings.TrimSpace(value.String()) != "[undefined]" {
+			continue
+		}
+		body, _ = sjson.DeleteBytes(body, key)
 	}
 	return body
 }

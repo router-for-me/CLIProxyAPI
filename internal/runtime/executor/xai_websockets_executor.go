@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -402,6 +401,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		return e.executeCompactionTriggerFromWebsocketContext(ctx, auth, req, opts, idMapper)
 	}
 
+	token, baseURL := xaiRequestCreds(auth)
 	// Keep websocket on the official API base URL (or an explicit non-default
 	// base_url). Do not reuse xaiChatBaseURL: cli-chat-proxy only accepts HTTP
 	// POST and returns 405 for websocket upgrades.
@@ -427,7 +427,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID)
+	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID, prepared.baseModel)
 	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
 	warmupRequest := xaiWebsocketGenerateFalse(wsReqBody)
 
@@ -1208,7 +1208,7 @@ func buildXAIResponsesWebsocketURL(httpURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, token string, sessionID string) http.Header {
+func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, token string, sessionID string, model string) http.Header {
 	if headers == nil {
 		headers = http.Header{}
 	}
@@ -1219,6 +1219,7 @@ func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, toke
 	if sessionID != "" {
 		headers.Set("x-grok-conv-id", sessionID)
 	}
+	applyXAIGrokCLISessionHeaders(&http.Request{Header: headers}, auth, model)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
