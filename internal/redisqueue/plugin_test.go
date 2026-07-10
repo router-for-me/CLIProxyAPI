@@ -25,18 +25,19 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:        "openai",
-			ExecutorType:    "KimiExecutor",
-			Model:           "gpt-5.4",
-			Alias:           "client-gpt",
-			APIKey:          "test-key",
-			AuthIndex:       "0",
-			AuthType:        "apikey",
-			Source:          "user@example.com",
-			ReasoningEffort: "medium",
-			ServiceTier:     "priority",
-			RequestedAt:     time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:         1500 * time.Millisecond,
+			Provider:            "openai",
+			ExecutorType:        "KimiExecutor",
+			Model:               "gpt-5.4",
+			Alias:               "client-gpt",
+			APIKey:              "test-key",
+			AuthIndex:           "0",
+			AuthType:            "apikey",
+			Source:              "user@example.com",
+			ReasoningEffort:     "medium",
+			ServiceTier:         "priority",
+			ResponseServiceTier: "default",
+			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:             1500 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -57,6 +58,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "priority")
+		requireStringField(t, payload, "request_service_tier", "priority")
+		requireStringField(t, payload, "response_service_tier", "default")
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
