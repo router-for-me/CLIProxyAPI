@@ -1,6 +1,7 @@
 package xai
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"strconv"
@@ -18,7 +19,7 @@ const (
 // a positive API tier. The claim is used only to select an upstream transport;
 // the upstream still authenticates and authorizes every request.
 func AccessTokenHasStandardAPITier(accessToken string) bool {
-	parts := strings.Split(strings.TrimSpace(accessToken), ".")
+	parts := strings.SplitN(strings.TrimSpace(accessToken), ".", 3)
 	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
 		return false
 	}
@@ -50,7 +51,7 @@ func OAuthModelUsesGrokCLI(authKind, accessToken, model string) bool {
 }
 
 func positiveTierClaim(raw json.RawMessage) bool {
-	raw = json.RawMessage(strings.TrimSpace(string(raw)))
+	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
 		return false
 	}
