@@ -58,6 +58,37 @@ func TestEnsureImageGenerationTool_AlreadyPresent(t *testing.T) {
 	}
 }
 
+func TestEnsureImageGenerationTool_ImageGenNamespaceDoesNotInjectTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`)
+	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
+
+	if string(result) != string(body) {
+		t.Fatalf("expected body to be unchanged, got %s", string(result))
+	}
+}
+
+func TestEnsureImageGenerationTool_FlattenedImageGenFunctionDoesNotInjectTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"image_gen.imagegen","parameters":{}}]}`)
+	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
+
+	if string(result) != string(body) {
+		t.Fatalf("expected body to be unchanged, got %s", string(result))
+	}
+}
+
+func TestEnsureImageGenerationTool_SimilarNamespaceStillInjectsTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_tools","tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`)
+	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
+
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+	if tools[1].Get("type").String() != "image_generation" {
+		t.Fatalf("expected second tool type=image_generation, got %s", tools[1].Get("type").String())
+	}
+}
+
 func TestEnsureImageGenerationTool_EmptyToolsArray(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[]}`)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil)
