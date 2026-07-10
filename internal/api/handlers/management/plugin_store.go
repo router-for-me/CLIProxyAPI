@@ -59,32 +59,34 @@ type pluginStoreSourceErr struct {
 }
 
 type pluginStoreListEntry struct {
-	StoreID          string                `json:"store_id"`
-	SourceID         string                `json:"source_id"`
-	SourceName       string                `json:"source_name"`
-	SourceURL        string                `json:"source_url"`
-	ID               string                `json:"id"`
-	Name             string                `json:"name"`
-	Description      string                `json:"description"`
-	Author           string                `json:"author"`
-	Version          string                `json:"version"`
-	Repository       string                `json:"repository"`
-	InstallType      string                `json:"install_type"`
-	AuthRequired     bool                  `json:"auth_required"`
-	AuthConfigured   bool                  `json:"auth_configured"`
-	Platforms        []pluginStorePlatform `json:"platforms,omitempty"`
-	Logo             string                `json:"logo,omitempty"`
-	Homepage         string                `json:"homepage,omitempty"`
-	License          string                `json:"license,omitempty"`
-	Tags             []string              `json:"tags,omitempty"`
-	Installed        bool                  `json:"installed"`
-	InstalledVersion string                `json:"installed_version"`
-	Path             string                `json:"path"`
-	Configured       bool                  `json:"configured"`
-	Registered       bool                  `json:"registered"`
-	Enabled          bool                  `json:"enabled"`
-	EffectiveEnabled bool                  `json:"effective_enabled"`
-	UpdateAvailable  bool                  `json:"update_available"`
+	StoreID             string                `json:"store_id"`
+	SourceID            string                `json:"source_id"`
+	SourceName          string                `json:"source_name"`
+	SourceURL           string                `json:"source_url"`
+	ID                  string                `json:"id"`
+	Name                string                `json:"name"`
+	Description         string                `json:"description"`
+	Author              string                `json:"author"`
+	Version             string                `json:"version"`
+	Repository          string                `json:"repository"`
+	InstallType         string                `json:"install_type"`
+	AuthRequired        bool                  `json:"auth_required"`
+	AuthConfigured      bool                  `json:"auth_configured"`
+	Platforms           []pluginStorePlatform `json:"platforms,omitempty"`
+	Logo                string                `json:"logo,omitempty"`
+	Homepage            string                `json:"homepage,omitempty"`
+	License             string                `json:"license,omitempty"`
+	Tags                []string              `json:"tags,omitempty"`
+	Installed           bool                  `json:"installed"`
+	InstalledVersion    string                `json:"installed_version"`
+	InstalledSourceID   string                `json:"installed_source_id,omitempty"`
+	InstallSourceStatus string                `json:"install_source_status,omitempty"`
+	Path                string                `json:"path"`
+	Configured          bool                  `json:"configured"`
+	Registered          bool                  `json:"registered"`
+	Enabled             bool                  `json:"enabled"`
+	EffectiveEnabled    bool                  `json:"effective_enabled"`
+	UpdateAvailable     bool                  `json:"update_available"`
 }
 
 type pluginStorePlatform struct {
@@ -110,13 +112,16 @@ type pluginInstallRequest struct {
 }
 
 type pluginLocalStatus struct {
-	Installed        bool
-	InstalledVersion string
-	Path             string
-	Configured       bool
-	Registered       bool
-	Enabled          bool
-	EffectiveEnabled bool
+	Installed          bool
+	InstalledVersion   string
+	StoreManaged       bool
+	InstalledSourceID  string
+	InstalledSourceURL string
+	Path               string
+	Configured         bool
+	Registered         bool
+	Enabled            bool
+	EffectiveEnabled   bool
 }
 
 type sourcedPlugin struct {
@@ -148,11 +153,21 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 	}
 	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
 	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
+	pluginSourceCounts := make(map[string]int, len(plugins))
+	for _, item := range plugins {
+		pluginSourceCounts[item.plugin.ID]++
+	}
 
 	entries := make([]pluginStoreListEntry, 0, len(plugins))
 	for index, item := range plugins {
 		plugin := item.plugin
 		status := statuses[plugin.ID]
+		installedSourceID, installSourceStatus, sourceAllowsUpdate := pluginStoreInstallSourceStatus(
+			status,
+			sources,
+			item.source.ID,
+			pluginSourceCounts[plugin.ID],
+		)
 		installedVersion := status.InstalledVersion
 		// Fall back to the registry version when the latest release is unknown.
 		storeVersion := plugin.Version
@@ -160,32 +175,34 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			storeVersion = latestVersions[index]
 		}
 		entries = append(entries, pluginStoreListEntry{
-			StoreID:          htmlsanitize.String(item.source.ID + "/" + plugin.ID),
-			SourceID:         htmlsanitize.String(item.source.ID),
-			SourceName:       htmlsanitize.String(item.source.Name),
-			SourceURL:        htmlsanitize.String(item.source.URL),
-			ID:               htmlsanitize.String(plugin.ID),
-			Name:             htmlsanitize.String(plugin.Name),
-			Description:      htmlsanitize.String(plugin.Description),
-			Author:           htmlsanitize.String(plugin.Author),
-			Version:          htmlsanitize.String(storeVersion),
-			Repository:       htmlsanitize.String(plugin.Repository),
-			InstallType:      htmlsanitize.String(pluginstore.PluginInstallType(plugin)),
-			AuthRequired:     plugin.AuthRequired,
-			AuthConfigured:   pluginAuthConfigured(item.source, plugin, storeAuth),
-			Platforms:        sanitizePluginStorePlatforms(pluginstore.PluginPlatforms(plugin)),
-			Logo:             htmlsanitize.String(plugin.Logo),
-			Homepage:         htmlsanitize.String(plugin.Homepage),
-			License:          htmlsanitize.String(plugin.License),
-			Tags:             htmlsanitize.Strings(plugin.Tags),
-			Installed:        status.Installed,
-			InstalledVersion: htmlsanitize.String(installedVersion),
-			Path:             htmlsanitize.String(status.Path),
-			Configured:       status.Configured,
-			Registered:       status.Registered,
-			Enabled:          status.Enabled,
-			EffectiveEnabled: status.EffectiveEnabled,
-			UpdateAvailable:  pluginstore.UpdateAvailable(installedVersion, storeVersion),
+			StoreID:             htmlsanitize.String(item.source.ID + "/" + plugin.ID),
+			SourceID:            htmlsanitize.String(item.source.ID),
+			SourceName:          htmlsanitize.String(item.source.Name),
+			SourceURL:           htmlsanitize.String(item.source.URL),
+			ID:                  htmlsanitize.String(plugin.ID),
+			Name:                htmlsanitize.String(plugin.Name),
+			Description:         htmlsanitize.String(plugin.Description),
+			Author:              htmlsanitize.String(plugin.Author),
+			Version:             htmlsanitize.String(storeVersion),
+			Repository:          htmlsanitize.String(plugin.Repository),
+			InstallType:         htmlsanitize.String(pluginstore.PluginInstallType(plugin)),
+			AuthRequired:        plugin.AuthRequired,
+			AuthConfigured:      pluginAuthConfigured(item.source, plugin, storeAuth),
+			Platforms:           sanitizePluginStorePlatforms(pluginstore.PluginPlatforms(plugin)),
+			Logo:                htmlsanitize.String(plugin.Logo),
+			Homepage:            htmlsanitize.String(plugin.Homepage),
+			License:             htmlsanitize.String(plugin.License),
+			Tags:                htmlsanitize.Strings(plugin.Tags),
+			Installed:           status.Installed,
+			InstalledVersion:    htmlsanitize.String(installedVersion),
+			InstalledSourceID:   htmlsanitize.String(installedSourceID),
+			InstallSourceStatus: htmlsanitize.String(installSourceStatus),
+			Path:                htmlsanitize.String(status.Path),
+			Configured:          status.Configured,
+			Registered:          status.Registered,
+			Enabled:             status.Enabled,
+			EffectiveEnabled:    status.EffectiveEnabled,
+			UpdateAvailable:     sourceAllowsUpdate && pluginstore.UpdateAvailable(installedVersion, storeVersion),
 		})
 	}
 
@@ -213,7 +230,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	installCtx := c.Request.Context()
-	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, _, host := h.pluginStoreSnapshot()
+	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()})
@@ -221,6 +238,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 	source, plugin, client, okPlugin := h.findPluginStoreInstallTarget(installCtx, proxyURL, storeAuth, sources, id, c.Query("source"), c)
 	if !okPlugin {
+		return
+	}
+	if !validatePluginStoreInstallSource(c, configs, sources, id, source.ID) {
 		return
 	}
 	pluginIsBusy := func() bool { return pluginBusy(host, id) }
@@ -717,6 +737,7 @@ func pluginLocalStatuses(pluginsEnabled bool, pluginsDir string, configs map[str
 		status := statuses[id]
 		status.Configured = true
 		status.Enabled = pluginInstanceEnabled(item)
+		status.InstalledSourceID, status.InstalledSourceURL, status.StoreManaged = pluginStoreConfiguredSource(item)
 		statuses[id] = status
 	}
 	if host != nil {
@@ -736,6 +757,95 @@ func pluginLocalStatuses(pluginsEnabled bool, pluginsDir string, configs map[str
 		statuses[id] = status
 	}
 	return statuses, nil
+}
+
+func pluginStoreConfiguredSource(item config.PluginInstanceConfig) (sourceID string, sourceURL string, managed bool) {
+	storeNode := pluginStoreConfigNode(item)
+	if storeNode == nil {
+		return "", "", false
+	}
+	var manifest pluginstore.Manifest
+	if errDecode := storeNode.Decode(&manifest); errDecode != nil {
+		return "", "", true
+	}
+	return strings.TrimSpace(manifest.SourceID), strings.TrimSpace(manifest.SourceURL), true
+}
+
+func pluginStoreResolveInstalledSource(status pluginLocalStatus, sources []pluginstore.Source) (string, bool) {
+	sourceID := strings.TrimSpace(status.InstalledSourceID)
+	sourceURL := strings.TrimSpace(status.InstalledSourceURL)
+	if sourceID != "" {
+		for _, source := range sources {
+			if strings.TrimSpace(source.ID) != sourceID {
+				continue
+			}
+			if sourceURL != "" && strings.TrimSpace(source.URL) != sourceURL {
+				return "", false
+			}
+			return sourceID, true
+		}
+		return sourceID, true
+	}
+	if sourceURL == "" {
+		return "", false
+	}
+	for _, source := range sources {
+		if strings.TrimSpace(source.URL) == sourceURL {
+			return strings.TrimSpace(source.ID), true
+		}
+	}
+	return "", false
+}
+
+func pluginStoreInstallSourceStatus(status pluginLocalStatus, sources []pluginstore.Source, entrySourceID string, sourceCount int) (installedSourceID string, sourceStatus string, allowUpdate bool) {
+	if !status.Installed && !status.Configured && !status.Registered {
+		return "", "", true
+	}
+	if sourceID, known := pluginStoreResolveInstalledSource(status, sources); known {
+		if sourceID == strings.TrimSpace(entrySourceID) {
+			return sourceID, "matched", true
+		}
+		return sourceID, "different", false
+	}
+	if status.StoreManaged || sourceCount > 1 {
+		return "", "unknown", false
+	}
+	return "", "assumed", true
+}
+
+func validatePluginStoreInstallSource(c *gin.Context, configs map[string]config.PluginInstanceConfig, sources []pluginstore.Source, id string, requestedSourceID string) bool {
+	item, configured := configs[id]
+	if !configured {
+		return true
+	}
+	installedSourceID, installedSourceURL, managed := pluginStoreConfiguredSource(item)
+	if !managed {
+		return true
+	}
+	status := pluginLocalStatus{
+		StoreManaged:       true,
+		InstalledSourceID:  installedSourceID,
+		InstalledSourceURL: installedSourceURL,
+	}
+	resolvedSourceID, known := pluginStoreResolveInstalledSource(status, sources)
+	if !known {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":               "plugin_store_installed_source_unknown",
+			"message":             "installed plugin source cannot be verified; uninstall it before reinstalling from the store",
+			"requested_source_id": strings.TrimSpace(requestedSourceID),
+		})
+		return false
+	}
+	if resolvedSourceID != strings.TrimSpace(requestedSourceID) {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":               "plugin_store_source_conflict",
+			"message":             "installed plugin belongs to a different store source; uninstall it before switching sources",
+			"installed_source_id": resolvedSourceID,
+			"requested_source_id": strings.TrimSpace(requestedSourceID),
+		})
+		return false
+	}
+	return true
 }
 
 func pluginStoreDesiredVersions(configs map[string]config.PluginInstanceConfig) map[string]string {
