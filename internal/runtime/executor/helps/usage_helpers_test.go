@@ -167,8 +167,8 @@ func TestStreamUsageBufferPreservesTierAcrossChunks(t *testing.T) {
 	t.Parallel()
 
 	var buffer StreamUsageBuffer
-	buffer.Observe(ParseOpenAIStreamUsage([]byte(`data: {"service_tier":"default"}`)))
-	buffer.Observe(ParseOpenAIStreamUsage([]byte(`data: {"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)))
+	buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"default"}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
 	detail, ok := buffer.Detail()
 	if !ok {
 		t.Fatal("Detail() ok = false, want true")
@@ -176,6 +176,57 @@ func TestStreamUsageBufferPreservesTierAcrossChunks(t *testing.T) {
 	if detail.InputTokens != 1 || detail.OutputTokens != 1 || detail.ResponseServiceTier != "default" {
 		t.Fatalf("detail = %+v, want usage with response tier default", detail)
 	}
+}
+
+func TestStreamUsageBufferObserveOpenAIStreamStateTransitions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("same chunk", func(t *testing.T) {
+		var buffer StreamUsageBuffer
+		buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"flex","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`))
+		detail, ok := buffer.Detail()
+		if !ok || detail.InputTokens != 2 || detail.ResponseServiceTier != "flex" {
+			t.Fatalf("detail = %+v ok=%v", detail, ok)
+		}
+	})
+
+	t.Run("usage before tier", func(t *testing.T) {
+		var buffer StreamUsageBuffer
+		buffer.ObserveOpenAIStream([]byte(`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`))
+		buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"default"}`))
+		detail, ok := buffer.Detail()
+		if !ok || detail.InputTokens != 2 || detail.ResponseServiceTier != "default" {
+			t.Fatalf("detail = %+v ok=%v", detail, ok)
+		}
+	})
+
+	t.Run("final usage tier overrides early tier", func(t *testing.T) {
+		var buffer StreamUsageBuffer
+		buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"default"}`))
+		buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"priority","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`))
+		detail, ok := buffer.Detail()
+		if !ok || detail.ResponseServiceTier != "priority" {
+			t.Fatalf("detail = %+v ok=%v", detail, ok)
+		}
+	})
+
+	t.Run("irrelevant and invalid chunks do not change state", func(t *testing.T) {
+		var buffer StreamUsageBuffer
+		buffer.ObserveOpenAIStream([]byte(`data: {"content":"the word \"usage\" appears here"}`))
+		buffer.ObserveOpenAIStream([]byte(`data: {"usage":`))
+		buffer.ObserveOpenAIStream([]byte(`data: {"usage":null}`))
+		if detail, ok := buffer.Detail(); ok {
+			t.Fatalf("detail = %+v ok=true, want empty buffer", detail)
+		}
+	})
+
+	t.Run("zero token usage is retained", func(t *testing.T) {
+		var buffer StreamUsageBuffer
+		buffer.ObserveOpenAIStream([]byte(`data: {"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`))
+		if _, ok := buffer.Detail(); !ok {
+			t.Fatal("Detail() ok = false, want true")
+		}
+	})
 }
 
 func TestStreamUsageBufferPreservesOnlyZeroUsage(t *testing.T) {

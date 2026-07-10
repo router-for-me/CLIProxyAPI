@@ -455,6 +455,11 @@ type StreamUsageBuffer struct {
 	ok     bool
 }
 
+var (
+	openAIStreamUsageMarker       = []byte(`"usage"`)
+	openAIStreamServiceTierMarker = []byte(`"service_tier"`)
+)
+
 // Observe records detail when ok is true, allowing the final stream usage to win.
 func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	if b == nil || !ok {
@@ -471,6 +476,42 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 		b.detail.ResponseServiceTier = responseServiceTier
 	}
 	b.ok = true
+}
+
+// ObserveOpenAIStream records response-tier state and the latest usage from an
+// OpenAI-style stream while avoiding JSON parsing for irrelevant chunks.
+func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
+	if b == nil {
+		return
+	}
+	payload := jsonPayload(line)
+	if len(payload) == 0 {
+		return
+	}
+
+	hasUsageCandidate := bytes.Contains(payload, openAIStreamUsageMarker)
+	needTier := b.detail.ResponseServiceTier == "" || hasUsageCandidate
+	hasTierCandidate := needTier && bytes.Contains(payload, openAIStreamServiceTierMarker)
+	if !hasUsageCandidate && !hasTierCandidate {
+		return
+	}
+	if !gjson.ValidBytes(payload) {
+		return
+	}
+
+	detail := usage.Detail{}
+	usageOK := false
+	if hasUsageCandidate {
+		usageNode := gjson.GetBytes(payload, "usage")
+		if hasOpenAIStyleUsageTokenFields(usageNode) {
+			detail = parseOpenAIStyleUsageNode(usageNode)
+			usageOK = true
+		}
+	}
+	if hasTierCandidate {
+		detail.ResponseServiceTier = extractResponseServiceTierFromValidJSON(payload)
+	}
+	b.Observe(detail, usageOK || detail.ResponseServiceTier != "")
 }
 
 // Publish emits the latest observed usage detail, if any.
@@ -682,6 +723,10 @@ func extractResponseServiceTier(payload []byte) string {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return ""
 	}
+	return extractResponseServiceTierFromValidJSON(payload)
+}
+
+func extractResponseServiceTierFromValidJSON(payload []byte) string {
 	for _, path := range []string{"response.service_tier", "service_tier", "interaction.service_tier"} {
 		if tier := strings.TrimSpace(gjson.GetBytes(payload, path).String()); tier != "" {
 			return tier

@@ -449,7 +449,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 				chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
 				for _, line := range bytes.Split(chunk, []byte("\n")) {
-					streamUsage.Observe(helps.ParseOpenAIStreamUsage(bytes.TrimSpace(line)))
+					streamUsage.ObserveOpenAIStream(bytes.TrimSpace(line))
 				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
