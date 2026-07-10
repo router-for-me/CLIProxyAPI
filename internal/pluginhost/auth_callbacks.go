@@ -20,6 +20,12 @@ type rpcHostAuthGetRequest struct {
 	AuthIndex string `json:"auth_index"`
 }
 
+type rpcHostAuthCooldownRequest struct {
+	AuthIndex            string `json:"auth_index"`
+	NextRetryAfterUnixMs int64  `json:"next_retry_after_unix_ms"`
+	Reason               string `json:"reason,omitempty"`
+}
+
 type rpcHostAuthListResponse struct {
 	Files []pluginapi.HostAuthFileEntry `json:"files"`
 }
@@ -130,6 +136,31 @@ func (h *Host) callHostAuthSave(ctx context.Context, request []byte) ([]byte, er
 		Name: name,
 		Path: path,
 	})
+}
+
+func (h *Host) callHostAuthCooldown(ctx context.Context, request []byte) ([]byte, error) {
+	_ = ctx
+	var req rpcHostAuthCooldownRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host auth cooldown request: %w", errUnmarshal)
+	}
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	if authIndex == "" {
+		return nil, fmt.Errorf("auth_index is required")
+	}
+	if req.NextRetryAfterUnixMs <= 0 {
+		return nil, fmt.Errorf("next_retry_after_unix_ms must be greater than 0")
+	}
+	auth, _, errGet := h.authPhysicalJSONByIndex(authIndex)
+	if errGet != nil {
+		return nil, errGet
+	}
+	manager := h.currentAuthManager()
+	if manager == nil {
+		return nil, fmt.Errorf("core auth manager unavailable")
+	}
+	manager.SetTemporaryCooldown(auth.ID, time.UnixMilli(req.NextRetryAfterUnixMs), req.Reason)
+	return marshalRPCResult(pluginapi.HostAuthCooldownResponse{OK: true})
 }
 
 func (h *Host) listAuthFiles() ([]pluginapi.HostAuthFileEntry, error) {

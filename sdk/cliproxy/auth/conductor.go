@@ -614,6 +614,45 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 	return nil
 }
 
+// SetTemporaryCooldown places the auth identified by id into a temporary,
+// self-recovering cooldown until the provided time. It mirrors the auth-level
+// branch of restoreCooldownRecordLocked so selection treats the auth as a
+// temporary skip (auth.Unavailable && NextRetryAfter.After(now)) and persists the
+// cooldown so it survives restart. It intentionally never sets Disabled, since
+// Register/Update clear cooldown state for disabled auths.
+func (m *Manager) SetTemporaryCooldown(id string, until time.Time, reason string) {
+	if m == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	now := time.Now()
+	reason = strings.TrimSpace(reason)
+
+	m.mu.Lock()
+	auth := m.auths[id]
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
+		m.mu.Unlock()
+		return
+	}
+	auth.Unavailable = true
+	auth.Status = StatusError
+	auth.NextRetryAfter = until
+	auth.UpdatedAt = now
+	if reason != "" {
+		auth.StatusMessage = reason
+	}
+	snapshot := auth.Clone()
+	m.mu.Unlock()
+
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+	m.persistCooldownStates(context.Background())
+}
+
 func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now time.Time) bool {
 	authID := strings.TrimSpace(record.AuthID)
 	if authID == "" || record.NextRetryAfter.IsZero() || !record.NextRetryAfter.After(now) {

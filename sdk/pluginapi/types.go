@@ -767,6 +767,23 @@ type HostAuthSaveResponse struct {
 	Path string `json:"path"`
 }
 
+// HostAuthCooldownRequest asks the host to place an auth into a temporary,
+// self-recovering cooldown until the provided time.
+type HostAuthCooldownRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// NextRetryAfterUnixMs is the cooldown expiry in Unix milliseconds.
+	NextRetryAfterUnixMs int64 `json:"next_retry_after_unix_ms"`
+	// Reason is an optional human-readable cooldown reason.
+	Reason string `json:"reason,omitempty"`
+}
+
+// HostAuthCooldownResponse reports the cooldown outcome.
+type HostAuthCooldownResponse struct {
+	// OK indicates the cooldown was applied.
+	OK bool `json:"ok"`
+}
+
 // HTTPRequest describes an upstream HTTP request issued through the host.
 type HTTPRequest struct {
 	// Method is the HTTP method.
