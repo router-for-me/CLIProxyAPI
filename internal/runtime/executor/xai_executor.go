@@ -127,12 +127,12 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	}
 
 	token, _ := xaiCreds(auth)
-	baseURL := xaiChatBaseURL(auth)
 
 	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
 	if err != nil {
 		return resp, err
 	}
+	baseURL := xaiChatBaseURL(auth, prepared.baseModel)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -143,7 +143,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, baseURL)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -216,12 +216,12 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
 	token, _ := xaiCreds(auth)
-	baseURL := xaiChatBaseURL(auth)
 
 	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	baseURL := xaiChatBaseURL(auth, prepared.baseModel)
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
@@ -235,7 +235,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID, baseURL)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -581,12 +581,12 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	token, _ := xaiCreds(auth)
-	baseURL := xaiChatBaseURL(auth)
 
 	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
 	if err != nil {
 		return nil, err
 	}
+	baseURL := xaiChatBaseURL(auth, prepared.baseModel)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -597,7 +597,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, baseURL)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -914,17 +914,23 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
-// xaiChatBaseURL returns the base URL for non-image/video xAI HTTP chat requests.
-// Empty or official default base_url is rewritten to the CLI chat-proxy endpoint.
+// xaiChatBaseURL returns the entitlement-specific URL for non-media xAI HTTP chat.
 // An explicit non-default base_url (tests / custom gateways) is still honored.
 // Websocket transport intentionally does not use this helper: cli-chat-proxy only
 // accepts HTTP POST and returns 405 for websocket upgrades.
-func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
-	_, baseURL := xaiCreds(auth)
+func xaiChatBaseURL(auth *cliproxyauth.Auth, model string) string {
+	token, baseURL := xaiCreds(auth)
 	if baseURL != "" && !xaiIsDefaultAPIBaseURL(baseURL) {
 		return baseURL
 	}
-	return xaiauth.CLIChatProxyBaseURL
+	authKind := ""
+	if auth != nil {
+		authKind = auth.AuthKind()
+	}
+	if xaiauth.OAuthModelUsesGrokCLI(authKind, token, model) {
+		return xaiauth.CLIChatProxyBaseURL
+	}
+	return xaiauth.DefaultAPIBaseURL
 }
 
 func xaiNormalizeBaseURL(baseURL string) string {
@@ -971,9 +977,9 @@ func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
 // applyXAIChatHeaders applies standard xAI headers for non-image/video chat
 // requests. CLI chat-proxy identity headers are only attached when the resolved
 // chat base URL is the official CLI chat-proxy endpoint.
-func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID, baseURL string) {
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
-	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
+	if xaiIsCLIChatProxyBaseURL(baseURL) {
 		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
 		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
 	}

@@ -1574,41 +1574,57 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 }
 
 func TestXAIChatBaseURL(t *testing.T) {
+	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
 	tests := []struct {
-		name string
-		auth *cliproxyauth.Auth
-		want string
+		name  string
+		auth  *cliproxyauth.Auth
+		model string
+		want  string
 	}{
 		{
-			name: "nil auth defaults to chat proxy",
+			name: "nil auth defaults to standard api",
 			auth: nil,
-			want: xaiauth.CLIChatProxyBaseURL,
+			want: xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "empty base url defaults to chat proxy",
+			name: "empty auth defaults to standard api",
 			auth: &cliproxyauth.Auth{Provider: "xai"},
-			want: xaiauth.CLIChatProxyBaseURL,
+			want: xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "official default rewrites to chat proxy",
+			name: "free oauth uses chat proxy",
 			auth: &cliproxyauth.Auth{
-				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
+				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL, "auth_kind": "oauth"},
+				Metadata:   map[string]any{"access_token": "opaque-free-token"},
 			},
-			want: xaiauth.CLIChatProxyBaseURL,
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.CLIChatProxyBaseURL,
 		},
 		{
-			name: "official default with trailing slash rewrites to chat proxy",
+			name: "paid oauth uses standard api",
 			auth: &cliproxyauth.Auth{
-				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL + "/"},
+				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL + "/", "auth_kind": "oauth"},
+				Metadata:   map[string]any{"access_token": paidToken},
 			},
-			want: xaiauth.CLIChatProxyBaseURL,
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "metadata official default rewrites to chat proxy",
+			name: "paid composer uses chat proxy",
 			auth: &cliproxyauth.Auth{
-				Metadata: map[string]any{"base_url": xaiauth.DefaultAPIBaseURL},
+				Attributes: map[string]string{"auth_kind": "oauth"},
+				Metadata:   map[string]any{"base_url": xaiauth.DefaultAPIBaseURL, "access_token": paidToken},
 			},
-			want: xaiauth.CLIChatProxyBaseURL,
+			model: "grok-composer-2.5-fast",
+			want:  xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "api key uses standard api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL, "api_key": "key", "auth_kind": "apikey"},
+			},
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.DefaultAPIBaseURL,
 		},
 		{
 			name: "custom base url is honored",
@@ -1628,7 +1644,7 @@ func TestXAIChatBaseURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := xaiChatBaseURL(tt.auth); got != tt.want {
+			if got := xaiChatBaseURL(tt.auth, tt.model); got != tt.want {
 				t.Fatalf("xaiChatBaseURL() = %q, want %q", got, tt.want)
 			}
 		})
@@ -1641,7 +1657,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		auth := &cliproxyauth.Auth{
 			Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
 		}
-		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1")
+		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1", xaiauth.CLIChatProxyBaseURL)
 
 		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
 			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
@@ -1662,7 +1678,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		auth := &cliproxyauth.Auth{
 			Attributes: map[string]string{"base_url": "https://gateway.example.com/v1"},
 		}
-		applyXAIChatHeaders(req, auth, "xai-token", false, "")
+		applyXAIChatHeaders(req, auth, "xai-token", false, "", "https://gateway.example.com/v1")
 
 		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
 			t.Fatalf("%s = %q, want empty for custom gateway", xaiTokenAuthHeader, got)
@@ -1681,7 +1697,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 				"header:" + xaiClientVersionHeader: "custom-client-version",
 			},
 		}
-		applyXAIChatHeaders(req, auth, "xai-token", true, "")
+		applyXAIChatHeaders(req, auth, "xai-token", true, "", xaiauth.CLIChatProxyBaseURL)
 
 		if got := req.Header.Get(xaiTokenAuthHeader); got != "custom-token-auth" {
 			t.Fatalf("%s = %q, want custom-token-auth", xaiTokenAuthHeader, got)
@@ -1696,7 +1712,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		auth := &cliproxyauth.Auth{
 			Attributes: map[string]string{"base_url": xaiauth.CLIChatProxyBaseURL + "/"},
 		}
-		applyXAIChatHeaders(req, auth, "xai-token", true, "")
+		applyXAIChatHeaders(req, auth, "xai-token", true, "", xaiauth.CLIChatProxyBaseURL)
 
 		if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
 			t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)

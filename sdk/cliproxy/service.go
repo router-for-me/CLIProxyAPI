@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
@@ -2027,6 +2028,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
+		models = scopeXAIModelsForAuth(a, authKind, models)
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -2140,6 +2142,41 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func scopeXAIModelsForAuth(auth *coreauth.Auth, authKind string, models []*ModelInfo) []*ModelInfo {
+	if !strings.EqualFold(strings.TrimSpace(authKind), coreauth.AuthKindOAuth) {
+		return models
+	}
+	baseURL := ""
+	if auth != nil && auth.Attributes != nil {
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	if baseURL == "" && auth != nil && auth.Metadata != nil {
+		if value, ok := auth.Metadata["base_url"].(string); ok {
+			baseURL = strings.TrimSpace(value)
+		}
+	}
+	if baseURL != "" && !strings.EqualFold(strings.TrimRight(baseURL, "/"), strings.TrimRight(xaiauth.DefaultAPIBaseURL, "/")) {
+		return models
+	}
+	accessToken := ""
+	if auth != nil && auth.Metadata != nil {
+		if value, ok := auth.Metadata["access_token"].(string); ok {
+			accessToken = strings.TrimSpace(value)
+		}
+	}
+	if xaiauth.AccessTokenHasStandardAPITier(accessToken) {
+		return models
+	}
+
+	freeModels := make([]*ModelInfo, 0, 1)
+	for _, model := range models {
+		if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), xaiauth.FreeOAuthModel) {
+			freeModels = append(freeModels, model)
+		}
+	}
+	return freeModels
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for
