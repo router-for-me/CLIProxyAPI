@@ -26,6 +26,53 @@ func TestOAuthSessionStoreCompleteKeepsShortLivedSession(t *testing.T) {
 	}
 }
 
+func TestOAuthSessionStoreCompleteDoesNotExtendCompletedSession(t *testing.T) {
+	store := newOAuthSessionStore(time.Minute)
+	store.Register("completed-state", "codex")
+	store.Complete("completed-state")
+	before, ok := store.Get("completed-state")
+	if !ok {
+		t.Fatal("completed OAuth session tombstone is missing")
+	}
+
+	store.completedTTL = 2 * time.Minute
+	store.Complete("completed-state")
+	after, ok := store.Get("completed-state")
+	if !ok {
+		t.Fatal("completed OAuth session tombstone is missing after repeated completion")
+	}
+	if !after.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Fatalf("repeated completion extended expiry from %s to %s", before.ExpiresAt, after.ExpiresAt)
+	}
+}
+
+func TestOAuthSessionStoreCompleteProviderSkipsCompletedSessions(t *testing.T) {
+	store := newOAuthSessionStore(time.Minute)
+	store.Register("completed-state", "codex")
+	store.Register("pending-state", "codex")
+	store.Complete("completed-state")
+	completedBefore, ok := store.Get("completed-state")
+	if !ok {
+		t.Fatal("completed OAuth session tombstone is missing")
+	}
+
+	store.completedTTL = 2 * time.Minute
+	if got := store.CompleteProvider("codex", oauthSessionSourceBuiltin); got != 1 {
+		t.Fatalf("CompleteProvider() = %d, want 1 newly completed session", got)
+	}
+	completedAfter, ok := store.Get("completed-state")
+	if !ok {
+		t.Fatal("completed OAuth session tombstone is missing after provider completion")
+	}
+	if !completedAfter.ExpiresAt.Equal(completedBefore.ExpiresAt) {
+		t.Fatalf("provider completion extended existing tombstone from %s to %s", completedBefore.ExpiresAt, completedAfter.ExpiresAt)
+	}
+	pendingAfter, ok := store.Get("pending-state")
+	if !ok || !pendingAfter.Completed {
+		t.Fatalf("pending session completed/ok = %t/%t, want true/true", pendingAfter.Completed, ok)
+	}
+}
+
 func TestGetOAuthSessionHidesCompletedSession(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	replaceOAuthSessionStoreForTest(t, store)
