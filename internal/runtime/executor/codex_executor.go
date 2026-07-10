@@ -792,6 +792,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = stripCodexInputNamespace(body)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -973,6 +974,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = stripCodexInputNamespace(body)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
@@ -1081,6 +1083,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = stripCodexInputNamespace(body)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
@@ -1785,6 +1788,26 @@ func normalizeCodexInstructions(body []byte) []byte {
 	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null {
 		body, _ = sjson.SetBytes(body, "instructions", "")
+	}
+	return body
+}
+
+// stripCodexInputNamespace removes the client-only "namespace" field from Codex
+// input history items (function_call / custom_tool_call). Newer Codex CLI clients
+// attach it for local tool grouping, but the upstream Responses API rejects it with
+// "Unknown parameter: 'input[N].namespace'". The backend correlates tool calls via
+// call_id, so dropping the field is safe.
+func stripCodexInputNamespace(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	for i, item := range input.Array() {
+		if item.Get("namespace").Exists() {
+			if updated, err := sjson.DeleteBytes(body, fmt.Sprintf("input.%d.namespace", i)); err == nil {
+				body = updated
+			}
+		}
 	}
 	return body
 }
