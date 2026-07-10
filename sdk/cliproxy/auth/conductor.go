@@ -387,10 +387,10 @@ func (m *Manager) RefreshSchedulerAll() {
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
-// Supported models are reset to a clean state because re-registration already
-// cleared the registry-side cooldown/suspension snapshot. ModelStates for
-// models that are no longer present in the registry are pruned entirely so
-// renamed/removed models cannot keep auth-level status stale.
+// Active cooldowns for supported models are preserved across re-registration
+// and restored into the registry. ModelStates for models that are no longer
+// present in the registry are pruned entirely so renamed/removed models cannot
+// keep auth-level status stale.
 func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID string) {
 	if m == nil || authID == "" {
 		return
@@ -409,7 +409,14 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		supported[modelKey] = struct{}{}
 	}
 
+	type registryCooldown struct {
+		model  string
+		reason string
+		quota  bool
+	}
+
 	var snapshot *Auth
+	var cooldowns []registryCooldown
 	now := time.Now()
 
 	m.mu.Lock()
@@ -435,6 +442,16 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if modelStateIsClean(state) {
 				continue
 			}
+			if state.Unavailable && state.NextRetryAfter.After(now) {
+				if reason, quota, suspend := registrySuspensionForModelState(state); suspend {
+					cooldowns = append(cooldowns, registryCooldown{
+						model:  baseModel,
+						reason: reason,
+						quota:  quota,
+					})
+				}
+				continue
+			}
 			resetModelState(state, now)
 			changed = true
 		}
@@ -457,8 +474,41 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 	m.mu.Unlock()
 
+	reg := registry.GetGlobalRegistry()
+	for _, cooldown := range cooldowns {
+		if cooldown.quota {
+			reg.SetModelQuotaExceeded(authID, cooldown.model)
+		}
+		reg.SuspendClientModel(authID, cooldown.model, cooldown.reason)
+	}
+
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
+	}
+}
+
+func registrySuspensionForModelState(state *ModelState) (reason string, quota, suspend bool) {
+	if state == nil {
+		return "", false, false
+	}
+	if state.Quota.Exceeded && strings.EqualFold(strings.TrimSpace(state.Quota.Reason), "quota") {
+		return "quota", true, true
+	}
+	if isModelSupportResultError(state.LastError) {
+		return "model_not_supported", false, true
+	}
+	if isInvalidGrantResultError(state.LastError) {
+		return "invalid_grant", false, true
+	}
+	switch statusCodeFromResult(state.LastError) {
+	case http.StatusUnauthorized:
+		return "unauthorized", false, true
+	case http.StatusPaymentRequired, http.StatusForbidden:
+		return "payment_required", false, true
+	case http.StatusNotFound:
+		return "not_found", false, true
+	default:
+		return "", false, false
 	}
 }
 
