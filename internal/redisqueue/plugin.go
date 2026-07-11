@@ -66,13 +66,16 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
 
 	tokens := tokenStats{
-		InputTokens:         record.Detail.InputTokens,
-		OutputTokens:        record.Detail.OutputTokens,
-		ReasoningTokens:     record.Detail.ReasoningTokens,
-		CachedTokens:        record.Detail.CachedTokens,
-		CacheReadTokens:     record.Detail.CacheReadTokens,
-		CacheCreationTokens: record.Detail.CacheCreationTokens,
-		TotalTokens:         record.Detail.TotalTokens,
+		InputTokens:           record.Detail.InputTokens,
+		OutputTokens:          record.Detail.OutputTokens,
+		ReasoningTokens:       record.Detail.ReasoningTokens,
+		CachedTokens:          record.Detail.CachedTokens,
+		CacheReadTokens:       record.Detail.CacheReadTokens,
+		CacheCreationTokens:   record.Detail.CacheCreationTokens,
+		CacheCreation5mTokens: record.Detail.CacheCreation5mTokens,
+		CacheCreation1hTokens: record.Detail.CacheCreation1hTokens,
+		CacheTelemetryPresent: record.Detail.CacheTelemetryPresent,
+		TotalTokens:           record.Detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
@@ -102,6 +105,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	payload, err := json.Marshal(queuedUsageDetail{
 		requestDetail:       detail,
 		Provider:            provider,
+		Operation:           normalizeOperation(record.Operation),
 		ExecutorType:        executorType,
 		Model:               modelName,
 		Alias:               aliasName,
@@ -123,6 +127,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 type queuedUsageDetail struct {
 	requestDetail
 	Provider            string `json:"provider"`
+	Operation           string `json:"operation"`
 	ExecutorType        string `json:"executor_type"`
 	Model               string `json:"model"`
 	Alias               string `json:"alias"`
@@ -149,13 +154,24 @@ type requestDetail struct {
 }
 
 type tokenStats struct {
-	InputTokens         int64 `json:"input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	ReasoningTokens     int64 `json:"reasoning_tokens"`
-	CachedTokens        int64 `json:"cached_tokens"`
-	CacheReadTokens     int64 `json:"cache_read_tokens"`
-	CacheCreationTokens int64 `json:"cache_creation_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
+	InputTokens           int64 `json:"input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningTokens       int64 `json:"reasoning_tokens"`
+	CachedTokens          int64 `json:"cached_tokens"`
+	CacheReadTokens       int64 `json:"cache_read_tokens"`
+	CacheCreationTokens   int64 `json:"cache_creation_tokens"`
+	CacheCreation5mTokens int64 `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int64 `json:"cache_creation_1h_tokens"`
+	CacheTelemetryPresent bool  `json:"cache_telemetry_present"`
+	TotalTokens           int64 `json:"total_tokens"`
+}
+
+func normalizeOperation(operation string) string {
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	if operation == "" {
+		return "inference"
+	}
+	return operation
 }
 
 type failDetail struct {

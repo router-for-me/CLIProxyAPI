@@ -144,6 +144,12 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	if password == "" && tuiMode && !standalone {
+		// A pure TUI client may reuse the same inherited, loopback-only secret as
+		// the server without placing it in process arguments. An empty value keeps
+		// the existing interactive password prompt.
+		password = strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD"))
+	}
 
 	// Core application variables.
 	var err error
@@ -630,7 +636,7 @@ func main() {
 				misc.StartAntigravityVersionUpdater(context.Background())
 				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
 				hook := tui.NewLogHook(2000)
-				hook.SetFormatter(&logging.LogFormatter{})
+				hook.SetFormatter(&logging.LogFormatter{DisableRequestEventColors: true})
 				log.AddHook(hook)
 
 				origStdout := os.Stdout

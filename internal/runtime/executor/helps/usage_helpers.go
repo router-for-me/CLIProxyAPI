@@ -23,6 +23,7 @@ import (
 
 type UsageReporter struct {
 	provider     string
+	operation    string
 	executorType string
 	model        string
 	alias        string
@@ -100,6 +101,15 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 		return
 	}
 	r.publishRecord(ctx, record)
+}
+
+// SetOperation labels records emitted by this reporter. The default operation
+// is inference; callers should use "compaction" for native compact requests.
+func (r *UsageReporter) SetOperation(operation string) {
+	if r == nil {
+		return
+	}
+	r.operation = strings.ToLower(strings.TrimSpace(operation))
 }
 
 func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
@@ -187,6 +197,13 @@ func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
 	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
 }
 
+// PublishFailureWithDetail emits partial upstream usage while marking the
+// request failed/incomplete. This is used when a streaming client disconnects
+// after the provider has already reported billable input or output tokens.
+func (r *UsageReporter) PublishFailureWithDetail(ctx context.Context, detail usage.Detail, errs ...error) {
+	r.publishWithOutcome(ctx, detail, true, failFromErrors(errs...))
+}
+
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 	if r == nil || errPtr == nil {
 		return
@@ -223,6 +240,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.CachedTokens != 0 ||
 		detail.CacheReadTokens != 0 ||
 		detail.CacheCreationTokens != 0 ||
+		detail.CacheCreation5mTokens != 0 ||
+		detail.CacheCreation1hTokens != 0 ||
 		detail.TotalTokens != 0
 }
 
@@ -261,6 +280,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	}
 	return usage.Record{
 		Provider:            r.provider,
+		Operation:           r.operation,
 		ExecutorType:        r.executorType,
 		Model:               model,
 		Alias:               r.alias,
@@ -455,6 +475,89 @@ type StreamUsageBuffer struct {
 	ok     bool
 }
 
+// ClaudeStreamUsageBuffer merges Anthropic's split streaming usage frames.
+// message_start carries input/cache tokens under message.usage, while later
+// message_delta frames normally carry the final cumulative output_tokens under
+// top-level usage. Publishing the first frame would undercount both output and
+// cost, so callers should publish this buffer only when the stream terminates.
+type ClaudeStreamUsageBuffer struct {
+	detail usage.Detail
+	ok     bool
+}
+
+// ObserveClaudeStream merges usage fields present in one Claude SSE line.
+func (b *ClaudeStreamUsageBuffer) ObserveClaudeStream(line []byte) {
+	if b == nil {
+		return
+	}
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return
+	}
+	root := gjson.ParseBytes(payload)
+	usageNode := root.Get("usage")
+	if !usageNode.Exists() {
+		usageNode = root.Get("message.usage")
+	}
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return
+	}
+
+	if node := usageNode.Get("input_tokens"); node.Exists() {
+		b.detail.InputTokens = node.Int()
+	}
+	if node := usageNode.Get("output_tokens"); node.Exists() {
+		b.detail.OutputTokens = node.Int()
+	}
+	if node := usageNode.Get("cache_read_input_tokens"); node.Exists() {
+		b.detail.CacheReadTokens = node.Int()
+		b.detail.CachedTokens = node.Int()
+		b.detail.CacheTelemetryPresent = true
+	}
+	if node := usageNode.Get("cache_creation_input_tokens"); node.Exists() {
+		b.detail.CacheCreationTokens = node.Int()
+		b.detail.CacheTelemetryPresent = true
+		if b.detail.CachedTokens == 0 {
+			b.detail.CachedTokens = node.Int()
+		}
+	}
+	cacheCreation5mNode := usageNode.Get("cache_creation.ephemeral_5m_input_tokens")
+	cacheCreation1hNode := usageNode.Get("cache_creation.ephemeral_1h_input_tokens")
+	if cacheCreation5mNode.Exists() {
+		b.detail.CacheCreation5mTokens = cacheCreation5mNode.Int()
+		b.detail.CacheTelemetryPresent = true
+	}
+	if cacheCreation1hNode.Exists() {
+		b.detail.CacheCreation1hTokens = cacheCreation1hNode.Int()
+		b.detail.CacheTelemetryPresent = true
+	}
+	if !usageNode.Get("cache_creation_input_tokens").Exists() && (cacheCreation5mNode.Exists() || cacheCreation1hNode.Exists()) {
+		b.detail.CacheCreationTokens = b.detail.CacheCreation5mTokens + b.detail.CacheCreation1hTokens
+		if b.detail.CachedTokens == 0 {
+			b.detail.CachedTokens = b.detail.CacheCreationTokens
+		}
+	}
+	b.detail.TotalTokens = b.detail.InputTokens + b.detail.OutputTokens + b.detail.CacheReadTokens + b.detail.CacheCreationTokens
+	b.ok = true
+}
+
+// Publish emits the merged Claude stream usage once.
+func (b *ClaudeStreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter) bool {
+	if b == nil || !b.ok || reporter == nil {
+		return false
+	}
+	reporter.Publish(ctx, b.detail)
+	return true
+}
+
+// Detail returns the merged Claude stream usage for tests and diagnostics.
+func (b *ClaudeStreamUsageBuffer) Detail() (usage.Detail, bool) {
+	if b == nil || !b.ok {
+		return usage.Detail{}, false
+	}
+	return b.detail, true
+}
+
 var (
 	openAIStreamUsageMarker       = []byte(`"usage"`)
 	openAIStreamServiceTierMarker = []byte(`"service_tier"`)
@@ -604,6 +707,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
 		detail.CacheReadTokens = cached.Int()
+		detail.CacheTelemetryPresent = true
 	}
 	cacheCreation := firstExistingUsageNode(
 		usageNode,
@@ -614,6 +718,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	)
 	if cacheCreation.Exists() {
 		detail.CacheCreationTokens = cacheCreation.Int()
+		detail.CacheTelemetryPresent = true
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
@@ -658,20 +763,35 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
-		return usage.Detail{}, false
+		usageNode = gjson.GetBytes(payload, "message.usage")
+		if !usageNode.Exists() {
+			return usage.Detail{}, false
+		}
 	}
 	return parseClaudeUsageNode(usageNode), true
 }
 
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
-	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
-	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
+	cacheReadNode := usageNode.Get("cache_read_input_tokens")
+	cacheCreationNode := usageNode.Get("cache_creation_input_tokens")
+	cacheCreation5mNode := usageNode.Get("cache_creation.ephemeral_5m_input_tokens")
+	cacheCreation1hNode := usageNode.Get("cache_creation.ephemeral_1h_input_tokens")
+	cacheReadTokens := cacheReadNode.Int()
+	cacheCreationTokens := cacheCreationNode.Int()
+	cacheCreation5mTokens := cacheCreation5mNode.Int()
+	cacheCreation1hTokens := cacheCreation1hNode.Int()
+	if !cacheCreationNode.Exists() && (cacheCreation5mNode.Exists() || cacheCreation1hNode.Exists()) {
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
 	detail := usage.Detail{
-		InputTokens:         usageNode.Get("input_tokens").Int(),
-		OutputTokens:        usageNode.Get("output_tokens").Int(),
-		CachedTokens:        cacheReadTokens,
-		CacheReadTokens:     cacheReadTokens,
-		CacheCreationTokens: cacheCreationTokens,
+		InputTokens:           usageNode.Get("input_tokens").Int(),
+		OutputTokens:          usageNode.Get("output_tokens").Int(),
+		CachedTokens:          cacheReadTokens,
+		CacheReadTokens:       cacheReadTokens,
+		CacheCreationTokens:   cacheCreationTokens,
+		CacheCreation5mTokens: cacheCreation5mTokens,
+		CacheCreation1hTokens: cacheCreation1hTokens,
+		CacheTelemetryPresent: cacheReadNode.Exists() || cacheCreationNode.Exists() || cacheCreation5mNode.Exists() || cacheCreation1hNode.Exists(),
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
@@ -681,14 +801,15 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
-	cachedTokens := node.Get("cachedContentTokenCount").Int()
+	cachedNode := node.Get("cachedContentTokenCount")
 	detail := usage.Detail{
-		InputTokens:     node.Get("promptTokenCount").Int(),
-		OutputTokens:    node.Get("candidatesTokenCount").Int(),
-		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
-		TotalTokens:     node.Get("totalTokenCount").Int(),
-		CachedTokens:    cachedTokens,
-		CacheReadTokens: cachedTokens,
+		InputTokens:           node.Get("promptTokenCount").Int(),
+		OutputTokens:          node.Get("candidatesTokenCount").Int(),
+		ReasoningTokens:       node.Get("thoughtsTokenCount").Int(),
+		TotalTokens:           node.Get("totalTokenCount").Int(),
+		CachedTokens:          cachedNode.Int(),
+		CacheReadTokens:       cachedNode.Int(),
+		CacheTelemetryPresent: cachedNode.Exists(),
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
@@ -697,24 +818,27 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 }
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
-	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
+	cachedNode := firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens")
+	cacheReadNode := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
+	cacheCreationNode := firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens")
 	detail := usage.Detail{
-		InputTokens:         firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
-		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
-		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
-		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
-		CachedTokens:        firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
-		CacheReadTokens:     cacheRead.Int(),
-		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
-	}
-	if !cacheRead.Exists() && detail.CachedTokens > 0 {
-		detail.CacheReadTokens = detail.CachedTokens
+		InputTokens:           firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
+		OutputTokens:          firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
+		ReasoningTokens:       firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
+		TotalTokens:           firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
+		CachedTokens:          cachedNode.Int(),
+		CacheReadTokens:       cacheReadNode.Int(),
+		CacheCreationTokens:   cacheCreationNode.Int(),
+		CacheTelemetryPresent: cachedNode.Exists() || cacheReadNode.Exists() || cacheCreationNode.Exists(),
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheCreationTokens
-		if cacheRead.Exists() {
+		if cacheReadNode.Exists() {
 			detail.TotalTokens += detail.CacheReadTokens
 		}
+	}
+	if detail.CacheReadTokens == 0 && !cacheReadNode.Exists() {
+		detail.CacheReadTokens = detail.CachedTokens
 	}
 	return detail
 }

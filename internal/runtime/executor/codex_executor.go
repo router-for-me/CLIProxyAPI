@@ -258,23 +258,72 @@ func applyCodexReasoningReplayCache(ctx context.Context, from sdktranslator.Form
 }
 
 func applyCodexReasoningReplayCacheRequired(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, codexReasoningReplayScope, error) {
+	updated, application, err := applyCodexReasoningReplayCacheRequiredWithSuppression(ctx, from, req, opts, body, nil, nil)
+	return updated, application.scope, err
+}
+
+type codexReasoningReplayApplication struct {
+	scope       codexReasoningReplayScope
+	sourceItems [][]byte
+}
+
+func applyCodexReasoningReplayCacheRequiredWithSuppression(
+	ctx context.Context,
+	from sdktranslator.Format,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	body []byte,
+	suppressedItemHashes []string,
+	rejectedEncryptedItemHashes []string,
+) ([]byte, codexReasoningReplayApplication, error) {
 	scope := codexReasoningReplayScopeFromRequest(ctx, from, req, opts, body)
+	application := codexReasoningReplayApplication{scope: scope}
 	if !scope.valid() {
-		return body, scope, nil
+		return body, application, nil
 	}
 	items, ok, errReplay := internalcache.GetCodexReasoningReplayItemsRequired(ctx, scope.modelName, scope.sessionKey)
 	if errReplay != nil || !ok {
-		return body, scope, errReplay
+		return body, application, errReplay
+	}
+	application.sourceItems = codexCloneItems(items)
+	suppressedItemHashes = codexMergeUniqueHashes(
+		suppressedItemHashes,
+		codexRejectedReplayItemHashes(items, rejectedEncryptedItemHashes),
+	)
+	updated, _ := applyCodexReasoningReplayItems(body, items, suppressedItemHashes)
+	return updated, application, nil
+}
+
+func applyCodexReasoningReplayItems(body []byte, items [][]byte, suppressedItemHashes []string) ([]byte, bool) {
+	if len(suppressedItemHashes) > 0 {
+		suppressed := make(map[string]struct{}, len(suppressedItemHashes))
+		for _, itemHash := range suppressedItemHashes {
+			if strings.TrimSpace(itemHash) != "" {
+				suppressed[itemHash] = struct{}{}
+			}
+		}
+		eligible := make([][]byte, 0, len(items))
+		for _, item := range items {
+			if _, skip := suppressed[codexReasoningReplayItemHash(item)]; !skip {
+				eligible = append(eligible, item)
+			}
+		}
+		items = eligible
 	}
 	items = filterCodexReasoningReplayItemsForInput(body, items)
 	if len(items) == 0 {
-		return body, scope, nil
+		return body, false
 	}
 	updated, ok := insertCodexReasoningReplayItems(body, items)
 	if !ok {
-		return body, scope, nil
+		return body, false
 	}
-	return updated, scope, nil
+	return updated, true
+}
+
+func codexReasoningReplayItemHash(item []byte) string {
+	sum := sha256.Sum256(item)
+	return hex.EncodeToString(sum[:])
 }
 
 func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) codexReasoningReplayScope {
@@ -713,9 +762,82 @@ func clearCodexReasoningReplayOnInvalidSignature(ctx context.Context, scope code
 	}
 	code, _, ok := codexStatusErrorClassification(statusCode, body)
 	if ok && code == "thinking_signature_invalid" {
-		return internalcache.DeleteCodexReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey)
+		return internalcache.RemoveCodexReasoningReplayItemsByTypeRequired(ctx, scope.modelName, scope.sessionKey, "reasoning")
 	}
 	return nil
+}
+
+type codexInvalidGenerationRetryContextKey struct{}
+
+type codexInvalidGenerationRetryState struct {
+	attempts       int
+	summaryRetired bool
+}
+
+func recoverCodexInvalidGenerationState(
+	ctx context.Context,
+	replayScope codexReasoningReplayScope,
+	compactionScope codexNativeCompactionScope,
+	statusCode int,
+	responseBody, requestBody []byte,
+) (bool, error) {
+	code, _, ok := codexStatusErrorClassification(statusCode, responseBody)
+	if !ok || code != "thinking_signature_invalid" {
+		return false, nil
+	}
+	if compactionScope.active {
+		// A replacement compaction item is the first suspect. Retire it and
+		// retry raw history unchanged; only a repeated rejection (or a request
+		// with no replacement) tombstones the actually-sent reasoning items.
+		rejectReasoning := !compactionScope.replacementActive || codexInvalidGenerationRetryUsed(ctx)
+		replaced, err := compactionScope.rejectEncryptedState(requestBody, rejectReasoning)
+		if err != nil {
+			return true, fmt.Errorf("codex native compaction: invalidate rejected generation state: %w", err)
+		}
+		if !replaced {
+			helps.LogWithRequestID(ctx).Debug("codex native compaction: rejected generation state already advanced to a different replacement")
+		}
+		return true, nil
+	}
+	cleanupCtx := context.WithoutCancel(ctx)
+	if err := clearCodexReasoningReplayOnInvalidSignature(cleanupCtx, replayScope, statusCode, responseBody); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func codexInvalidGenerationRetryUsed(ctx context.Context) bool {
+	return codexInvalidGenerationRetryStateFromContext(ctx).attempts > 0
+}
+
+func codexInvalidGenerationRetryAllowed(ctx context.Context) bool {
+	state := codexInvalidGenerationRetryStateFromContext(ctx)
+	if state.attempts == 0 {
+		return true
+	}
+	// Most invalid encrypted-state failures get one retry. When the first
+	// failure retired an active compaction replacement, one additional retry
+	// is required to resolve the remaining ambiguity: the replacement may have
+	// been valid while a preserved reasoning item was the actual culprit.
+	return state.summaryRetired && state.attempts < 2
+}
+
+func codexInvalidGenerationRetryStateFromContext(ctx context.Context) codexInvalidGenerationRetryState {
+	if ctx == nil {
+		return codexInvalidGenerationRetryState{}
+	}
+	state, _ := ctx.Value(codexInvalidGenerationRetryContextKey{}).(codexInvalidGenerationRetryState)
+	return state
+}
+
+func codexInvalidGenerationRetryContext(ctx context.Context, retiredSummary bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state := codexInvalidGenerationRetryStateFromContext(ctx)
+	state.attempts++
+	state.summaryRetired = state.summaryRetired || retiredSummary
+	return context.WithValue(ctx, codexInvalidGenerationRetryContextKey{}, state)
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
@@ -798,9 +920,18 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return resp, errReplay
+	body, compactionScope, _, errCompaction := e.prepareCodexNativeCompaction(ctx, auth, req, from, opts, originalPayloadSource, body, baseModel, apiKey, baseURL)
+	if errCompaction != nil {
+		return resp, errCompaction
+	}
+	defer compactionScope.abandon()
+	replayScope := compactionScope.replayScope
+	if !compactionScope.replayApplied {
+		var errReplay error
+		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+		if errReplay != nil {
+			return resp, errReplay
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
@@ -846,12 +977,20 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
+		upstreamErr := newCodexStatusErr(httpResp.StatusCode, b)
+		reporter.PublishFailure(ctx, upstreamErr)
+		recoveredInvalidState, errClearReplay := recoverCodexInvalidGenerationState(ctx, replayScope, compactionScope, httpResp.StatusCode, b, body)
+		if errClearReplay != nil {
 			return resp, errClearReplay
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = newCodexStatusErr(httpResp.StatusCode, b)
+		if recoveredInvalidState && codexInvalidGenerationRetryAllowed(ctx) {
+			compactionScope.abandon()
+			_ = httpResp.Body.Close()
+			return e.Execute(codexInvalidGenerationRetryContext(ctx, compactionScope.replacementActive), auth, req, opts)
+		}
+		err = upstreamErr
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -874,8 +1013,15 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if streamErr, terminalBody, ok := codexTerminalStreamErr(eventData); ok {
-			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+			reporter.PublishFailure(ctx, streamErr)
+			recoveredInvalidState, errClearReplay := recoverCodexInvalidGenerationState(ctx, replayScope, compactionScope, streamErr.StatusCode(), terminalBody, body)
+			if errClearReplay != nil {
 				return resp, errClearReplay
+			}
+			if recoveredInvalidState && codexInvalidGenerationRetryAllowed(ctx) {
+				compactionScope.abandon()
+				_ = httpResp.Body.Close()
+				return e.Execute(codexInvalidGenerationRetryContext(ctx, compactionScope.replacementActive), auth, req, opts)
 			}
 			err = streamErr
 			return resp, err
@@ -895,6 +1041,14 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			continue
 		}
 
+		if eventType == "response.incomplete" {
+			if detail, ok := helps.ParseCodexUsage(eventData); ok {
+				reporter.Publish(ctx, detail)
+			}
+			compactionScope.observeTerminal(eventData)
+			continue
+		}
+
 		if eventType != "response.completed" {
 			continue
 		}
@@ -902,6 +1056,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
 			reporter.Publish(ctx, detail)
 		}
+		compactionScope.observeTerminal(eventData)
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
 		completedData := eventData
@@ -947,6 +1102,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter.SetOperation("compaction")
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -1083,9 +1239,23 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return nil, errReplay
+	body, compactionScope, _, errCompaction := e.prepareCodexNativeCompaction(ctx, auth, req, from, opts, originalPayloadSource, body, baseModel, apiKey, baseURL)
+	if errCompaction != nil {
+		return nil, errCompaction
+	}
+	compactionScopeOwned := true
+	defer func() {
+		if compactionScopeOwned {
+			compactionScope.abandon()
+		}
+	}()
+	replayScope := compactionScope.replayScope
+	if !compactionScope.replayApplied {
+		var errReplay error
+		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+		if errReplay != nil {
+			return nil, errReplay
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
@@ -1134,27 +1304,42 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, readErr
 		}
 		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
+		upstreamErr := newCodexStatusErr(httpResp.StatusCode, data)
+		reporter.PublishFailure(ctx, upstreamErr)
+		recoveredInvalidState, errClearReplay := recoverCodexInvalidGenerationState(ctx, replayScope, compactionScope, httpResp.StatusCode, data, body)
+		if errClearReplay != nil {
 			return nil, errClearReplay
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErr(httpResp.StatusCode, data)
+		if recoveredInvalidState && codexInvalidGenerationRetryAllowed(ctx) {
+			compactionScope.abandon()
+			return e.ExecuteStream(codexInvalidGenerationRetryContext(ctx, compactionScope.replacementActive), auth, req, opts)
+		}
+		err = upstreamErr
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
+		defer compactionScope.abandon()
+		responseClosed := false
+		closeResponse := func() {
+			if responseClosed {
+				return
+			}
+			responseClosed = true
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
-		}()
+		}
+		defer closeResponse()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		emittedClientChunk := false
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -1163,17 +1348,61 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
 				if streamErr, terminalBody, ok := codexTerminalStreamErr(data); ok {
-					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+					reporter.PublishFailure(ctx, streamErr)
+					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					recoveredInvalidState, errClearReplay := recoverCodexInvalidGenerationState(ctx, replayScope, compactionScope, streamErr.StatusCode(), terminalBody, body)
+					if errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
-						reporter.PublishFailure(ctx, errClearReplay)
 						select {
 						case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
 						case <-ctx.Done():
 						}
 						return
 					}
-					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-					reporter.PublishFailure(ctx, streamErr)
+					if recoveredInvalidState && !emittedClientChunk && codexInvalidGenerationRetryAllowed(ctx) {
+						compactionScope.abandon()
+						closeResponse()
+						retryResult, retryErr := e.ExecuteStream(
+							codexInvalidGenerationRetryContext(ctx, compactionScope.replacementActive),
+							auth,
+							req,
+							opts,
+						)
+						if retryErr != nil {
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: retryErr}:
+							case <-ctx.Done():
+							}
+							return
+						}
+						if retryResult == nil || retryResult.Chunks == nil {
+							retryErr = fmt.Errorf("codex executor: invalid-signature streaming retry returned no result")
+							helps.RecordAPIResponseError(ctx, e.cfg, retryErr)
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: retryErr}:
+							case <-ctx.Done():
+							}
+							return
+						}
+						for {
+							select {
+							case retryChunk, okRetry := <-retryResult.Chunks:
+								if !okRetry {
+									return
+								}
+								select {
+								case out <- retryChunk:
+								case <-ctx.Done():
+									return
+								}
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
+					if recoveredInvalidState {
+						helps.LogWithRequestID(ctx).Warn("codex native compaction: rejected streaming generation state was retired; the next request will rebuild from client history")
+					}
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 					case <-ctx.Done():
@@ -1183,10 +1412,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				switch gjson.GetBytes(data, "type").String() {
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
+				case "response.incomplete":
+					if detail, ok := helps.ParseCodexUsage(data); ok {
+						reporter.Publish(ctx, detail)
+					}
+					compactionScope.observeTerminal(data)
 				case "response.completed":
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
+					compactionScope.observeTerminal(data)
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					cacheCodexReasoningReplayFromCompleted(replayScope, data)
@@ -1199,6 +1434,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					emittedClientChunk = true
 				case <-ctx.Done():
 					return
 				}
@@ -1213,6 +1449,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 	}()
+	compactionScopeOwned = false
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
@@ -1282,6 +1519,7 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 
 	root := gjson.ParseBytes(body)
 	var segments []string
+	var conservativeTokens int64
 
 	if inst := strings.TrimSpace(root.Get("instructions").String()); inst != "" {
 		segments = append(segments, inst)
@@ -1299,8 +1537,20 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 					parts := content.Array()
 					for j := range parts {
 						part := parts[j]
-						if text := strings.TrimSpace(part.Get("text").String()); text != "" {
-							segments = append(segments, text)
+						switch part.Get("type").String() {
+						case "input_image", "image", "image_url":
+							// Image tokenization depends on decoded dimensions, which are
+							// not reliably available here. Reserve a conservative budget
+							// so an image-heavy turn cannot slip past the hard boundary.
+							conservativeTokens += 8_192
+						case "input_file", "file":
+							conservativeTokens += 16_384
+						default:
+							if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+								segments = append(segments, text)
+							} else if raw := strings.TrimSpace(part.Raw); raw != "" && raw != "null" {
+								segments = append(segments, raw)
+							}
 						}
 					}
 				}
@@ -1315,9 +1565,28 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 				if out := strings.TrimSpace(item.Get("output").String()); out != "" {
 					segments = append(segments, out)
 				}
+			case "reasoning":
+				if encrypted := item.Get("encrypted_content").String(); encrypted != "" {
+					// Opaque encrypted reasoning is intentionally not sent to the
+					// tokenizer. Random/base64-like ciphertext is conservatively
+					// budgeted at two bytes per token.
+					conservativeTokens += int64(len(encrypted)+1) / 2
+				}
+				if summary := strings.TrimSpace(item.Get("summary").Raw); summary != "" && summary != "null" && summary != "[]" {
+					segments = append(segments, summary)
+				}
+			case "compaction":
+				// Compaction ciphertext is accounted by CompactionTokens from
+				// authoritative upstream usage (or its opaque fallback).
+			case "input_image", "image", "image_url":
+				conservativeTokens += 8_192
+			case "input_file", "file":
+				conservativeTokens += 16_384
 			default:
 				if text := strings.TrimSpace(item.Get("text").String()); text != "" {
 					segments = append(segments, text)
+				} else if raw := strings.TrimSpace(item.Raw); raw != "" && raw != "null" {
+					segments = append(segments, raw)
 				}
 			}
 		}
@@ -1364,14 +1633,14 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 
 	text := strings.Join(segments, "\n")
 	if text == "" {
-		return 0, nil
+		return conservativeTokens, nil
 	}
 
 	count, err := enc.Count(text)
 	if err != nil {
 		return 0, err
 	}
-	return int64(count), nil
+	return int64(count) + conservativeTokens, nil
 }
 
 func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -1723,7 +1992,7 @@ func codexStatusErrorClassification(statusCode int, body []byte) (code string, e
 	switch {
 	case statusCode == http.StatusRequestEntityTooLarge || upstreamCode == "context_length_exceeded" || upstreamCode == "context_too_large" || isInvalidRequest && (strings.Contains(errorMessage, "context length") || strings.Contains(errorMessage, "context_length") || strings.Contains(errorMessage, "maximum context") || strings.Contains(errorMessage, "too many tokens")):
 		return "context_too_large", "invalid_request_error", true
-	case strings.Contains(lower, "invalid signature in thinking block") || strings.Contains(lower, "invalid_encrypted_content"):
+	case upstreamCode == "thinking_signature_invalid" || upstreamCode == "invalid_encrypted_content" || strings.Contains(lower, "invalid signature in thinking block") || strings.Contains(lower, "invalid_encrypted_content") || strings.Contains(lower, "invalid encrypted content"):
 		return "thinking_signature_invalid", "invalid_request_error", true
 	case upstreamCode == "previous_response_not_found" || strings.Contains(lower, "previous_response_not_found") || strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not found"):
 		return "previous_response_not_found", "invalid_request_error", true

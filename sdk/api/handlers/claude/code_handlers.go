@@ -155,7 +155,17 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
+	h.ClaudeModelsWithCodexContextWindow(c, 0)
+}
+
+// ClaudeModelsWithCodexContextWindow serves the Claude model list and, when
+// requested by the host, advertises a virtual input window for models that are
+// supplied exclusively by the Codex provider. Native Claude models keep their
+// provider-reported context windows so their client-side compaction remains
+// available in the same picker.
+func (h *ClaudeCodeAPIHandler) ClaudeModelsWithCodexContextWindow(c *gin.Context, codexContextWindow int64) {
 	models := h.Models()
+	applyCodexClaudeClientContextWindow(models, codexContextWindow)
 	for i := range models {
 		if id, ok := models[i]["id"].(string); ok {
 			models[i]["id"] = util.EnsureClaudeModelIDPrefix(id)
@@ -179,6 +189,33 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 		"first_id": firstID,
 		"last_id":  lastID,
 	})
+}
+
+func applyCodexClaudeClientContextWindow(models []map[string]any, contextWindow int64) {
+	if contextWindow <= 0 {
+		return
+	}
+	modelRegistry := registry.GetGlobalRegistry()
+	for i := range models {
+		modelID, _ := models[i]["id"].(string)
+		if modelID == "" {
+			continue
+		}
+		providers := modelRegistry.GetModelProviders(modelID)
+		if !containsModelProvider(providers, "codex") || containsModelProvider(providers, "claude") {
+			continue
+		}
+		models[i]["max_input_tokens"] = contextWindow
+	}
+}
+
+func containsModelProvider(providers []string, want string) bool {
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // sortClaudeModelsByDisplayName sorts models by display_name ascending.

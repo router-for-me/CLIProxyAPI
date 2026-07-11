@@ -93,6 +93,12 @@ var zhStrings = map[string]string{
 	"auth_gate_connecting":        "正在连接...",
 	"auth_gate_connect_fail":      "连接失败：%s",
 	"auth_gate_password_required": "请输入密码",
+	"summary_requests":            "请求",
+	"summary_input":               "输入",
+	"summary_output":              "输出",
+	"summary_cache_misses":        "缓存未命中",
+	"summary_compactions":         "压缩",
+	"summary_estimated_cost":      "预估费用",
 
 	// ── Dashboard ──
 	"dashboard_title":  "📊 仪表盘",
@@ -248,6 +254,12 @@ var enStrings = map[string]string{
 	"auth_gate_connecting":        "Connecting...",
 	"auth_gate_connect_fail":      "Connection failed: %s",
 	"auth_gate_password_required": "password is required",
+	"summary_requests":            "Requests",
+	"summary_input":               "In",
+	"summary_output":              "Out",
+	"summary_cache_misses":        "Cache misses",
+	"summary_compactions":         "Compactions",
+	"summary_estimated_cost":      "Est. cost",
 
 	// ── Dashboard ──
 	"dashboard_title":  "📊 Dashboard",

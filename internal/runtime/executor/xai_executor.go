@@ -244,6 +244,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
+	reporter.SetOperation("compaction")
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 

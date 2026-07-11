@@ -125,6 +125,26 @@ func (c *Client) GetConfig() (map[string]any, error) {
 	return c.getJSON("/v0/management/config")
 }
 
+// GetObservabilitySnapshot fetches normalized process-lifetime request totals
+// plus a cursor-bounded event page.
+func (c *Client) GetObservabilitySnapshot(after uint64, limit int, bootID string) (observabilitySnapshot, error) {
+	query := url.Values{}
+	query.Set("after", strconv.FormatUint(after, 10))
+	query.Set("limit", strconv.Itoa(limit))
+	if strings.TrimSpace(bootID) != "" {
+		query.Set("boot_id", strings.TrimSpace(bootID))
+	}
+	data, err := c.get("/v0/management/observability?" + query.Encode())
+	if err != nil {
+		return observabilitySnapshot{}, err
+	}
+	var snapshot observabilitySnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return observabilitySnapshot{}, err
+	}
+	return snapshot, nil
+}
+
 // GetConfigYAML fetches the raw config.yaml content.
 func (c *Client) GetConfigYAML() (string, error) {
 	data, err := c.get("/v0/management/config.yaml")

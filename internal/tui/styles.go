@@ -79,16 +79,24 @@ var (
 			PaddingLeft(1).
 			PaddingRight(1)
 
+	summaryBarStyle = lipgloss.NewStyle().
+			Foreground(colorText).
+			Background(colorBg).
+			Bold(true).
+			PaddingLeft(1).
+			PaddingRight(1)
+
 	helpStyle = lipgloss.NewStyle().
 			Foreground(colorMuted)
 )
 
 // Log level styles
 var (
-	logDebugStyle = lipgloss.NewStyle().Foreground(colorMuted)
-	logInfoStyle  = lipgloss.NewStyle().Foreground(colorInfo)
-	logWarnStyle  = lipgloss.NewStyle().Foreground(colorWarning)
-	logErrorStyle = lipgloss.NewStyle().Foreground(colorError)
+	logDebugStyle      = lipgloss.NewStyle().Foreground(colorMuted)
+	logInfoStyle       = lipgloss.NewStyle().Foreground(colorInfo)
+	logWarnStyle       = lipgloss.NewStyle().Foreground(colorWarning)
+	logErrorStyle      = lipgloss.NewStyle().Foreground(colorError)
+	logCompactionStyle = lipgloss.NewStyle().Foreground(colorHighlight).Bold(true)
 )
 
 // Table styles

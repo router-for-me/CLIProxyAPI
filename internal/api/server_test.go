@@ -830,6 +830,108 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	})
 }
 
+func TestAnthropicModelsAdvertiseCodexClientContextWindow(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	const (
+		codexClientID  = "test-codex-client-context-window"
+		claudeClientID = "test-claude-client-context-window"
+		compatClientID = "test-compat-client-context-window"
+	)
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{{
+		ID:            "gpt-codex-context-window-test",
+		OwnedBy:       "openai",
+		DisplayName:   "Codex Context Window Test",
+		ContextLength: 272000,
+	}})
+	modelRegistry.RegisterClient(claudeClientID, "claude", []*registry.ModelInfo{{
+		ID:            "claude-fable-5-context-window-test",
+		OwnedBy:       "anthropic",
+		DisplayName:   "Fable Context Window Test",
+		ContextLength: 1000000,
+	}})
+	modelRegistry.RegisterClient(compatClientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:            "openai-compat-context-window-test",
+		OwnedBy:       "third-party",
+		DisplayName:   "OpenAI Compat Context Window Test",
+		ContextLength: 128000,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(codexClientID)
+		modelRegistry.UnregisterClient(claudeClientID)
+		modelRegistry.UnregisterClient(compatClientID)
+	})
+
+	server := newTestServer(t)
+	requestModels := func(t *testing.T) map[string]map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("Anthropic-Version", "2023-06-01")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var response struct {
+			Data []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			t.Fatalf("parse models response: %v", err)
+		}
+		byDisplayName := make(map[string]map[string]any, len(response.Data))
+		for _, model := range response.Data {
+			displayName, _ := model["display_name"].(string)
+			byDisplayName[displayName] = model
+		}
+		return byDisplayName
+	}
+	assertWindow := func(t *testing.T, models map[string]map[string]any, displayName string, want float64) {
+		t.Helper()
+		model := models[displayName]
+		if model == nil {
+			t.Fatalf("model %q missing from Anthropic response", displayName)
+		}
+		if got, _ := model["max_input_tokens"].(float64); got != want {
+			t.Fatalf("%s max_input_tokens = %v, want %v", displayName, got, want)
+		}
+	}
+
+	t.Run("disabled leaves provider metadata unchanged", func(t *testing.T) {
+		cfg := *server.cfg
+		cfg.Codex.NativeCompaction.Enabled = false
+		cfg.Codex.NativeCompaction.ClaudeClientContextWindow = 777000
+		server.UpdateClients(&cfg)
+
+		models := requestModels(t)
+		assertWindow(t, models, "Codex Context Window Test", 272000)
+		assertWindow(t, models, "Fable Context Window Test", 1000000)
+		assertWindow(t, models, "OpenAI Compat Context Window Test", 128000)
+	})
+
+	t.Run("enabled applies configured window only to codex", func(t *testing.T) {
+		cfg := *server.cfg
+		cfg.Codex.NativeCompaction.Enabled = true
+		cfg.Codex.NativeCompaction.ClaudeClientContextWindow = 777000
+		server.UpdateClients(&cfg)
+
+		models := requestModels(t)
+		assertWindow(t, models, "Codex Context Window Test", 777000)
+		assertWindow(t, models, "Fable Context Window Test", 1000000)
+		assertWindow(t, models, "OpenAI Compat Context Window Test", 128000)
+	})
+
+	t.Run("enabled defaults to one million", func(t *testing.T) {
+		cfg := *server.cfg
+		cfg.Codex.NativeCompaction.Enabled = true
+		cfg.Codex.NativeCompaction.ClaudeClientContextWindow = 0
+		server.UpdateClients(&cfg)
+
+		models := requestModels(t)
+		assertWindow(t, models, "Codex Context Window Test", float64(proxyconfig.DefaultCodexClaudeClientContextWindow))
+		assertWindow(t, models, "Fable Context Window Test", 1000000)
+	})
+}
+
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"

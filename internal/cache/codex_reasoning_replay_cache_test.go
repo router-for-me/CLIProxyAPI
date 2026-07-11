@@ -121,6 +121,44 @@ func TestCodexReasoningReplayCacheRejectsInvalidItems(t *testing.T) {
 	}
 }
 
+func TestCodexReasoningReplayRemovalPreservesCompanionToolCalls(t *testing.T) {
+	for _, homeMode := range []bool{false, true} {
+		name := "local"
+		if homeMode {
+			name = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			ClearCodexReasoningReplayCache()
+			t.Cleanup(ClearCodexReasoningReplayCache)
+			client := newFakeCodexReasoningReplayKVClient()
+			useFakeCodexReasoningReplayKVClient(t, client, homeMode, nil)
+
+			model, session := "gpt-5.6-sol", "composite-session"
+			items := [][]byte{
+				validCodexReasoningReplayItemForTest(2),
+				[]byte(`{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{}"}`),
+			}
+			if homeMode {
+				client.values[codexReasoningReplayKVKey(model, session)] = mustCodexReasoningReplayJSON(t, items)
+			} else if !CacheCodexReasoningReplayItems(model, session, items) {
+				t.Fatal("cache composite replay")
+			}
+
+			if err := RemoveCodexReasoningReplayItemsByTypeRequired(context.Background(), model, session, "reasoning"); err != nil {
+				t.Fatalf("remove reasoning: %v", err)
+			}
+			got, found, err := GetCodexReasoningReplayItemsRequired(context.Background(), model, session)
+			if err != nil || !found || len(got) != 1 {
+				t.Fatalf("filtered replay found=%v items=%q err=%v", found, got, err)
+			}
+			var item map[string]any
+			if err := json.Unmarshal(got[0], &item); err != nil || item["type"] != "function_call" {
+				t.Fatalf("filtered replay item=%s err=%v, want function_call", got[0], err)
+			}
+		})
+	}
+}
+
 func TestCodexReasoningReplayRequiredHomeReadAndSlidingExpire(t *testing.T) {
 	ClearCodexReasoningReplayCache()
 	t.Cleanup(ClearCodexReasoningReplayCache)

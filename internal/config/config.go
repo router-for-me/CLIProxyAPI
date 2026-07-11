@@ -24,6 +24,9 @@ const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 	DefaultAuthDir               = "~/.cli-proxy-api"
+	// DefaultCodexClaudeClientContextWindow defers Claude Code's client-side
+	// compaction while Codex-native compaction manages the real context window.
+	DefaultCodexClaudeClientContextWindow int64 = 1_000_000
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -282,7 +285,21 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	IdentityConfuse  bool                  `yaml:"identity-confuse" json:"identity-confuse"`
+	NativeCompaction CodexNativeCompaction `yaml:"native-compaction" json:"native-compaction"`
+}
+
+// CodexNativeCompaction configures server-side Responses compaction for Claude Code
+// requests routed to Codex models. It is intentionally opt-in so upstream defaults
+// remain unchanged for other clients.
+type CodexNativeCompaction struct {
+	Enabled                   bool   `yaml:"enabled" json:"enabled"`
+	TriggerTokens             int64  `yaml:"trigger-tokens" json:"trigger-tokens"`
+	ContextWindow             int64  `yaml:"context-window" json:"context-window"`
+	ClaudeClientContextWindow int64  `yaml:"claude-client-context-window" json:"claude-client-context-window"`
+	PreserveRecentTokens      int64  `yaml:"preserve-recent-tokens" json:"preserve-recent-tokens"`
+	RetainedMessageTokens     int64  `yaml:"retained-message-tokens" json:"retained-message-tokens"`
+	StateTTL                  string `yaml:"state-ttl" json:"state-ttl"`
 }
 
 // TLSConfig holds HTTPS server settings.

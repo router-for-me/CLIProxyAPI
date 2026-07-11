@@ -313,6 +313,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	engine.Use(corsMiddleware())
+	engine.Use(middleware.InferenceObservabilityMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -839,6 +840,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		mgmt.GET("/observability", s.mgmt.GetObservabilitySnapshot)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -1178,11 +1180,22 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		// Route to Claude handler for Anthropic API requests.
 		if isAnthropicModelsRequest(c) {
-			claudeHandler.ClaudeModels(c)
+			claudeHandler.ClaudeModelsWithCodexContextWindow(c, s.codexClaudeClientContextWindow())
 		} else {
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func (s *Server) codexClaudeClientContextWindow() int64 {
+	if s == nil || s.cfg == nil || !s.cfg.Codex.NativeCompaction.Enabled {
+		return 0
+	}
+	contextWindow := s.cfg.Codex.NativeCompaction.ClaudeClientContextWindow
+	if contextWindow <= 0 {
+		return config.DefaultCodexClaudeClientContextWindow
+	}
+	return contextWindow
 }
 
 // handleHomeCodexClientModels builds the Codex client catalog from Home model IDs.

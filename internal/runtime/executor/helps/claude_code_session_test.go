@@ -49,6 +49,37 @@ func TestClaudeCodePromptCacheStableAcrossRequests(t *testing.T) {
 	}
 }
 
+func TestClaudeCodePromptCacheStableWithoutProcessCacheState(t *testing.T) {
+	ctx := context.Background()
+	payload := []byte(`{"metadata":{"user_id":"{\"session_id\":\"durable-session\"}"}}`)
+
+	first, ok, err := ClaudeCodePromptCache(ctx, "gpt-5.6-sol(xhigh)", payload, nil)
+	if err != nil || !ok {
+		t.Fatalf("ClaudeCodePromptCache first = %#v, ok=%v, err=%v", first, ok, err)
+	}
+
+	codexCacheMu.Lock()
+	codexCacheMap = make(map[string]CodexCache)
+	codexCacheMu.Unlock()
+
+	second, ok, err := ClaudeCodePromptCache(ctx, "gpt-5.6-sol(xhigh)", payload, nil)
+	if err != nil || !ok {
+		t.Fatalf("ClaudeCodePromptCache second = %#v, ok=%v, err=%v", second, ok, err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("cache ID after reset = %q, want %q", second.ID, first.ID)
+	}
+}
+
+func TestClaudeCodePromptCacheSeparatesModels(t *testing.T) {
+	payload := []byte(`{"metadata":{"user_id":"{\"session_id\":\"model-lane\"}"}}`)
+	first, _, _ := ClaudeCodePromptCache(context.Background(), "gpt-5.6-sol(xhigh)", payload, nil)
+	second, _, _ := ClaudeCodePromptCache(context.Background(), "gpt-5.6-terra(xhigh)", payload, nil)
+	if first.ID == second.ID {
+		t.Fatalf("different models share cache ID %q", first.ID)
+	}
+}
+
 func TestExtractClaudeCodeSessionIDPrefersHeaderOverPayload(t *testing.T) {
 	payload := []byte(`{"metadata":{"user_id":"{"session_id":"payload-session"}"}}`)
 	headers := http.Header{}

@@ -185,6 +185,24 @@ codex:
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
 
+  # Use Codex's native Responses compaction for Claude Code sessions routed to
+  # Codex models. Claude-provider models (including Fable) are not affected.
+  native-compaction:
+    enabled: false
+    # Compact before the 272K logical context window is exhausted.
+    trigger-tokens: 240000
+    context-window: 272000
+    # Advertise a larger virtual window only for models supplied by the Codex
+    # provider, deferring Claude Code's own compaction. Native Claude/Fable
+    # models retain their provider-reported context windows.
+    claude-client-context-window: 1000000
+    # Keep the active/recent turn exact instead of folding it into the opaque summary.
+    preserve-recent-tokens: 32000
+    # Mirrors the retained-message budget in the current Codex client.
+    retained-message-tokens: 64000
+    # In-memory provider/model/auth lane state uses a sliding expiration.
+    state-ttl: "168h"
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 

@@ -1256,6 +1256,8 @@ type ManagementResponse struct {
 type UsageRecord struct {
 	// Provider identifies the upstream provider.
 	Provider string
+	// Operation identifies inference, compaction, or another upstream operation.
+	Operation string
 	// ExecutorType identifies the executor implementation.
 	ExecutorType string
 	// Model is the model used for the request.
@@ -1314,6 +1316,13 @@ type UsageDetail struct {
 	CacheReadTokens int64
 	// CacheCreationTokens is the cache creation token count.
 	CacheCreationTokens int64
+	// CacheCreation5mTokens is the cache creation count using a five-minute TTL.
+	CacheCreation5mTokens int64
+	// CacheCreation1hTokens is the cache creation count using a one-hour TTL.
+	CacheCreation1hTokens int64
+	// CacheTelemetryPresent distinguishes an explicit zero-token result from
+	// an upstream response that did not report cache telemetry.
+	CacheTelemetryPresent bool
 	// TotalTokens is the total token count.
 	TotalTokens int64
 }

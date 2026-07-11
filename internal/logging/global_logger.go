@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -17,17 +18,22 @@ import (
 )
 
 var (
-	setupOnce      sync.Once
-	writerMu       sync.Mutex
-	logWriter      *lumberjack.Logger
-	ginInfoWriter  *io.PipeWriter
-	ginErrorWriter *io.PipeWriter
+	setupOnce          sync.Once
+	writerMu           sync.Mutex
+	logWriter          *lumberjack.Logger
+	ginInfoWriter      *io.PipeWriter
+	ginErrorWriter     *io.PipeWriter
+	requestEventColors atomic.Bool
 )
 
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
 // Format: [2025-12-23 20:14:04] [debug] [manager.go:524] | a1b2c3d4 | Use API key sk-9...0RHO for model gpt-5.2
-type LogFormatter struct{}
+type LogFormatter struct {
+	// DisableRequestEventColors keeps ANSI out of TUI hooks and other secondary
+	// formatters even when the process is writing interactively to stdout.
+	DisableRequestEventColors bool
+}
 
 // logFieldOrder defines the display order for common log fields.
 var logFieldOrder = []string{
@@ -50,6 +56,9 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 	timestamp := entry.Time.Format("2006-01-02 15:04:05")
 	message := strings.TrimRight(entry.Message, "\r\n")
+	if !m.DisableRequestEventColors && requestEventColors.Load() {
+		message = colorRequestEvent(message)
+	}
 
 	reqID := "--------"
 	if id, ok := entry.Data["request_id"].(string); ok && id != "" {
@@ -169,6 +178,7 @@ func ConfigureLogOutput(cfg *config.Config) error {
 
 	protectedPath := ""
 	if cfg.LoggingToFile {
+		requestEventColors.Store(false)
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
 		}
@@ -190,10 +200,37 @@ func ConfigureLogOutput(cfg *config.Config) error {
 			logWriter = nil
 		}
 		log.SetOutput(os.Stdout)
+		requestEventColors.Store(stdoutSupportsRequestEventColors())
 	}
 
 	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
 	return nil
+}
+
+func stdoutSupportsRequestEventColors() bool {
+	if _, disabled := os.LookupEnv("NO_COLOR"); disabled {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
+		return false
+	}
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func colorRequestEvent(message string) string {
+	lower := strings.ToLower(message)
+	if !strings.Contains(lower, "request_event") {
+		return message
+	}
+	const reset = "\x1b[0m"
+	if strings.Contains(lower, "cache_outcome=miss") || strings.Contains(lower, "cache_miss=true") {
+		return "\x1b[31m" + message + reset
+	}
+	if strings.Contains(lower, "operation=compaction") {
+		return "\x1b[35m" + message + reset
+	}
+	return message
 }
 
 func closeLogOutputs() {

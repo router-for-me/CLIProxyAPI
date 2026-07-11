@@ -83,3 +83,20 @@ func TestLogFormatterOmitsGenericPathField(t *testing.T) {
 		}
 	}
 }
+
+func TestColorRequestEventHighlightsCacheMissAndCompaction(t *testing.T) {
+	cacheMiss := "request_event operation=inference cache_outcome=miss cache_miss=true"
+	if got := colorRequestEvent(cacheMiss); got != "\x1b[31m"+cacheMiss+"\x1b[0m" {
+		t.Fatalf("cache miss color = %q", got)
+	}
+
+	compaction := "request_event operation=compaction cache_outcome=hit cache_miss=false"
+	if got := colorRequestEvent(compaction); got != "\x1b[35m"+compaction+"\x1b[0m" {
+		t.Fatalf("compaction color = %q", got)
+	}
+
+	normal := "ordinary log line"
+	if got := colorRequestEvent(normal); got != normal {
+		t.Fatalf("ordinary line color = %q, want unchanged", got)
+	}
+}

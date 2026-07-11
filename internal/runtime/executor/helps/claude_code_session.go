@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -56,16 +55,12 @@ func ClaudeCodePromptCache(ctx context.Context, modelName string, payload []byte
 	if sessionID == "" {
 		return CodexCache{}, false, nil
 	}
-	key := CodexPromptCacheKey(modelName, "claude:"+sessionID)
-	if cache, ok, errCache := GetCodexCacheRequired(ctx, key); errCache != nil || ok {
-		return cache, ok, errCache
-	}
-	cache := CodexCache{
-		ID:     uuid.New().String(),
-		Expire: time.Now().Add(1 * time.Hour),
-	}
-	if errSet := SetCodexCacheRequired(ctx, key, cache); errSet != nil {
-		return CodexCache{}, false, errSet
-	}
-	return cache, true, nil
+	name := strings.Join([]string{
+		"cli-proxy-api",
+		"claude-code",
+		"prompt-cache",
+		strings.TrimSpace(modelName),
+		strings.TrimSpace(sessionID),
+	}, ":")
+	return CodexCache{ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()}, true, nil
 }

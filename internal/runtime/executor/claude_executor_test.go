@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -1286,6 +1287,75 @@ func TestClaudeExecutor_ExecuteStreamDirectPassthroughEmitsCompleteSSEEvents(t *
 		if payloads[i] != want[i] {
 			t.Fatalf("payload[%d] = %q, want %q", i, payloads[i], want[i])
 		}
+	}
+}
+
+type claudeCancelledStreamUsageCapture struct {
+	model string
+	ch    chan cliproxyusage.Record
+}
+
+func (c *claudeCancelledStreamUsageCapture) HandleUsage(_ context.Context, record cliproxyusage.Record) {
+	if c != nil && record.Model == c.model {
+		select {
+		case c.ch <- record:
+		default:
+		}
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamCancellationPublishesPartialUsage(t *testing.T) {
+	const model = "claude-cancelled-stream-usage-test"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1,"cache_read_input_tokens":30,"cache_creation_input_tokens":4}}}`+"\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	capture := &claudeCancelledStreamUsageCapture{model: model, ch: make(chan cliproxyusage.Record, 1)}
+	cliproxyusage.RegisterNamedPlugin("claude-cancelled-stream-usage-test", capture)
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "base_url": server.URL}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		cancel()
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk := <-result.Chunks:
+		if chunk.Err != nil || !strings.Contains(string(chunk.Payload), "message_start") {
+			cancel()
+			t.Fatalf("first chunk = %+v", chunk)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for first upstream event")
+	}
+	cancel()
+	for range result.Chunks {
+	}
+
+	select {
+	case record := <-capture.ch:
+		if !record.Failed || record.Detail.InputTokens != 12 || record.Detail.CacheReadTokens != 30 || record.Detail.CacheCreationTokens != 4 {
+			t.Fatalf("cancelled stream usage = %+v", record)
+		}
+		if !strings.Contains(strings.ToLower(record.Fail.Body), "cancel") {
+			t.Fatalf("cancelled stream failure = %+v", record.Fail)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled stream usage record")
 	}
 }
 

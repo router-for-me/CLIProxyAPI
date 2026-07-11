@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -191,6 +192,76 @@ func DeleteCodexReasoningReplayItemRequired(ctx context.Context, modelName, sess
 	delete(codexReasoningReplayEntries, key)
 	codexReasoningReplayMu.Unlock()
 	return nil
+}
+
+// RemoveCodexReasoningReplayItemsByTypeRequired removes rejected replay item
+// kinds while preserving unaffected companion items such as function calls.
+// This keeps a matching tool call available when an encrypted reasoning item
+// is rejected, avoiding an orphaned function_call_output on the retry.
+func RemoveCodexReasoningReplayItemsByTypeRequired(ctx context.Context, modelName, sessionKey, itemType string) error {
+	key := codexReasoningReplayCacheKey(modelName, sessionKey)
+	itemType = strings.TrimSpace(itemType)
+	if key == "" || itemType == "" {
+		return nil
+	}
+	client, homeMode, errClient := currentCodexReasoningReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		kvKey := codexReasoningReplayKVKey(modelName, sessionKey)
+		raw, found, errGet := client.KVGet(ctx, kvKey)
+		if errGet != nil || !found {
+			return errGet
+		}
+		var items [][]byte
+		if errUnmarshal := json.Unmarshal(raw, &items); errUnmarshal != nil {
+			return errUnmarshal
+		}
+		items = filterCodexReasoningReplayItemsByType(items, itemType)
+		if len(items) == 0 {
+			_, errDel := client.KVDel(ctx, kvKey)
+			return errDel
+		}
+		updated, errMarshal := json.Marshal(items)
+		if errMarshal != nil {
+			return errMarshal
+		}
+		written, errSet := client.KVSet(ctx, kvKey, updated, homekv.KVSetOptions{EX: CodexReasoningReplayCacheTTL})
+		if errSet != nil {
+			return errSet
+		}
+		if !written {
+			return fmt.Errorf("codex reasoning replay cache did not persist filtered items")
+		}
+		return nil
+	}
+
+	codexReasoningReplayMu.Lock()
+	defer codexReasoningReplayMu.Unlock()
+	entry, ok := codexReasoningReplayEntries[key]
+	if !ok {
+		return nil
+	}
+	entry.Items = filterCodexReasoningReplayItemsByType(entry.Items, itemType)
+	if len(entry.Items) == 0 {
+		delete(codexReasoningReplayEntries, key)
+		return nil
+	}
+	entry.Timestamp = time.Now()
+	codexReasoningReplayEntries[key] = entry
+	return nil
+}
+
+func filterCodexReasoningReplayItemsByType(items [][]byte, itemType string) [][]byte {
+	filtered := make([][]byte, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(gjson.GetBytes(item, "type").String()) == itemType {
+			continue
+		}
+		filtered = append(filtered, append([]byte(nil), item...))
+	}
+	return filtered
 }
 
 // ClearCodexReasoningReplayCache clears all Codex reasoning replay state.

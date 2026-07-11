@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -16,6 +17,9 @@ const DefaultServiceTier = "default"
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider string
+	// Operation identifies the upstream operation represented by this record.
+	// Empty values are treated as "inference" by observability consumers.
+	Operation string
 	// ExecutorType stores the concrete executor type that handled the request.
 	ExecutorType string
 	Model        string
@@ -51,19 +55,81 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
-	ResponseServiceTier string
+	InputTokens           int64
+	OutputTokens          int64
+	ReasoningTokens       int64
+	CachedTokens          int64
+	CacheReadTokens       int64
+	CacheCreationTokens   int64
+	CacheCreation5mTokens int64
+	CacheCreation1hTokens int64
+	// CacheTelemetryPresent distinguishes an explicit zero-token cache result
+	// (a cache miss) from a provider response that omitted cache telemetry.
+	CacheTelemetryPresent bool
+	TotalTokens           int64
+	ResponseServiceTier   string
 }
 
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
+type requestTrackingContextKey struct{}
+
+// RequestTracker records whether an executor published usage for the current
+// HTTP request. It is safe to share across derived contexts and goroutines.
+// Request middleware uses the tracker to report failures which occur before an
+// executor is selected without double-counting failures reported by executors.
+type RequestTracker struct {
+	published atomic.Bool
+}
+
+// WithRequestTracking returns a child context and its request usage tracker.
+func WithRequestTracking(ctx context.Context) (context.Context, *RequestTracker) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if tracker, _ := ctx.Value(requestTrackingContextKey{}).(*RequestTracker); tracker != nil {
+		return ctx, tracker
+	}
+	tracker := &RequestTracker{}
+	return context.WithValue(ctx, requestTrackingContextKey{}, tracker), tracker
+}
+
+// InheritRequestTracking attaches the tracker from source to ctx. Protocol
+// handlers use this when their execution context intentionally has a different
+// value/deadline parent from the incoming HTTP request context.
+func InheritRequestTracking(ctx, source context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if source == nil {
+		return ctx
+	}
+	tracker, _ := source.Value(requestTrackingContextKey{}).(*RequestTracker)
+	if tracker == nil {
+		return ctx
+	}
+	if existing, _ := ctx.Value(requestTrackingContextKey{}).(*RequestTracker); existing == tracker {
+		return ctx
+	}
+	return context.WithValue(ctx, requestTrackingContextKey{}, tracker)
+}
+
+// Published reports whether PublishRecord has been called with the tracked
+// request context or one of its descendants.
+func (t *RequestTracker) Published() bool {
+	return t != nil && t.published.Load()
+}
+
+func markRequestPublished(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	tracker, _ := ctx.Value(requestTrackingContextKey{}).(*RequestTracker)
+	if tracker != nil {
+		tracker.published.Store(true)
+	}
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -326,8 +392,13 @@ func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 // RegisterNamedPlugin registers or replaces a named plugin on the default manager.
 func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
 
-// PublishRecord publishes a record using the default manager.
-func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }
+// PublishRecord publishes a record using the default manager. Request tracking
+// is marked synchronously before the asynchronous manager queue is touched so
+// HTTP middleware can deterministically avoid synthetic duplicate failures.
+func PublishRecord(ctx context.Context, record Record) {
+	markRequestPublished(ctx)
+	DefaultManager().Publish(ctx, record)
+}
 
 // StartDefault starts the default manager's dispatcher.
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }

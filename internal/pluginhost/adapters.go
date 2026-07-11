@@ -1819,6 +1819,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	}()
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
 		Provider:        record.Provider,
+		Operation:       record.Operation,
 		ExecutorType:    record.ExecutorType,
 		Model:           record.Model,
 		Alias:           record.Alias,
@@ -1838,13 +1839,16 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			Body:       record.Fail.Body,
 		},
 		Detail: pluginapi.UsageDetail{
-			InputTokens:         record.Detail.InputTokens,
-			OutputTokens:        record.Detail.OutputTokens,
-			ReasoningTokens:     record.Detail.ReasoningTokens,
-			CachedTokens:        record.Detail.CachedTokens,
-			CacheReadTokens:     record.Detail.CacheReadTokens,
-			CacheCreationTokens: record.Detail.CacheCreationTokens,
-			TotalTokens:         record.Detail.TotalTokens,
+			InputTokens:           record.Detail.InputTokens,
+			OutputTokens:          record.Detail.OutputTokens,
+			ReasoningTokens:       record.Detail.ReasoningTokens,
+			CachedTokens:          record.Detail.CachedTokens,
+			CacheReadTokens:       record.Detail.CacheReadTokens,
+			CacheCreationTokens:   record.Detail.CacheCreationTokens,
+			CacheCreation5mTokens: record.Detail.CacheCreation5mTokens,
+			CacheCreation1hTokens: record.Detail.CacheCreation1hTokens,
+			CacheTelemetryPresent: record.Detail.CacheTelemetryPresent,
+			TotalTokens:           record.Detail.TotalTokens,
 		},
 		ResponseHeaders: cloneHeader(record.ResponseHeaders),
 	})

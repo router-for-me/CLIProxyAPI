@@ -11,18 +11,21 @@ import (
 
 // logsTabModel displays real-time log lines from hook/API source.
 type logsTabModel struct {
-	client     *Client
-	hook       *LogHook
-	viewport   viewport.Model
-	lines      []string
-	maxLines   int
-	autoScroll bool
-	width      int
-	height     int
-	ready      bool
-	filter     string // "", "debug", "info", "warn", "error"
-	after      int64
-	lastErr    error
+	client                    *Client
+	hook                      *LogHook
+	viewport                  viewport.Model
+	lines                     []string
+	maxLines                  int
+	autoScroll                bool
+	width                     int
+	height                    int
+	ready                     bool
+	filter                    string // "", "debug", "info", "warn", "error"
+	after                     int64
+	lastErr                   error
+	observabilityOnly         bool
+	lastObservabilitySequence uint64
+	lastObservabilityGapTo    uint64
 }
 
 type logsPollMsg struct {
@@ -46,6 +49,9 @@ func newLogsTabModel(client *Client, hook *LogHook) logsTabModel {
 func (m logsTabModel) Init() tea.Cmd {
 	if m.hook != nil {
 		return m.waitForLog
+	}
+	if m.observabilityOnly {
+		return nil
 	}
 	return m.fetchLogs
 }
@@ -82,7 +88,7 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderLogs())
 		return m, nil
 	case logsTickMsg:
-		if m.hook != nil {
+		if m.hook != nil || m.observabilityOnly {
 			return m, nil
 		}
 		return m, m.fetchLogs
@@ -168,6 +174,97 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *logsTabModel) SetObservabilityOnly(enabled bool) {
+	if m == nil || m.hook != nil {
+		return
+	}
+	m.observabilityOnly = enabled
+	if enabled {
+		m.lastErr = nil
+	}
+}
+
+func (m *logsTabModel) AddObservabilityEvents(events []observabilityEvent) {
+	if m == nil || !m.observabilityOnly || len(events) == 0 {
+		return
+	}
+	for _, event := range events {
+		if event.Sequence <= m.lastObservabilitySequence {
+			continue
+		}
+		m.lines = append(m.lines, formatObservabilityEventLine(event))
+		m.lastObservabilitySequence = event.Sequence
+	}
+	if len(m.lines) > m.maxLines {
+		m.lines = m.lines[len(m.lines)-m.maxLines:]
+	}
+	if m.ready {
+		m.viewport.SetContent(m.renderLogs())
+		if m.autoScroll {
+			m.viewport.GotoBottom()
+		}
+	}
+}
+
+// ResetObservabilityCursor marks a server restart and permits the new process
+// to reuse sequence numbers starting at one.
+func (m *logsTabModel) ResetObservabilityCursor(bootID string) {
+	if m == nil {
+		return
+	}
+	m.lastObservabilitySequence = 0
+	m.lastObservabilityGapTo = 0
+	if !m.observabilityOnly {
+		return
+	}
+	m.lines = append(m.lines, fmt.Sprintf("[warn] request_event_stream_restart boot_id=%q cursor_reset=true", bootID))
+	m.refreshObservabilityView()
+}
+
+// AddObservabilityGap makes bounded-buffer loss explicit in the log stream.
+func (m *logsTabModel) AddObservabilityGap(from, to uint64) {
+	if m == nil || !m.observabilityOnly || from == 0 || to < from || to <= m.lastObservabilityGapTo {
+		return
+	}
+	m.lines = append(m.lines, fmt.Sprintf("[warn] request_event_gap missing_sequences=%d-%d", from, to))
+	m.lastObservabilityGapTo = to
+	m.refreshObservabilityView()
+}
+
+func (m *logsTabModel) refreshObservabilityView() {
+	if len(m.lines) > m.maxLines {
+		m.lines = m.lines[len(m.lines)-m.maxLines:]
+	}
+	if m.ready {
+		m.viewport.SetContent(m.renderLogs())
+		if m.autoScroll {
+			m.viewport.GotoBottom()
+		}
+	}
+}
+
+func formatObservabilityEventLine(event observabilityEvent) string {
+	cost := "unavailable"
+	if event.EstimatedCostAvailable {
+		cost = fmt.Sprintf("%.8f", event.EstimatedCostUSD)
+	}
+	return fmt.Sprintf(
+		"[info] request_event operation=%s provider=%q model=%q input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_write_tokens=%d cache_outcome=%s cache_miss=%t estimated_cost_usd=%s estimated_cost_tier=%s failed=%t",
+		event.Operation,
+		event.Provider,
+		event.Model,
+		event.InputTokens,
+		event.OutputTokens,
+		event.CacheReadTokens,
+		event.CacheWriteTokens,
+		event.CacheOutcome,
+		event.CacheMiss,
+		cost,
+		event.EstimatedCostTier,
+		event.Failed,
+	)
+}
+
 func (m *logsTabModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
@@ -245,6 +342,14 @@ func (m logsTabModel) matchLevel(line string) bool {
 }
 
 func (m logsTabModel) styleLine(line string) string {
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "request_event") &&
+		(strings.Contains(lower, "cache_outcome=miss") || strings.Contains(lower, "cache_miss=true")) {
+		return logErrorStyle.Render(line)
+	}
+	if strings.Contains(lower, "request_event") && strings.Contains(lower, "operation=compaction") {
+		return logCompactionStyle.Render(line)
+	}
 	if strings.Contains(line, "[error]") || strings.Contains(line, "[fatal]") {
 		return logErrorStyle.Render(line)
 	}

@@ -2138,6 +2138,33 @@ func TestUsageAdapterPanicFusesPlugin(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterForwardsOperationAndCacheTelemetryPresence(t *testing.T) {
+	var got pluginapi.UsageRecord
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-observability",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+				got = record
+			}),
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-observability"}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:  "codex",
+		Operation: "compaction",
+		Detail: coreusage.Detail{
+			CacheCreation5mTokens: 5,
+			CacheCreation1hTokens: 7,
+			CacheTelemetryPresent: true,
+		},
+	})
+
+	if got.Operation != "compaction" || !got.Detail.CacheTelemetryPresent || got.Detail.CacheCreation5mTokens != 5 || got.Detail.CacheCreation1hTokens != 7 {
+		t.Fatalf("forwarded operation/cache detail = %q/%+v, want compaction with 5m/1h 5/7", got.Operation, got.Detail)
+	}
+}
+
 func TestUsageManagerRegisterNamedReplacesWithoutDuplicateDispatch(t *testing.T) {
 	manager := coreusage.NewManager(0)
 	defer manager.Stop()
