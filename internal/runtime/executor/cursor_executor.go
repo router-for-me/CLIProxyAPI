@@ -39,6 +39,8 @@ const (
 	cursorHeartbeatInterval = 5 * time.Second
 	cursorSessionTTL        = 5 * time.Minute
 	cursorCheckpointTTL     = 30 * time.Minute
+	cursorStreamFlushDelay  = 16 * time.Millisecond
+	cursorStreamMaxBatch    = 512
 )
 
 // CursorExecutor handles requests to the Cursor API via Connect+Protobuf protocol.
@@ -603,26 +605,36 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		usage := &cursorTokenUsage{}
 		usage.setInputEstimate(len(payload))
 
-		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
-			func(text string, isThinking bool) {
-				// Emit thinking as the standard OpenAI `reasoning_content` delta
-				// field instead of inline <think>...</think> tags. Inline tags
-				// pollute `content` for OpenAI clients and end up rendered as
-				// literal text in Anthropic/Claude clients; `reasoning_content`
-				// is understood by the translators (mapped to thinking blocks
-				// for Claude) and by downstream proxies.
-				if isThinking {
-					if !thinkingActive {
-						thinkingActive = true
-						sendChunkSwitchable(`{"role":"assistant","content":""}`, "")
-					}
-					sendChunkSwitchable(fmt.Sprintf(`{"reasoning_content":%s}`, jsonString(text)), "")
-				} else {
-					thinkingActive = false
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+		emitTextDelta := func(text string, isThinking bool) {
+			// Emit thinking as the standard OpenAI `reasoning_content` delta
+			// field instead of inline <think>...</think> tags. Inline tags
+			// pollute `content` for OpenAI clients and end up rendered as
+			// literal text in Anthropic/Claude clients; `reasoning_content`
+			// is understood by the translators (mapped to thinking blocks
+			// for Claude) and by downstream proxies.
+			if isThinking {
+				if !thinkingActive {
+					thinkingActive = true
+					sendChunkSwitchable(`{"role":"assistant","content":""}`, "")
 				}
-			},
+				sendChunkSwitchable(fmt.Sprintf(`{"reasoning_content":%s}`, jsonString(text)), "")
+			} else {
+				thinkingActive = false
+				sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+			}
+		}
+		streamCoalescer := newCursorStreamCoalescer(
+			sessionCtx,
+			cursorStreamFlushDelay,
+			emitTextDelta,
+		)
+
+		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
+			streamCoalescer.push,
 			func(exec pendingMcpExec) {
+				// Preserve ordering: all assistant text must reach the client
+				// before the tool-call boundary is emitted.
+				streamCoalescer.flush()
 				thinkingActive = false
 				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":%s,"type":"function","function":{"name":%s,"arguments":%s}}]}`,
 					toolCallIndex, jsonString(exec.ToolCallId), jsonString(exec.ToolName), jsonString(exec.Args))
@@ -669,7 +681,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				resumeOutCh = resumeOut
 
 				// processH2SessionFrames will now block on toolResultCh (inline wait loop)
-				// while continuing to handle KV messages
+				// while continuing to handle KV messages.
 			},
 			toolResultCh,
 			usage,
@@ -686,6 +698,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
 			},
 		)
+		streamCoalescer.close()
 
 		// processH2SessionFrames returned — stream is done.
 		// Check if error happened before any chunks were emitted.
@@ -828,6 +841,152 @@ func cursorH2Heartbeat(ctx context.Context, stream *cursorproto.H2Stream) {
 }
 
 // --- Response processing ---
+
+type cursorStreamDeltaCommand struct {
+	text       string
+	isThinking bool
+	flush      bool
+	close      bool
+	ack        chan struct{}
+}
+
+// cursorStreamCoalescer turns Cursor's bursty protobuf deltas into SSE-sized
+// updates at roughly one display frame. The first delta remains immediate,
+// while later adjacent deltas are grouped for at most cursorStreamFlushDelay.
+type cursorStreamCoalescer struct {
+	commands chan cursorStreamDeltaCommand
+	done     chan struct{}
+}
+
+func newCursorStreamCoalescer(
+	ctx context.Context,
+	flushDelay time.Duration,
+	emit func(text string, isThinking bool),
+) *cursorStreamCoalescer {
+	coalescer := &cursorStreamCoalescer{
+		commands: make(chan cursorStreamDeltaCommand),
+		done:     make(chan struct{}),
+	}
+	go coalescer.run(ctx, flushDelay, emit)
+	return coalescer
+}
+
+func (c *cursorStreamCoalescer) push(text string, isThinking bool) {
+	if text == "" {
+		return
+	}
+	select {
+	case c.commands <- cursorStreamDeltaCommand{text: text, isThinking: isThinking}:
+	case <-c.done:
+	}
+}
+
+func (c *cursorStreamCoalescer) flush() {
+	c.sync(cursorStreamDeltaCommand{flush: true, ack: make(chan struct{})})
+}
+
+func (c *cursorStreamCoalescer) close() {
+	c.sync(cursorStreamDeltaCommand{close: true, ack: make(chan struct{})})
+}
+
+func (c *cursorStreamCoalescer) sync(command cursorStreamDeltaCommand) {
+	select {
+	case c.commands <- command:
+	case <-c.done:
+		return
+	}
+	select {
+	case <-command.ack:
+	case <-c.done:
+	}
+}
+
+func (c *cursorStreamCoalescer) run(
+	ctx context.Context,
+	flushDelay time.Duration,
+	emit func(text string, isThinking bool),
+) {
+	defer close(c.done)
+
+	timer := time.NewTimer(flushDelay)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+
+	var pending strings.Builder
+	var pendingThinking bool
+	var timerC <-chan time.Time
+	emittedFirst := false
+
+	stopTimer := func() {
+		if timerC == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timerC = nil
+	}
+	flushPending := func() {
+		stopTimer()
+		if pending.Len() == 0 {
+			return
+		}
+		text := pending.String()
+		pending.Reset()
+		emit(text, pendingThinking)
+	}
+	queue := func(text string, isThinking bool) {
+		if !emittedFirst {
+			emittedFirst = true
+			emit(text, isThinking)
+			return
+		}
+		if pending.Len() > 0 && pendingThinking != isThinking {
+			flushPending()
+		}
+		if pending.Len() == 0 {
+			pendingThinking = isThinking
+			timer.Reset(flushDelay)
+			timerC = timer.C
+		}
+		pending.WriteString(text)
+		if pending.Len() >= cursorStreamMaxBatch {
+			flushPending()
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			flushPending()
+			return
+		case <-timerC:
+			timerC = nil
+			if pending.Len() > 0 {
+				text := pending.String()
+				pending.Reset()
+				emit(text, pendingThinking)
+			}
+		case command := <-c.commands:
+			switch {
+			case command.close:
+				flushPending()
+				close(command.ack)
+				return
+			case command.flush:
+				flushPending()
+				close(command.ack)
+			default:
+				queue(command.text, command.isThinking)
+			}
+		}
+	}
+}
 
 // cursorTokenUsage tracks token counts from Cursor's TokenDeltaUpdate messages.
 type cursorTokenUsage struct {
