@@ -2049,6 +2049,47 @@ func TestPruneXAIOrphanToolOutputs_KeepsWhenCallPresent(t *testing.T) {
 	}
 }
 
+func TestPrepareResponsesRequest_PrunesOrPreservesPreviousResponseOutputs(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","previous_response_id":"resp-prev","input":[{"type":"item_reference","id":"fc-prev"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+
+	httpPrepared, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+	if got := gjson.GetBytes(httpPrepared.body, "input.#").Int(); got != 0 {
+		t.Fatalf("HTTP input count = %d, want 0 after orphan prune; body=%s", got, httpPrepared.body)
+	}
+
+	websocketPrepared, err := exec.prepareResponsesRequestKeepingPreviousResponseToolOutputs(context.Background(), req, opts, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequestKeepingPreviousResponseToolOutputs() error = %v", err)
+	}
+	if got := gjson.GetBytes(websocketPrepared.body, "input.#").Int(); got != 1 {
+		t.Fatalf("WebSocket input count = %d, want 1; body=%s", got, websocketPrepared.body)
+	}
+	if got := gjson.GetBytes(websocketPrepared.body, "input.0.type").String(); got != "function_call_output" {
+		t.Fatalf("WebSocket input.0.type = %q, want function_call_output; body=%s", got, websocketPrepared.body)
+	}
+	if got := gjson.GetBytes(websocketPrepared.body, "input.0.call_id").String(); got != "call-1" {
+		t.Fatalf("WebSocket input.0.call_id = %q, want call-1; body=%s", got, websocketPrepared.body)
+	}
+
+	noPreviousReq := req
+	noPreviousReq.Payload = []byte(`{"model":"grok-4.3","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`)
+	noPreviousPrepared, err := exec.prepareResponsesRequestKeepingPreviousResponseToolOutputs(context.Background(), noPreviousReq, opts, true)
+	if err != nil {
+		t.Fatalf("prepare without previous_response_id error = %v", err)
+	}
+	if got := gjson.GetBytes(noPreviousPrepared.body, "input.#").Int(); got != 0 {
+		t.Fatalf("WebSocket input without previous_response_id count = %d, want 0; body=%s", got, noPreviousPrepared.body)
+	}
+}
+
 func TestNormalizeXAIInputItems_ConvertsCustomToolCalls(t *testing.T) {
 	body := []byte(`{"model":"grok-4","input":[
 		{"type":"custom_tool_call","call_id":"c0","name":"ApplyPatch","input":"*** Begin Patch"},

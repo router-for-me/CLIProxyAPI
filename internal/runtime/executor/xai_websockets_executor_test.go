@@ -65,7 +65,7 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","stream":true,"previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"message","role":"user","content":"hello"}]}`),
+		Payload: []byte(`{"model":"grok-4.3","stream":true,"previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`),
 	}
 	opts := cliproxyexecutor.Options{
 		SourceFormat:   sdktranslator.FormatOpenAIResponse,
@@ -88,6 +88,15 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 		}
 		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp-prev" {
 			t.Fatalf("previous_response_id = %q, want resp-prev; payload=%s", got, payload)
+		}
+		if got := gjson.GetBytes(payload, "input.#").Int(); got != 1 {
+			t.Fatalf("input count = %d, want 1; payload=%s", got, payload)
+		}
+		if got := gjson.GetBytes(payload, "input.0.type").String(); got != "function_call_output" {
+			t.Fatalf("input.0.type = %q, want function_call_output; payload=%s", got, payload)
+		}
+		if got := gjson.GetBytes(payload, "input.0.call_id").String(); got != "call-1" {
+			t.Fatalf("input.0.call_id = %q, want call-1; payload=%s", got, payload)
 		}
 		if gjson.GetBytes(payload, "stream").Exists() {
 			t.Fatalf("stream must be omitted for xAI websocket payload: %s", payload)
@@ -868,5 +877,162 @@ func TestXAIWebsocketsExecuteStreamStopsOnBareErrorPayload(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for bare upstream error")
+	}
+}
+
+func TestXAIWebsocketsExecuteStreamSearchResultFilteringRequiresDualFlags(t *testing.T) {
+	tests := []struct {
+		name       string
+		xaiConfig  config.XAIConfig
+		wantHidden bool
+	}{
+		{
+			name: "inject_and_hide",
+			xaiConfig: config.XAIConfig{
+				InjectBuildSearchTools:    true,
+				HideInjectedSearchResults: true,
+			},
+			wantHidden: true,
+		},
+		{
+			name: "inject_without_hide",
+			xaiConfig: config.XAIConfig{
+				InjectBuildSearchTools: true,
+			},
+		},
+		{
+			name: "hide_without_inject",
+			xaiConfig: config.XAIConfig{
+				HideInjectedSearchResults: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					t.Errorf("upgrade websocket: %v", err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+
+				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+					t.Errorf("read upstream websocket message: %v", errRead)
+					return
+				}
+				events := [][]byte{
+					[]byte(`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}`),
+					[]byte(`{"type":"response.web_search_call.in_progress","sequence_number":2,"output_index":0,"item_id":"ws_1"}`),
+					[]byte(`{"type":"response.content_part.added","sequence_number":3,"output_index":0,"item_id":"ws_1","content_index":0,"part":{"type":"search_result","text":"hidden"}}`),
+					[]byte(`{"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"completed"}}`),
+					[]byte(`{"type":"response.output_item.added","sequence_number":5,"output_index":1,"item":{"id":"xs_1","type":"x_search_call","status":"in_progress"}}`),
+					[]byte(`{"type":"response.x_search_call.in_progress","sequence_number":6,"output_index":1,"item_id":"xs_1"}`),
+					[]byte(`{"type":"response.content_part.added","sequence_number":7,"output_index":1,"item_id":"xs_1","content_index":0,"part":{"type":"search_result","text":"hidden"}}`),
+					[]byte(`{"type":"response.output_item.done","sequence_number":8,"output_index":1,"item":{"id":"xs_1","type":"x_search_call","status":"completed"}}`),
+					[]byte(`{"type":"response.output_item.added","sequence_number":9,"output_index":2,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]}}`),
+					[]byte(`{"type":"response.output_text.delta","sequence_number":10,"output_index":2,"item_id":"msg_1","content_index":0,"delta":"answer"}`),
+					[]byte(`{"type":"response.output_item.done","sequence_number":11,"output_index":2,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}}`),
+					[]byte(`{"type":"response.completed","sequence_number":12,"response":{"id":"resp_1","status":"completed","output":[{"id":"ws_1","type":"web_search_call","status":"completed"},{"id":"xs_1","type":"x_search_call","status":"completed"},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`),
+				}
+				for _, event := range events {
+					if errWrite := conn.WriteMessage(websocket.TextMessage, event); errWrite != nil {
+						t.Errorf("write websocket event: %v", errWrite)
+						return
+					}
+				}
+			}))
+			defer server.Close()
+
+			exec := NewXAIWebsocketsExecutor(&config.Config{XAI: tt.xaiConfig})
+			auth := &cliproxyauth.Auth{
+				ID:       "xai-auth-search-filter",
+				Provider: "xai",
+				Attributes: map[string]string{
+					"base_url":   server.URL,
+					"websockets": "true",
+				},
+				Metadata: map[string]any{"access_token": "xai-token"},
+			}
+			result, err := exec.ExecuteStream(
+				cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
+				auth,
+				cliproxyexecutor.Request{
+					Model:   "grok-4.3",
+					Payload: []byte(`{"model":"grok-4.3","tools":[{"type":"web_search"}],"input":"hello"}`),
+				},
+				cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatOpenAIResponse,
+					ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				},
+			)
+			if err != nil {
+				t.Fatalf("ExecuteStream() error = %v", err)
+			}
+
+			var events [][]byte
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error = %v", chunk.Err)
+				}
+				events = append(events, bytes.Clone(bytes.TrimSpace(chunk.Payload)))
+			}
+
+			wantMessageIndex := int64(2)
+			if tt.wantHidden {
+				wantMessageIndex = 0
+			}
+			var sawSearchEvent, sawSearchResidual, sawCompleted bool
+			messageIndexChecks := 0
+			for _, event := range events {
+				eventType := gjson.GetBytes(event, "type").String()
+				itemType := gjson.GetBytes(event, "item.type").String()
+				if strings.Contains(eventType, "web_search") || strings.Contains(eventType, "x_search") || itemType == "web_search_call" || itemType == "x_search_call" {
+					sawSearchEvent = true
+				}
+				if itemID := gjson.GetBytes(event, "item_id").String(); itemID == "ws_1" || itemID == "xs_1" {
+					sawSearchResidual = true
+				}
+				if gjson.GetBytes(event, "item.id").String() == "msg_1" || gjson.GetBytes(event, "item_id").String() == "msg_1" {
+					messageIndexChecks++
+					if got := gjson.GetBytes(event, "output_index").Int(); got != wantMessageIndex {
+						t.Fatalf("message output_index = %d, want %d; event=%s", got, wantMessageIndex, event)
+					}
+				}
+				if eventType != "response.completed" {
+					continue
+				}
+				sawCompleted = true
+				output := gjson.GetBytes(event, "response.output")
+				wantOutputCount := int64(3)
+				if tt.wantHidden {
+					wantOutputCount = 1
+				}
+				if got := output.Get("#").Int(); got != wantOutputCount {
+					t.Fatalf("completed output count = %d, want %d; event=%s", got, wantOutputCount, event)
+				}
+				if tt.wantHidden && output.Get("0.type").String() != "message" {
+					t.Fatalf("completed output.0.type = %q, want message; event=%s", output.Get("0.type").String(), event)
+				}
+			}
+
+			if !sawCompleted {
+				t.Fatal("stream missing response.completed")
+			}
+			if messageIndexChecks != 3 {
+				t.Fatalf("message output_index checks = %d, want 3", messageIndexChecks)
+			}
+			if tt.wantHidden {
+				if sawSearchEvent || sawSearchResidual {
+					t.Fatalf("hidden search events leaked: search=%v residual=%v events=%q", sawSearchEvent, sawSearchResidual, events)
+				}
+				return
+			}
+			if !sawSearchEvent || !sawSearchResidual {
+				t.Fatalf("search events were filtered without dual flags: search=%v residual=%v events=%q", sawSearchEvent, sawSearchResidual, events)
+			}
+		})
 	}
 }

@@ -900,6 +900,14 @@ func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxye
 }
 
 func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
+	return e.prepareResponsesRequestToWithPreviousResponseToolOutputs(ctx, req, opts, stream, to, false)
+}
+
+func (e *XAIExecutor) prepareResponsesRequestKeepingPreviousResponseToolOutputs(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
+	return e.prepareResponsesRequestToWithPreviousResponseToolOutputs(ctx, req, opts, stream, sdktranslator.FormatCodex, true)
+}
+
+func (e *XAIExecutor) prepareResponsesRequestToWithPreviousResponseToolOutputs(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format, keepPreviousResponseToolOutputs bool) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -940,9 +948,13 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		return nil, err
 	}
 	// After replay may re-insert function_call items for matching outputs,
-	// drop any remaining tool outputs whose call is still missing. xAI (and
-	// the websocket repair path) reject transcripts with orphaned outputs.
-	body = pruneXAIOrphanToolOutputs(body)
+	// drop any remaining tool outputs whose call is still missing. WebSocket
+	// follow-ups keep previous_response_id, so their matching calls remain in
+	// upstream history and those outputs must be preserved.
+	keepPreviousResponseOutputs := keepPreviousResponseToolOutputs && strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()) != ""
+	if !keepPreviousResponseOutputs {
+		body = pruneXAIOrphanToolOutputs(body)
+	}
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
