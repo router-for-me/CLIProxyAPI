@@ -12,7 +12,7 @@ import (
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
-	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
+	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":6},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)
 	if detail.InputTokens != 1 {
 		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 1)
@@ -26,8 +26,18 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
 	}
+	if detail.CacheCreationTokens != 6 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 6)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
+	}
+}
+
+func TestParseOpenAIUsageDetectsPromptCacheWriteOnly(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(`{"usage":{"prompt_tokens_details":{"cache_write_tokens":6}}}`))
+	if detail.CacheCreationTokens != 6 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 6)
 	}
 }
 
@@ -136,6 +146,32 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 	if detail.ResponseServiceTier != "flex" {
 		t.Fatalf("response service tier = %q, want flex", detail.ResponseServiceTier)
+	}
+}
+
+func TestParseOpenAIStreamUsageChatCompletionsFields(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":8,"completion_tokens":5,"total_tokens":13,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":4},"completion_tokens_details":{"reasoning_tokens":2}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 8 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 8)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.TotalTokens != 13 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 13)
+	}
+	if detail.CachedTokens != 3 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.CacheCreationTokens != 4 {
+		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 4)
+	}
+	if detail.ReasoningTokens != 2 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
 	}
 }
 
