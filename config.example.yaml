@@ -171,7 +171,7 @@ routing:
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
   # X-Session-ID, Session_id (Codex), X-Client-Request-Id (PI), conversation_id,
-  # or first few messages hash.
+  # prompt_cache_key (OpenAI Responses / Codex), or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
@@ -184,6 +184,13 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+
+# xAI / Grok provider behavior.
+# xai:
+#   # When true, inject native web_search + x_search tools so free OAuth
+#   # requests route to cache-capable grok-4.5 instead of grok-4.5-build-free.
+#   # Enable only for cli-chat-proxy pools. Default: false.
+#   inject-build-search-tools: false
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

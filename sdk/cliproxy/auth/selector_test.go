@@ -439,6 +439,21 @@ func TestExtractSessionID(t *testing.T) {
 			want:    "conv:conv-12345",
 		},
 		{
+			name:    "prompt_cache_key",
+			payload: `{"model":"grok-4.5","prompt_cache_key":"019f4a09-session","input":[{"type":"message","role":"user","content":"hi"}]}`,
+			want:    "pck:019f4a09-session",
+		},
+		{
+			name:    "prompt_cache_key_preferred_over_message_hash",
+			payload: `{"prompt_cache_key":"stable-session","input":[{"type":"message","role":"system","content":"sys"},{"type":"message","role":"user","content":"hello world"}]}`,
+			want:    "pck:stable-session",
+		},
+		{
+			name:    "conversation_id_preferred_over_prompt_cache_key",
+			payload: `{"conversation_id":"conv-1","prompt_cache_key":"pck-1"}`,
+			want:    "conv:conv-1",
+		},
+		{
 			name:    "no_metadata",
 			payload: `{"model":"claude-3"}`,
 			want:    "",

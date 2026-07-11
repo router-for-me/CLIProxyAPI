@@ -1871,3 +1871,313 @@ func testValidGrokEncryptedContent() string {
 	}
 	return base64.RawStdEncoding.EncodeToString(buf[:256])
 }
+
+func TestNormalizeXAIInputItems_PromotesCodexAdditionalTools(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"tool_choice":"auto",
+		"input":[
+			{"type":"additional_tools","role":"developer","tools":[
+				{"type":"custom","name":"exec","description":"run","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE"}},
+				{"type":"function","name":"wait","parameters":{"type":"object","properties":{}}},
+				{"type":"namespace","name":"collaboration","tools":[
+					{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"prompt":{"type":"string"}}}}
+				]}
+			]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+		]
+	}`)
+
+	// Mirror prepareResponsesRequest ordering for the xAI path.
+	out := normalizeXAIToolChoiceForTools(normalizeXAITools(normalizeXAIInputItems(body)))
+
+	if gjson.GetBytes(out, "input.#").Int() != 1 {
+		t.Fatalf("input should drop additional_tools item: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "input.0.type").String(); got != "message" {
+		t.Fatalf("input.0.type = %q, want message: %s", got, string(out))
+	}
+
+	tools := gjson.GetBytes(out, "tools")
+	if !tools.IsArray() {
+		t.Fatalf("tools missing after promote: %s", string(out))
+	}
+	names := map[string]bool{}
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() != "function" {
+			t.Fatalf("tool type = %q, want function: %s", tool.Get("type").String(), tool.Raw)
+		}
+		if tool.Get("format").Exists() {
+			t.Fatalf("custom format should be stripped: %s", tool.Raw)
+		}
+		if !tool.Get("parameters").Exists() {
+			t.Fatalf("function parameters missing: %s", tool.Raw)
+		}
+		names[tool.Get("name").String()] = true
+		if tool.Get("name").String() == "exec" {
+			if got := tool.Get("parameters.properties.input.type").String(); got != "string" {
+				t.Fatalf("exec freeform input type = %q, want string: %s", got, tool.Raw)
+			}
+		}
+	}
+	for _, want := range []string{"exec", "wait", "spawn_agent"} {
+		if !names[want] {
+			t.Fatalf("tool %q missing after promote/normalize: %s", want, string(out))
+		}
+	}
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want auto with promoted tools: %s", got, string(out))
+	}
+	// original custom names must be collectable before rewrite
+	customNames := collectXAIOriginalCustomToolNames(body)
+	if _, ok := customNames["exec"]; !ok {
+		t.Fatalf("collectXAIOriginalCustomToolNames missing exec: %#v", customNames)
+	}
+}
+
+func TestRemapXAICustomToolCallsInPayload_OnlyCustomNames(t *testing.T) {
+	custom := map[string]struct{}{"exec": {}}
+	payload := []byte(`{
+		"type":"response.completed",
+		"response":{"output":[
+			{"type":"function_call","name":"exec","call_id":"c1","arguments":"{\"input\":\"console.log(1)\"}"},
+			{"type":"function_call","name":"wait","call_id":"c2","arguments":"{\"seconds\":1}"}
+		]}
+	}`)
+	out := remapXAICustomToolCallsInPayload(payload, custom)
+	if got := gjson.GetBytes(out, "response.output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("exec type = %q, want custom_tool_call: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "response.output.0.input").String(); got != "console.log(1)" {
+		t.Fatalf("exec input = %q, want source: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "response.output.0.arguments").Exists() {
+		t.Fatalf("exec arguments should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "response.output.1.type").String(); got != "function_call" {
+		t.Fatalf("wait type should stay function_call, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "response.output.1.arguments").String(); got != `{"seconds":1}` {
+		t.Fatalf("wait arguments mutated: %s", string(out))
+	}
+}
+
+func TestRemapXAICustomToolCallsInPayload_NoopWithoutCustomNames(t *testing.T) {
+	payload := []byte(`{"item":{"type":"function_call","name":"exec","arguments":"{\"input\":\"x\"}"}}`)
+	out := remapXAICustomToolCallsInPayload(payload, nil)
+	if string(out) != string(payload) {
+		t.Fatalf("expected no-op without custom names, got %s", string(out))
+	}
+}
+
+func TestNormalizeXAIInputItems_DropsItemReference(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","input":[
+		{"role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"item_reference","id":"rs_abc"},
+		{"type":"item_reference","id":"fc_abc_0"},
+		{"type":"function_call_output","call_id":"call-1","output":"done"},
+		{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+	]}`)
+	out := normalizeXAIInputItems(body)
+
+	if gjson.GetBytes(out, "input.#").Int() != 3 {
+		t.Fatalf("item_reference items should be dropped: %s", string(out))
+	}
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if item.Get("type").String() == "item_reference" {
+			t.Fatalf("item_reference remained: %s", string(out))
+		}
+	}
+	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call_output" {
+		t.Fatalf("function_call_output should remain: %s", string(out))
+	}
+}
+
+func TestNormalizeXAIInputItems_ConvertsCustomToolCalls(t *testing.T) {
+	body := []byte(`{"model":"grok-4","input":[
+		{"type":"custom_tool_call","call_id":"c0","name":"ApplyPatch","input":"*** Begin Patch"},
+		{"type":"custom_tool_call_output","call_id":"c0","output":"done"},
+		{"type":"function_call","call_id":"f0","name":"lookup","arguments":"{}"}
+	]}`)
+	out := normalizeXAIInputItems(body)
+
+	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
+		t.Fatalf("input.0.type = %q, want function_call: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.0.input").Exists() {
+		t.Fatalf("custom input field should be removed: %s", string(out))
+	}
+	arguments := gjson.GetBytes(out, "input.0.arguments").String()
+	if got := gjson.Get(arguments, "input").String(); got != "*** Begin Patch" {
+		t.Fatalf("arguments.input = %q, want patch text; arguments=%s body=%s", got, arguments, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call_output" {
+		t.Fatalf("input.1.type = %q, want function_call_output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("existing function_call should be preserved: %s", string(out))
+	}
+}
+
+func TestNormalizeXAIInputItems_FlattensFunctionCallOutputArray(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","input":[
+		{"type":"function_call_output","call_id":"call-1","output":[
+			{"type":"input_text","text":"hello "},
+			{"type":"input_text","text":"world"}
+		]}
+	]}`)
+	out := normalizeXAIInputItems(body)
+
+	if got := gjson.GetBytes(out, "input.0.output").String(); got != "hello world" {
+		t.Fatalf("output = %q, want flattened string: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.0.output").IsArray() {
+		t.Fatalf("output should be string, not array: %s", string(out))
+	}
+}
+
+func TestNormalizeXAIInputItems_MergesAdditionalToolsWithExistingTools(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.5",
+		"tools":[{"type":"function","name":"Bash","parameters":{"type":"object","properties":{}}}],
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"function","name":"wait","parameters":{"type":"object","properties":{}}}]},
+			{"type":"message","role":"user","content":"hi"}
+		]
+	}`)
+	out := normalizeXAIInputItems(body)
+	names := map[string]bool{}
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		names[tool.Get("name").String()] = true
+	}
+	if !names["Bash"] || !names["wait"] {
+		t.Fatalf("expected both existing and promoted tools, got %v body=%s", names, string(out))
+	}
+}
+
+func TestInjectXAIBuildCacheTools_DisabledByDefault(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","tools":[{"type":"function","name":"exec","parameters":{"type":"object","properties":{}}}],"input":"hi"}`)
+	out := injectXAIBuildCacheTools(&config.Config{}, body)
+	if gjson.GetBytes(out, "tools.#").Int() != 1 {
+		t.Fatalf("tools count = %d, want 1; body=%s", gjson.GetBytes(out, "tools.#").Int(), out)
+	}
+	if gjson.GetBytes(out, "tools.0.type").String() != "function" {
+		t.Fatalf("tools.0.type = %q, want function", gjson.GetBytes(out, "tools.0.type").String())
+	}
+}
+
+func TestInjectXAIBuildCacheTools_PrependsMissingSearchTools(t *testing.T) {
+	cfg := &config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}
+	body := []byte(`{"model":"grok-4.5","tools":[{"type":"function","name":"exec","parameters":{"type":"object","properties":{}}}],"input":"hi"}`)
+	out := injectXAIBuildCacheTools(cfg, body)
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 3 {
+		t.Fatalf("tools count = %d, want 3; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "tools.0.type").String() != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", gjson.GetBytes(out, "tools.0.type").String(), out)
+	}
+	if gjson.GetBytes(out, "tools.1.type").String() != "x_search" {
+		t.Fatalf("tools.1.type = %q, want x_search; body=%s", gjson.GetBytes(out, "tools.1.type").String(), out)
+	}
+	if gjson.GetBytes(out, "tools.2.name").String() != "exec" {
+		t.Fatalf("tools.2.name = %q, want exec; body=%s", gjson.GetBytes(out, "tools.2.name").String(), out)
+	}
+}
+
+func TestInjectXAIBuildCacheTools_NoDuplicateWhenPresent(t *testing.T) {
+	cfg := &config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}
+	body := []byte(`{"tools":[{"type":"web_search"},{"type":"x_search"},{"type":"function","name":"exec","parameters":{"type":"object","properties":{}}}]}`)
+	out := injectXAIBuildCacheTools(cfg, body)
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 3 {
+		t.Fatalf("tools count = %d, want 3; body=%s", got, out)
+	}
+}
+
+func TestInjectXAIBuildCacheTools_CreatesToolsWhenMissing(t *testing.T) {
+	cfg := &config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}
+	body := []byte(`{"model":"grok-4.5","input":"hi"}`)
+	out := injectXAIBuildCacheTools(cfg, body)
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 2 {
+		t.Fatalf("tools count = %d, want 2; body=%s", got, out)
+	}
+}
+
+func TestFilterXAIInjectedServerToolPayload_DropsSearchCalls(t *testing.T) {
+	data := []byte(`{"type":"response.completed","response":{"output":[{"type":"reasoning"},{"type":"web_search_call"},{"type":"message","role":"assistant"}]}}`)
+	out := filterXAIInjectedServerToolPayload(data)
+	arr := gjson.GetBytes(out, "response.output")
+	if !arr.IsArray() || len(arr.Array()) != 2 {
+		t.Fatalf("output = %s, want 2 items", arr.Raw)
+	}
+	if arr.Array()[0].Get("type").String() != "reasoning" || arr.Array()[1].Get("type").String() != "message" {
+		t.Fatalf("output types unexpected: %s", arr.Raw)
+	}
+}
+
+func TestFilterXAIInjectedServerToolPayload_DropsOutputItemEvent(t *testing.T) {
+	data := []byte(`{"type":"response.output_item.done","item":{"type":"web_search_call"}}`)
+	out := filterXAIInjectedServerToolPayload(data)
+	if out != nil {
+		t.Fatalf("want nil dropped event, got %s", out)
+	}
+}
+
+func TestInjectXAIBuildCacheTools_StripsFunctionNamedWebSearch(t *testing.T) {
+	cfg := &config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}
+	body := []byte(`{"tools":[{"type":"function","name":"web_search","parameters":{"type":"object","properties":{}}},{"type":"function","name":"exec","parameters":{"type":"object","properties":{}}}]}`)
+	out := injectXAIBuildCacheTools(cfg, body)
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 3 {
+		t.Fatalf("tools count = %d, want 3 (native web+x + exec); body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "tools.0.type").String() != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", gjson.GetBytes(out, "tools.0.type").String(), out)
+	}
+	if gjson.GetBytes(out, "tools.1.type").String() != "x_search" {
+		t.Fatalf("tools.1.type = %q, want x_search; body=%s", gjson.GetBytes(out, "tools.1.type").String(), out)
+	}
+	// Ensure no function named web_search remains.
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		if tool.Get("type").String() == "function" && tool.Get("name").String() == "web_search" {
+			t.Fatalf("function web_search still present: %s", out)
+		}
+	}
+	if gjson.GetBytes(out, "tools.2.name").String() != "exec" {
+		t.Fatalf("tools.2.name = %q, want exec; body=%s", gjson.GetBytes(out, "tools.2.name").String(), out)
+	}
+}
+
+func TestInjectXAIBuildCacheTools_StripsCustomNamedXSearch(t *testing.T) {
+	cfg := &config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}
+	body := []byte(`{"tools":[{"type":"custom","name":"x_search"},{"type":"web_search"},{"type":"function","name":"exec","parameters":{"type":"object","properties":{}}}]}`)
+	out := injectXAIBuildCacheTools(cfg, body)
+	// web native kept, custom x_search stripped, native x injected, exec kept => 3
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 3 {
+		t.Fatalf("tools count = %d, want 3; body=%s", got, out)
+	}
+	types := []string{}
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		types = append(types, tool.Get("type").String()+":"+tool.Get("name").String())
+	}
+	// Expect x_search native present exactly once and no custom x_search.
+	xCount := 0
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		if tool.Get("type").String() == "x_search" {
+			xCount++
+		}
+		if tool.Get("name").String() == "x_search" && tool.Get("type").String() != "x_search" {
+			t.Fatalf("non-native x_search remained: %s", out)
+		}
+	}
+	if xCount != 1 {
+		t.Fatalf("x_search native count=%d want 1; types=%v body=%s", xCount, types, out)
+	}
+}
+
+func TestInjectXAIBuildCacheTools_DedupesNativeDuplicates(t *testing.T) {
+	cfg := &config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}
+	body := []byte(`{"tools":[{"type":"web_search"},{"type":"web_search"},{"type":"x_search"}]}`)
+	out := injectXAIBuildCacheTools(cfg, body)
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 2 {
+		t.Fatalf("tools count = %d, want 2; body=%s", got, out)
+	}
+}

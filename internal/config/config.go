@@ -132,6 +132,9 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// XAI configures provider-wide xAI / Grok request behavior.
+	XAI XAIConfig `yaml:"xai" json:"xai"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -280,6 +283,15 @@ type CodexHeaderDefaults struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+}
+
+// XAIConfig configures provider-wide xAI / Grok request behavior.
+type XAIConfig struct {
+	// InjectBuildSearchTools prepends cli-chat-proxy native search tools
+	// (web_search, x_search) when missing. Those tools route free OAuth
+	// requests onto the cache-capable grok-4.5 tier instead of
+	// grok-4.5-build-free. Default false; enable only for cli-chat-proxy pools.
+	InjectBuildSearchTools bool `yaml:"inject-build-search-tools" json:"inject-build-search-tools"`
 }
 
 // TLSConfig holds HTTPS server settings.
