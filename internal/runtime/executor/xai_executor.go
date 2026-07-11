@@ -655,6 +655,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		// Track output indexes dropped because they belonged to injected
+		// search tools, so remaining stream events can be renumbered densely.
+		droppedOutputIndexes := make(map[int64]struct{})
 		var pendingEventLine []byte
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param)
@@ -687,12 +690,15 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					switch normalizedEventName {
 					case "response.output_item.done":
 						if e.cfg != nil && e.cfg.XAI.InjectBuildSearchTools {
-							eventData = filterXAIInjectedServerToolPayload(eventData)
-							if len(eventData) == 0 {
+							filtered := filterXAIInjectedServerToolPayload(eventData)
+							if len(filtered) == 0 {
+								xaiRecordDroppedOutputIndex(eventData, droppedOutputIndexes)
 								pendingEventLine = nil
 								continue
 							}
+							eventData = filtered
 						}
+						eventData = xaiCompactOutputIndex(eventData, droppedOutputIndexes)
 						eventData = remapXAICustomToolCallsInPayload(eventData, prepared.customToolNames)
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 					case "response.completed":
@@ -710,9 +716,12 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					default:
 						// Drop SSE for injected server tools so clients never see them.
 						if e.cfg != nil && e.cfg.XAI.InjectBuildSearchTools && xaiIsInjectedServerToolEvent(eventData) {
+							xaiRecordDroppedOutputIndex(eventData, droppedOutputIndexes)
 							pendingEventLine = nil
 							continue
 						}
+						// Renumber after earlier injected items were stripped.
+						eventData = xaiCompactOutputIndex(eventData, droppedOutputIndexes)
 						// Remap item-bearing events (e.g. output_item.added) for custom tools only.
 						eventData = remapXAICustomToolCallsInPayload(eventData, prepared.customToolNames)
 					}
@@ -1384,22 +1393,19 @@ func xaiCustomToolCallArguments(input gjson.Result) string {
 		return "{}"
 	}
 
+	// Freeform custom tools are promoted to a function schema with a required
+	// string field "input". Always wrap string payloads under that key — even
+	// when the string happens to be JSON — so replayed history matches the
+	// promoted contract (e.g. input `{"cmd":"pwd"}` -> {"input":"{\"cmd\":\"pwd\"}"}).
 	if input.Type == gjson.String {
-		text := input.String()
-		trimmed := strings.TrimSpace(text)
-		if strings.HasPrefix(trimmed, "{") {
-			var object map[string]any
-			if errUnmarshal := json.Unmarshal([]byte(trimmed), &object); errUnmarshal == nil {
-				return trimmed
-			}
-		}
-		if encoded, errMarshal := json.Marshal(text); errMarshal == nil {
+		if encoded, errMarshal := json.Marshal(input.String()); errMarshal == nil {
 			return `{"input":` + string(encoded) + `}`
 		}
 		return "{}"
 	}
 
 	if input.IsObject() {
+		// Already shaped as {"input": ...} or a structured arguments object.
 		return input.Raw
 	}
 	if input.Raw != "" {
@@ -1584,8 +1590,45 @@ func filterXAIInjectedServerToolPayload(data []byte) []byte {
 	return out
 }
 
-// collectXAIOriginalCustomToolNames records tools that were type=custom before
-// normalizeXAITools rewrites them to function. Used only for response remapping.
+// xaiRecordDroppedOutputIndex records an output_index removed from the client
+// stream (injected search tools) so later events can be renumbered densely.
+func xaiRecordDroppedOutputIndex(eventData []byte, dropped map[int64]struct{}) {
+	if dropped == nil || len(eventData) == 0 {
+		return
+	}
+	idx := gjson.GetBytes(eventData, "output_index")
+	if idx.Exists() {
+		dropped[idx.Int()] = struct{}{}
+	}
+}
+
+// xaiCompactOutputIndex rewrites output_index by subtracting how many dropped
+// indexes are strictly below it. No-op when nothing was dropped or the field
+// is absent. Keeps stream assemblers aligned with the filtered completed output.
+func xaiCompactOutputIndex(eventData []byte, dropped map[int64]struct{}) []byte {
+	if len(dropped) == 0 || len(eventData) == 0 {
+		return eventData
+	}
+	idx := gjson.GetBytes(eventData, "output_index")
+	if !idx.Exists() {
+		return eventData
+	}
+	orig := idx.Int()
+	var delta int64
+	for d := range dropped {
+		if d < orig {
+			delta++
+		}
+	}
+	if delta == 0 {
+		return eventData
+	}
+	updated, errSet := sjson.SetBytes(eventData, "output_index", orig-delta)
+	if errSet != nil {
+		return eventData
+	}
+	return updated
+}
 
 // collectXAIOriginalCustomToolNames records tools that were type=custom before
 // normalizeXAITools rewrites them to function. Used only for response remapping.

@@ -2181,3 +2181,48 @@ func TestInjectXAIBuildCacheTools_DedupesNativeDuplicates(t *testing.T) {
 		t.Fatalf("tools count = %d, want 2; body=%s", got, out)
 	}
 }
+
+func TestXAICustomToolCallArguments_WrapsJSONLookingString(t *testing.T) {
+	// Freeform custom input that happens to be a JSON object must stay a string
+	// under "input", not be promoted to top-level function arguments.
+	raw := "\"{\\\"cmd\\\":\\\"pwd\\\"}\""
+	input := gjson.Parse(raw)
+	got := xaiCustomToolCallArguments(input)
+	if !gjson.Get(got, "input").Exists() {
+		t.Fatalf("missing input field: %s", got)
+	}
+	if gjson.Get(got, "cmd").Exists() {
+		t.Fatalf("arguments leaked cmd to top level: %s", got)
+	}
+	if gotInput := gjson.Get(got, "input").String(); gotInput != `{"cmd":"pwd"}` {
+		t.Fatalf("input = %q, want {\"cmd\":\"pwd\"}", gotInput)
+	}
+
+	// Plain freeform text still wraps.
+	plain := xaiCustomToolCallArguments(gjson.Parse(`"*** Begin Patch"`))
+	if gjson.Get(plain, "input").String() != "*** Begin Patch" {
+		t.Fatalf("plain wrap = %s", plain)
+	}
+}
+
+func TestXAICompactOutputIndex_SubtractsDroppedBelow(t *testing.T) {
+	dropped := map[int64]struct{}{0: {}}
+	in := []byte(`{"type":"response.output_item.done","output_index":1,"item":{"type":"message"}}`)
+	out := xaiCompactOutputIndex(in, dropped)
+	if got := gjson.GetBytes(out, "output_index").Int(); got != 0 {
+		t.Fatalf("output_index = %d, want 0", got)
+	}
+	// No drop below -> unchanged
+	out2 := xaiCompactOutputIndex(in, map[int64]struct{}{2: {}})
+	if got := gjson.GetBytes(out2, "output_index").Int(); got != 1 {
+		t.Fatalf("output_index = %d, want 1", got)
+	}
+}
+
+func TestXAIRecordDroppedOutputIndex(t *testing.T) {
+	dropped := map[int64]struct{}{}
+	xaiRecordDroppedOutputIndex([]byte(`{"output_index":3,"item":{"type":"web_search_call"}}`), dropped)
+	if _, ok := dropped[3]; !ok {
+		t.Fatalf("expected index 3 recorded, got %#v", dropped)
+	}
+}
