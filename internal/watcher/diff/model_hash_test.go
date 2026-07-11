@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -33,6 +34,50 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 	if textModel == imageModel {
 		t.Fatal("hash should change when image flag changes")
+	}
+}
+
+func TestComputeOpenAICompatModelsHash_IncludesModalities(t *testing.T) {
+	base := config.OpenAICompatibilityModel{Name: "model", Alias: "public"}
+	withInput := base
+	withInput.InputModalities = []string{"text", "image"}
+	withOutput := base
+	withOutput.OutputModalities = []string{"text", "image"}
+
+	baseHash := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{base})
+	inputHash := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{withInput})
+	outputHash := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{withOutput})
+	if baseHash == "" || baseHash == inputHash || baseHash == outputHash || inputHash == outputHash {
+		t.Fatalf("modality hashes must be distinct: base=%q input=%q output=%q", baseHash, inputHash, outputHash)
+	}
+
+	normalized := withInput
+	normalized.InputModalities = []string{" TEXT ", "image", "text"}
+	if got := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{normalized}); got != inputHash {
+		t.Fatalf("normalized modality hash = %q, want %q", got, inputHash)
+	}
+}
+
+func TestConfiguredModelHashesIncludeThinking(t *testing.T) {
+	low := &registry.ThinkingSupport{Levels: []string{"low"}}
+	high := &registry.ThinkingSupport{Levels: []string{"high"}}
+	tests := []struct {
+		name string
+		low  string
+		high string
+	}{
+		{"openai-compatibility", ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", Thinking: low}}), ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", Thinking: high}})},
+		{"gemini", ComputeGeminiModelsHash([]config.GeminiModel{{Name: "model", Thinking: low}}), ComputeGeminiModelsHash([]config.GeminiModel{{Name: "model", Thinking: high}})},
+		{"claude", ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "model", Thinking: low}}), ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "model", Thinking: high}})},
+		{"codex", ComputeCodexModelsHash([]config.CodexModel{{Name: "model", Thinking: low}}), ComputeCodexModelsHash([]config.CodexModel{{Name: "model", Thinking: high}})},
+		{"vertex", ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "model", Thinking: low}}), ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "model", Thinking: high}})},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.low == "" || tc.high == "" || tc.low == tc.high {
+				t.Fatalf("thinking hashes = %q / %q, want distinct non-empty values", tc.low, tc.high)
+			}
+		})
 	}
 }
 

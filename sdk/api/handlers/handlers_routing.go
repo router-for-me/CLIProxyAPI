@@ -7,6 +7,7 @@ import (
 
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -98,24 +99,32 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	return h.getRequestDetailsWithOptions(modelName, false)
 }
 
-func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
+func validateRequiredProviderExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
 	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
-	if forcedProvider == "" || entryProtocol != Interactions {
+	if forcedProvider == "" {
 		return nil
 	}
-	if routeDecision.ExecutorPluginID != "" {
+	routeProvider := strings.ToLower(strings.TrimSpace(routeDecision.Provider))
+	if routeDecision.ExecutorPluginID == "" && (routeProvider == "" || routeProvider == forcedProvider) {
+		return nil
+	}
+	if entryProtocol == Interactions {
 		return nativeInteractionsExecutionError()
 	}
-	if routeProvider := strings.ToLower(strings.TrimSpace(routeDecision.Provider)); routeProvider != "" && routeProvider != forcedProvider {
-		return nativeInteractionsExecutionError()
-	}
-	return nil
+	return requiredProviderExecutionError(forcedProvider)
 }
 
 func nativeInteractionsExecutionError() *interfaces.ErrorMessage {
 	return &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadRequest,
 		Error:      fmt.Errorf("agent is only supported for native interactions execution"),
+	}
+}
+
+func requiredProviderExecutionError(provider string) *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      fmt.Errorf("request requires native %s execution, but the model router selected a different target", provider),
 	}
 }
 
@@ -131,7 +140,10 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 		if routeProvider := strings.ToLower(strings.TrimSpace(routeDecision.Provider)); routeProvider != "" && routeProvider != forcedProvider {
 			return nil, "", nativeInteractionsExecutionError()
 		}
-		normalizedModel := strings.TrimSpace(modelName)
+		normalizedModel := strings.TrimSpace(routeDecision.Model)
+		if normalizedModel == "" {
+			normalizedModel = strings.TrimSpace(modelName)
+		}
 		if normalizedModel == "" {
 			normalizedModel = strings.TrimSpace(originalRequestedModel)
 		}
@@ -220,12 +232,12 @@ func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageMode
 }
 
 func isOpenAIImageOnlyModel(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(routeModelBaseName(model))) {
-	case "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-image-quality":
-		return true
-	default:
-		return false
+	model = strings.TrimSpace(model)
+	if capabilities, found := registry.LookupModelEndpointCapabilities(model); found {
+		return capabilities.Image && !capabilities.Chat
 	}
+	baseModel := routeModelBaseName(model)
+	return baseModel != model && registry.ModelIsImageOnly(baseModel)
 }
 
 func routeModelBaseName(model string) string {

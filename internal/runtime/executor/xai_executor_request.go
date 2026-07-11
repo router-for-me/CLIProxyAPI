@@ -54,11 +54,11 @@ type xaiClientToolKey struct {
 	toolType  string
 }
 
-func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
-	return e.prepareResponsesRequestTo(ctx, req, opts, stream, sdktranslator.FormatCodex)
+func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
+	return e.prepareResponsesRequestTo(ctx, auth, req, opts, stream, sdktranslator.FormatCodex)
 }
 
-func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
+func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -73,7 +73,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = preserveXAIResponsesOutputControls(body, req.Payload, from)
 
 	var err error
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
+	body, err = helps.ApplyRequestThinking(body, auth, req, opts, from.String(), e.Identifier(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}

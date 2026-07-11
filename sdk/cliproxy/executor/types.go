@@ -48,6 +48,10 @@ const (
 	DerivedSessionIDMetadataKey = "derived_session_id"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
+	// ImageExecutionMetadataKey marks requests dispatched from an image endpoint.
+	ImageExecutionMetadataKey = "image_execution"
+	// VideoExecutionMetadataKey marks requests dispatched from a video endpoint.
+	VideoExecutionMetadataKey = "video_execution"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

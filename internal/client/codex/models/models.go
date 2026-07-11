@@ -56,21 +56,24 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			continue
 		}
 
+		info, supportsChat, hasDynamicInfo := lookupCodexClientModelInfo(id)
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
 			applyCodexClientDisplayName(entry, model)
+			applyCodexClientEndpointMetadata(entry, info, supportsChat)
+			if hasDynamicInfo {
+				applyCodexClientThinkingMetadata(entry, info.Thinking)
+			}
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
-			applyCodexClientVisibilityOverride(entry, id)
 			result = append(result, entry)
 			continue
 		}
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
-		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2)
+		applyCodexClientModelMetadata(entry, id, model, info, supportsChat, optimizeMultiAgentV2)
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry)
-		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
 	}
 
@@ -209,9 +212,7 @@ func applyCodexClientSearchToolSupport(entry map[string]any, id string, template
 	}
 }
 
-func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any, optimizeMultiAgentV2 bool) {
-	info := registry.LookupModelInfo(id)
-
+func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any, info *registry.ModelInfo, supportsChat bool, optimizeMultiAgentV2 bool) {
 	displayName := stringModelValue(model, "display_name")
 	description := stringModelValue(model, "description")
 	contextWindow := intModelValue(model, "context_length")
@@ -226,13 +227,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if info.ContextLength > 0 {
 			contextWindow = info.ContextLength
 		}
-		if info.Type == registry.OpenAIImageModelType {
-			entry["visibility"] = "hide"
-			delete(entry, "input_modalities")
-			delete(entry, "supports_image_detail_original")
-		} else {
-			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
-		}
+		applyCodexClientEndpointMetadata(entry, info, supportsChat)
 		applyCodexClientThinkingMetadata(entry, info.Thinking)
 	}
 
@@ -268,11 +263,31 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	}
 }
 
-func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
-	switch strings.TrimSpace(id) {
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5-preview":
-		entry["visibility"] = "hide"
+func lookupCodexClientModelInfo(id string) (*registry.ModelInfo, bool, bool) {
+	info, supportsChat := registry.GetGlobalRegistry().GetCatalogModelInfo(id)
+	if info != nil {
+		return info, supportsChat, true
 	}
+
+	info = registry.LookupStaticModelInfo(id)
+	if info == nil {
+		return nil, false, false
+	}
+	capabilities, _ := registry.LookupModelEndpointCapabilities(id)
+	return info, capabilities.Chat, false
+}
+
+func applyCodexClientEndpointMetadata(entry map[string]any, info *registry.ModelInfo, supportsChat bool) {
+	if info == nil {
+		return
+	}
+	if !supportsChat {
+		entry["visibility"] = "hide"
+		delete(entry, "input_modalities")
+		delete(entry, "supports_image_detail_original")
+		return
+	}
+	applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 }
 
 func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []string) {

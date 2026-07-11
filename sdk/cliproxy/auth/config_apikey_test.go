@@ -30,4 +30,14 @@ func TestIsConfigAPIKeyAuth(t *testing.T) {
 	}) {
 		t.Fatal("expected config api key auth")
 	}
+	if !IsConfigAPIKeyAuth(&Auth{
+		ID:       "openai-compatibility:keyless",
+		Provider: "openai-compatibility:keyless",
+		Attributes: map[string]string{
+			"compat_name": "keyless",
+			"source":      "config:keyless[abc]",
+		},
+	}) {
+		t.Fatal("expected keyless openai-compatibility config auth")
+	}
 }

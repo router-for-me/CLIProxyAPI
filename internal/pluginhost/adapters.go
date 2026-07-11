@@ -117,8 +117,8 @@ type AuthModelResult struct {
 	Err      error
 }
 
-func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo) *registry.ModelInfo {
-	return &registry.ModelInfo{
+func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo, provider string) *registry.ModelInfo {
+	info := &registry.ModelInfo{
 		ID:                         model.ID,
 		Object:                     model.Object,
 		Created:                    model.Created,
@@ -139,6 +139,12 @@ func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo) *registry.Mod
 		Thinking:                   pluginThinkingSupportToRegistryThinkingSupport(model.Thinking),
 		UserDefined:                model.UserDefined,
 	}
+	if static := registry.LookupStaticModelInfoByChannel(info.ID, provider); static != nil {
+		info.SupportsImageAPI = static.SupportsImageAPI
+		info.SupportsVideoAPI = static.SupportsVideoAPI
+		info.ChatDisabled = static.ChatDisabled
+	}
+	return info
 }
 
 func pluginThinkingSupportToRegistryThinkingSupport(thinking *pluginapi.ThinkingSupport) *registry.ThinkingSupport {
@@ -269,7 +275,7 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 
 		models := make([]*registry.ModelInfo, 0, len(resp.Models))
 		for _, item := range resp.Models {
-			model := pluginModelInfoToRegistryModelInfo(item)
+			model := pluginModelInfoToRegistryModelInfo(item, provider)
 			if model == nil || strings.TrimSpace(model.ID) == "" {
 				continue
 			}
@@ -352,7 +358,7 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 		}
 		models := make([]*registry.ModelInfo, 0, len(resp.Models))
 		for _, item := range resp.Models {
-			model := pluginModelInfoToRegistryModelInfo(item)
+			model := pluginModelInfoToRegistryModelInfo(item, respProvider)
 			if model != nil {
 				model.ID = strings.TrimSpace(model.ID)
 			}

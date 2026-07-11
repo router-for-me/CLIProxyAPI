@@ -1816,6 +1816,26 @@ func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T
 	}
 }
 
+func TestClaudeExecutor_CountTokensValidatesSuffixThinkingLocally(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
+
+	if _, err := executor.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6(high)",
+		Payload: payload,
+	}, opts); err != nil {
+		t.Fatalf("CountTokens() valid suffix error = %v", err)
+	}
+
+	if _, err := executor.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6(xhigh)",
+		Payload: payload,
+	}, opts); err == nil {
+		t.Fatal("CountTokens() unsupported suffix error = nil")
+	}
+}
+
 func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

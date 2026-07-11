@@ -87,7 +87,7 @@ func nextTransientErrorRetryAfter(now time.Time) time.Time {
 }
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
-// Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
+// Callers should provide the latest config on reload so per-credential model routing stays in sync.
 func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	if m == nil {
 		return
@@ -114,6 +114,7 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
+	cfg = cfg.CloneForRuntime()
 	m.mu.RLock()
 	oldCooldownStore := m.cooldownStore
 	m.mu.RUnlock()

@@ -52,7 +52,7 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 		UserDefined: true,
 	}
 
-	got := pluginModelInfoToRegistryModelInfo(model)
+	got := pluginModelInfoToRegistryModelInfo(model, "plugin")
 	if got.ID != model.ID || got.Object != model.Object || got.Created != model.Created || got.OwnedBy != model.OwnedBy || got.Type != model.Type ||
 		got.DisplayName != model.DisplayName || got.Name != model.Name || got.Version != model.Version || got.Description != model.Description ||
 		got.InputTokenLimit != int(model.InputTokenLimit) || got.OutputTokenLimit != int(model.OutputTokenLimit) ||
@@ -75,6 +75,16 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 		got.SupportedInputModalities[0] != "text" || got.SupportedOutputModalities[0] != "image" ||
 		got.Thinking.Levels[0] != "low" {
 		t.Fatalf("converted model kept aliases to plugin slices: %#v", got)
+	}
+}
+
+func TestPluginModelInfoToRegistryModelInfoInheritsProviderEndpointCapabilities(t *testing.T) {
+	got := pluginModelInfoToRegistryModelInfo(pluginapi.ModelInfo{ID: "grok-imagine-video"}, "xai")
+	if got == nil || !got.SupportsVideoAPI || !got.ChatDisabled {
+		t.Fatalf("converted xAI video model = %#v, want video-only endpoint metadata", got)
+	}
+	if got.SupportsImageAPI {
+		t.Fatal("converted xAI video model unexpectedly supports image execution")
 	}
 }
 

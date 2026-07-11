@@ -178,6 +178,55 @@ func TestValidateImageOnlyModel_AllowsImageEndpoints(t *testing.T) {
 	}
 }
 
+func TestValidateImageOnlyModelRejectsRegisteredNativeAlias(t *testing.T) {
+	const (
+		clientID = "native-image-alias-request-details"
+		modelID  = "tenant/public-image"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(clientID)
+	modelRegistry.RegisterClient(clientID, "xai", []*registry.ModelInfo{{
+		ID:               modelID,
+		Type:             "xai",
+		SupportsImageAPI: true,
+		ChatDisabled:     true,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	if errMsg := handler.validateImageOnlyModel(modelID, false); errMsg == nil {
+		t.Fatalf("validateImageOnlyModel(%q, false) = nil, want image-only error", modelID)
+	}
+	if errMsg := handler.validateImageOnlyModel(modelID, true); errMsg != nil {
+		t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", modelID, errMsg)
+	}
+}
+
+func TestValidateImageOnlyModelPrefersExactDynamicChatRegistration(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	modelRegistry := registry.GetGlobalRegistry()
+
+	for _, provider := range []string{"claude", "gemini", "vertex"} {
+		t.Run(provider, func(t *testing.T) {
+			clientID := "dynamic-chat-static-image-base-" + provider
+			modelID := provider + "/gpt-image-2"
+			modelRegistry.UnregisterClient(clientID)
+			modelRegistry.RegisterClient(clientID, provider, []*registry.ModelInfo{{
+				ID:   modelID,
+				Type: provider,
+			}})
+			t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+			if isOpenAIImageOnlyModel(modelID) {
+				t.Fatalf("exact dynamic chat model %q was shadowed by static image base", modelID)
+			}
+			if errMsg := handler.validateImageOnlyModel(modelID, false); errMsg != nil {
+				t.Fatalf("validateImageOnlyModel(%q, false) = %+v, want chat-capable exact registration", modelID, errMsg)
+			}
+		})
+	}
+}
+
 func TestIsOpenAIImageOnlyModel(t *testing.T) {
 	tests := []struct {
 		model string

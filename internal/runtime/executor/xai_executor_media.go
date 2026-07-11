@@ -17,11 +17,13 @@ import (
 )
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
-	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
-	if model == "" {
-		model = strings.TrimSpace(req.Model)
+	// req.Model is credential-scoped and alias-resolved; the payload can still
+	// contain the client-facing alias or provider-prefixed model.
+	resolvedModel := strings.TrimSpace(req.Model)
+	if resolvedModel == "" {
+		resolvedModel = strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
 	}
-	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, resolvedModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	token, baseURL := xaiCreds(auth)
@@ -34,6 +36,9 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	payload := normalizeXAIImageRefs(req.Payload)
+	if resolvedModel != "" {
+		payload = helps.SetStringIfDifferent(payload, "model", resolvedModel)
+	}
 	url := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
@@ -74,9 +79,11 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
+	// req.Model is credential-scoped and alias-resolved; the payload can still
+	// contain the client-facing alias or provider-prefixed model.
+	model := strings.TrimSpace(req.Model)
 	if model == "" {
-		model = strings.TrimSpace(req.Model)
+		model = strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
 	}
 	reporter := helps.NewExecutorUsageReporter(ctx, e, model, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -88,6 +95,9 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	logXAIResolvedBaseURL(ctx, baseURL)
 
 	payload := normalizeXAIImageRefs(req.Payload)
+	if model != "" {
+		payload = helps.SetStringIfDifferent(payload, "model", model)
+	}
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
 	var body io.Reader = bytes.NewReader(payload)
