@@ -122,18 +122,82 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
-	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
-	if errMsg == nil {
-		t.Fatalf("expected error for gpt-image-2, got nil")
+	imageOnlyModels := []string{
+		"gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
 	}
-	if errMsg.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+	for _, model := range imageOnlyModels {
+		t.Run(model, func(t *testing.T) {
+			_, _, errMsg := handler.getRequestDetails(model)
+			if errMsg == nil {
+				t.Fatalf("expected error for %s, got nil", model)
+			}
+			if errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+			}
+			if errMsg.Error == nil {
+				t.Fatalf("expected error message, got nil")
+			}
+			msg := errMsg.Error.Error()
+			if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
+				t.Fatalf("unexpected error message: %q", msg)
+			}
+		})
 	}
-	if errMsg.Error == nil {
-		t.Fatalf("expected error message, got nil")
+}
+
+func TestValidateImageOnlyModel_AllowsImageEndpoints(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	imageOnlyModels := []string{
+		"gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
 	}
-	msg := errMsg.Error.Error()
-	if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
-		t.Fatalf("unexpected error message: %q", msg)
+	for _, model := range imageOnlyModels {
+		t.Run(model, func(t *testing.T) {
+			if errMsg := handler.validateImageOnlyModel(model, true); errMsg != nil {
+				t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", model, errMsg)
+			}
+			if errMsg := handler.validateImageOnlyModel(model, false); errMsg == nil {
+				t.Fatalf("validateImageOnlyModel(%q, false) = nil, want image-only error", model)
+			} else if errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
+func TestIsOpenAIImageOnlyModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{model: "gpt-image-1.5", want: true},
+		{model: "gpt-image-2", want: true},
+		{model: "codex/gpt-image-1.5", want: true},
+		{model: "grok-imagine-image", want: true},
+		{model: "xai/grok-imagine-image", want: true},
+		{model: "XAI/Grok-Imagine-Image-Quality", want: true},
+		{model: "grok-imagine-image-quality", want: true},
+		{model: "grok-3", want: false},
+		{model: "gpt-5.2", want: false},
+		{model: "grok-imagine-video", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := isOpenAIImageOnlyModel(tt.model); got != tt.want {
+				t.Fatalf("isOpenAIImageOnlyModel(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
@@ -806,11 +807,15 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 	var gotPath string
 	var gotAuth string
 	var gotAccept string
+	var gotTokenAuth string
+	var gotClientVersion string
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotAccept = r.Header.Get("Accept")
+		gotTokenAuth = r.Header.Get(xaiTokenAuthHeader)
+		gotClientVersion = r.Header.Get(xaiClientVersionHeader)
 		var errRead error
 		gotBody, errRead = io.ReadAll(r.Body)
 		if errRead != nil {
@@ -852,6 +857,12 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
 	}
 	if gotAccept != "application/json" {
 		t.Fatalf("Accept = %q, want application/json", gotAccept)
+	}
+	if gotTokenAuth != "" {
+		t.Fatalf("%s = %q, want empty on media path", xaiTokenAuthHeader, gotTokenAuth)
+	}
+	if gotClientVersion != "" {
+		t.Fatalf("%s = %q, want empty on media path", xaiClientVersionHeader, gotClientVersion)
 	}
 	if string(gotBody) != `{"model":"grok-imagine-image","prompt":"draw"}` {
 		t.Fatalf("body = %s", string(gotBody))
@@ -1057,6 +1068,119 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 				t.Fatalf("path = %q, want %s", gotPath, tt.wantPath)
 			}
 		})
+	}
+}
+
+func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T) {
+	// Large oneOf+$ref schema mimicking Codex Desktop codex_app.automation_update.
+	params := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
+	body := []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":true,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
+	out := normalizeXAITools(body)
+
+	tools := gjson.GetBytes(out, "tools")
+	if !tools.IsArray() {
+		t.Fatalf("tools missing: %s", string(out))
+	}
+	foundAuto := false
+	foundExec := false
+	for _, tool := range tools.Array() {
+		switch tool.Get("name").String() {
+		case "automation_update":
+			foundAuto = true
+			paramsRaw := tool.Get("parameters").Raw
+			if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) {
+				t.Fatalf("automation_update parameters were not simplified: %s", paramsRaw)
+			}
+			if tool.Get("parameters.type").String() != "object" {
+				t.Fatalf("automation_update parameters.type = %q, want object", tool.Get("parameters.type").String())
+			}
+			if tool.Get("parameters.additionalProperties").Type != gjson.True {
+				t.Fatalf("automation_update parameters should allow additionalProperties: %s", paramsRaw)
+			}
+			if tool.Get("strict").Type != gjson.False {
+				t.Fatalf("automation_update strict = %s, want false", tool.Get("strict").Raw)
+			}
+		case "exec_command":
+			foundExec = true
+			if got := tool.Get("parameters.properties.cmd.type").String(); got != "string" {
+				t.Fatalf("exec_command schema should be preserved, got %q in %s", got, tool.Raw)
+			}
+		}
+	}
+	if !foundAuto {
+		t.Fatalf("automation_update tool missing after normalize: %s", string(out))
+	}
+	if !foundExec {
+		t.Fatalf("exec_command tool missing after normalize: %s", string(out))
+	}
+}
+
+func TestNormalizeXAITools_PreservesUnrelatedSchemas(t *testing.T) {
+	largeParams := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "top-level automation_update",
+			body: []byte(`{"tools":[{"type":"function","name":"automation_update","strict":true,"parameters":{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"],"additionalProperties":false}}]}`),
+		},
+		{
+			name: "automation_update in another namespace",
+			body: []byte(`{"tools":[{"type":"namespace","name":"calendar","tools":[{"type":"function","name":"automation_update","strict":true,"parameters":{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"],"additionalProperties":false}}]}]}`),
+		},
+		{
+			name: "custom automation_update in codex_app",
+			body: []byte(`{"tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"custom","name":"automation_update","strict":true,"parameters":{"type":"object","properties":{"cron":{"type":"string"}},"required":["cron"],"additionalProperties":false}}]}]}`),
+		},
+		{
+			name: "large schema on another codex_app function",
+			body: []byte(`{"tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"exec_command","strict":true,"parameters":` + largeParams + `}]}]}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := normalizeXAITools(tt.body)
+			tool := gjson.GetBytes(out, "tools.0")
+			if tool.Get("strict").Type != gjson.True {
+				t.Fatalf("strict changed for unrelated tool: %s", string(out))
+			}
+			params := tool.Get("parameters")
+			if tt.name == "large schema on another codex_app function" {
+				if !params.Get("oneOf").Exists() || !params.Get("$defs").Exists() {
+					t.Fatalf("large schema was simplified: %s", string(out))
+				}
+				return
+			}
+			if got := params.Get("properties.cron.type").String(); got != "string" {
+				t.Fatalf("schema was simplified, cron type = %q: %s", got, string(out))
+			}
+			if params.Get("additionalProperties").Type != gjson.False {
+				t.Fatalf("additionalProperties changed: %s", string(out))
+			}
+		})
+	}
+}
+
+func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
+	auto := gjson.Parse(`{"type":"function","name":"automation_update","parameters":{"type":"object"}}`)
+	if !xaiFunctionParametersNeedSimplification(auto, "codex_app") {
+		t.Fatal("codex_app.automation_update should need simplification")
+	}
+	if xaiFunctionParametersNeedSimplification(auto, "calendar") {
+		t.Fatal("automation_update outside codex_app should not need simplification")
+	}
+	if xaiFunctionParametersNeedSimplification(auto, "") {
+		t.Fatal("top-level automation_update should not need simplification")
+	}
+	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
+	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {
+		t.Fatal("custom codex_app.automation_update should not need simplification")
+	}
+	safe := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)
+	if xaiFunctionParametersNeedSimplification(safe, "codex_app") {
+		t.Fatal("unrelated codex_app function should not need simplification")
 	}
 }
 
@@ -1446,6 +1570,287 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 	}
 	if got := gjson.GetBytes(secondBody, "input.3.call_id").String(); got != "call_1" {
 		t.Fatalf("input.3.call_id = %q, want call_1; body=%s", got, string(secondBody))
+	}
+}
+
+func TestXAIChatBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{
+			name: "nil auth defaults to official api",
+			auth: nil,
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "empty base url defaults to official api without using_api",
+			auth: &cliproxyauth.Auth{Provider: "xai"},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "official default stays official without using_api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth credentials default to chat proxy without using_api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "metadata-only OAuth credentials default to chat proxy without using_api",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false empty base url rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{xaiUsingAPIAttr: "false"},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false official default rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false official default with trailing slash rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL + "/",
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "metadata using_api false official default rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: false,
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false custom base url is honored",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      "https://gateway.example.com/v1",
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: "https://gateway.example.com/v1",
+		},
+		{
+			name: "custom base url is honored without using_api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"base_url": "https://gateway.example.com/v1"},
+			},
+			want: "https://gateway.example.com/v1",
+		},
+		{
+			name: "using_api false explicit chat proxy base url is preserved",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.CLIChatProxyBaseURL,
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api true keeps official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth using_api true keeps official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiChatBaseURL(tt.auth); got != tt.want {
+				t.Fatalf("xaiChatBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyXAIChatHeaders(t *testing.T) {
+	t.Run("non OAuth defaults to official API headers", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1")
+
+		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+		}
+		if got := req.Header.Get("x-grok-conv-id"); got != "conv-1" {
+			t.Fatalf("x-grok-conv-id = %q, want conv-1", got)
+		}
+		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for official API", xaiTokenAuthHeader, got)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for official API", xaiClientVersionHeader, got)
+		}
+	})
+
+	t.Run("OAuth defaults to cli chat proxy headers", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  xaiauth.DefaultAPIBaseURL,
+			},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1")
+
+		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+		}
+		if got := req.Header.Get("x-grok-conv-id"); got != "conv-1" {
+			t.Fatalf("x-grok-conv-id = %q, want conv-1", got)
+		}
+		if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
+			t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
+			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
+		}
+	})
+
+	t.Run("no cli headers on custom gateway with using_api false", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "https://gateway.example.com/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":      "https://gateway.example.com/v1",
+				xaiUsingAPIAttr: "false",
+			},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", false, "")
+
+		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for custom gateway", xaiTokenAuthHeader, got)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for custom gateway", xaiClientVersionHeader, got)
+		}
+	})
+
+	t.Run("custom headers override cli chat proxy defaults", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":                         xaiauth.CLIChatProxyBaseURL,
+				xaiUsingAPIAttr:                    "false",
+				"header:" + xaiTokenAuthHeader:     "custom-token-auth",
+				"header:" + xaiClientVersionHeader: "custom-client-version",
+			},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", true, "")
+
+		if got := req.Header.Get(xaiTokenAuthHeader); got != "custom-token-auth" {
+			t.Fatalf("%s = %q, want custom-token-auth", xaiTokenAuthHeader, got)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != "custom-client-version" {
+			t.Fatalf("%s = %q, want custom-client-version", xaiClientVersionHeader, got)
+		}
+	})
+
+	t.Run("cli headers on explicit chat proxy base with using_api false", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"base_url":      xaiauth.CLIChatProxyBaseURL + "/",
+				xaiUsingAPIAttr: "false",
+			},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", true, "")
+
+		if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
+			t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
+			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
+		}
+	})
+}
+
+func TestXAIExecutorExecuteChatUsesProxyHeadersOnlyForChatProxy(t *testing.T) {
+	var gotTokenAuth string
+	var gotClientVersion string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTokenAuth = r.Header.Get(xaiTokenAuthHeader)
+		gotClientVersion = r.Header.Get(xaiClientVersionHeader)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":      server.URL,
+			xaiUsingAPIAttr: "false",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotTokenAuth != "" {
+		t.Fatalf("%s = %q, want empty for custom chat gateway", xaiTokenAuthHeader, gotTokenAuth)
+	}
+	if gotClientVersion != "" {
+		t.Fatalf("%s = %q, want empty for custom chat gateway", xaiClientVersionHeader, gotClientVersion)
 	}
 }
 

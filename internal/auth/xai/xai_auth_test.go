@@ -2,6 +2,7 @@ package xai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,55 +20,199 @@ func resetXAIRefreshGroupForTest() {
 	xaiRefreshGroup = singleflight.Group{}
 }
 
-func TestBuildAuthorizeURLIncludesXAIRequiredParameters(t *testing.T) {
-	authURL, err := BuildAuthorizeURL(AuthorizeURLParams{
-		AuthorizationEndpoint: "https://auth.x.ai/oauth/authorize",
-		RedirectURI:           "http://127.0.0.1:56121/callback",
-		CodeChallenge:         "challenge",
-		State:                 "state-123",
-		Nonce:                 "nonce-123",
-	})
-	if err != nil {
-		t.Fatalf("BuildAuthorizeURL() error = %v", err)
-	}
-
-	parsed, errParse := url.Parse(authURL)
-	if errParse != nil {
-		t.Fatalf("parse authorize URL: %v", errParse)
-	}
-	if parsed.Scheme != "https" || parsed.Host != "auth.x.ai" || parsed.Path != "/oauth/authorize" {
-		t.Fatalf("authorize URL endpoint = %s://%s%s", parsed.Scheme, parsed.Host, parsed.Path)
-	}
-
-	query := parsed.Query()
-	want := map[string]string{
-		"response_type":         "code",
-		"client_id":             ClientID,
-		"redirect_uri":          "http://127.0.0.1:56121/callback",
-		"scope":                 Scope,
-		"code_challenge":        "challenge",
-		"code_challenge_method": "S256",
-		"state":                 "state-123",
-		"nonce":                 "nonce-123",
-		"plan":                  "generic",
-		"referrer":              "cli-proxy-api",
-	}
-	for key, value := range want {
-		if got := query.Get(key); got != value {
-			t.Fatalf("%s = %q, want %q", key, got, value)
-		}
-	}
-}
-
 func TestValidateOAuthEndpointRejectsNonXAIOrigin(t *testing.T) {
-	if _, err := ValidateOAuthEndpoint("https://auth.x.ai/oauth/token", "token_endpoint"); err != nil {
+	if _, err := ValidateOAuthEndpoint("https://auth.x.ai/oauth2/token", "token_endpoint"); err != nil {
 		t.Fatalf("ValidateOAuthEndpoint(xai) error = %v", err)
 	}
-	if _, err := ValidateOAuthEndpoint("http://auth.x.ai/oauth/token", "token_endpoint"); err == nil {
+	if _, err := ValidateOAuthEndpoint("http://auth.x.ai/oauth2/token", "token_endpoint"); err == nil {
 		t.Fatal("expected non-HTTPS endpoint to be rejected")
 	}
 	if _, err := ValidateOAuthEndpoint("https://evil.example/oauth/token", "token_endpoint"); err == nil {
 		t.Fatal("expected non-xAI endpoint to be rejected")
+	}
+}
+
+func TestRequestDeviceCodePostsClientIDAndScope(t *testing.T) {
+	var gotForm url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-www-form-urlencoded") {
+			t.Fatalf("Content-Type = %q, want form", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		gotForm = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_code":               "device-abc",
+			"user_code":                 "ABCD-1234",
+			"verification_uri":          "https://accounts.x.ai/oauth2/device",
+			"verification_uri_complete": "https://accounts.x.ai/oauth2/device?user_code=ABCD-1234",
+			"expires_in":                1800,
+			"interval":                  5,
+		})
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	deviceCode, err := auth.RequestDeviceCode(context.Background(), server.URL, "https://auth.x.ai/oauth2/token")
+	if err != nil {
+		t.Fatalf("RequestDeviceCode() error = %v", err)
+	}
+	if deviceCode.DeviceCode != "device-abc" {
+		t.Fatalf("device_code = %q, want device-abc", deviceCode.DeviceCode)
+	}
+	if deviceCode.UserCode != "ABCD-1234" {
+		t.Fatalf("user_code = %q, want ABCD-1234", deviceCode.UserCode)
+	}
+	if deviceCode.TokenEndpoint != "https://auth.x.ai/oauth2/token" {
+		t.Fatalf("TokenEndpoint = %q", deviceCode.TokenEndpoint)
+	}
+	if gotForm.Get("client_id") != ClientID {
+		t.Fatalf("client_id = %q, want %q", gotForm.Get("client_id"), ClientID)
+	}
+	if gotForm.Get("scope") != Scope {
+		t.Fatalf("scope = %q, want %q", gotForm.Get("scope"), Scope)
+	}
+}
+
+func TestPollForTokenExchangesDeviceCode(t *testing.T) {
+	var pollCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm() error = %v", err)
+		}
+		if got := r.PostForm.Get("grant_type"); got != DeviceCodeGrantType {
+			t.Fatalf("grant_type = %q, want %q", got, DeviceCodeGrantType)
+		}
+		if got := r.PostForm.Get("device_code"); got != "device-abc" {
+			t.Fatalf("device_code = %q, want device-abc", got)
+		}
+		if got := r.PostForm.Get("client_id"); got != ClientID {
+			t.Fatalf("client_id = %q, want %q", got, ClientID)
+		}
+
+		count := atomic.AddInt32(&pollCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if count == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":             "authorization_pending",
+				"error_description": "User has not yet authorized",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "access-1",
+			"refresh_token": "refresh-1",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+			"id_token":      fakeJWTWithEmail("user@x.ai", "sub-1"),
+		})
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	tokenData, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
+		DeviceCode:    "device-abc",
+		UserCode:      "ABCD-1234",
+		ExpiresIn:     60,
+		Interval:      1,
+		TokenEndpoint: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("PollForToken() error = %v", err)
+	}
+	if tokenData.AccessToken != "access-1" {
+		t.Fatalf("access token = %q, want access-1", tokenData.AccessToken)
+	}
+	if tokenData.RefreshToken != "refresh-1" {
+		t.Fatalf("refresh token = %q, want refresh-1", tokenData.RefreshToken)
+	}
+	if tokenData.Email != "user@x.ai" {
+		t.Fatalf("email = %q, want user@x.ai", tokenData.Email)
+	}
+	if tokenData.Subject != "sub-1" {
+		t.Fatalf("subject = %q, want sub-1", tokenData.Subject)
+	}
+	if got := atomic.LoadInt32(&pollCount); got != 2 {
+		t.Fatalf("poll count = %d, want 2", got)
+	}
+}
+
+func TestPollForTokenAccessDenied(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "access_denied",
+			"error_description": "The user rejected the request",
+		})
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	_, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
+		DeviceCode:    "device-abc",
+		UserCode:      "ABCD-1234",
+		ExpiresIn:     60,
+		Interval:      1,
+		TokenEndpoint: server.URL,
+	})
+	if err == nil || !strings.Contains(err.Error(), "authorization denied") {
+		t.Fatalf("PollForToken() error = %v, want authorization denied", err)
+	}
+}
+
+func TestPollForTokenSlowDownContinuesPolling(t *testing.T) {
+	var pollCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddInt32(&pollCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if count == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "slow_down"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "access-slow",
+			"refresh_token": "refresh-slow",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	tokenData, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
+		DeviceCode:    "device-abc",
+		UserCode:      "ABCD-1234",
+		ExpiresIn:     60,
+		Interval:      5,
+		TokenEndpoint: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("PollForToken() error = %v", err)
+	}
+	if tokenData.AccessToken != "access-slow" {
+		t.Fatalf("access token = %q, want access-slow", tokenData.AccessToken)
+	}
+	if got := atomic.LoadInt32(&pollCount); got != 2 {
+		t.Fatalf("poll count = %d, want 2", got)
+	}
+}
+
+func TestBuildTokenDataOmitsExpireWhenExpiresInZero(t *testing.T) {
+	tokenData := buildTokenData("access", "refresh", "", "Bearer", 0, "user@x.ai", "sub-1")
+	if tokenData.Expire != "" {
+		t.Fatalf("Expire = %q, want empty", tokenData.Expire)
+	}
+	tokenData = buildTokenData("access", "refresh", "", "Bearer", 60, "user@x.ai", "sub-1")
+	if tokenData.Expire == "" {
+		t.Fatal("Expire empty, want RFC3339 timestamp")
 	}
 }
 
@@ -173,4 +318,10 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected both refresh callers to share a single upstream call, got %d", got)
 	}
+}
+
+func fakeJWTWithEmail(email, subject string) string {
+	header := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"email":"` + email + `","sub":"` + subject + `"}`))
+	return header + "." + payload + ".sig"
 }
