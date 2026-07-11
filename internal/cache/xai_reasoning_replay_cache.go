@@ -267,6 +267,9 @@ func normalizeXAIReasoningReplayFunctionCallItem(itemResult gjson.Result) ([]byt
 	}
 
 	normalized := []byte(`{"type":"function_call"}`)
+	if id := strings.TrimSpace(itemResult.Get("id").String()); id != "" {
+		normalized, _ = sjson.SetBytes(normalized, "id", id)
+	}
 	normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
 	normalized, _ = sjson.SetBytes(normalized, "name", name)
 	normalized, _ = sjson.SetBytes(normalized, "arguments", arguments.String())
@@ -282,6 +285,9 @@ func normalizeXAIReasoningReplayCustomToolCallItem(itemResult gjson.Result) ([]b
 	}
 
 	normalized := []byte(`{"type":"custom_tool_call","status":"completed"}`)
+	if id := strings.TrimSpace(itemResult.Get("id").String()); id != "" {
+		normalized, _ = sjson.SetBytes(normalized, "id", id)
+	}
 	if status := strings.TrimSpace(itemResult.Get("status").String()); status != "" {
 		normalized, _ = sjson.SetBytes(normalized, "status", status)
 	}

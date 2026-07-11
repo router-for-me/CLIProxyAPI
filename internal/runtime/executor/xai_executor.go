@@ -936,6 +936,10 @@ func (e *XAIExecutor) prepareResponsesRequestToWithPreviousResponseToolOutputs(c
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	// Capture original custom tool names before rewriting tools for xAI.
 	customToolNames := collectXAIOriginalCustomToolNames(body)
+	// Expand item_reference from per-item cache before normalize drops them.
+	// Alma multi-turn often sends only item_reference + function_call_output
+	// without prompt_cache_key; previous_response_id replay covers the rest.
+	body = expandXAIItemReferencesFromCache(ctx, baseModel, body)
 	// Promote/drop Codex/OpenAI-only input items before tool filtering so
 	// additional_tools can feed top-level tools and keep function calling.
 	body = normalizeXAIInputItems(body)
@@ -1247,6 +1251,10 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 //     after reasoning-replay may reinsert the referenced calls.
 //   - custom_tool_call(_output): map to function_call(_output)
 //   - function_call_output.output arrays: flatten to string
+//   - function_call.arguments objects: marshal to JSON string
+//   - server-tool history (web_search_call / x_search_call / ...) and other
+//     non-ModelInput types: drop (Codex re-sends visible search results when
+//     hide-injected-search-results is false)
 func normalizeXAIInputItems(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
@@ -1257,6 +1265,7 @@ func normalizeXAIInputItems(body []byte) []byte {
 	changed := false
 	items := make([]json.RawMessage, 0, len(inputArray))
 	promotedTools := make([]json.RawMessage, 0)
+	droppedTypes := make(map[string]int)
 
 	for _, item := range inputArray {
 		itemType := strings.TrimSpace(item.Get("type").String())
@@ -1274,6 +1283,7 @@ func normalizeXAIInputItems(body []byte) []byte {
 			continue
 		case xaiItemReferenceType:
 			changed = true
+			droppedTypes[xaiItemReferenceType]++
 			log.Debugf("xai: dropping unsupported input item_reference id=%s", strings.TrimSpace(item.Get("id").String()))
 			continue
 		case xaiCustomToolCallType:
@@ -1299,9 +1309,50 @@ func normalizeXAIInputItems(body []byte) []byte {
 				changed = true
 			}
 			items = append(items, json.RawMessage(raw))
-		default:
+		case xaiFunctionCallType:
+			raw, ok := normalizeXAIFunctionCallItem(item)
+			if !ok {
+				return body
+			}
+			if string(raw) != item.Raw {
+				changed = true
+			}
+			items = append(items, json.RawMessage(raw))
+		case "", "message", "reasoning", "compaction":
+			// Empty type with role is the inline message form; reasoning /
+			// compaction shapes are sanitized later for encrypted_content.
 			items = append(items, json.RawMessage(item.Raw))
+		case xaiWebSearchCallType, xaiXSearchCallType, "web_search", "x_search",
+			"computer_call", "computer_call_output", "local_shell_call", "local_shell_call_output",
+			"image_generation_call", "code_interpreter_call", "file_search_call",
+			"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response",
+			"compaction_trigger":
+			changed = true
+			droppedTypes[itemType]++
+			continue
+		default:
+			// Unknown type: drop rather than forward a guaranteed ModelInput 422.
+			// Empty-type messages are handled above; role-bearing typed items that
+			// are not in the allowlist are still dropped.
+			if itemType == "" {
+				items = append(items, json.RawMessage(item.Raw))
+				continue
+			}
+			changed = true
+			droppedTypes[itemType]++
+			log.Debugf("xai: dropping unsupported input type=%s", itemType)
+			continue
 		}
+	}
+
+	if len(droppedTypes) > 0 {
+		parts := make([]string, 0, len(droppedTypes))
+		for t, n := range droppedTypes {
+			parts = append(parts, fmt.Sprintf("%s=%d", t, n))
+		}
+		sort.Strings(parts)
+		log.WithField("dropped_types", strings.Join(parts, ",")).
+			Debug("xai: dropped non-ModelInput input items before upstream")
 	}
 
 	if len(promotedTools) > 0 {
@@ -1343,6 +1394,32 @@ func normalizeXAIInputItems(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+func normalizeXAIFunctionCallItem(item gjson.Result) ([]byte, bool) {
+	raw := []byte(item.Raw)
+	arguments := item.Get("arguments")
+	if !arguments.Exists() || arguments.Type == gjson.Null {
+		updated, errSet := sjson.SetBytes(raw, "arguments", "{}")
+		if errSet != nil {
+			return nil, false
+		}
+		return updated, true
+	}
+	// xAI ModelInput function_call.arguments must be a JSON string.
+	if arguments.Type == gjson.String {
+		return raw, true
+	}
+	// Structured JSON (object/array) or scalar token: store its raw text as a string.
+	encoded, errMarshal := json.Marshal(arguments.Raw)
+	if errMarshal != nil {
+		return nil, false
+	}
+	updated, errSet := sjson.SetRawBytes(raw, "arguments", encoded)
+	if errSet != nil {
+		return nil, false
+	}
+	return updated, true
 }
 
 func normalizeXAICustomToolCallItem(item gjson.Result) ([]byte, bool) {
@@ -2151,43 +2228,33 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
+		// xAI ModelInput reasoning/compaction variants require a valid Grok
+		// encrypted_content. Foreign signatures (GPT/Codex gAAAA..., Claude,
+		// Gemini), null, non-string, or missing values cannot be repaired by
+		// field deletion — a bare {type,summary} shell fails untagged enum
+		// deserialization with 422. Drop the entire item (same policy for
+		// reasoning and compaction).
 		encryptedContent := item.Get("encrypted_content")
-		if !encryptedContent.Exists() {
-			items = append(items, json.RawMessage(item.Raw))
-			continue
-		}
 		reason := ""
-		switch encryptedContent.Type {
-		case gjson.String:
-			if _, err := signature.InspectGrokEncryptedContent(encryptedContent.String()); err != nil {
-				reason = err.Error()
+		if !encryptedContent.Exists() {
+			reason = "encrypted_content missing"
+		} else {
+			switch encryptedContent.Type {
+			case gjson.String:
+				if _, err := signature.InspectGrokEncryptedContent(encryptedContent.String()); err != nil {
+					reason = err.Error()
+				}
+			case gjson.Null:
+				reason = "encrypted_content is null"
+			default:
+				reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 			}
-		case gjson.Null:
-			reason = "encrypted_content is null"
-		default:
-			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
 			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
 
-		if itemType == "compaction" {
-			changed = true
-			dropCount++
-			if firstReason == "" {
-				firstReason = reason
-				firstItemType = itemType
-			}
-			continue
-		}
-
-		next, err := sjson.DeleteBytes([]byte(item.Raw), "encrypted_content")
-		if err != nil {
-			items = append(items, json.RawMessage(item.Raw))
-			continue
-		}
-		items = append(items, json.RawMessage(next))
 		changed = true
 		dropCount++
 		if firstReason == "" {
@@ -2212,7 +2279,7 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 			"dropped":         dropCount,
 			"first_item_type": firstItemType,
 			"first_reason":    firstReason,
-		}).Debug("xai executor: removed invalid encrypted_content before upstream")
+		}).Debug("xai executor: dropped invalid reasoning/compaction item before upstream")
 	}
 	return mergeAdjacentXAIInputReasoningSummaries(updated)
 }
@@ -2223,6 +2290,9 @@ func normalizeXAIInputReasoningItems(body []byte) []byte {
 		return body
 	}
 
+	// Strip null content/encrypted_content fields only. Items that end up without
+	// a valid Grok encrypted_content are dropped later by
+	// sanitizeXAIInputEncryptedContent (xAI ModelInput requires it).
 	updated := body
 	for i, item := range input.Array() {
 		if item.Get("type").String() != "reasoning" {
