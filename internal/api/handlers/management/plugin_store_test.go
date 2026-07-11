@@ -402,6 +402,154 @@ func TestListPluginStoreIncludesThirdPartySources(t *testing.T) {
 	}
 }
 
+func TestListPluginStoreMatchesInstalledStatusToManifestSource(t *testing.T) {
+	t.Parallel()
+
+	pluginsDir := t.TempDir()
+	archDir := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", archDir, errMkdirAll)
+	}
+	pluginPath := filepath.Join(archDir, "sample-provider-v0.0.1"+managementPluginExtension(runtime.GOOS))
+	if errWriteFile := os.WriteFile(pluginPath, []byte("x"), 0o644); errWriteFile != nil {
+		t.Fatalf("WriteFile(%s) error = %v", pluginPath, errWriteFile)
+	}
+
+	communityURL := "https://community.example/registry.json"
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled:      true,
+				Dir:          pluginsDir,
+				StoreSources: []string{communityURL},
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigWithStoreSource(t, pluginstore.DefaultSourceID, pluginstore.DefaultRegistryURL),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			pluginstore.DefaultRegistryURL: registryJSON(t),
+			communityURL:                   thirdPartySampleRegistryJSON(t),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugin-store", nil)
+	h.ListPluginStore(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Plugins []struct {
+			SourceID            string `json:"source_id"`
+			InstalledSourceID   string `json:"installed_source_id"`
+			InstallSourceStatus string `json:"install_source_status"`
+			UpdateAvailable     bool   `json:"update_available"`
+		} `json:"plugins"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if len(body.Plugins) != 2 {
+		t.Fatalf("plugins len = %d, want 2", len(body.Plugins))
+	}
+	entries := make(map[string]struct {
+		InstalledSourceID   string
+		InstallSourceStatus string
+		UpdateAvailable     bool
+	}, len(body.Plugins))
+	for _, entry := range body.Plugins {
+		entries[entry.SourceID] = struct {
+			InstalledSourceID   string
+			InstallSourceStatus string
+			UpdateAvailable     bool
+		}{entry.InstalledSourceID, entry.InstallSourceStatus, entry.UpdateAvailable}
+	}
+	official := entries[pluginstore.DefaultSourceID]
+	if official.InstalledSourceID != pluginstore.DefaultSourceID || official.InstallSourceStatus != "matched" || !official.UpdateAvailable {
+		t.Fatalf("official entry = %#v, want matched update", official)
+	}
+	communitySourceID := pluginstore.SourceID(communityURL)
+	community := entries[communitySourceID]
+	if community.InstalledSourceID != pluginstore.DefaultSourceID || community.InstallSourceStatus != "different" || community.UpdateAvailable {
+		t.Fatalf("community entry = %#v, want different source without update", community)
+	}
+}
+
+func TestInstallPluginFromStoreRejectsImplicitSourceSwitch(t *testing.T) {
+	t.Parallel()
+
+	communityURL := "https://community.example/registry.json"
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled:      true,
+				Dir:          writeManagementPluginFile(t, "sample-provider"),
+				StoreSources: []string{communityURL},
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigWithStoreSource(t, pluginstore.DefaultSourceID, pluginstore.DefaultRegistryURL),
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			pluginstore.DefaultRegistryURL: registryJSON(t),
+			communityURL:                   thirdPartySampleRegistryJSON(t),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	communitySourceID := pluginstore.SourceID(communityURL)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install?source="+communitySourceID, nil)
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "plugin_store_source_conflict") || !strings.Contains(rec.Body.String(), pluginstore.DefaultSourceID) {
+		t.Fatalf("body = %s, want source conflict with installed source", rec.Body.String())
+	}
+}
+
+func TestInstallPluginFromStoreRejectsUnknownManagedSource(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     writeManagementPluginFile(t, "sample-provider"),
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigWithStoreSource(t, "", ""),
+				},
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": registryJSON(t),
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "plugin_store_installed_source_unknown") {
+		t.Fatalf("body = %s, want unknown installed source error", rec.Body.String())
+	}
+}
+
 func TestListPluginStoreIncludesDirectMetadataAndAuth(t *testing.T) {
 	t.Setenv("PLUGIN_STORE_TOKEN", "secret-token")
 
@@ -1145,6 +1293,18 @@ func testStoreManifest() pluginstore.Manifest {
 		Repository:  "https://github.com/author-name/cliproxy-sample-provider-plugin",
 		Install:     pluginstore.InstallPlan{Type: pluginstore.InstallTypeGitHubRelease},
 	}
+}
+
+func pluginConfigWithStoreSource(t *testing.T, sourceID string, sourceURL string) config.PluginInstanceConfig {
+	t.Helper()
+	sourceFields := ""
+	if sourceID != "" {
+		sourceFields += "  source-id: " + sourceID + "\n"
+	}
+	if sourceURL != "" {
+		sourceFields += "  source-url: " + sourceURL + "\n"
+	}
+	return pluginConfigFromYAML(t, "enabled: true\nstore:\n  schema-version: 1\n  id: sample-provider\n  version: 0.0.1\n  release-tag: v0.0.1\n  repository: https://github.com/author-name/cliproxy-sample-provider-plugin\n"+sourceFields+"  install:\n    type: github-release\n")
 }
 
 func pluginStoreManifestFromConfig(t *testing.T, item config.PluginInstanceConfig) pluginstore.Manifest {
