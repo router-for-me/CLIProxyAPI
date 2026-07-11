@@ -208,7 +208,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			completedData = filterXAIInjectedServerToolPayload(completedData)
+			if e.cfg != nil && e.cfg.XAI.InjectBuildSearchTools {
+				completedData = filterXAIInjectedServerToolPayload(completedData)
+			}
 			// Only remap tools that were originally custom (e.g. Codex exec).
 			completedData = remapXAICustomToolCallsInPayload(completedData, prepared.customToolNames)
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
@@ -684,10 +686,12 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					normalizedEventName := gjson.GetBytes(eventData, "type").String()
 					switch normalizedEventName {
 					case "response.output_item.done":
-						eventData = filterXAIInjectedServerToolPayload(eventData)
-						if len(eventData) == 0 {
-							pendingEventLine = nil
-							continue
+						if e.cfg != nil && e.cfg.XAI.InjectBuildSearchTools {
+							eventData = filterXAIInjectedServerToolPayload(eventData)
+							if len(eventData) == 0 {
+								pendingEventLine = nil
+								continue
+							}
 						}
 						eventData = remapXAICustomToolCallsInPayload(eventData, prepared.customToolNames)
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -697,13 +701,15 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 						}
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
-						eventData = filterXAIInjectedServerToolPayload(eventData)
+						if e.cfg != nil && e.cfg.XAI.InjectBuildSearchTools {
+							eventData = filterXAIInjectedServerToolPayload(eventData)
+						}
 						eventData = remapXAICustomToolCallsInPayload(eventData, prepared.customToolNames)
 						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
 						normalizedEventName = gjson.GetBytes(eventData, "type").String()
 					default:
 						// Drop SSE for injected server tools so clients never see them.
-						if xaiIsInjectedServerToolEvent(eventData) {
+						if e.cfg != nil && e.cfg.XAI.InjectBuildSearchTools && xaiIsInjectedServerToolEvent(eventData) {
 							pendingEventLine = nil
 							continue
 						}
@@ -1533,9 +1539,7 @@ func xaiIsInjectedServerToolEvent(eventData []byte) bool {
 
 // filterXAIInjectedServerToolPayload drops web_search/x_search items from
 // response payloads so injected cache-bait tools never surface to clients.
-
-// filterXAIInjectedServerToolPayload drops web_search/x_search items from
-// response payloads so injected cache-bait tools never surface to clients.
+// Callers must only invoke this when InjectBuildSearchTools is enabled.
 func filterXAIInjectedServerToolPayload(data []byte) []byte {
 	if len(data) == 0 || !gjson.ValidBytes(data) {
 		return data
