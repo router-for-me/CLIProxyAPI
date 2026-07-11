@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -61,14 +63,18 @@ func TestAPICallRefreshesCodexTokenAfterUnauthorized(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	authFile := filepath.Join(t.TempDir(), "codex-example.json")
+	if errWrite := os.WriteFile(authFile, []byte(`{"refresh_token":"refresh-old"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	auth := &coreauth.Auth{
 		ID:       "codex-example.json",
 		Provider: "codex",
-		Metadata: map[string]any{
-			"access_token":  "access-old",
-			"refresh_token": "refresh-old",
+		Attributes: map[string]string{
+			coreauth.AttributePath: authFile,
 		},
+		Metadata: map[string]any{"access_token": "access-old"},
 	}
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)

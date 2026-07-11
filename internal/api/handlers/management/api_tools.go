@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -203,7 +204,10 @@ func (h *Handler) APICall(c *gin.Context) {
 		refreshedToken, errRefresh := h.refreshCodexOAuthAccessToken(c.Request.Context(), auth)
 		if errRefresh != nil {
 			log.WithError(errRefresh).Debug("management APICall Codex token refresh failed")
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":         "auth token refresh failed",
+				"refresh_error": managementCodexRefreshErrorCode(errRefresh),
+			})
 			return
 		}
 		for key, template := range tokenHeaderTemplates {
@@ -255,7 +259,7 @@ func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreau
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return "", fmt.Errorf("codex auth missing")
 	}
-	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	refreshToken := managementCodexRefreshToken(auth)
 	if refreshToken == "" {
 		return "", fmt.Errorf("codex refresh token missing")
 	}
@@ -295,6 +299,54 @@ func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreau
 		}
 	}
 	return strings.TrimSpace(tokenData.AccessToken), nil
+}
+
+func managementCodexRefreshToken(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if refreshToken := stringValue(auth.Metadata, "refresh_token"); refreshToken != "" {
+		return refreshToken
+	}
+	for _, attribute := range []string{coreauth.AttributePath, coreauth.AttributeSource} {
+		path := strings.TrimSpace(auth.Attributes[attribute])
+		if path == "" {
+			continue
+		}
+		data, errRead := os.ReadFile(path)
+		if errRead != nil {
+			continue
+		}
+		var stored map[string]any
+		if errUnmarshal := json.Unmarshal(data, &stored); errUnmarshal != nil {
+			continue
+		}
+		if refreshToken := stringValue(stored, "refresh_token"); refreshToken != "" {
+			return refreshToken
+		}
+	}
+	return ""
+}
+
+func managementCodexRefreshErrorCode(err error) string {
+	if err == nil {
+		return "none"
+	}
+	raw := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(raw, "refresh token missing"):
+		return "refresh_token_missing"
+	case strings.Contains(raw, "refresh_token_reused") || strings.Contains(raw, "already used"):
+		return "refresh_token_reused"
+	case strings.Contains(raw, "invalid_grant") || strings.Contains(raw, "sign in again"):
+		return "reauth_required"
+	case strings.Contains(raw, "deadline exceeded") || strings.Contains(raw, "timeout") || strings.Contains(raw, "connection"):
+		return "transient_transport_failure"
+	case strings.Contains(raw, "empty access token"):
+		return "empty_access_token"
+	default:
+		return "unknown"
+	}
 }
 
 func firstNonEmptyString(values ...*string) string {
