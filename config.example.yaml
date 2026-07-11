@@ -187,10 +187,14 @@ codex:
 
 # xAI / Grok provider behavior.
 # xai:
-#   # When true, inject native web_search + x_search tools so free OAuth
-#   # requests route to cache-capable grok-4.5 instead of grok-4.5-build-free.
-#   # Enable only for cli-chat-proxy pools. Default: false.
+#   # Inject native web_search + x_search so free OAuth can land on the
+#   # cache-capable grok-4.5 tier (instead of grok-4.5-build-free).
+#   # Default: false. Responses still expose native search results unless
+#   # hide-injected-search-results is true (fish and bear's paw: cache + search).
 #   inject-build-search-tools: false
+#   # When true (and inject is on), strip web_search_call/x_search_call from
+#   # client responses. Default false — prefer leaving results visible.
+#   hide-injected-search-results: false
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

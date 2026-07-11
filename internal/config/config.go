@@ -287,11 +287,18 @@ type CodexConfig struct {
 
 // XAIConfig configures provider-wide xAI / Grok request behavior.
 type XAIConfig struct {
-	// InjectBuildSearchTools prepends cli-chat-proxy native search tools
-	// (web_search, x_search) when missing. Those tools route free OAuth
-	// requests onto the cache-capable grok-4.5 tier instead of
-	// grok-4.5-build-free. Default false; enable only for cli-chat-proxy pools.
+	// InjectBuildSearchTools prepends native server tools web_search + x_search
+	// when missing. Those tools fingerprint free OAuth requests onto the
+	// cache-capable grok-4.5 tier instead of grok-4.5-build-free.
+	// Default false. Safe to combine with real search usage: responses keep
+	// native search items unless HideInjectedSearchResults is true.
 	InjectBuildSearchTools bool `yaml:"inject-build-search-tools" json:"inject-build-search-tools"`
+
+	// HideInjectedSearchResults strips web_search_call / x_search_call items
+	// from client-visible responses when InjectBuildSearchTools is also on.
+	// Default false so cache injection and real native search can coexist.
+	// Set true only for bait-only pools that must never surface server search.
+	HideInjectedSearchResults bool `yaml:"hide-injected-search-results" json:"hide-injected-search-results"`
 }
 
 // TLSConfig holds HTTPS server settings.

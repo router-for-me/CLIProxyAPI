@@ -1980,6 +1980,8 @@ func TestNormalizeXAIInputItems_DropsItemReference(t *testing.T) {
 	]}`)
 	out := normalizeXAIInputItems(body)
 
+	// normalize alone only strips item_reference; orphan outputs are handled by
+	// pruneXAIOrphanToolOutputs after reasoning-replay in prepareResponsesRequestTo.
 	if gjson.GetBytes(out, "input.#").Int() != 3 {
 		t.Fatalf("item_reference items should be dropped: %s", string(out))
 	}
@@ -1989,7 +1991,61 @@ func TestNormalizeXAIInputItems_DropsItemReference(t *testing.T) {
 		}
 	}
 	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_call_output" {
-		t.Fatalf("function_call_output should remain: %s", string(out))
+		t.Fatalf("function_call_output should remain after normalize-only: %s", string(out))
+	}
+}
+
+func TestPruneXAIOrphanToolOutputs_DropsUnmatchedOutputs(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","input":[
+		{"role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"function_call","call_id":"call-keep","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call-keep","output":"ok"},
+		{"type":"function_call_output","call_id":"call-orphan","output":"gone"},
+		{"type":"custom_tool_call_output","call_id":"c-orphan","output":"gone2"},
+		{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+	]}`)
+	out := pruneXAIOrphanToolOutputs(body)
+	if gjson.GetBytes(out, "input.#").Int() != 4 {
+		t.Fatalf("want 4 items after prune, got %d: %s", gjson.GetBytes(out, "input.#").Int(), string(out))
+	}
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		typeName := item.Get("type").String()
+		if typeName != "function_call_output" && typeName != "custom_tool_call_output" {
+			continue
+		}
+		if item.Get("call_id").String() != "call-keep" {
+			t.Fatalf("unexpected output remained: %s", item.Raw)
+		}
+	}
+}
+
+func TestPruneXAIOrphanToolOutputs_AfterItemReferenceDrop(t *testing.T) {
+	// Simulate prepare order: normalize (drop refs) then prune (drop orphans).
+	body := []byte(`{"model":"grok-4.5","input":[
+		{"role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"item_reference","id":"fc_abc_0"},
+		{"type":"function_call_output","call_id":"call-1","output":"done"},
+		{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+	]}`)
+	out := pruneXAIOrphanToolOutputs(normalizeXAIInputItems(body))
+	if gjson.GetBytes(out, "input.#").Int() != 2 {
+		t.Fatalf("want only user messages, got %s", string(out))
+	}
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if strings.Contains(item.Get("type").String(), "function_call") {
+			t.Fatalf("tool items should be gone: %s", string(out))
+		}
+	}
+}
+
+func TestPruneXAIOrphanToolOutputs_KeepsWhenCallPresent(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","input":[
+		{"type":"function_call","call_id":"c1","name":"x","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":"y"}
+	]}`)
+	out := pruneXAIOrphanToolOutputs(body)
+	if string(out) != string(body) && gjson.GetBytes(out, "input.#").Int() != 2 {
+		t.Fatalf("should keep matched pair: %s", string(out))
 	}
 }
 
@@ -2126,8 +2182,9 @@ func TestInjectXAIBuildCacheTools_StripsFunctionNamedWebSearch(t *testing.T) {
 	cfg := &config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}
 	body := []byte(`{"tools":[{"type":"function","name":"web_search","parameters":{"type":"object","properties":{}}},{"type":"function","name":"exec","parameters":{"type":"object","properties":{}}}]}`)
 	out := injectXAIBuildCacheTools(cfg, body)
-	if got := gjson.GetBytes(out, "tools.#").Int(); got != 3 {
-		t.Fatalf("tools count = %d, want 3 (native web+x + exec); body=%s", got, out)
+	// native web, native x, exec — function web_search stripped (xAI name uniqueness)
+	if gjson.GetBytes(out, "tools.#").Int() != 3 {
+		t.Fatalf("tools.# = %d, want 3; body=%s", gjson.GetBytes(out, "tools.#").Int(), out)
 	}
 	if gjson.GetBytes(out, "tools.0.type").String() != "web_search" {
 		t.Fatalf("tools.0.type = %q, want web_search; body=%s", gjson.GetBytes(out, "tools.0.type").String(), out)
@@ -2135,14 +2192,10 @@ func TestInjectXAIBuildCacheTools_StripsFunctionNamedWebSearch(t *testing.T) {
 	if gjson.GetBytes(out, "tools.1.type").String() != "x_search" {
 		t.Fatalf("tools.1.type = %q, want x_search; body=%s", gjson.GetBytes(out, "tools.1.type").String(), out)
 	}
-	// Ensure no function named web_search remains.
 	for _, tool := range gjson.GetBytes(out, "tools").Array() {
 		if tool.Get("type").String() == "function" && tool.Get("name").String() == "web_search" {
 			t.Fatalf("function web_search still present: %s", out)
 		}
-	}
-	if gjson.GetBytes(out, "tools.2.name").String() != "exec" {
-		t.Fatalf("tools.2.name = %q, want exec; body=%s", gjson.GetBytes(out, "tools.2.name").String(), out)
 	}
 }
 
@@ -2151,25 +2204,36 @@ func TestInjectXAIBuildCacheTools_StripsCustomNamedXSearch(t *testing.T) {
 	body := []byte(`{"tools":[{"type":"custom","name":"x_search"},{"type":"web_search"},{"type":"function","name":"exec","parameters":{"type":"object","properties":{}}}]}`)
 	out := injectXAIBuildCacheTools(cfg, body)
 	// web native kept, custom x_search stripped, native x injected, exec kept => 3
-	if got := gjson.GetBytes(out, "tools.#").Int(); got != 3 {
-		t.Fatalf("tools count = %d, want 3; body=%s", got, out)
+	if gjson.GetBytes(out, "tools.#").Int() != 3 {
+		t.Fatalf("tools.# = %d, want 3; body=%s", gjson.GetBytes(out, "tools.#").Int(), out)
 	}
-	types := []string{}
+	types := map[string]int{}
 	for _, tool := range gjson.GetBytes(out, "tools").Array() {
-		types = append(types, tool.Get("type").String()+":"+tool.Get("name").String())
+		types[tool.Get("type").String()+"|"+tool.Get("name").String()]++
 	}
-	// Expect x_search native present exactly once and no custom x_search.
-	xCount := 0
-	for _, tool := range gjson.GetBytes(out, "tools").Array() {
-		if tool.Get("type").String() == "x_search" {
-			xCount++
-		}
-		if tool.Get("name").String() == "x_search" && tool.Get("type").String() != "x_search" {
-			t.Fatalf("non-native x_search remained: %s", out)
-		}
+	if types["web_search|"] != 1 || types["x_search|"] != 1 || types["function|exec"] != 1 {
+		t.Fatalf("unexpected tools: %v body=%s", types, out)
 	}
-	if xCount != 1 {
-		t.Fatalf("x_search native count=%d want 1; types=%v body=%s", xCount, types, out)
+	if types["custom|x_search"] != 0 {
+		t.Fatalf("custom x_search should be stripped: %s", out)
+	}
+}
+
+func TestXAIShouldHideInjectedSearchResults(t *testing.T) {
+	if xaiShouldHideInjectedSearchResults(nil) {
+		t.Fatal("nil cfg")
+	}
+	if xaiShouldHideInjectedSearchResults(&config.Config{}) {
+		t.Fatal("defaults must not hide")
+	}
+	if xaiShouldHideInjectedSearchResults(&config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true}}) {
+		t.Fatal("inject alone must not hide (cache + real search coexistence)")
+	}
+	if !xaiShouldHideInjectedSearchResults(&config.Config{XAI: config.XAIConfig{InjectBuildSearchTools: true, HideInjectedSearchResults: true}}) {
+		t.Fatal("inject+hide must hide")
+	}
+	if xaiShouldHideInjectedSearchResults(&config.Config{XAI: config.XAIConfig{HideInjectedSearchResults: true}}) {
+		t.Fatal("hide without inject must not hide")
 	}
 }
 
@@ -2224,5 +2288,73 @@ func TestXAIRecordDroppedOutputIndex(t *testing.T) {
 	xaiRecordDroppedOutputIndex([]byte(`{"output_index":3,"item":{"type":"web_search_call"}}`), dropped)
 	if _, ok := dropped[3]; !ok {
 		t.Fatalf("expected index 3 recorded, got %#v", dropped)
+	}
+}
+
+func TestTranslateXAICustomToolCallInputEvents_DeltaAndDone(t *testing.T) {
+	custom := map[int64]struct{}{1: {}}
+
+	// Partial / full argument deltas for custom tools are suppressed: xAI streams
+	// JSON wrapper fragments that would corrupt freeform custom input.
+	deltaIn := []byte(`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"input\":\"pwd\"}"}`)
+	if out := translateXAICustomToolCallInputEvents(deltaIn, custom); out != nil {
+		t.Fatalf("custom argument delta should be dropped, got %s", string(out))
+	}
+	partial := []byte(`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"in"}`)
+	if out := translateXAICustomToolCallInputEvents(partial, custom); out != nil {
+		t.Fatalf("partial custom argument delta should be dropped, got %s", string(out))
+	}
+
+	doneIn := []byte(`{"type":"response.function_call_arguments.done","output_index":1,"arguments":"{\"input\":\"pwd\"}"}`)
+	doneOut := translateXAICustomToolCallInputEvents(doneIn, custom)
+	if got := gjson.GetBytes(doneOut, "type").String(); got != "response.custom_tool_call_input.done" {
+		t.Fatalf("done type = %q", got)
+	}
+	if gjson.GetBytes(doneOut, "arguments").Exists() {
+		t.Fatalf("arguments should be removed: %s", string(doneOut))
+	}
+	if got := gjson.GetBytes(doneOut, "input").String(); got != "pwd" {
+		t.Fatalf("done input = %q", got)
+	}
+
+	// Non-custom index: unchanged (including deltas).
+	other := []byte(`{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}`)
+	if string(translateXAICustomToolCallInputEvents(other, custom)) != string(other) {
+		t.Fatalf("non-custom index should be noop")
+	}
+}
+
+func TestXAITrackCustomOutputIndex(t *testing.T) {
+	custom := map[int64]struct{}{}
+	xaiTrackCustomOutputIndex([]byte(`{"type":"response.output_item.added","output_index":2,"item":{"type":"custom_tool_call","name":"exec"}}`), custom)
+	if _, ok := custom[2]; !ok {
+		t.Fatalf("expected index 2 tracked")
+	}
+	xaiTrackCustomOutputIndex([]byte(`{"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","name":"lookup"}}`), custom)
+	if _, ok := custom[3]; ok {
+		t.Fatalf("function_call must not be tracked")
+	}
+}
+
+func TestXAIOutputIndexIsDropped(t *testing.T) {
+	dropped := map[int64]struct{}{0: {}}
+	if !xaiOutputIndexIsDropped([]byte(`{"output_index":0,"delta":"x"}`), dropped) {
+		t.Fatal("index 0 should be dropped")
+	}
+	if xaiOutputIndexIsDropped([]byte(`{"output_index":1,"delta":"x"}`), dropped) {
+		t.Fatal("index 1 should not be dropped")
+	}
+}
+
+func TestCollectXAIOriginalCustomToolNames_FromHistory(t *testing.T) {
+	body := []byte(`{"model":"grok-4","tools":[{"type":"function","name":"lookup"}],"input":[
+		{"type":"custom_tool_call","call_id":"c0","name":"ApplyPatch","input":"x"}
+	]}`)
+	names := collectXAIOriginalCustomToolNames(body)
+	if _, ok := names["ApplyPatch"]; !ok {
+		t.Fatalf("ApplyPatch from history missing: %#v", names)
+	}
+	if _, ok := names["lookup"]; ok {
+		t.Fatalf("lookup is function, must not be custom: %#v", names)
 	}
 }
