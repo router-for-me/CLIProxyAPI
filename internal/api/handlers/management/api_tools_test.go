@@ -21,30 +21,36 @@ import (
 )
 
 type fakeManagementCodexRefreshService struct {
-	tokenData *codexauth.CodexTokenData
+	tokenData     *codexauth.CodexTokenData
+	refreshTokens []string
 }
 
 func (f *fakeManagementCodexRefreshService) RefreshTokensWithRetry(_ context.Context, refreshToken string, retries int) (*codexauth.CodexTokenData, error) {
-	if refreshToken != "refresh-old" {
-		return nil, fmt.Errorf("refresh token = %q, want refresh-old", refreshToken)
-	}
 	if retries != 3 {
 		return nil, fmt.Errorf("retries = %d, want 3", retries)
+	}
+	f.refreshTokens = append(f.refreshTokens, refreshToken)
+	if refreshToken == "refresh-stale" {
+		return nil, fmt.Errorf("token refresh failed: refresh_token_reused")
+	}
+	if refreshToken != "refresh-old" {
+		return nil, fmt.Errorf("refresh token = %q, want refresh-old", refreshToken)
 	}
 	return f.tokenData, nil
 }
 
 func TestAPICallRefreshesCodexTokenAfterUnauthorized(t *testing.T) {
 	originalFactory := newManagementCodexRefreshService
+	fakeRefresh := &fakeManagementCodexRefreshService{tokenData: &codexauth.CodexTokenData{
+		AccessToken:  "access-new",
+		RefreshToken: "refresh-new",
+		IDToken:      "id-new",
+		AccountID:    "account-new",
+		Email:        "codex@example.test",
+		Expire:       time.Now().Add(time.Hour).Format(time.RFC3339),
+	}}
 	newManagementCodexRefreshService = func(_ *config.Config, _ string) managementCodexRefreshService {
-		return &fakeManagementCodexRefreshService{tokenData: &codexauth.CodexTokenData{
-			AccessToken:  "access-new",
-			RefreshToken: "refresh-new",
-			IDToken:      "id-new",
-			AccountID:    "account-new",
-			Email:        "codex@example.test",
-			Expire:       time.Now().Add(time.Hour).Format(time.RFC3339),
-		}}
+		return fakeRefresh
 	}
 	defer func() { newManagementCodexRefreshService = originalFactory }()
 
@@ -74,7 +80,10 @@ func TestAPICallRefreshesCodexTokenAfterUnauthorized(t *testing.T) {
 		Attributes: map[string]string{
 			coreauth.AttributePath: authFile,
 		},
-		Metadata: map[string]any{"access_token": "access-old"},
+		Metadata: map[string]any{
+			"access_token":  "access-old",
+			"refresh_token": "refresh-stale",
+		},
 	}
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
@@ -107,6 +116,9 @@ func TestAPICallRefreshesCodexTokenAfterUnauthorized(t *testing.T) {
 	}
 	if requestTokens[0] != "Bearer access-old" || requestTokens[1] != "Bearer access-new" {
 		t.Fatalf("Authorization sequence = %v, want old/new", requestTokens)
+	}
+	if got := fmt.Sprint(fakeRefresh.refreshTokens); got != "[refresh-stale refresh-old]" {
+		t.Fatalf("refresh token candidates = %s, want stale/persisted", got)
 	}
 	updated := h.authByIndex(auth.Index)
 	if got := tokenValueForAuth(updated); got != "access-new" {

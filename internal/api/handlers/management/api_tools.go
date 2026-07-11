@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -204,9 +205,10 @@ func (h *Handler) APICall(c *gin.Context) {
 		refreshedToken, errRefresh := h.refreshCodexOAuthAccessToken(c.Request.Context(), auth)
 		if errRefresh != nil {
 			log.WithError(errRefresh).Debug("management APICall Codex token refresh failed")
+			refreshError := managementCodexRefreshErrorCode(errRefresh)
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error":         "auth token refresh failed",
-				"refresh_error": managementCodexRefreshErrorCode(errRefresh),
+				"error":         "auth token refresh failed: " + refreshError,
+				"refresh_error": refreshError,
 			})
 			return
 		}
@@ -259,17 +261,25 @@ func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreau
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return "", fmt.Errorf("codex auth missing")
 	}
-	refreshToken := managementCodexRefreshToken(auth)
-	if refreshToken == "" {
+	refreshTokens := h.managementCodexRefreshTokens(auth)
+	if len(refreshTokens) == 0 {
 		return "", fmt.Errorf("codex refresh token missing")
 	}
 	service := newManagementCodexRefreshService(h.cfg, auth.ProxyURL)
-	tokenData, errRefresh := service.RefreshTokensWithRetry(ctx, refreshToken, 3)
-	if errRefresh != nil {
-		return "", errRefresh
+	var tokenData *codexauth.CodexTokenData
+	var errRefresh error
+	for _, refreshToken := range refreshTokens {
+		tokenData, errRefresh = service.RefreshTokensWithRetry(ctx, refreshToken, 3)
+		if errRefresh == nil && tokenData != nil && strings.TrimSpace(tokenData.AccessToken) != "" {
+			break
+		}
+		if errRefresh == nil {
+			errRefresh = fmt.Errorf("codex token refresh returned empty access token")
+		}
+		tokenData = nil
 	}
-	if tokenData == nil || strings.TrimSpace(tokenData.AccessToken) == "" {
-		return "", fmt.Errorf("codex token refresh returned empty access token")
+	if tokenData == nil {
+		return "", errRefresh
 	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
@@ -301,18 +311,53 @@ func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreau
 	return strings.TrimSpace(tokenData.AccessToken), nil
 }
 
-func managementCodexRefreshToken(auth *coreauth.Auth) string {
+func (h *Handler) managementCodexRefreshTokens(auth *coreauth.Auth) []string {
 	if auth == nil {
-		return ""
+		return nil
 	}
-	if refreshToken := stringValue(auth.Metadata, "refresh_token"); refreshToken != "" {
-		return refreshToken
+	refreshTokens := make([]string, 0, 2)
+	seenTokens := make(map[string]struct{}, 2)
+	addToken := func(refreshToken string) {
+		refreshToken = strings.TrimSpace(refreshToken)
+		if refreshToken == "" {
+			return
+		}
+		if _, exists := seenTokens[refreshToken]; exists {
+			return
+		}
+		seenTokens[refreshToken] = struct{}{}
+		refreshTokens = append(refreshTokens, refreshToken)
+	}
+	addToken(stringValue(auth.Metadata, "refresh_token"))
+
+	paths := make([]string, 0, 4)
+	seenPaths := make(map[string]struct{}, 4)
+	addPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if _, exists := seenPaths[path]; exists {
+			return
+		}
+		seenPaths[path] = struct{}{}
+		paths = append(paths, path)
 	}
 	for _, attribute := range []string{coreauth.AttributePath, coreauth.AttributeSource} {
-		path := strings.TrimSpace(auth.Attributes[attribute])
-		if path == "" {
-			continue
+		addPath(auth.Attributes[attribute])
+	}
+	if h != nil && h.cfg != nil {
+		authDir := strings.TrimSpace(h.cfg.AuthDir)
+		if authDir != "" {
+			for _, name := range []string{auth.FileName, auth.ID} {
+				if name = strings.TrimSpace(name); name != "" {
+					addPath(filepath.Join(authDir, filepath.Base(name)))
+				}
+			}
 		}
+	}
+	for _, path := range paths {
 		data, errRead := os.ReadFile(path)
 		if errRead != nil {
 			continue
@@ -321,11 +366,9 @@ func managementCodexRefreshToken(auth *coreauth.Auth) string {
 		if errUnmarshal := json.Unmarshal(data, &stored); errUnmarshal != nil {
 			continue
 		}
-		if refreshToken := stringValue(stored, "refresh_token"); refreshToken != "" {
-			return refreshToken
-		}
+		addToken(stringValue(stored, "refresh_token"))
 	}
-	return ""
+	return refreshTokens
 }
 
 func managementCodexRefreshErrorCode(err error) string {
@@ -338,10 +381,18 @@ func managementCodexRefreshErrorCode(err error) string {
 		return "refresh_token_missing"
 	case strings.Contains(raw, "refresh_token_reused") || strings.Contains(raw, "already used"):
 		return "refresh_token_reused"
-	case strings.Contains(raw, "invalid_grant") || strings.Contains(raw, "sign in again"):
+	case strings.Contains(raw, "invalid_grant") || strings.Contains(raw, "sign in again") || strings.Contains(raw, "status 400") || strings.Contains(raw, "status 401"):
 		return "reauth_required"
+	case strings.Contains(raw, "status 403"):
+		return "oauth_access_denied"
+	case strings.Contains(raw, "status 429"):
+		return "upstream_rate_limited"
+	case strings.Contains(raw, "status 500") || strings.Contains(raw, "status 502") || strings.Contains(raw, "status 503") || strings.Contains(raw, "status 504"):
+		return "upstream_unavailable"
 	case strings.Contains(raw, "deadline exceeded") || strings.Contains(raw, "timeout") || strings.Contains(raw, "connection"):
 		return "transient_transport_failure"
+	case strings.Contains(raw, "failed to parse refresh response") || strings.Contains(raw, "failed to read refresh response"):
+		return "malformed_upstream_response"
 	case strings.Contains(raw, "empty access token"):
 		return "empty_access_token"
 	default:
