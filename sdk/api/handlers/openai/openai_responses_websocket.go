@@ -696,8 +696,7 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 		case "function_call", "custom_tool_call":
 			return true
 		case "message":
-			role := strings.TrimSpace(item.Get("role").String())
-			if role == "assistant" {
+			if strings.TrimSpace(item.Get("role").String()) == "assistant" {
 				return true
 			}
 		}
@@ -1310,6 +1309,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	completed := false
 	completedOutput := []byte("[]")
 	completedResponseID := ""
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
 	pendingToolCallIDs := make(map[string]struct{})
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
@@ -1390,9 +1391,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
+				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
+				eventType := gjson.GetBytes(payloads[i], "type").String()
+				if isResponsesWebsocketCompletionEvent(eventType) {
+					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
+				}
 				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				recordPendingToolCallIDsFromPayload(pendingToolCallIDs, payloads[i])
-				eventType := gjson.GetBytes(payloads[i], "type").String()
 				var payloadErrMsg *interfaces.ErrorMessage
 				if eventType == wsEventTypeError {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
@@ -1401,7 +1406,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 				} else if isResponsesWebsocketCompletionEvent(eventType) {
 					completed = true
-					completedOutput = responseCompletedOutputFromPayload(payloads[i])
+					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
 				}
 				markAPIResponseTimestamp(c)
@@ -1467,12 +1472,68 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	return false
 }
 
-func responseCompletedOutputFromPayload(payload []byte) []byte {
+func collectResponsesWebsocketOutputItem(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
+	if gjson.GetBytes(payload, "type").String() != "response.output_item.done" {
+		return
+	}
+	item := gjson.GetBytes(payload, "item")
+	if !item.Exists() || !item.IsObject() {
+		return
+	}
+	outputIndex := gjson.GetBytes(payload, "output_index")
+	if outputIndex.Exists() {
+		outputItemsByIndex[outputIndex.Int()] = bytes.Clone([]byte(item.Raw))
+		return
+	}
+	*outputItemsFallback = append(*outputItemsFallback, bytes.Clone([]byte(item.Raw)))
+}
+
+func restoreResponsesWebsocketCompletionOutput(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
 	output := gjson.GetBytes(payload, "response.output")
-	if output.Exists() && output.IsArray() {
+	if output.Exists() && output.IsArray() && len(output.Array()) > 0 {
+		return payload
+	}
+	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
+		return payload
+	}
+
+	restored, errSet := sjson.SetRawBytes(payload, "response.output", responseCompletedOutputFromPayload(payload, outputItemsByIndex, outputItemsFallback))
+	if errSet != nil {
+		return payload
+	}
+	return restored
+}
+
+func responseCompletedOutputFromPayload(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
+	output := gjson.GetBytes(payload, "response.output")
+	if output.Exists() && output.IsArray() && len(output.Array()) > 0 {
 		return bytes.Clone([]byte(output.Raw))
 	}
-	return []byte("[]")
+	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
+		return []byte("[]")
+	}
+
+	indexes := make([]int64, 0, len(outputItemsByIndex))
+	for index := range outputItemsByIndex {
+		indexes = append(indexes, index)
+	}
+	sort.Slice(indexes, func(i, j int) bool {
+		return indexes[i] < indexes[j]
+	})
+
+	items := make([]json.RawMessage, 0, len(outputItemsByIndex)+len(outputItemsFallback))
+	for _, index := range indexes {
+		items = append(items, json.RawMessage(outputItemsByIndex[index]))
+	}
+	for _, item := range outputItemsFallback {
+		items = append(items, json.RawMessage(item))
+	}
+
+	marshaledOutput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return []byte("[]")
+	}
+	return marshaledOutput
 }
 
 func responseCompletedIDFromPayload(payload []byte) string {

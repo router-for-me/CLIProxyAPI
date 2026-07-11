@@ -74,12 +74,16 @@ func TestRegisterModelsForAuthScopesXAIByOAuthTier(t *testing.T) {
 		name          string
 		token         string
 		baseURL       string
+		usingAPI      string
 		wantOnlyFree  bool
 		wantComposer  bool
 		wantPaidModel bool
 	}{
 		{name: "free", token: "opaque-free-token", wantOnlyFree: true},
 		{name: "paid", token: paidToken, wantComposer: true, wantPaidModel: true},
+		{name: "free explicit api override", token: "opaque-free-token", usingAPI: "true", wantComposer: true, wantPaidModel: true},
+		{name: "paid explicit cli override", token: paidToken, usingAPI: "false", wantComposer: true, wantPaidModel: true},
+		{name: "unknown explicit cli override", token: "opaque-free-token", usingAPI: "false", wantOnlyFree: true},
 		{name: "custom gateway", token: "opaque-token", baseURL: "https://gateway.example.com/v1", wantComposer: true, wantPaidModel: true},
 		{name: "explicit cli proxy", token: "opaque-token", baseURL: xaiauth.CLIChatProxyBaseURL, wantComposer: true, wantPaidModel: true},
 	}
@@ -95,6 +99,9 @@ func TestRegisterModelsForAuthScopesXAIByOAuthTier(t *testing.T) {
 					"base_url":  tt.baseURL,
 				},
 				Metadata: map[string]any{"access_token": tt.token},
+			}
+			if tt.usingAPI != "" {
+				auth.Attributes[xaiauth.UsingAPIKey] = tt.usingAPI
 			}
 			modelRegistry := registry.GetGlobalRegistry()
 			modelRegistry.UnregisterClient(auth.ID)
@@ -163,11 +170,14 @@ func TestXAIRefreshReregistersModelsWhenOAuthTierChanges(t *testing.T) {
 		name        string
 		initial     string
 		refreshed   string
+		usingAPI    string
 		initialPaid bool
 		wantPaid    bool
 	}{
 		{name: "free_to_paid", initial: "opaque-free-token", refreshed: paidToken, wantPaid: true},
 		{name: "paid_to_free", initial: paidToken, refreshed: "opaque-refreshed-free-token", initialPaid: true},
+		{name: "explicit_api_free_to_paid", initial: "opaque-free-token", refreshed: paidToken, usingAPI: "true", initialPaid: true, wantPaid: true},
+		{name: "explicit_api_paid_to_unknown", initial: paidToken, refreshed: "opaque-refreshed-token", usingAPI: "true", initialPaid: true, wantPaid: true},
 	}
 
 	for _, tt := range tests {
@@ -200,6 +210,9 @@ func TestXAIRefreshReregistersModelsWhenOAuthTierChanges(t *testing.T) {
 					"access_token":  tt.initial,
 					"refresh_token": "refresh-token",
 				},
+			}
+			if tt.usingAPI != "" {
+				auth.Attributes[xaiauth.UsingAPIKey] = tt.usingAPI
 			}
 			modelRegistry := registry.GetGlobalRegistry()
 			modelRegistry.UnregisterClient(auth.ID)

@@ -66,6 +66,8 @@ const (
 	xaiClientVersionHeader      = "x-grok-client-version"
 	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
 	xaiClientVersionValue = "0.2.93"
+	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
+	xaiUsingAPIAttr = xaiauth.UsingAPIKey
 )
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.
@@ -133,25 +135,16 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	baseURL := xaiChatBaseURL(auth, prepared.baseModel)
+	route := xaiResolveChatRoute(auth, prepared.baseModel)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
-	if err != nil {
-		return resp, err
-	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, baseURL)
-	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
-
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := e.doXAIChatRequest(ctx, auth, token, route, prepared.baseModel, "/responses", prepared.body, true, prepared.sessionID, httpClient)
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	defer func() {
@@ -222,7 +215,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	baseURL := xaiChatBaseURL(auth, prepared.baseModel)
+	route := xaiResolveChatRoute(auth, prepared.baseModel)
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
@@ -231,19 +224,10 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID, baseURL)
-	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
-
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := e.doXAIChatRequest(ctx, auth, token, route, prepared.baseModel, "/responses/compact", prepared.body, false, prepared.sessionID, httpClient)
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, nil, nil, err
 	}
 	defer func() {
@@ -587,25 +571,16 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, err
 	}
-	baseURL := xaiChatBaseURL(auth, prepared.baseModel)
+	route := xaiResolveChatRoute(auth, prepared.baseModel)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
-	if err != nil {
-		return nil, err
-	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, baseURL)
-	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
-
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := e.doXAIChatRequest(ctx, auth, token, route, prepared.baseModel, "/responses", prepared.body, true, prepared.sessionID, httpClient)
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -922,23 +897,217 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
-// xaiChatBaseURL returns the entitlement-specific URL for non-media xAI HTTP chat.
-// An explicit non-default base_url (tests / custom gateways) is still honored.
-// Websocket transport intentionally does not use this helper: cli-chat-proxy only
-// accepts HTTP POST and returns 405 for websocket upgrades.
-func xaiChatBaseURL(auth *cliproxyauth.Auth, model string) string {
+type xaiRouteSource string
+
+const (
+	xaiRouteSourceExplicit xaiRouteSource = "explicit"
+	xaiRouteSourceTierHint xaiRouteSource = "tier_hint"
+	xaiRouteSourceFallback xaiRouteSource = "fallback"
+)
+
+type xaiChatRouteDecision struct {
+	baseURL                  string
+	source                   xaiRouteSource
+	allowEntitlementFallback bool
+}
+
+// xaiExplicitUsingAPI returns a valid explicit route override. Attributes take
+// precedence over metadata; invalid values are ignored so automatic routing can
+// still use the token hint or conservative fallback.
+func xaiExplicitUsingAPI(auth *cliproxyauth.Auth) (value, ok bool) {
+	if auth == nil {
+		return false, false
+	}
+	return xaiauth.ExplicitUsingAPI(auth.Attributes, auth.Metadata)
+}
+
+// xaiResolveChatRoute selects the transport for non-media xAI HTTP chat. A
+// custom base URL is authoritative, OAuth composer models remain CLI-only, a
+// valid using_api value overrides automatic routing, and undocumented token
+// claims are treated only as hints. Unknown claims fail closed to Grok CLI.
+// Websocket transport intentionally does not use this helper because the CLI
+// chat proxy accepts HTTP POST only.
+func xaiResolveChatRoute(auth *cliproxyauth.Auth, model string) xaiChatRouteDecision {
 	token, baseURL := xaiCreds(auth)
 	if baseURL != "" && !xaiIsDefaultAPIBaseURL(baseURL) {
-		return baseURL
+		return xaiChatRouteDecision{baseURL: baseURL, source: xaiRouteSourceExplicit}
 	}
+
 	authKind := ""
 	if auth != nil {
 		authKind = auth.AuthKind()
 	}
-	if xaiauth.OAuthModelUsesGrokCLI(authKind, token, model) {
-		return xaiauth.CLIChatProxyBaseURL
+	if strings.EqualFold(authKind, cliproxyauth.AuthKindOAuth) &&
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), xaiauth.ComposerModelPrefix) {
+		return xaiChatRouteDecision{baseURL: xaiauth.CLIChatProxyBaseURL, source: xaiRouteSourceFallback}
 	}
-	return xaiauth.DefaultAPIBaseURL
+
+	if usingAPI, explicit := xaiExplicitUsingAPI(auth); explicit {
+		if usingAPI {
+			return xaiChatRouteDecision{baseURL: xaiauth.DefaultAPIBaseURL, source: xaiRouteSourceExplicit}
+		}
+		return xaiChatRouteDecision{baseURL: xaiauth.CLIChatProxyBaseURL, source: xaiRouteSourceExplicit}
+	}
+
+	if !strings.EqualFold(authKind, cliproxyauth.AuthKindOAuth) {
+		return xaiChatRouteDecision{baseURL: xaiauth.DefaultAPIBaseURL, source: xaiRouteSourceFallback}
+	}
+
+	switch xaiauth.AccessTokenStandardAPIHint(token) {
+	case xaiauth.StandardAPIHintYes:
+		return xaiChatRouteDecision{
+			baseURL:                  xaiauth.DefaultAPIBaseURL,
+			source:                   xaiRouteSourceTierHint,
+			allowEntitlementFallback: true,
+		}
+	case xaiauth.StandardAPIHintNo:
+		return xaiChatRouteDecision{baseURL: xaiauth.CLIChatProxyBaseURL, source: xaiRouteSourceTierHint}
+	default:
+		return xaiChatRouteDecision{baseURL: xaiauth.CLIChatProxyBaseURL, source: xaiRouteSourceFallback}
+	}
+}
+
+func (route xaiChatRouteDecision) cliEntitlementFallback() xaiChatRouteDecision {
+	return xaiChatRouteDecision{
+		baseURL: xaiauth.CLIChatProxyBaseURL,
+		source:  xaiRouteSourceFallback,
+	}
+}
+
+func xaiChatTransport(baseURL string) string {
+	switch {
+	case xaiIsCLIChatProxyBaseURL(baseURL):
+		return "cli"
+	case xaiIsDefaultAPIBaseURL(baseURL):
+		return "api"
+	default:
+		return "custom"
+	}
+}
+
+func xaiShouldFallbackToCLI(route xaiChatRouteDecision, statusCode int, body []byte) bool {
+	if !route.allowEntitlementFallback || !xaiIsDefaultAPIBaseURL(route.baseURL) {
+		return false
+	}
+	if statusCode == http.StatusPaymentRequired {
+		return true
+	}
+	if statusCode != http.StatusForbidden || len(body) == 0 {
+		return false
+	}
+
+	var candidates []string
+	if gjson.ValidBytes(body) {
+		candidates = []string{
+			gjson.GetBytes(body, "code").String(),
+			gjson.GetBytes(body, "type").String(),
+			gjson.GetBytes(body, "message").String(),
+			gjson.GetBytes(body, "error.code").String(),
+			gjson.GetBytes(body, "error.type").String(),
+			gjson.GetBytes(body, "error.message").String(),
+		}
+		if errorValue := gjson.GetBytes(body, "error"); errorValue.Type == gjson.String {
+			candidates = append(candidates, errorValue.String())
+		}
+	} else {
+		// Some gateways return plain text. Bound how much unstructured data is
+		// inspected so an oversized error page cannot amplify retry work.
+		const maxUnstructuredErrorBytes = 4096
+		if len(body) > maxUnstructuredErrorBytes {
+			body = body[:maxUnstructuredErrorBytes]
+		}
+		candidates = []string{string(body)}
+	}
+	combined := strings.ToLower(strings.Join(candidates, " "))
+	for _, marker := range []string{
+		"blocked", "policy", "safety", "abuse", "mtls", "certificate",
+	} {
+		if strings.Contains(combined, marker) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"billing", "payment", "subscription", "entitlement",
+		"insufficient credit", "credit balance", "credits required",
+		"api tier", "tier_required", "tier-gated", "paid plan",
+		"plan access", "upgrade your plan", "supergrok",
+	} {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// doXAIChatRequest sends one chat request and, only for an automatic positive
+// tier hint rejected by a clear entitlement response, retries once through the
+// CLI proxy. It never retries after a successful HTTP response or stream start.
+func (e *XAIExecutor) doXAIChatRequest(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	token string,
+	route xaiChatRouteDecision,
+	model string,
+	endpointPath string,
+	body []byte,
+	stream bool,
+	sessionID string,
+	httpClient *http.Client,
+) (*http.Response, error) {
+	currentRoute := route
+	for attempt := 0; attempt < 2; attempt++ {
+		fields := log.Fields{
+			"model":        model,
+			"route_source": currentRoute.source,
+			"transport":    xaiChatTransport(currentRoute.baseURL),
+		}
+		helps.LogWithRequestID(ctx).WithFields(fields).Debug("xai executor: resolved HTTP chat route")
+
+		requestURL := strings.TrimSuffix(currentRoute.baseURL, "/") + endpointPath
+		httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
+		if errRequest != nil {
+			return nil, errRequest
+		}
+		applyXAIChatHeaders(httpReq, auth, token, stream, sessionID, currentRoute.baseURL)
+		e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), body)
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+			return nil, errDo
+		}
+		if attempt > 0 || !currentRoute.allowEntitlementFallback ||
+			(httpResp.StatusCode != http.StatusPaymentRequired && httpResp.StatusCode != http.StatusForbidden) {
+			return httpResp, nil
+		}
+
+		data, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("xai executor: close response body before route fallback error: %v", errClose)
+		}
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			return nil, errRead
+		}
+		if !xaiShouldFallbackToCLI(currentRoute, httpResp.StatusCode, data) {
+			httpResp.Body = io.NopCloser(bytes.NewReader(data))
+			return httpResp, nil
+		}
+
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		helps.LogWithRequestID(ctx).WithFields(log.Fields{
+			"model":        model,
+			"route_source": xaiRouteSourceFallback,
+			"status_code":  httpResp.StatusCode,
+			"transport":    "cli",
+		}).Debug("xai executor: retrying HTTP chat through CLI after entitlement rejection")
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, errContext
+		}
+		currentRoute = currentRoute.cliEntitlementFallback()
+	}
+	return nil, statusErr{code: http.StatusInternalServerError, msg: "xai executor: route fallback exhausted"}
 }
 
 func xaiNormalizeBaseURL(baseURL string) string {
@@ -982,9 +1151,9 @@ func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
-// applyXAIChatHeaders applies standard xAI headers for non-image/video chat
-// requests. CLI chat-proxy identity headers are only attached when the resolved
-// chat base URL is the official CLI chat-proxy endpoint.
+// applyXAIChatHeaders applies standard xAI headers for non-image/video chat.
+// CLI identity headers depend on the final resolved URL, including a fallback
+// attempt, rather than on the credential's initial classification.
 func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID, baseURL string) {
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
 	if xaiIsCLIChatProxyBaseURL(baseURL) {

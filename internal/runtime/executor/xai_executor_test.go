@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,8 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -1757,7 +1760,7 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 	}
 }
 
-func TestXAIChatBaseURL(t *testing.T) {
+func TestXAIResolveChatRouteBaseURL(t *testing.T) {
 	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
 	tests := []struct {
 		name  string
@@ -1766,12 +1769,12 @@ func TestXAIChatBaseURL(t *testing.T) {
 		want  string
 	}{
 		{
-			name: "nil auth defaults to standard api",
+			name: "nil auth defaults to official api",
 			auth: nil,
 			want: xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "empty auth defaults to standard api",
+			name: "empty base url defaults to official api without using_api",
 			auth: &cliproxyauth.Auth{Provider: "xai"},
 			want: xaiauth.DefaultAPIBaseURL,
 		},
@@ -1803,6 +1806,18 @@ func TestXAIChatBaseURL(t *testing.T) {
 			want:  xaiauth.CLIChatProxyBaseURL,
 		},
 		{
+			name: "metadata-only free oauth uses chat proxy",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"auth_kind":    "oauth",
+					"base_url":     xaiauth.DefaultAPIBaseURL,
+					"access_token": "opaque-free-token",
+				},
+			},
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.CLIChatProxyBaseURL,
+		},
+		{
 			name: "api key uses standard api",
 			auth: &cliproxyauth.Auth{
 				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL, "api_key": "key", "auth_kind": "apikey"},
@@ -1811,16 +1826,149 @@ func TestXAIChatBaseURL(t *testing.T) {
 			want:  xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "custom base url is honored",
+			name: "using_api false empty base url rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{xaiUsingAPIAttr: "false"},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false official default rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false official default with trailing slash rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL + "/",
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "metadata using_api false official default rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: false,
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false custom base url is honored",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      "https://gateway.example.com/v1",
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: "https://gateway.example.com/v1",
+		},
+		{
+			name: "custom base url is honored without using_api",
 			auth: &cliproxyauth.Auth{
 				Attributes: map[string]string{"base_url": "https://gateway.example.com/v1"},
 			},
 			want: "https://gateway.example.com/v1",
 		},
 		{
-			name: "explicit chat proxy base url is preserved",
+			name: "using_api false explicit chat proxy base url is preserved",
 			auth: &cliproxyauth.Auth{
-				Attributes: map[string]string{"base_url": xaiauth.CLIChatProxyBaseURL},
+				Attributes: map[string]string{
+					"base_url":      xaiauth.CLIChatProxyBaseURL,
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api true keeps official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth using_api true keeps official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "paid oauth using_api false uses chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth", xaiUsingAPIAttr: "false"},
+				Metadata:   map[string]any{"access_token": paidToken},
+			},
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "free oauth using_api true uses official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth", xaiUsingAPIAttr: "true"},
+				Metadata:   map[string]any{"access_token": "opaque-free-token"},
+			},
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "paid composer ignores using_api true",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth", xaiUsingAPIAttr: "true"},
+				Metadata:   map[string]any{"access_token": paidToken},
+			},
+			model: "grok-composer-2.5-fast",
+			want:  xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "attribute override takes precedence over metadata",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth", xaiUsingAPIAttr: "false"},
+				Metadata:   map[string]any{"access_token": paidToken, xaiUsingAPIAttr: true},
+			},
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "invalid attribute falls through to metadata",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth", xaiUsingAPIAttr: "invalid"},
+				Metadata:   map[string]any{"access_token": "opaque-free-token", xaiUsingAPIAttr: true},
+			},
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "invalid overrides use conservative fallback",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth", xaiUsingAPIAttr: "invalid"},
+				Metadata:   map[string]any{"access_token": "opaque-free-token", xaiUsingAPIAttr: 1},
+			},
+			model: xaiauth.FreeOAuthModel,
+			want:  xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "explicit cli base wins over using_api true",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"base_url": xaiauth.CLIChatProxyBaseURL, xaiUsingAPIAttr: "true"},
 			},
 			want: xaiauth.CLIChatProxyBaseURL,
 		},
@@ -1828,18 +1976,106 @@ func TestXAIChatBaseURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := xaiChatBaseURL(tt.auth, tt.model); got != tt.want {
-				t.Fatalf("xaiChatBaseURL() = %q, want %q", got, tt.want)
+			if got := xaiResolveChatRoute(tt.auth, tt.model).baseURL; got != tt.want {
+				t.Fatalf("xaiResolveChatRoute().baseURL = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestXAIResolveChatRouteSourceAndFallback(t *testing.T) {
+	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
+	tests := []struct {
+		name         string
+		auth         *cliproxyauth.Auth
+		model        string
+		wantURL      string
+		wantSource   xaiRouteSource
+		wantFallback bool
+	}{
+		{
+			name: "automatic paid oauth allows entitlement fallback",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth"},
+				Metadata:   map[string]any{"access_token": paidToken},
+			},
+			model:        xaiauth.FreeOAuthModel,
+			wantURL:      xaiauth.DefaultAPIBaseURL,
+			wantSource:   xaiRouteSourceTierHint,
+			wantFallback: true,
+		},
+		{
+			name: "recognized zero tier uses cli without retry",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth"},
+				Metadata: map[string]any{"access_token": "header." +
+					base64.RawURLEncoding.EncodeToString([]byte(`{"tier":0}`)) + ".signature"},
+			},
+			model:      xaiauth.FreeOAuthModel,
+			wantURL:    xaiauth.CLIChatProxyBaseURL,
+			wantSource: xaiRouteSourceTierHint,
+		},
+		{
+			name: "unknown token uses conservative fallback",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth"},
+				Metadata:   map[string]any{"access_token": "opaque-token"},
+			},
+			model:      xaiauth.FreeOAuthModel,
+			wantURL:    xaiauth.CLIChatProxyBaseURL,
+			wantSource: xaiRouteSourceFallback,
+		},
+		{
+			name: "explicit official route cannot fallback",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth", xaiUsingAPIAttr: "true"},
+				Metadata:   map[string]any{"access_token": paidToken},
+			},
+			model:      xaiauth.FreeOAuthModel,
+			wantURL:    xaiauth.DefaultAPIBaseURL,
+			wantSource: xaiRouteSourceExplicit,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := xaiResolveChatRoute(tt.auth, tt.model)
+			if got.baseURL != tt.wantURL || got.source != tt.wantSource || got.allowEntitlementFallback != tt.wantFallback {
+				t.Fatalf("xaiResolveChatRoute() = %#v, want url=%q source=%q fallback=%v", got, tt.wantURL, tt.wantSource, tt.wantFallback)
 			}
 		})
 	}
 }
 
 func TestApplyXAIChatHeaders(t *testing.T) {
-	t.Run("cli chat proxy headers on default base", func(t *testing.T) {
+	t.Run("non OAuth defaults to official API headers", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
 		auth := &cliproxyauth.Auth{
 			Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1", xaiauth.DefaultAPIBaseURL)
+
+		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+		}
+		if got := req.Header.Get("x-grok-conv-id"); got != "conv-1" {
+			t.Fatalf("x-grok-conv-id = %q, want conv-1", got)
+		}
+		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for official API", xaiTokenAuthHeader, got)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for official API", xaiClientVersionHeader, got)
+		}
+	})
+
+	t.Run("OAuth defaults to cli chat proxy headers", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  xaiauth.DefaultAPIBaseURL,
+			},
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1", xaiauth.CLIChatProxyBaseURL)
 
@@ -1857,10 +2093,13 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("no cli headers on custom gateway", func(t *testing.T) {
+	t.Run("no cli headers on custom gateway with using_api false", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "https://gateway.example.com/responses", nil)
 		auth := &cliproxyauth.Auth{
-			Attributes: map[string]string{"base_url": "https://gateway.example.com/v1"},
+			Attributes: map[string]string{
+				"base_url":      "https://gateway.example.com/v1",
+				xaiUsingAPIAttr: "false",
+			},
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", false, "", "https://gateway.example.com/v1")
 
@@ -1877,6 +2116,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		auth := &cliproxyauth.Auth{
 			Attributes: map[string]string{
 				"base_url":                         xaiauth.CLIChatProxyBaseURL,
+				xaiUsingAPIAttr:                    "false",
 				"header:" + xaiTokenAuthHeader:     "custom-token-auth",
 				"header:" + xaiClientVersionHeader: "custom-client-version",
 			},
@@ -1891,10 +2131,13 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("cli headers on explicit chat proxy base", func(t *testing.T) {
+	t.Run("cli headers on explicit chat proxy base with using_api true", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
 		auth := &cliproxyauth.Auth{
-			Attributes: map[string]string{"base_url": xaiauth.CLIChatProxyBaseURL + "/"},
+			Attributes: map[string]string{
+				"base_url":      xaiauth.CLIChatProxyBaseURL + "/",
+				xaiUsingAPIAttr: "true",
+			},
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", true, "", xaiauth.CLIChatProxyBaseURL)
 
@@ -1905,6 +2148,360 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
 		}
 	})
+}
+
+func TestXAIShouldFallbackToCLI(t *testing.T) {
+	automaticRoute := xaiChatRouteDecision{
+		baseURL:                  xaiauth.DefaultAPIBaseURL,
+		source:                   xaiRouteSourceTierHint,
+		allowEntitlementFallback: true,
+	}
+	tests := []struct {
+		name   string
+		route  xaiChatRouteDecision
+		status int
+		body   string
+		want   bool
+	}{
+		{name: "payment required", route: automaticRoute, status: http.StatusPaymentRequired, body: `payment required`, want: true},
+		{name: "structured entitlement forbidden", route: automaticRoute, status: http.StatusForbidden, body: `{"error":{"code":"subscription_required","message":"Upgrade your plan"}}`, want: true},
+		{name: "credit forbidden", route: automaticRoute, status: http.StatusForbidden, body: `{"message":"Insufficient credits for API access"}`, want: true},
+		{name: "plain text entitlement forbidden", route: automaticRoute, status: http.StatusForbidden, body: `subscription required`, want: true},
+		{name: "generic forbidden", route: automaticRoute, status: http.StatusForbidden, body: `{"error":{"message":"permission denied"}}`},
+		{name: "blocked forbidden", route: automaticRoute, status: http.StatusForbidden, body: `{"error":{"message":"account blocked by policy"}}`},
+		{name: "blocked marker wins over billing marker", route: automaticRoute, status: http.StatusForbidden, body: `{"error":{"message":"account blocked; contact billing"}}`},
+		{name: "unrelated nested billing field is ignored", route: automaticRoute, status: http.StatusForbidden, body: `{"error":{"message":"permission denied"},"details":{"billing":"contact support"}}`},
+		{name: "mtls forbidden", route: automaticRoute, status: http.StatusForbidden, body: `mTLS certificate required`},
+		{name: "unauthorized", route: automaticRoute, status: http.StatusUnauthorized, body: `subscription required`},
+		{name: "rate limited", route: automaticRoute, status: http.StatusTooManyRequests, body: `credits required`},
+		{
+			name: "explicit route does not fallback",
+			route: xaiChatRouteDecision{
+				baseURL: xaiauth.DefaultAPIBaseURL,
+				source:  xaiRouteSourceExplicit,
+			},
+			status: http.StatusPaymentRequired,
+			body:   `payment required`,
+		},
+		{
+			name: "custom route does not fallback",
+			route: xaiChatRouteDecision{
+				baseURL:                  "https://gateway.example.com/v1",
+				source:                   xaiRouteSourceTierHint,
+				allowEntitlementFallback: true,
+			},
+			status: http.StatusPaymentRequired,
+			body:   `payment required`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiShouldFallbackToCLI(tt.route, tt.status, []byte(tt.body)); got != tt.want {
+				t.Fatalf("xaiShouldFallbackToCLI() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+type xaiTestRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f xaiTestRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type xaiTrackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (b *xaiTrackingReadCloser) Close() error {
+	b.closed = true
+	return nil
+}
+
+type xaiCapturedRequest struct {
+	host          string
+	path          string
+	body          []byte
+	tokenAuth     string
+	clientVersion string
+	sessionID     string
+	customHeader  string
+}
+
+func xaiTestCompletedSSEResponse() string {
+	return "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.5\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+}
+
+func TestXAIExecutorExecuteFallsBackOnceOnAutomaticTierEntitlementError(t *testing.T) {
+	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
+	firstBody := &xaiTrackingReadCloser{Reader: strings.NewReader(`{"error":{"code":"payment_required"}}`)}
+	var captured []xaiCapturedRequest
+	roundTripper := xaiTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		captured = append(captured, xaiCapturedRequest{
+			host:          req.URL.Host,
+			path:          req.URL.Path,
+			body:          body,
+			tokenAuth:     req.Header.Get(xaiTokenAuthHeader),
+			clientVersion: req.Header.Get(xaiClientVersionHeader),
+			sessionID:     req.Header.Get("x-grok-conv-id"),
+			customHeader:  req.Header.Get("X-Test-Route"),
+		})
+		if len(captured) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusPaymentRequired,
+				Header:     make(http.Header),
+				Body:       firstBody,
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(xaiTestCompletedSSEResponse())),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(roundTripper))
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"auth_kind":           "oauth",
+			"base_url":            xaiauth.DefaultAPIBaseURL,
+			"header:X-Test-Route": "preserved",
+		},
+		Metadata: map[string]any{"access_token": paidToken},
+	}
+
+	resp, err := NewXAIExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   xaiauth.FreeOAuthModel,
+		Payload: []byte(`{"model":"grok-4.5","prompt_cache_key":"session-1","input":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute() returned an empty payload")
+	}
+	if len(captured) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(captured))
+	}
+	if !firstBody.closed {
+		t.Fatal("first entitlement response body was not closed before retry")
+	}
+	if captured[0].host != "api.x.ai" || captured[1].host != "cli-chat-proxy.grok.com" {
+		t.Fatalf("upstream hosts = %q then %q, want api then cli", captured[0].host, captured[1].host)
+	}
+	if captured[0].path != "/v1/responses" || captured[1].path != "/v1/responses" {
+		t.Fatalf("upstream paths = %q then %q, want /v1/responses", captured[0].path, captured[1].path)
+	}
+	if !bytes.Equal(captured[0].body, captured[1].body) {
+		t.Fatal("fallback request body changed between attempts")
+	}
+	if captured[0].tokenAuth != "" || captured[0].clientVersion != "" {
+		t.Fatal("official API attempt unexpectedly carried CLI identity headers")
+	}
+	if captured[1].tokenAuth != xaiTokenAuthValue || captured[1].clientVersion != xaiClientVersionValue {
+		t.Fatal("CLI fallback attempt did not carry CLI identity headers")
+	}
+	for i := range captured {
+		if captured[i].sessionID != "session-1" || captured[i].customHeader != "preserved" {
+			t.Fatalf("attempt %d lost session or custom headers: %#v", i+1, captured[i])
+		}
+	}
+}
+
+func TestXAIExecutorGenericForbiddenDoesNotFallbackAndPreservesBody(t *testing.T) {
+	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
+	const responseBody = `{"error":{"message":"generic-route-marker"},"details":{"billing":"unrelated"}}`
+	requestCount := 0
+	roundTripper := xaiTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(roundTripper))
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"access_token": paidToken},
+	}
+
+	_, err := NewXAIExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   xaiauth.FreeOAuthModel,
+		Payload: []byte(`{"model":"grok-4.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err == nil || !strings.Contains(err.Error(), "generic-route-marker") {
+		t.Fatalf("Execute() error = %v, want original 403 body marker", err)
+	}
+	statusError, ok := err.(interface{ StatusCode() int })
+	if !ok || statusError.StatusCode() != http.StatusForbidden {
+		t.Fatalf("Execute() error = %v, want status 403", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("upstream request count = %d, want 1", requestCount)
+	}
+}
+
+func TestXAIExecutorRouteDebugLogDoesNotLeakAuth(t *testing.T) {
+	const (
+		tokenSentinel  = "route-log-token-sentinel"
+		emailSentinel  = "route-log-email-sentinel@example.invalid"
+		headerSentinel = "route-log-header-sentinel"
+	)
+	logger := log.StandardLogger()
+	previousLevel := log.GetLevel()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	log.SetLevel(log.DebugLevel)
+	hook := logtest.NewLocal(logger)
+	t.Cleanup(func() {
+		hook.Reset()
+		logger.ReplaceHooks(previousHooks)
+		log.SetLevel(previousLevel)
+	})
+
+	httpClient := &http.Client{Transport: xaiTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    req,
+		}, nil
+	})}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"header:X-Route-Secret": headerSentinel},
+		Metadata:   map[string]any{"access_token": tokenSentinel, "email": emailSentinel},
+	}
+	route := xaiChatRouteDecision{
+		baseURL:                  xaiauth.DefaultAPIBaseURL,
+		source:                   xaiRouteSourceTierHint,
+		allowEntitlementFallback: true,
+	}
+	resp, err := NewXAIExecutor(&config.Config{}).doXAIChatRequest(
+		context.Background(), auth, tokenSentinel, route, "grok-4.5", "/responses", []byte(`{}`), false, "", httpClient,
+	)
+	if err != nil {
+		t.Fatalf("doXAIChatRequest() error = %v", err)
+	}
+	_ = resp.Body.Close()
+
+	foundRouteLog := false
+	for _, entry := range hook.AllEntries() {
+		serialized := entry.Message + " " + fmt.Sprint(entry.Data)
+		for _, sentinel := range []string{tokenSentinel, emailSentinel, headerSentinel} {
+			if strings.Contains(serialized, sentinel) {
+				t.Fatalf("debug log leaked auth sentinel %q: %s", sentinel, serialized)
+			}
+		}
+		if entry.Message == "xai executor: resolved HTTP chat route" {
+			foundRouteLog = entry.Data["route_source"] == xaiRouteSourceTierHint && entry.Data["transport"] == "api"
+		}
+	}
+	if !foundRouteLog {
+		t.Fatal("structured route log with tier_hint/api fields was not emitted")
+	}
+}
+
+func TestXAIExecutorExecuteStreamFallsBackBeforeStreamingStarts(t *testing.T) {
+	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
+	requestCount := 0
+	roundTripper := xaiTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"subscription entitlement required"}}`)),
+				Request:    req,
+			}, nil
+		}
+		if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
+			t.Fatalf("CLI fallback token auth header = %q, want %q", got, xaiTokenAuthValue)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(xaiTestCompletedSSEResponse())),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(roundTripper))
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"access_token": paidToken},
+	}
+
+	result, err := NewXAIExecutor(&config.Config{}).ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   xaiauth.FreeOAuthModel,
+		Payload: []byte(`{"model":"grok-4.5","input":[{"role":"user","content":"hello"}],"stream":true}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var streamed bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamed.Write(chunk.Payload)
+	}
+	if requestCount != 2 {
+		t.Fatalf("upstream request count = %d, want 2", requestCount)
+	}
+	if !strings.Contains(streamed.String(), "response.completed") {
+		t.Fatalf("stream output missing completion: %s", streamed.String())
+	}
+}
+
+func TestXAIExecutorFallbackStopsAfterSecondFailure(t *testing.T) {
+	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
+	requestCount := 0
+	roundTripper := xaiTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		status := http.StatusPaymentRequired
+		body := `{"error":{"code":"payment_required"}}`
+		if requestCount == 2 {
+			status = http.StatusServiceUnavailable
+			body = `{"error":{"code":"cli_unavailable"}}`
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(roundTripper))
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"access_token": paidToken},
+	}
+
+	_, err := NewXAIExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   xaiauth.FreeOAuthModel,
+		Payload: []byte(`{"model":"grok-4.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want second-attempt failure")
+	}
+	statusError, ok := err.(interface{ StatusCode() int })
+	if !ok || statusError.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("Execute() error = %v, want status 503", err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("upstream request count = %d, want exactly 2", requestCount)
+	}
 }
 
 func TestXAIExecutorExecuteChatUsesProxyHeadersOnlyForChatProxy(t *testing.T) {
@@ -1922,7 +2519,8 @@ func TestXAIExecutorExecuteChatUsesProxyHeadersOnlyForChatProxy(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "xai",
 		Attributes: map[string]string{
-			"base_url": server.URL,
+			"base_url":      server.URL,
+			xaiUsingAPIAttr: "false",
 		},
 		Metadata: map[string]any{"access_token": "xai-token"},
 	}

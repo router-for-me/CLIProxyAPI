@@ -2176,7 +2176,14 @@ func scopeXAIModelsForAuth(auth *coreauth.Auth, authKind string, models []*Model
 			accessToken = strings.TrimSpace(value)
 		}
 	}
-	if xaiauth.AccessTokenHasStandardAPITier(accessToken) {
+	var attributes map[string]string
+	var metadata map[string]any
+	if auth != nil {
+		attributes = auth.Attributes
+		metadata = auth.Metadata
+	}
+	usingAPI, explicitUsingAPI := xaiauth.ExplicitUsingAPI(attributes, metadata)
+	if xaiauth.AccessTokenSuggestsStandardAPI(accessToken) || (explicitUsingAPI && usingAPI) {
 		return models
 	}
 
@@ -2209,7 +2216,8 @@ func xaiUsesFreeOAuthModelScope(auth *coreauth.Auth) bool {
 	if auth.Metadata != nil {
 		accessToken, _ = auth.Metadata["access_token"].(string)
 	}
-	return !xaiauth.AccessTokenHasStandardAPITier(strings.TrimSpace(accessToken))
+	usingAPI, explicitUsingAPI := xaiauth.ExplicitUsingAPI(auth.Attributes, auth.Metadata)
+	return !xaiauth.AccessTokenSuggestsStandardAPI(strings.TrimSpace(accessToken)) && !(explicitUsingAPI && usingAPI)
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for

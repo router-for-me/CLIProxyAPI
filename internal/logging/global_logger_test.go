@@ -26,6 +26,33 @@ func TestLogFormatterPrintsVersionField(t *testing.T) {
 	}
 }
 
+func TestLogFormatterPrintsSafeRouteFields(t *testing.T) {
+	entry := log.NewEntry(log.New())
+	entry.Time = time.Date(2026, 7, 11, 16, 40, 0, 0, time.Local)
+	entry.Level = log.DebugLevel
+	entry.Message = "xai executor: resolved HTTP chat route"
+	entry.Data["model"] = "grok-4.5"
+	entry.Data["route_source"] = "tier_hint"
+	entry.Data["transport"] = "api"
+	entry.Data["status_code"] = 402
+	entry.Data["access_token"] = "must-not-be-logged"
+
+	formatted, errFormat := (&LogFormatter{}).Format(entry)
+	if errFormat != nil {
+		t.Fatalf("Format() error = %v", errFormat)
+	}
+
+	line := string(formatted)
+	for _, want := range []string{"route_source=tier_hint", "transport=api", "status_code=402"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("formatted line %q missing %s", line, want)
+		}
+	}
+	if strings.Contains(line, "must-not-be-logged") || strings.Contains(line, "access_token") {
+		t.Fatalf("formatted line leaked a non-whitelisted field: %q", line)
+	}
+}
+
 func TestLogFormatterPrintsPluginFields(t *testing.T) {
 	entry := log.NewEntry(log.New())
 	entry.Time = time.Date(2026, 6, 25, 20, 10, 0, 0, time.Local)
