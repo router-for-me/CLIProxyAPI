@@ -16,10 +16,30 @@ func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 		}
 	case "namespace":
 		return convertResponsesNamespaceToolToOpenAIChat(tool)
+	case "custom":
+		if tJSON, ok := convertResponsesCustomToolToOpenAIChat(tool); ok {
+			return [][]byte{tJSON}
+		}
 	default:
 		return nil
 	}
 	return nil
+}
+
+// convertResponsesCustomToolToOpenAIChat maps a Responses freeform ("custom")
+// tool onto a Chat Completions function tool with a single freeform "input"
+// string, mirroring the function-based shape Codex uses for apply_patch.
+func convertResponsesCustomToolToOpenAIChat(tool gjson.Result) ([]byte, bool) {
+	name := responsesToolName(tool)
+	if name == "" {
+		return nil, false
+	}
+	chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}}`)
+	chatTool, _ = sjson.SetBytes(chatTool, "function.name", name)
+	if description := responsesToolDescription(tool); description != "" {
+		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
+	}
+	return chatTool, true
 }
 
 func convertResponsesNamespaceToolToOpenAIChat(tool gjson.Result) [][]byte {
@@ -88,6 +108,70 @@ func responsesToolParameters(tool gjson.Result) gjson.Result {
 		}
 	}
 	return gjson.Result{}
+}
+
+// responsesToolOutputText flattens a tool output value that may be a plain
+// string or an array of content parts ({"type":"input_text","text":...}) into
+// a single text payload for a Chat Completions tool message.
+func responsesToolOutputText(output gjson.Result) string {
+	if output.Type == gjson.String {
+		return output.String()
+	}
+	if output.IsArray() {
+		var b strings.Builder
+		output.ForEach(func(_, part gjson.Result) bool {
+			if text := part.Get("text"); text.Exists() {
+				b.WriteString(text.String())
+			}
+			return true
+		})
+		return b.String()
+	}
+	if output.Exists() {
+		return output.Raw
+	}
+	return ""
+}
+
+// responsesCustomToolNames collects the names of freeform ("custom") tools
+// declared in the original Responses request, both in the top-level "tools"
+// field and in Codex Desktop "additional_tools" input items.
+func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
+	names := make(map[string]struct{})
+	collect := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if strings.TrimSpace(tool.Get("type").String()) == "custom" {
+				if name := responsesToolName(tool); name != "" {
+					names[name] = struct{}{}
+				}
+			}
+			return true
+		})
+	}
+	root := gjson.ParseBytes(requestRawJSON)
+	collect(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				collect(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	return names
+}
+
+// unwrapCustomToolInput extracts the freeform input from the {"input": "..."}
+// function-call arguments produced for a converted custom tool; it falls back
+// to the raw arguments when the wrapper is absent.
+func unwrapCustomToolInput(arguments string) string {
+	if v := gjson.Get(arguments, "input"); v.Exists() && v.Type == gjson.String {
+		return v.String()
+	}
+	return arguments
 }
 
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
