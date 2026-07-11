@@ -120,6 +120,10 @@ func responsesToolOutputText(output gjson.Result) string {
 	if output.IsArray() {
 		var b strings.Builder
 		output.ForEach(func(_, part gjson.Result) bool {
+			if part.Type == gjson.String {
+				b.WriteString(part.String())
+				return true
+			}
 			if text := part.Get("text"); text.Exists() {
 				b.WriteString(text.String())
 			}
@@ -168,8 +172,11 @@ func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 // function-call arguments produced for a converted custom tool; it falls back
 // to the raw arguments when the wrapper is absent.
 func unwrapCustomToolInput(arguments string) string {
-	if v := gjson.Get(arguments, "input"); v.Exists() && v.Type == gjson.String {
-		return v.String()
+	if v := gjson.Get(arguments, "input"); v.Exists() {
+		if v.Type == gjson.String {
+			return v.String()
+		}
+		return v.Raw
 	}
 	return arguments
 }
