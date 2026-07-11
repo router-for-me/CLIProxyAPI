@@ -575,7 +575,10 @@ func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 		usageNode.Get("total_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cache_write_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cache_creation_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cache_write_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cache_creation_tokens").Exists() ||
 		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
 		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
@@ -600,9 +603,17 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
+		detail.CacheReadTokens = cached.Int()
 	}
-	if cacheWrite := usageNode.Get("input_tokens_details.cache_write_tokens"); cacheWrite.Exists() {
-		detail.CacheCreationTokens = cacheWrite.Int()
+	cacheCreation := firstExistingUsageNode(
+		usageNode,
+		"input_tokens_details.cache_creation_tokens",
+		"input_tokens_details.cache_write_tokens",
+		"prompt_tokens_details.cache_creation_tokens",
+		"prompt_tokens_details.cache_write_tokens",
+	)
+	if cacheCreation.Exists() {
+		detail.CacheCreationTokens = cacheCreation.Int()
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
@@ -670,12 +681,14 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
+	cachedTokens := node.Get("cachedContentTokenCount").Int()
 	detail := usage.Detail{
 		InputTokens:     node.Get("promptTokenCount").Int(),
 		OutputTokens:    node.Get("candidatesTokenCount").Int(),
 		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
 		TotalTokens:     node.Get("totalTokenCount").Int(),
-		CachedTokens:    node.Get("cachedContentTokenCount").Int(),
+		CachedTokens:    cachedTokens,
+		CacheReadTokens: cachedTokens,
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
@@ -684,17 +697,24 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 }
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
+	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
 	detail := usage.Detail{
 		InputTokens:         firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
 		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
 		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
 		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
 		CachedTokens:        firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
-		CacheReadTokens:     firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens").Int(),
-		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens").Int(),
+		CacheReadTokens:     cacheRead.Int(),
+		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
+	}
+	if !cacheRead.Exists() && detail.CachedTokens > 0 {
+		detail.CacheReadTokens = detail.CachedTokens
 	}
 	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheReadTokens + detail.CacheCreationTokens
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CacheCreationTokens
+		if cacheRead.Exists() {
+			detail.TotalTokens += detail.CacheReadTokens
+		}
 	}
 	return detail
 }
