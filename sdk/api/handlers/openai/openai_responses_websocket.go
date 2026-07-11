@@ -563,6 +563,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponsePendingToolCallIDs = previousLastResponsePendingToolCallIDs
 			passthroughModelName = previousPassthroughModelName
 		} else if !useUpstreamWebsocketPassthrough {
+			passthroughModelName = ""
 			lastResponseOutput = completedOutput
 			lastResponseID = strings.TrimSpace(completedResponseID)
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
