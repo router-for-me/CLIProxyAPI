@@ -2265,7 +2265,9 @@ func (m *Manager) updateAuth(ctx context.Context, auth *Auth, afterCommit func(c
 		m.scheduler.upsertAuth(authClone)
 	}
 	m.queueRefreshReschedule(authClone.ID)
-	_ = m.persist(ctx, authClone)
+	// Persist a decoupled copy: authClone is the live entry in m.auths and the
+	// store mutates the persisted auth's metadata map outside the manager lock.
+	_ = m.persist(ctx, authClone.Clone())
 	m.hook.OnAuthUpdated(ctx, authClone.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
