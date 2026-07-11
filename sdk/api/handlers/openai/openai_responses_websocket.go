@@ -1983,9 +1983,15 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	}
 	errCode := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
 	if errCode == "" {
+		errCode = strings.TrimSpace(gjson.GetBytes(payload, "body.error.code").String())
+	}
+	if errCode == "" {
 		errCode = strings.TrimSpace(gjson.GetBytes(payload, "code").String())
 	}
 	errType := strings.TrimSpace(gjson.GetBytes(payload, "error.type").String())
+	if errType == "" {
+		errType = strings.TrimSpace(gjson.GetBytes(payload, "body.error.type").String())
+	}
 	if errType == "" {
 		topLevelType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 		if !strings.EqualFold(topLevelType, wsEventTypeError) {
@@ -2001,6 +2007,9 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 	}
 
 	errText := strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
+	if errText == "" {
+		errText = strings.TrimSpace(gjson.GetBytes(payload, "body.error.message").String())
+	}
 	if errText == "" {
 		errText = strings.TrimSpace(gjson.GetBytes(payload, "message").String())
 	}
