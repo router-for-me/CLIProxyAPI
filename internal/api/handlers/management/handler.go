@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagestats"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -58,6 +59,7 @@ type Handler struct {
 	configReloadHook        func(context.Context, *config.Config)
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
+	usageStats              *usagestats.Store
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
 }
@@ -78,6 +80,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		tokenStore:          sdkAuth.GetTokenStore(),
+		usageStats:          usagestats.DefaultStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
