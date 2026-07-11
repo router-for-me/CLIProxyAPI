@@ -26,6 +26,9 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
 	}
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
 	}
@@ -45,6 +48,9 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	}
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
 	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
@@ -69,6 +75,9 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	if detail.CachedTokens != 30 {
 		t.Fatalf("cached tokens = %d, want 30", detail.CachedTokens)
 	}
+	if detail.CacheReadTokens != 30 {
+		t.Fatalf("cache read tokens = %d, want 30", detail.CacheReadTokens)
+	}
 	if detail.CacheCreationTokens != 40 {
 		t.Fatalf("cache creation tokens = %d, want 40", detail.CacheCreationTokens)
 	}
@@ -77,6 +86,14 @@ func TestParseCodexUsageIncludesCacheWriteTokens(t *testing.T) {
 	}
 	if detail.ResponseServiceTier != "priority" {
 		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+}
+
+func TestParseOpenAIUsageNormalizesCacheCreationAlias(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cache_creation_tokens":4}}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.CacheCreationTokens != 4 {
+		t.Fatalf("cache creation tokens = %d, want 4", detail.CacheCreationTokens)
 	}
 }
 
@@ -130,6 +147,9 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 	if detail.CachedTokens != 3 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.CacheReadTokens != 3 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 3)
 	}
 	if detail.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
@@ -276,8 +296,18 @@ func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 	}
 }
 
+func TestParseGeminiUsageNormalizesCachedContent(t *testing.T) {
+	detail := ParseGeminiUsage([]byte(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"cachedContentTokenCount":4,"totalTokenCount":12}}`))
+	if detail.CachedTokens != 4 {
+		t.Fatalf("cached tokens = %d, want 4", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want 4", detail.CacheReadTokens)
+	}
+}
+
 func TestParseInteractionsUsage(t *testing.T) {
-	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"total_tokens":12,"cached_tokens":2}}`))
+	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"cached_tokens":2}}`))
 	if detail.InputTokens != 3 {
 		t.Fatalf("input tokens = %d, want 3", detail.InputTokens)
 	}
@@ -292,6 +322,16 @@ func TestParseInteractionsUsage(t *testing.T) {
 	}
 	if detail.CachedTokens != 2 {
 		t.Fatalf("cached tokens = %d, want 2", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 2 {
+		t.Fatalf("cache read tokens = %d, want 2", detail.CacheReadTokens)
+	}
+}
+
+func TestParseInteractionsUsageNormalizesCacheWriteAlias(t *testing.T) {
+	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"cache_write_tokens":2}}`))
+	if detail.CacheCreationTokens != 2 {
+		t.Fatalf("cache creation tokens = %d, want 2", detail.CacheCreationTokens)
 	}
 }
 
@@ -321,6 +361,9 @@ func TestParseInteractionsStreamUsageOfficialMetadata(t *testing.T) {
 	}
 	if detail.CachedTokens != 1 {
 		t.Fatalf("cached tokens = %d, want 1", detail.CachedTokens)
+	}
+	if detail.CacheReadTokens != 1 {
+		t.Fatalf("cache read tokens = %d, want 1", detail.CacheReadTokens)
 	}
 	if detail.TotalTokens != 11 {
 		t.Fatalf("total tokens = %d, want 11", detail.TotalTokens)
