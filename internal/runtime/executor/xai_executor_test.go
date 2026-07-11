@@ -1580,49 +1580,127 @@ func TestXAIChatBaseURL(t *testing.T) {
 		want string
 	}{
 		{
-			name: "nil auth defaults to chat proxy",
+			name: "nil auth defaults to official api",
 			auth: nil,
-			want: xaiauth.CLIChatProxyBaseURL,
+			want: xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "empty base url defaults to chat proxy",
+			name: "empty base url defaults to official api without using_api",
 			auth: &cliproxyauth.Auth{Provider: "xai"},
-			want: xaiauth.CLIChatProxyBaseURL,
+			want: xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "official default rewrites to chat proxy",
+			name: "official default stays official without using_api",
 			auth: &cliproxyauth.Auth{
 				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
 			},
-			want: xaiauth.CLIChatProxyBaseURL,
+			want: xaiauth.DefaultAPIBaseURL,
 		},
 		{
-			name: "official default with trailing slash rewrites to chat proxy",
+			name: "OAuth credentials default to chat proxy without using_api",
 			auth: &cliproxyauth.Auth{
-				Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL + "/"},
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
 			},
 			want: xaiauth.CLIChatProxyBaseURL,
 		},
 		{
-			name: "metadata official default rewrites to chat proxy",
+			name: "metadata-only OAuth credentials default to chat proxy without using_api",
 			auth: &cliproxyauth.Auth{
-				Metadata: map[string]any{"base_url": xaiauth.DefaultAPIBaseURL},
+				Metadata: map[string]any{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
 			},
 			want: xaiauth.CLIChatProxyBaseURL,
 		},
 		{
-			name: "custom base url is honored",
+			name: "using_api false empty base url rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{xaiUsingAPIAttr: "false"},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false official default rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false official default with trailing slash rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL + "/",
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "metadata using_api false official default rewrites to chat proxy",
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: false,
+				},
+			},
+			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api false custom base url is honored",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      "https://gateway.example.com/v1",
+					xaiUsingAPIAttr: "false",
+				},
+			},
+			want: "https://gateway.example.com/v1",
+		},
+		{
+			name: "custom base url is honored without using_api",
 			auth: &cliproxyauth.Auth{
 				Attributes: map[string]string{"base_url": "https://gateway.example.com/v1"},
 			},
 			want: "https://gateway.example.com/v1",
 		},
 		{
-			name: "explicit chat proxy base url is preserved",
+			name: "using_api false explicit chat proxy base url is preserved",
 			auth: &cliproxyauth.Auth{
-				Attributes: map[string]string{"base_url": xaiauth.CLIChatProxyBaseURL},
+				Attributes: map[string]string{
+					"base_url":      xaiauth.CLIChatProxyBaseURL,
+					xaiUsingAPIAttr: "false",
+				},
 			},
 			want: xaiauth.CLIChatProxyBaseURL,
+		},
+		{
+			name: "using_api true keeps official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
+		},
+		{
+			name: "OAuth using_api true keeps official api",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					"base_url":      xaiauth.DefaultAPIBaseURL,
+					xaiUsingAPIAttr: "true",
+				},
+			},
+			want: xaiauth.DefaultAPIBaseURL,
 		},
 	}
 
@@ -1636,10 +1714,34 @@ func TestXAIChatBaseURL(t *testing.T) {
 }
 
 func TestApplyXAIChatHeaders(t *testing.T) {
-	t.Run("cli chat proxy headers on default base", func(t *testing.T) {
+	t.Run("non OAuth defaults to official API headers", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
 		auth := &cliproxyauth.Auth{
 			Attributes: map[string]string{"base_url": xaiauth.DefaultAPIBaseURL},
+		}
+		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1")
+
+		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+		}
+		if got := req.Header.Get("x-grok-conv-id"); got != "conv-1" {
+			t.Fatalf("x-grok-conv-id = %q, want conv-1", got)
+		}
+		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for official API", xaiTokenAuthHeader, got)
+		}
+		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
+			t.Fatalf("%s = %q, want empty for official API", xaiClientVersionHeader, got)
+		}
+	})
+
+	t.Run("OAuth defaults to cli chat proxy headers", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  xaiauth.DefaultAPIBaseURL,
+			},
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1")
 
@@ -1657,10 +1759,13 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("no cli headers on custom gateway", func(t *testing.T) {
+	t.Run("no cli headers on custom gateway with using_api false", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "https://gateway.example.com/responses", nil)
 		auth := &cliproxyauth.Auth{
-			Attributes: map[string]string{"base_url": "https://gateway.example.com/v1"},
+			Attributes: map[string]string{
+				"base_url":      "https://gateway.example.com/v1",
+				xaiUsingAPIAttr: "false",
+			},
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", false, "")
 
@@ -1677,6 +1782,7 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		auth := &cliproxyauth.Auth{
 			Attributes: map[string]string{
 				"base_url":                         xaiauth.CLIChatProxyBaseURL,
+				xaiUsingAPIAttr:                    "false",
 				"header:" + xaiTokenAuthHeader:     "custom-token-auth",
 				"header:" + xaiClientVersionHeader: "custom-client-version",
 			},
@@ -1691,10 +1797,13 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 	})
 
-	t.Run("cli headers on explicit chat proxy base", func(t *testing.T) {
+	t.Run("cli headers on explicit chat proxy base with using_api false", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
 		auth := &cliproxyauth.Auth{
-			Attributes: map[string]string{"base_url": xaiauth.CLIChatProxyBaseURL + "/"},
+			Attributes: map[string]string{
+				"base_url":      xaiauth.CLIChatProxyBaseURL + "/",
+				xaiUsingAPIAttr: "false",
+			},
 		}
 		applyXAIChatHeaders(req, auth, "xai-token", true, "")
 
@@ -1722,7 +1831,8 @@ func TestXAIExecutorExecuteChatUsesProxyHeadersOnlyForChatProxy(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "xai",
 		Attributes: map[string]string{
-			"base_url": server.URL,
+			"base_url":      server.URL,
+			xaiUsingAPIAttr: "false",
 		},
 		Metadata: map[string]any{"access_token": "xai-token"},
 	}
