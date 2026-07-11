@@ -15,7 +15,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
+// OpenAIImageModelType marks image-only models that must not be routed through chat endpoints.
 const OpenAIImageModelType = "openai-image"
 
 const (
@@ -62,6 +62,9 @@ type ModelInfo struct {
 	// SupportsWebSearch indicates this Antigravity model is listed by
 	// fetchAvailableModels.webSearchModelIds and can execute native googleSearch.
 	SupportsWebSearch bool `json:"supports_web_search,omitempty"`
+	// SupportsImageAPI indicates that the model is callable through OpenAI-compatible image endpoints.
+	// Unlike OpenAIImageModelType, this may also be true for a chat-capable shared alias.
+	SupportsImageAPI bool `json:"-"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
@@ -195,6 +198,38 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 		return cloneModelInfo(info)
 	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
+}
+
+// ModelSupportsImageAPI reports whether any active registration exposes modelID on image endpoints.
+func ModelSupportsImageAPI(modelID string) bool {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return false
+	}
+	if GetGlobalRegistry().modelSupportsImageAPI(modelID) {
+		return true
+	}
+	info := LookupStaticModelInfo(modelID)
+	return info != nil && (info.Type == OpenAIImageModelType || info.SupportsImageAPI)
+}
+
+func (r *ModelRegistry) modelSupportsImageAPI(modelID string) bool {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	reg := r.models[modelID]
+	if reg == nil {
+		return false
+	}
+	for clientID, infos := range r.clientModelInfos {
+		if _, registered := r.clientModels[clientID]; !registered {
+			continue
+		}
+		info := infos[modelID]
+		if info != nil && (info.Type == OpenAIImageModelType || info.SupportsImageAPI) {
+			return true
+		}
+	}
+	return len(reg.Providers) == 0 && reg.Info != nil && (reg.Info.Type == OpenAIImageModelType || reg.Info.SupportsImageAPI)
 }
 
 // ModelOverrideHeaders returns models.json config.override_header for the model, if any.
@@ -798,6 +833,28 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		}
 	}
 
+	return false
+}
+
+// ClientModelSupportsImageAPI reports whether a specific client registration
+// exposes modelID through OpenAI-compatible image endpoints.
+func (r *ModelRegistry) ClientModelSupportsImageAPI(clientID, modelID string) bool {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	infos := r.clientModelInfos[clientID]
+	for id, info := range infos {
+		if !strings.EqualFold(strings.TrimSpace(id), modelID) || info == nil {
+			continue
+		}
+		return info.Type == OpenAIImageModelType || info.SupportsImageAPI
+	}
 	return false
 }
 

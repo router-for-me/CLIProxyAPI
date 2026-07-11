@@ -44,6 +44,8 @@ const (
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// ImageExecutionMetadataKey marks requests dispatched from an image endpoint.
+	ImageExecutionMetadataKey = "image_execution"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

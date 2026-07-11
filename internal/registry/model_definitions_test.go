@@ -50,6 +50,42 @@ func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
 }
 
+func TestImageBuiltinsAdvertiseImageAPI(t *testing.T) {
+	tests := []struct {
+		name   string
+		models []*ModelInfo
+		ids    []string
+	}{
+		{
+			name:   "codex",
+			models: WithCodexBuiltins(nil),
+			ids:    []string{codexBuiltinImage15ModelID, codexBuiltinImageModelID},
+		},
+		{
+			name:   "xai",
+			models: WithXAIBuiltins(nil),
+			ids:    []string{xaiBuiltinImageModelID, xaiBuiltinImageQualityModelID},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			byID := make(map[string]*ModelInfo, len(tc.models))
+			for _, model := range tc.models {
+				if model != nil {
+					byID[model.ID] = model
+				}
+			}
+			for _, id := range tc.ids {
+				model := byID[id]
+				if model == nil || !model.SupportsImageAPI {
+					t.Fatalf("model %q = %+v, want image API support", id, model)
+				}
+			}
+		})
+	}
+}
+
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
 	registryRef := GetGlobalRegistry()
 	registryRef.RegisterClient("test-antigravity-websearch-route", "antigravity", []*ModelInfo{

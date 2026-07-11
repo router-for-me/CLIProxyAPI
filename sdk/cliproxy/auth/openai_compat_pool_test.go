@@ -10,6 +10,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 const openAICompatPoolProviderKey = "openai-compatible-pool"
@@ -185,17 +186,35 @@ func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []interna
 		Provider: openAICompatPoolProviderKey,
 		Status:   StatusActive,
 		Attributes: map[string]string{
-			"api_key":      "test-key",
-			"compat_name":  "pool",
-			"provider_key": openAICompatPoolProviderKey,
+			"api_key":       "test-key",
+			"compat_name":   "pool",
+			"provider_key":  openAICompatPoolProviderKey,
+			AttributeSource: "config:pool[test]",
 		},
 	}
 	if _, err := m.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
 
+	supportsImage := false
+	hasChatModel := false
+	for i := range models {
+		if models[i].Image {
+			supportsImage = true
+		} else {
+			hasChatModel = true
+		}
+	}
+	modelType := "openai-compatibility"
+	if supportsImage && !hasChatModel {
+		modelType = registry.OpenAIImageModelType
+	}
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth.ID, openAICompatPoolProviderKey, []*registry.ModelInfo{{ID: alias}})
+	reg.RegisterClient(auth.ID, openAICompatPoolProviderKey, []*registry.ModelInfo{{
+		ID:               alias,
+		Type:             modelType,
+		SupportsImageAPI: supportsImage,
+	}})
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth.ID)
 	})
@@ -215,6 +234,318 @@ func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.
 		payload = append(payload, chunk.Payload...)
 	}
 	return string(payload)
+}
+
+func TestManagerExecutePrefixedOpenAICompatImageModel(t *testing.T) {
+	const alias = "tenant/image-public"
+	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{ForceModelPrefix: true},
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:   "pool",
+			Prefix: "tenant",
+			Models: []internalconfig.OpenAICompatibilityModel{{
+				Name: "upstream-image", Alias: "image-public", Image: true,
+			}},
+		}},
+	})
+	m.RegisterExecutor(executor)
+	auth := &Auth{
+		ID:       "prefixed-image-auth",
+		Provider: openAICompatPoolProviderKey,
+		Prefix:   "tenant",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":       "test-key",
+			"compat_name":   "pool",
+			"provider_key":  openAICompatPoolProviderKey,
+			AttributeSource: "config:pool[test]",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, openAICompatPoolProviderKey, []*registry.ModelInfo{{
+		ID: alias, Type: registry.OpenAIImageModelType,
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	resp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.ImageExecutionMetadataKey: true},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := string(resp.Payload); got != "upstream-image" {
+		t.Fatalf("upstream model = %q, want upstream-image", got)
+	}
+}
+
+func TestManagerFiltersPrefixedOpenAICompatAliasPoolByEndpoint(t *testing.T) {
+	const alias = "tenant/public"
+	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+		Name:   "pool",
+		Prefix: "tenant",
+		Models: []internalconfig.OpenAICompatibilityModel{
+			{Name: "chat-upstream", Alias: "public"},
+			{Name: "image-upstream", Alias: "public", Image: true},
+		},
+	}}})
+	m.RegisterExecutor(executor)
+	auth := &Auth{
+		ID:       "prefixed-mixed-image-auth",
+		Provider: openAICompatPoolProviderKey,
+		Prefix:   "tenant",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAPIKey: "test-key",
+			"compat_name":   "pool",
+			"provider_key":  openAICompatPoolProviderKey,
+			AttributeSource: "config:pool[test]",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, openAICompatPoolProviderKey, []*registry.ModelInfo{{ID: alias, Type: registry.OpenAIImageModelType}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	chatCandidates, chatPooled, _, _ := m.preparedExecutionModelsWithAlias(auth, alias, false)
+	if len(chatCandidates) != 1 || chatCandidates[0] != "chat-upstream" || chatPooled {
+		t.Fatalf("chat candidates = %v, pooled = %t; want one non-pooled chat candidate", chatCandidates, chatPooled)
+	}
+	imageCandidates, imagePooled, _, _ := m.preparedExecutionModelsWithAlias(auth, alias, true)
+	if len(imageCandidates) != 1 || imageCandidates[0] != "image-upstream" || imagePooled {
+		t.Fatalf("image candidates = %v, pooled = %t; want one non-pooled image candidate", imageCandidates, imagePooled)
+	}
+
+	chatResp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("chat Execute() error = %v", err)
+	}
+	if got := string(chatResp.Payload); got != "chat-upstream" {
+		t.Fatalf("chat upstream model = %q, want chat-upstream", got)
+	}
+
+	imageResp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.ImageExecutionMetadataKey: true},
+	})
+	if err != nil {
+		t.Fatalf("image Execute() error = %v", err)
+	}
+	if got := string(imageResp.Payload); got != "image-upstream" {
+		t.Fatalf("image upstream model = %q, want image-upstream", got)
+	}
+
+	countResp, err := m.ExecuteCount(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("chat ExecuteCount() error = %v", err)
+	}
+	if got := string(countResp.Payload); got != "chat-upstream" {
+		t.Fatalf("count upstream model = %q, want chat-upstream", got)
+	}
+
+	stream, err := m.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.ImageExecutionMetadataKey: true},
+	})
+	if err != nil {
+		t.Fatalf("image ExecuteStream() error = %v", err)
+	}
+	if got := readOpenAICompatStreamPayload(t, stream); got != "image-upstream" {
+		t.Fatalf("stream upstream model = %q, want image-upstream", got)
+	}
+}
+
+func TestManagerImageExecutionExcludesChatOnlyAuthRegistrations(t *testing.T) {
+	const (
+		model         = "shared-image-model"
+		chatProvider  = "claude"
+		imageProvider = "openai-compatible-image"
+	)
+	selector := &trackingSelector{}
+	chatExecutor := &openAICompatPoolExecutor{id: chatProvider}
+	imageExecutor := &openAICompatPoolExecutor{id: imageProvider}
+	m := NewManager(nil, selector, nil)
+	m.SetConfig(&internalconfig.Config{
+		ClaudeKey: []internalconfig.ClaudeKey{{
+			APIKey: "chat-key",
+			Models: []internalconfig.ClaudeModel{{Name: model}},
+		}},
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "image",
+			Models: []internalconfig.OpenAICompatibilityModel{{
+				Name: "image-upstream", Alias: model, Image: true,
+			}},
+		}},
+	})
+	m.RegisterExecutor(chatExecutor)
+	m.RegisterExecutor(imageExecutor)
+
+	chatAuth := &Auth{
+		ID:       "chat-only-auth",
+		Provider: chatProvider,
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAPIKey: "chat-key",
+			AttributeSource: "config:claude[0]",
+		},
+	}
+	imageAuth := &Auth{
+		ID:       "image-auth",
+		Provider: imageProvider,
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAPIKey: "image-key",
+			AttributeSource: "config:openai-compatibility[image]",
+			"compat_name":   "image",
+			"provider_key":  imageProvider,
+		},
+	}
+	for _, auth := range []*Auth{chatAuth, imageAuth} {
+		if _, err := m.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(chatAuth.ID, chatProvider, []*registry.ModelInfo{{ID: model, Type: "openai-compatibility"}})
+	reg.RegisterClient(imageAuth.ID, imageProvider, []*registry.ModelInfo{{ID: model, Type: registry.OpenAIImageModelType, SupportsImageAPI: true}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(chatAuth.ID)
+		reg.UnregisterClient(imageAuth.ID)
+	})
+
+	resp, err := m.Execute(context.Background(), []string{chatProvider, imageProvider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.ImageExecutionMetadataKey: true},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := string(resp.Payload); got != "image-upstream" {
+		t.Fatalf("upstream model = %q, want image-upstream", got)
+	}
+	if got := selector.lastAuthID; len(got) != 1 || got[0] != imageAuth.ID {
+		t.Fatalf("selector candidates = %v, want only %s", got, imageAuth.ID)
+	}
+	if got := chatExecutor.ExecuteModels(); len(got) != 0 {
+		t.Fatalf("chat-only executor calls = %v, want none", got)
+	}
+
+	pluginScheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst},
+		handled: true,
+	}
+	m.SetPluginScheduler(pluginScheduler)
+	resp, err = m.Execute(context.Background(), []string{chatProvider, imageProvider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.ImageExecutionMetadataKey: true},
+	})
+	if err != nil {
+		t.Fatalf("Execute() with delegated scheduler error = %v", err)
+	}
+	if got := string(resp.Payload); got != "image-upstream" {
+		t.Fatalf("delegated scheduler upstream model = %q, want image-upstream", got)
+	}
+	if got := pluginScheduler.requests; len(got) != 1 || len(got[0].Candidates) != 1 || got[0].Candidates[0].ID != imageAuth.ID {
+		t.Fatalf("delegated scheduler candidates = %+v, want only %s", got, imageAuth.ID)
+	}
+}
+
+func TestManagerUsesEndpointSpecificForceMappingForSharedOpenAICompatAlias(t *testing.T) {
+	const alias = "shared"
+	executor := &openAICompatPoolExecutor{
+		id: openAICompatPoolProviderKey,
+		executePayloads: map[string][]byte{
+			"chat-upstream":  []byte(`{"model":"chat-upstream"}`),
+			"image-upstream": []byte(`{"model":"image-upstream"}`),
+		},
+		streamPayloads: map[string][]cliproxyexecutor.StreamChunk{
+			"chat-upstream":  {{Payload: []byte(`{"model":"chat-upstream"}`)}},
+			"image-upstream": {{Payload: []byte(`{"model":"image-upstream"}`)}},
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "chat-upstream", Alias: alias, ForceMapping: true},
+		{Name: "image-upstream", Alias: alias, Image: true},
+	}, executor)
+
+	chatResp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("chat Execute() error = %v", err)
+	}
+	if got := string(chatResp.Payload); got != `{"model":"shared"}` {
+		t.Fatalf("chat payload = %s, want force-mapped alias", got)
+	}
+
+	imageOpts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ImageExecutionMetadataKey: true}}
+	imageResp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, imageOpts)
+	if err != nil {
+		t.Fatalf("image Execute() error = %v", err)
+	}
+	if got := string(imageResp.Payload); got != `{"model":"image-upstream"}` {
+		t.Fatalf("image payload = %s, want upstream model without force mapping", got)
+	}
+
+	chatStream, err := m.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("chat ExecuteStream() error = %v", err)
+	}
+	if got := readOpenAICompatStreamPayload(t, chatStream); got != `{"model":"shared"}` {
+		t.Fatalf("chat stream payload = %s, want force-mapped alias", got)
+	}
+
+	imageStream, err := m.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, imageOpts)
+	if err != nil {
+		t.Fatalf("image ExecuteStream() error = %v", err)
+	}
+	if got := readOpenAICompatStreamPayload(t, imageStream); got != `{"model":"image-upstream"}` {
+		t.Fatalf("image stream payload = %s, want upstream model without force mapping", got)
+	}
+}
+
+func TestManagerMatchesDuplicateOpenAICompatUpstreamByEndpointKind(t *testing.T) {
+	orders := []struct {
+		name   string
+		models []internalconfig.OpenAICompatibilityModel
+	}{
+		{name: "chat first", models: []internalconfig.OpenAICompatibilityModel{
+			{Name: "shared-upstream", Alias: "shared"},
+			{Name: "shared-upstream", Alias: "shared", Image: true},
+		}},
+		{name: "image first", models: []internalconfig.OpenAICompatibilityModel{
+			{Name: "shared-upstream", Alias: "shared", Image: true},
+			{Name: "shared-upstream", Alias: "shared"},
+		}},
+	}
+
+	for _, tc := range orders {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey}
+			m := newOpenAICompatPoolTestManager(t, "shared", tc.models, executor)
+
+			for _, test := range []struct {
+				name     string
+				metadata map[string]any
+			}{
+				{name: "chat"},
+				{name: "image", metadata: map[string]any{cliproxyexecutor.ImageExecutionMetadataKey: true}},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					resp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: "shared"}, cliproxyexecutor.Options{Metadata: test.metadata})
+					if err != nil {
+						t.Fatalf("Execute() error = %v", err)
+					}
+					if got := string(resp.Payload); got != "shared-upstream" {
+						t.Fatalf("upstream model = %q, want shared-upstream", got)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {

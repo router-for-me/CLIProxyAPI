@@ -66,6 +66,26 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 	}
 }
 
+func TestBuildOpenAICompatibilityConfigModelsInheritsSuffixedStaticThinking(t *testing.T) {
+	static := registry.LookupStaticModelInfo("gpt-5.6-luna")
+	if static == nil || static.Thinking == nil {
+		t.Fatal("gpt-5.6-luna static thinking metadata is unavailable")
+	}
+	models := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Name: "compat",
+		Models: []config.OpenAICompatibilityModel{{
+			Name:  "gpt-5.6-luna(high)",
+			Alias: "public-luna",
+		}},
+	})
+	if len(models) != 1 || models[0].Thinking == nil {
+		t.Fatalf("models = %+v, want inherited static thinking", models)
+	}
+	if got, want := len(models[0].Thinking.Levels), len(static.Thinking.Levels); got != want {
+		t.Fatalf("thinking levels = %v, want %v", models[0].Thinking.Levels, static.Thinking.Levels)
+	}
+}
+
 func joinModalities(modalities []string) string {
 	if len(modalities) == 0 {
 		return ""
