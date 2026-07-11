@@ -1,0 +1,181 @@
+# Claude Code with native Claude and Codex models on Windows
+
+## Routing contract
+
+The `claude` PowerShell function starts normal Claude Code with permission
+prompts disabled. It does not change provider or compaction environment.
+
+The `claude-codex` function points Claude Code at CLIProxyAPI and uses:
+
+| Claude class | Routed model |
+| --- | --- |
+| Opus | `gpt-5.6-sol(xhigh)` |
+| Sonnet | `gpt-5.6-terra(xhigh)` |
+| Haiku | `gpt-5.6-luna(xhigh)` |
+| Fable 5 selected through `/model` | native `claude-fable-5` |
+
+The wrapper temporarily removes Claude Code's client-side compaction overrides
+only for `claude-codex`. This lets the proxy trigger Codex-native compaction at
+240,000 logical input tokens and enforce a 272,000-token hard boundary. Normal
+`claude` retains its native Claude/Fable context and compaction behavior.
+
+When native compaction is enabled, the Anthropic `/v1/models` response reports
+a virtual 1,000,000-token input window for models supplied by the Codex
+provider. This delays Claude Code's client compaction while the proxy repeatedly
+compacts at the real 240,000-token trigger. Native Claude/Fable entries keep
+their provider-reported window, so selecting Fable in the same `/model` picker
+still uses Claude Code's normal client compaction.
+
+Do not set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` globally for this hybrid setup. A
+global value would also shrink the native Fable lane.
+
+## Proxy configuration
+
+Add this block to the canonical YAML configuration:
+
+```yaml
+codex:
+  native-compaction:
+    enabled: true
+    trigger-tokens: 240000
+    context-window: 272000
+    claude-client-context-window: 1000000
+    preserve-recent-tokens: 32000
+    retained-message-tokens: 64000
+    state-ttl: 168h
+```
+
+`claude-client-context-window` is picker metadata, not the upstream Codex
+limit. Values at or below zero use the conservative 1,000,000-token default.
+CLIProxyAPI still triggers native compaction at `trigger-tokens` and enforces
+`context-window`. The override applies only to models currently supplied by
+the Codex provider; native Claude/Fable and generic OpenAI-compatible providers
+are unchanged.
+
+Claude Code may impose an internal maximum or change how it interprets model
+metadata in a future release. In that case this setting remains best-effort;
+the proxy's native compaction and hard boundary continue to apply, but Claude
+Code could still compact earlier than the advertised value.
+
+The proxy first uses Codex's current Responses v2 protocol: it appends
+`{"type":"compaction_trigger"}` to an otherwise normal `/responses` request
+and advertises `remote_compaction_v2`. It accepts the result only after one
+opaque compaction item and `response.completed` are observed. An unsupported v2
+request falls back to `/responses/compact`. Transient transport or stream
+failures retry v2 once and never permanently downgrade a conversation.
+
+The proxy retains a recent exact tail outside compaction so the user's active
+turn and tool-call pairs are not split. After compaction, later Claude Code
+requests are rewritten as the saved replacement history plus only the exact
+post-boundary delta. This produces one expected cache-root transition at a
+successful compaction, then restores append-only cache continuity.
+
+Claude-originated Codex turns also reuse the most recent valid encrypted
+reasoning item. Replay is inserted before compaction is planned, so it is
+either included once in the summarized prefix or kept once in the exact tail.
+The durable source boundary is still calculated only from client-owned history;
+the transient replay item never becomes a source hash or a second append.
+Rejected encrypted reasoning is tombstoned per Codex credential and session,
+without deleting the auth-independent replay cache used for failover. Companion
+tool calls remain available so recovery cannot orphan a tool output.
+
+If native compaction has a transient failure below 272,000 tokens, the current
+valid lane is sent and a warning is logged. If Codex rejects encrypted state,
+the proxy atomically retires the suspect summary, rebuilds from authoritative
+Claude history, suppresses only implicated reasoning, preserves tool pairs, and
+retries once. A summary rejected by the following generation is treated as the
+first suspect so unrelated recent reasoning is not blacklisted. At or above the
+hard boundary the request fails explicitly instead of silently discarding
+history. Compaction state is committed only after a validated terminal response
+and an atomic durable write. The state files live under
+`<auth-dir>\state\codex-native-compaction\claude-code-compaction-v1-*.json`;
+they are versioned, checksum-verified, and expire with `state-ttl`. The state
+directory and files receive a user-only ACL on Windows (and `0700`/`0600`
+permissions on Unix-like systems); periodic sweeps remove expired valid lane
+files while leaving unrelated or corrupt evidence untouched. Do not delete
+active files during a Claude Code conversation: they preserve the exact
+post-compaction cache root across proxy restarts.
+
+## Authentication and the `/model` picker
+
+Both Codex and Claude OAuth must be active in the same CLIProxyAPI instance.
+Run the interactive logins from the fork binary when either provider has no
+usable auth file:
+
+```powershell
+C:\Code\CLIProxyAPI\bin\cli-proxy-api.exe -codex-login
+C:\Code\CLIProxyAPI\bin\cli-proxy-api.exe -claude-login
+```
+
+Claude OAuth is what allows native Fable selected inside `/model` to remain on
+Claude. A stale Claude auth file produces `503 auth_unavailable` even when the
+three default Claude classes route successfully to Codex.
+
+Optional extra picker labels can be added without replacing the native class
+mapping:
+
+```yaml
+oauth-model-alias:
+  codex:
+    - name: gpt-5.6-sol
+      alias: claude-codex-opus
+      fork: true
+    - name: gpt-5.6-terra
+      alias: claude-codex-sonnet
+      fork: true
+    - name: gpt-5.6-luna
+      alias: claude-codex-haiku
+      fork: true
+  claude:
+    - name: claude-fable-5
+      alias: claude-native-fable
+      fork: true
+```
+
+Leave `force-mapping` disabled. The class environment variables remain the
+primary Opus/Sonnet/Haiku mapping.
+
+The installed PowerShell launcher accepts an existing listener on port 8317
+only when its executable path is the fork binary and both the health endpoint
+and authenticated observability endpoint respond successfully. An unrelated
+or unhealthy listener fails explicitly instead of being mistaken for the
+proxy.
+
+## Observability
+
+Every upstream attempt emits one metadata-only `request_event` line with
+provider, resolved model, operation, input/output/cache tokens, estimated cost,
+failure state, and latency.
+
+Inference failures that happen before an executor can publish usage (for
+example `auth_unavailable` or request validation failures) produce one
+unpriced synthetic event. A per-request publication marker prevents a normal
+executor record from being counted a second time.
+
+- A reported cache miss is red.
+- A compaction is magenta unless the same attempt is a cache miss, in which case
+  red takes precedence.
+- Redirected output and file logs never receive ANSI escape sequences.
+
+The fixed TUI row shows request count, input/output tokens, cache misses,
+successful compactions, and estimated cost. Failed compaction attempts remain in
+the event log and are exposed separately as `compaction_attempts` by:
+
+```text
+GET /v0/management/observability
+```
+
+When file logging is disabled, a remote TUI still populates its Logs tab through
+the endpoint's cursor-based metadata-only event feed. A bounded-buffer gap or
+server restart is shown explicitly instead of silently dropping events. This
+keeps colored request tracking available without persisting prompt-bearing
+error logs. The cost row shows `partial` when any request is unpriced and `—`
+when no priced request exists; values are estimates, not subscription charges.
+Fable cache writes use the provider's reported TTL breakdown: 5-minute writes
+are estimated at `$12.50/MTok`, 1-hour writes at `$20/MTok`, and an
+unclassified remainder is conservatively estimated at the 1-hour rate.
+
+Run `-tui -standalone` for an all-in-one foreground instance. When attaching a
+TUI to the background proxy, configure a loopback-only management secret. This
+fork lets the pure TUI client inherit `MANAGEMENT_PASSWORD` when `-password` is
+omitted, so the secret does not need to appear in process arguments or logs.

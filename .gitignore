@@ -30,6 +30,7 @@ auths/*
 
 # Documentation
 docs/*
+!docs/windows-claude-code-hybrid.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
