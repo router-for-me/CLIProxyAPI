@@ -1320,6 +1320,8 @@ func TestNormalizeXAIToolChoiceForTools_WebSearchObjectBecomesRequired(t *testin
 		{name: "preview alias", toolChoice: `{"type":"web_search_preview"}`, want: "required"},
 		{name: "single allowed web search", toolChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search"}]}`, want: "required"},
 		{name: "optional allowed web search", toolChoice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"}]}`, want: "auto"},
+		{name: "duplicate alias allowed web search", toolChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search_preview"},{"type":"web_search_preview_2025_03_11"}]}`, want: "required"},
+		{name: "optional duplicate alias allowed web search", toolChoice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"},{"type":"web_search_2025_08_26"}]}`, want: "auto"},
 	}
 
 	for _, tt := range tests {
@@ -1391,6 +1393,7 @@ func TestNormalizeXAIToolChoiceForTools_LeavesOtherObjectsUntouched(t *testing.T
 		`{"type":"function","name":"lookup"}`,
 		`{"type":"allowed_tools","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}]}`,
 		`{"type":"allowed_tools","mode":"future","tools":[{"type":"web_search"}]}`,
+		`{"type":"allowed_tools","mode":"required","tools":[]}`,
 	}
 	for _, toolChoice := range tests {
 		body := []byte(`{"model":"grok-4","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}],"tool_choice":` + toolChoice + `,"input":"hi"}`)

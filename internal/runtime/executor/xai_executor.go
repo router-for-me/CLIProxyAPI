@@ -1445,9 +1445,17 @@ func xaiToolChoiceWebSearchMode(toolChoice gjson.Result) (string, bool) {
 		return "", false
 	}
 	allowedTools := toolChoice.Get("tools")
-	if !allowedTools.IsArray() || len(allowedTools.Array()) != 1 ||
-		!xaiWebSearchToolTypeAlias(allowedTools.Get("0.type").String()) {
+	if !allowedTools.IsArray() {
 		return "", false
+	}
+	allowedEntries := allowedTools.Array()
+	if len(allowedEntries) == 0 {
+		return "", false
+	}
+	for _, allowedEntry := range allowedEntries {
+		if !xaiWebSearchToolTypeAlias(allowedEntry.Get("type").String()) {
+			return "", false
+		}
 	}
 	switch strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String())) {
 	case "auto":
