@@ -1997,7 +1997,7 @@ func TestXAIResolveChatRouteSourceAndFallback(t *testing.T) {
 		wantFallback bool
 	}{
 		{
-			name: "automatic paid oauth allows entitlement fallback",
+			name: "automatic paid oauth free model allows entitlement fallback",
 			auth: &cliproxyauth.Auth{
 				Attributes: map[string]string{"auth_kind": "oauth"},
 				Metadata:   map[string]any{"access_token": paidToken},
@@ -2006,6 +2006,16 @@ func TestXAIResolveChatRouteSourceAndFallback(t *testing.T) {
 			wantURL:      xaiauth.DefaultAPIBaseURL,
 			wantSource:   xaiRouteSourceTierHint,
 			wantFallback: true,
+		},
+		{
+			name: "automatic paid oauth standard-only model cannot fallback",
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{"auth_kind": "oauth"},
+				Metadata:   map[string]any{"access_token": paidToken},
+			},
+			model:      "grok-4.3",
+			wantURL:    xaiauth.DefaultAPIBaseURL,
+			wantSource: xaiRouteSourceTierHint,
 		},
 		{
 			name: "recognized zero tier uses cli without retry",
@@ -2349,6 +2359,42 @@ func TestXAIExecutorGenericForbiddenDoesNotFallbackAndPreservesBody(t *testing.T
 	statusError, ok := err.(interface{ StatusCode() int })
 	if !ok || statusError.StatusCode() != http.StatusForbidden {
 		t.Fatalf("Execute() error = %v, want status 403", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("upstream request count = %d, want 1", requestCount)
+	}
+}
+
+func TestXAIExecutorStandardOnlyModelPaymentErrorDoesNotFallback(t *testing.T) {
+	paidToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(`{"tier":4}`)) + ".signature"
+	const responseBody = `{"error":{"code":"payment_required","message":"standard-api-billing-marker"}}`
+	requestCount := 0
+	roundTripper := xaiTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		return &http.Response{
+			StatusCode: http.StatusPaymentRequired,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(roundTripper))
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"access_token": paidToken},
+	}
+
+	_, err := NewXAIExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":"hello"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err == nil || !strings.Contains(err.Error(), "standard-api-billing-marker") {
+		t.Fatalf("Execute() error = %v, want original 402 body marker", err)
+	}
+	statusError, ok := err.(interface{ StatusCode() int })
+	if !ok || statusError.StatusCode() != http.StatusPaymentRequired {
+		t.Fatalf("Execute() error = %v, want status 402", err)
 	}
 	if requestCount != 1 {
 		t.Fatalf("upstream request count = %d, want 1", requestCount)

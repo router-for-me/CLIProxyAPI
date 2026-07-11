@@ -958,7 +958,7 @@ func xaiResolveChatRoute(auth *cliproxyauth.Auth, model string) xaiChatRouteDeci
 		return xaiChatRouteDecision{
 			baseURL:                  xaiauth.DefaultAPIBaseURL,
 			source:                   xaiRouteSourceTierHint,
-			allowEntitlementFallback: true,
+			allowEntitlementFallback: strings.EqualFold(strings.TrimSpace(model), xaiauth.FreeOAuthModel),
 		}
 	case xaiauth.StandardAPIHintNo:
 		return xaiChatRouteDecision{baseURL: xaiauth.CLIChatProxyBaseURL, source: xaiRouteSourceTierHint}
