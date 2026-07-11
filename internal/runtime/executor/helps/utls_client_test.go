@@ -29,6 +29,11 @@ func TestFallbackRoundTripperRoutesHosts(t *testing.T) {
 			wantProtected: true,
 		},
 		{
+			name:          "anthropic mixed case uses utls transport",
+			host:          "API.anthropic.com",
+			wantProtected: true,
+		},
+		{
 			name: "ordinary host uses fallback transport",
 			host: "example.com",
 		},
@@ -49,7 +54,7 @@ func TestFallbackRoundTripperRoutesHosts(t *testing.T) {
 				}),
 			}
 
-			_, protected := utlsProtectedHosts[testCase.host]
+			_, protected := utlsProtectedHosts[strings.ToLower(testCase.host)]
 			if protected != testCase.wantProtected {
 				t.Fatalf("utls protected status for %q = %t, want %t", testCase.host, protected, testCase.wantProtected)
 			}
