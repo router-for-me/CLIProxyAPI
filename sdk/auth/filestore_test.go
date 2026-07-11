@@ -158,6 +158,42 @@ func TestFileTokenStoreListExpandsPluginMultiAuths(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreListAppliesSourceDisabledToPluginMultiAuths(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "geminicli.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"gemini-cli","disabled":true}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	RegisterPluginAuthParser(fileStoreMultiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{
+			{ID: "geminicli.json", Provider: "gemini-cli", Metadata: map[string]any{"type": "gemini-cli"}},
+			{ID: "geminicli-project-a.json", Provider: "gemini-cli", Metadata: map[string]any{"type": "gemini-cli", "project_id": "project-a"}},
+		}, true, nil
+	}))
+	t.Cleanup(func() {
+		RegisterPluginAuthParser(nil)
+	})
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(context.Background())
+	if errList != nil {
+		t.Fatalf("List() error = %v", errList)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("List() len = %d, want two plugin auths", len(auths))
+	}
+	for _, auth := range auths {
+		if !auth.Disabled || auth.Status != cliproxyauth.StatusDisabled {
+			t.Fatalf("auth %s disabled/status = %v/%s, want disabled", auth.ID, auth.Disabled, auth.Status)
+		}
+		if got, _ := auth.Metadata["disabled"].(bool); !got {
+			t.Fatalf("auth %s metadata disabled = %#v, want true", auth.ID, auth.Metadata["disabled"])
+		}
+	}
+}
+
 func TestFileTokenStoreListPluginHandledEmptySuppressesBuiltin(t *testing.T) {
 	baseDir := t.TempDir()
 	path := filepath.Join(baseDir, "codex.json")

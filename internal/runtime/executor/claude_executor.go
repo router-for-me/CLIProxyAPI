@@ -245,6 +245,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeSamplingForUpstream(body)
+	// Claude OAuth (and this executor's redact-thinking beta) returns signature-only
+	// thinking blocks unless display is set to "summarized".
+	body = ensureClaudeThinkingDisplay(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -435,6 +438,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeSamplingForUpstream(body)
+	// Claude OAuth (and this executor's redact-thinking beta) returns signature-only
+	// thinking blocks unless display is set to "summarized".
+	body = ensureClaudeThinkingDisplay(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -889,6 +895,27 @@ func normalizeClaudeSamplingForUpstream(body []byte) []byte {
 		body, _ = sjson.DeleteBytes(body, "top_k")
 	}
 	return body
+}
+
+// ensureClaudeThinkingDisplay defaults thinking.display to "summarized" when thinking
+// is active and the client did not set display. Without this, Claude backends that
+// enable redact-thinking return signature-only thinking blocks (empty thinking text).
+// Explicit client values such as "omitted" are preserved.
+func ensureClaudeThinkingDisplay(body []byte) []byte {
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	switch thinkingType {
+	case "enabled", "adaptive", "auto":
+	default:
+		return body
+	}
+	if display := strings.TrimSpace(gjson.GetBytes(body, "thinking.display").String()); display != "" {
+		return body
+	}
+	out, err := sjson.SetBytes(body, "thinking.display", "summarized")
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 type compositeReadCloser struct {

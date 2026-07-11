@@ -114,7 +114,7 @@ func isResponsesWebsocketUpgrade(req *http.Request) bool {
 	if req == nil || req.URL == nil {
 		return false
 	}
-	if req.URL.Path != "/v1/responses" {
+	if req.URL.Path != "/v1/responses" && req.URL.Path != "/backend-api/codex/responses" {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(req.Header.Get("Upgrade")), "websocket")

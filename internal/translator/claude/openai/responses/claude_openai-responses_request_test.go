@@ -321,3 +321,33 @@ func testGPTResponsesReasoningSignature() string {
 	}
 	return base64.URLEncoding.EncodeToString(payload)
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_PreservesContentPartCacheControl(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "cached prefix", "cache_control": {"type": "ephemeral"}},
+					{"type": "input_text", "text": "fresh question"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	content := resultJSON.Get("messages.0.content")
+	if !content.IsArray() {
+		t.Fatalf("expected content array when cache_control is present, got %s", result)
+	}
+	if got := content.Get("0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content.0.cache_control.type = %q, want ephemeral. Output: %s", got, result)
+	}
+	if content.Get("1.cache_control").Exists() {
+		t.Fatalf("content.1 should not have cache_control. Output: %s", result)
+	}
+}

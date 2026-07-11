@@ -293,7 +293,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.Observe(helps.ParseOpenAIStreamUsage(line))
+			streamUsage.ObserveOpenAIStream(line)
 			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range chunks {
 				select {
