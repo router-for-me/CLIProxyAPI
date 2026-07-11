@@ -12,54 +12,6 @@ import (
 
 var chatMarkdownURLCitationPattern = regexp.MustCompile(`\[(\[?[^\]\r\n]+\]?)\]\((https?://[^)\s]+)\)`)
 
-func normalizeChatWebSearchRequest(rawJSON []byte) []byte {
-	tools := gjson.GetBytes(rawJSON, "tools")
-	hasWebSearchTool := false
-	if tools.IsArray() {
-		for i, tool := range tools.Array() {
-			normalizedType := normalizeChatWebSearchToolType(tool.Get("type").String())
-			if normalizedType == "" {
-				continue
-			}
-			hasWebSearchTool = true
-			rawJSON, _ = sjson.SetBytes(rawJSON, "tools."+strconv.Itoa(i)+".type", normalizedType)
-		}
-	}
-
-	synthesizedWebSearchTool := false
-	if webSearchOptions := gjson.GetBytes(rawJSON, "web_search_options"); webSearchOptions.IsObject() && !hasWebSearchTool {
-		if !gjson.GetBytes(rawJSON, "tools").IsArray() {
-			rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools", []byte(`[]`))
-		}
-		webSearchTool := []byte(`{"type":"web_search"}`)
-		if contextSize := webSearchOptions.Get("search_context_size"); contextSize.Exists() {
-			webSearchTool, _ = sjson.SetBytes(webSearchTool, "search_context_size", contextSize.Value())
-		}
-		if userLocation := webSearchOptions.Get("user_location"); userLocation.IsObject() {
-			responsesLocation := userLocation
-			if approximate := userLocation.Get("approximate"); approximate.IsObject() {
-				responsesLocation = approximate
-			}
-			location := []byte(responsesLocation.Raw)
-			location, _ = sjson.SetBytes(location, "type", "approximate")
-			webSearchTool, _ = sjson.SetRawBytes(webSearchTool, "user_location", location)
-		}
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools.-1", webSearchTool)
-		synthesizedWebSearchTool = true
-	}
-
-	toolChoice := gjson.GetBytes(rawJSON, "tool_choice")
-	if toolChoice.IsObject() {
-		if normalizedType := normalizeChatWebSearchToolType(toolChoice.Get("type").String()); normalizedType != "" {
-			rawJSON, _ = sjson.SetBytes(rawJSON, "tool_choice.type", normalizedType)
-		}
-	} else if synthesizedWebSearchTool && !toolChoice.Exists() && len(gjson.GetBytes(rawJSON, "tools").Array()) == 1 {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "tool_choice", "required")
-	}
-
-	return rawJSON
-}
-
 func normalizeChatWebSearchToolType(toolType string) string {
 	switch strings.ToLower(strings.TrimSpace(toolType)) {
 	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
@@ -101,6 +53,9 @@ func addChatWebSearchAnnotations(requestRawJSON, responseRawJSON []byte) []byte 
 }
 
 func chatRequestUsesWebSearch(rawJSON []byte) bool {
+	if gjson.GetBytes(rawJSON, "web_search_options").IsObject() {
+		return true
+	}
 	for _, tool := range gjson.GetBytes(rawJSON, "tools").Array() {
 		if normalizeChatWebSearchToolType(tool.Get("type").String()) != "" {
 			return true

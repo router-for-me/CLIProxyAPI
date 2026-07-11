@@ -222,9 +222,14 @@ type Manager struct {
 	executors     map[string]ProviderExecutor
 	selector      Selector
 	hook          Hook
-	mu            sync.RWMutex
-	auths         map[string]*Auth
-	scheduler     *authScheduler
+	// authRefreshCallback observes successful credential refreshes after the
+	// refreshed auth has been committed to the manager. It is copied while
+	// holding mu and invoked without mu so callbacks may safely inspect manager
+	// state or refresh scheduler/model registrations.
+	authRefreshCallback func(context.Context, *Auth, *Auth)
+	mu                  sync.RWMutex
+	auths               map[string]*Auth
+	scheduler           *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
@@ -296,6 +301,18 @@ func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
 	}
 	m.mu.Lock()
 	m.pluginScheduler = scheduler
+	m.mu.Unlock()
+}
+
+// SetAuthRefreshCallback installs a callback invoked after a refreshed auth has
+// been successfully committed to the manager. The callback is not invoked for
+// ordinary Register or Update calls.
+func (m *Manager) SetAuthRefreshCallback(callback func(context.Context, *Auth, *Auth)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.authRefreshCallback = callback
 	m.mu.Unlock()
 }
 
@@ -2175,6 +2192,10 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.updateAuth(ctx, auth, nil)
+}
+
+func (m *Manager) updateAuth(ctx context.Context, auth *Auth, afterCommit func(context.Context, *Auth, *Auth)) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -2184,6 +2205,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.mu.Unlock()
 		return nil, nil
 	}
+	previous := existing.Clone()
 	if !auth.indexAssigned && auth.Index == "" {
 		auth.Index = existing.Index
 		auth.indexAssigned = existing.indexAssigned
@@ -2203,21 +2225,62 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
-	m.auths[auth.ID] = authClone
+	storedAuth := authClone
+	if afterCommit != nil {
+		// Keep the refreshed credential visible for model registration while
+		// preventing any selector (including a scheduler self-rebuild) from
+		// dispatching it before the entitlement snapshot is ready.
+		storedAuth = authClone.Clone()
+		storedAuth.refreshing = true
+	}
+	m.auths[auth.ID] = storedAuth
 	m.mu.Unlock()
+	if afterCommit != nil {
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(storedAuth)
+		}
+		afterCommit(ctx, previous, authClone.Clone())
+
+		m.mu.Lock()
+		current, stillCurrent := m.auths[auth.ID]
+		if !stillCurrent || current == nil {
+			m.mu.Unlock()
+			return nil, nil
+		}
+		if current != storedAuth {
+			committed := current.Clone()
+			m.mu.Unlock()
+			return committed, nil
+		}
+		committed := current.Clone()
+		committed.refreshing = false
+		m.auths[auth.ID] = committed
+		authClone = committed
+		m.mu.Unlock()
+	}
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
-	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	m.queueRefreshReschedule(authClone.ID)
+	_ = m.persist(ctx, authClone)
+	m.hook.OnAuthUpdated(ctx, authClone.Clone())
 	if clearedCooldown {
 		m.persistCooldownStates(ctx)
 	}
-	return auth.Clone(), nil
+	return authClone.Clone(), nil
+}
+
+func (m *Manager) updateRefreshedAuth(ctx context.Context, auth *Auth) (*Auth, error) {
+	if m == nil || auth == nil || auth.ID == "" {
+		return nil, nil
+	}
+	m.mu.RLock()
+	callback := m.authRefreshCallback
+	m.mu.RUnlock()
+	return m.updateAuth(ctx, auth, callback)
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -5914,7 +5977,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.Update(ctx, updated)
+	saved, errUpdate := m.updateRefreshedAuth(ctx, updated)
 	for _, model := range modelsToResume {
 		registry.GetGlobalRegistry().ResumeClientModel(id, model)
 	}

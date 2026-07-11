@@ -98,6 +98,9 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// refreshing temporarily removes this auth from selection while a refreshed
+	// credential's entitlement-dependent registry state is rebuilt.
+	refreshing bool `json:"-"`
 }
 
 const (

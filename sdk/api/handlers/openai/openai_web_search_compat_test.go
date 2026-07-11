@@ -2,67 +2,87 @@ package openai
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
 
-func TestNormalizeChatWebSearchRequestOptions(t *testing.T) {
-	input := []byte(`{
-		"model":"grok-4.5",
-		"messages":[{"role":"user","content":"Search current news"}],
-		"web_search_options":{
-			"search_context_size":"high",
-			"user_location":{"type":"approximate","approximate":{"city":"Shanghai","country":"CN"}}
-		}
-	}`)
-
-	out := normalizeChatWebSearchRequest(input)
-	tools := gjson.GetBytes(out, "tools").Array()
-	if len(tools) != 1 {
-		t.Fatalf("tools length = %d, want 1: %s", len(tools), string(out))
-	}
-	tool := tools[0]
-	if got := tool.Get("type").String(); got != "web_search" {
-		t.Fatalf("tool type = %q, want web_search: %s", got, string(out))
-	}
-	if got := tool.Get("search_context_size").String(); got != "high" {
-		t.Fatalf("search_context_size = %q, want high: %s", got, string(out))
-	}
-	if got := tool.Get("user_location.city").String(); got != "Shanghai" {
-		t.Fatalf("user_location.city = %q, want Shanghai: %s", got, string(out))
-	}
-	if tool.Get("user_location.approximate").Exists() {
-		t.Fatalf("Chat user_location should be flattened for Responses: %s", string(out))
-	}
-	if got := gjson.GetBytes(out, "tool_choice").String(); got != "required" {
-		t.Fatalf("tool_choice = %q, want required: %s", got, string(out))
-	}
+type chatPassthroughCaptureExecutor struct {
+	payload []byte
 }
 
-func TestNormalizeChatWebSearchRequestAvoidsDuplicateAndNormalizesAliases(t *testing.T) {
-	input := []byte(`{
-		"messages":[{"role":"user","content":"Search"}],
-		"tools":[{"type":"web_search_preview_2025_03_11"}],
-		"tool_choice":{"type":"web_search_2025_08_26"},
-		"web_search_options":{"search_context_size":"low"}
-	}`)
+func (e *chatPassthroughCaptureExecutor) Identifier() string { return "chat-passthrough-provider" }
 
-	out := normalizeChatWebSearchRequest(input)
-	tools := gjson.GetBytes(out, "tools").Array()
-	if len(tools) != 1 {
-		t.Fatalf("tools length = %d, want 1: %s", len(tools), string(out))
+func (e *chatPassthroughCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	e.payload = bytes.Clone(req.Payload)
+	return coreexecutor.Response{Payload: []byte(`{"id":"chatcmpl_test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)}, nil
+}
+
+func (e *chatPassthroughCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *chatPassthroughCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *chatPassthroughCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *chatPassthroughCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestChatCompletionsPreservesWebSearchOptionsForProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &chatPassthroughCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "chat-passthrough-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
 	}
-	if got := tools[0].Get("type").String(); got != "web_search" {
-		t.Fatalf("tool type = %q, want web_search: %s", got, string(out))
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "passthrough-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	handler := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/chat/completions", handler.ChatCompletions)
+	requestBody := `{"model":"passthrough-model","messages":[{"role":"user","content":"Search"}],"web_search_options":{"search_context_size":"high","user_location":{"type":"approximate","approximate":{"city":"Shanghai"}}}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(requestBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "web_search" {
-		t.Fatalf("tool_choice.type = %q, want web_search: %s", got, string(out))
+	if !bytes.Equal(executor.payload, []byte(requestBody)) {
+		t.Fatalf("provider payload changed:\n got: %s\nwant: %s", string(executor.payload), requestBody)
+	}
+	if !gjson.GetBytes(executor.payload, "web_search_options").IsObject() {
+		t.Fatalf("web_search_options missing: %s", string(executor.payload))
+	}
+	if gjson.GetBytes(executor.payload, "tools").Exists() || gjson.GetBytes(executor.payload, "tool_choice").Exists() {
+		t.Fatalf("xAI-only search fields leaked into passthrough payload: %s", string(executor.payload))
 	}
 }
 
 func TestAddChatWebSearchAnnotations(t *testing.T) {
-	request := []byte(`{"tools":[{"type":"web_search"}]}`)
+	request := []byte(`{"web_search_options":{"search_context_size":"medium"}}`)
 	response := []byte(`{"choices":[{"message":{"role":"assistant","content":"你好 [[1]](https://example.com/source) and [Second](https://example.org/two)"}}]}`)
 
 	out := addChatWebSearchAnnotations(request, response)

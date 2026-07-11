@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -827,6 +828,13 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	originalPayload := bytes.Clone(originalPayloadSource)
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
+	if from == sdktranslator.FormatOpenAI {
+		// web_search_options is a Chat Completions extension. Translate it only
+		// inside the xAI path so OpenAI-compatible providers receive the client
+		// payload unchanged.
+		originalTranslated = normalizeXAIChatWebSearchRequest(originalTranslated, originalPayload)
+		body = normalizeXAIChatWebSearchRequest(body, req.Payload)
+	}
 
 	var err error
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
@@ -1088,6 +1096,58 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	return body
 }
 
+func normalizeXAIChatWebSearchRequest(body, chatPayload []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	hasWebSearchTool := false
+	if tools.IsArray() {
+		for i, tool := range tools.Array() {
+			if xaiWebSearchToolTypeAlias(tool.Get("type").String()) {
+				hasWebSearchTool = true
+				body, _ = sjson.SetBytes(body, "tools."+strconv.Itoa(i)+".type", xaiWebSearchToolType)
+			}
+		}
+	}
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if toolChoice.IsObject() && xaiWebSearchToolTypeAlias(toolChoice.Get("type").String()) {
+		body, _ = sjson.SetBytes(body, "tool_choice.type", xaiWebSearchToolType)
+	}
+
+	webSearchOptions := gjson.GetBytes(chatPayload, "web_search_options")
+	if !webSearchOptions.IsObject() {
+		return body
+	}
+
+	// The translated Responses payload must not retain the Chat-only field.
+	if gjson.GetBytes(body, "web_search_options").Exists() {
+		body, _ = sjson.DeleteBytes(body, "web_search_options")
+	}
+	if hasWebSearchTool {
+		return body
+	}
+
+	if !tools.IsArray() {
+		body, _ = sjson.SetRawBytes(body, "tools", []byte(`[]`))
+	}
+	webSearchTool := []byte(`{"type":"web_search"}`)
+	if contextSize := webSearchOptions.Get("search_context_size"); contextSize.Exists() {
+		webSearchTool, _ = sjson.SetBytes(webSearchTool, "search_context_size", contextSize.Value())
+	}
+	if userLocation := webSearchOptions.Get("user_location"); userLocation.IsObject() {
+		responsesLocation := userLocation
+		if approximate := userLocation.Get("approximate"); approximate.IsObject() {
+			responsesLocation = approximate
+		}
+		location := []byte(responsesLocation.Raw)
+		location, _ = sjson.SetBytes(location, "type", "approximate")
+		webSearchTool, _ = sjson.SetRawBytes(webSearchTool, "user_location", location)
+	}
+	body, _ = sjson.SetRawBytes(body, "tools.-1", webSearchTool)
+	if !gjson.GetBytes(body, "tool_choice").Exists() && len(gjson.GetBytes(body, "tools").Array()) == 1 {
+		body, _ = sjson.SetBytes(body, "tool_choice", "required")
+	}
+	return body
+}
+
 func normalizeXAITools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
@@ -1165,28 +1225,69 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	}
 
 	// xAI Build currently rejects Responses-style object choices for built-in
-	// web search. Preserve the required-search intent using the supported
-	// string form. Leave function and mixed allowed-tools choices untouched.
+	// web search. Preserve the choice using the supported string form, while
+	// filtering the top-level tools to the same search-only permission set.
+	// Leave function and mixed allowed-tools choices untouched.
 	toolChoice := gjson.GetBytes(body, "tool_choice")
-	if xaiToolChoiceRequiresWebSearch(toolChoice) {
-		body, _ = sjson.SetBytes(body, "tool_choice", "required")
+	if mode, ok := xaiToolChoiceWebSearchMode(toolChoice); ok {
+		filteredTools := []byte(`[]`)
+		filteredCount := 0
+		for _, tool := range tools.Array() {
+			if !xaiWebSearchToolTypeAlias(tool.Get("type").String()) {
+				continue
+			}
+			raw := []byte(tool.Raw)
+			var err error
+			raw, err = sjson.SetBytes(raw, "type", xaiWebSearchToolType)
+			if err != nil {
+				return body
+			}
+			updatedTools, err := sjson.SetRawBytes(filteredTools, "-1", raw)
+			if err != nil {
+				return body
+			}
+			filteredTools = updatedTools
+			filteredCount++
+		}
+		if filteredCount == 0 {
+			return body
+		}
+		updatedBody, err := sjson.SetRawBytes(body, "tools", filteredTools)
+		if err != nil {
+			return body
+		}
+		updatedBody, err = sjson.SetBytes(updatedBody, "tool_choice", mode)
+		if err != nil {
+			return body
+		}
+		body = updatedBody
 	}
 	return body
 }
 
-func xaiToolChoiceRequiresWebSearch(toolChoice gjson.Result) bool {
+func xaiToolChoiceWebSearchMode(toolChoice gjson.Result) (string, bool) {
 	if !toolChoice.IsObject() {
-		return false
+		return "", false
 	}
 	if xaiWebSearchToolTypeAlias(toolChoice.Get("type").String()) {
-		return true
+		return "required", true
 	}
 	if toolChoice.Get("type").String() != "allowed_tools" {
-		return false
+		return "", false
 	}
 	allowedTools := toolChoice.Get("tools")
-	return allowedTools.IsArray() && len(allowedTools.Array()) == 1 &&
-		xaiWebSearchToolTypeAlias(allowedTools.Get("0.type").String())
+	if !allowedTools.IsArray() || len(allowedTools.Array()) != 1 ||
+		!xaiWebSearchToolTypeAlias(allowedTools.Get("0.type").String()) {
+		return "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(toolChoice.Get("mode").String())) {
+	case "auto":
+		return "auto", true
+	case "", "required":
+		return "required", true
+	default:
+		return "", false
+	}
 }
 
 func xaiWebSearchToolTypeAlias(toolType string) bool {

@@ -124,7 +124,6 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
-	rawJSON = normalizeChatWebSearchRequest(rawJSON)
 
 	if stream {
 		h.handleStreamingResponse(c, rawJSON)

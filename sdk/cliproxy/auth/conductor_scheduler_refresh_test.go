@@ -45,6 +45,136 @@ func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
 }
 
+type authRefreshCallbackTestExecutor struct {
+	schedulerProviderTestExecutor
+	refreshedToken string
+	err            error
+}
+
+func (e authRefreshCallbackTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = e.refreshedToken
+	return auth, nil
+}
+
+func TestManager_RefreshAuthNotifiesCallbackAfterCommit(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(authRefreshCallbackTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "xai"},
+		refreshedToken:                "new-access-token",
+	})
+
+	auth := &Auth{
+		ID:       "refresh-callback-success",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"access_token":  "old-access-token",
+			"refresh_token": "refresh-token",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+	if _, errExecute := manager.Execute(ctx, []string{"xai"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("auth was not selectable before refresh: %v", errExecute)
+	}
+
+	type callbackObservation struct {
+		previousToken string
+		callbackToken string
+		managerToken  string
+		managerFound  bool
+		selectionHeld bool
+	}
+	observations := make(chan callbackObservation, 2)
+	manager.SetAuthRefreshCallback(func(callbackCtx context.Context, previous, refreshed *Auth) {
+		current, ok := manager.GetByID(refreshed.ID)
+		_, errExecute := manager.Execute(callbackCtx, []string{"xai"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+		observations <- callbackObservation{
+			previousToken: authAccessToken(previous),
+			callbackToken: authAccessToken(refreshed),
+			managerToken:  authAccessToken(current),
+			managerFound:  ok,
+			selectionHeld: errExecute != nil,
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refreshAuth deadlocked while callback inspected manager state")
+	}
+
+	select {
+	case observation := <-observations:
+		if !observation.managerFound {
+			t.Fatal("callback ran before refreshed auth was committed")
+		}
+		if observation.previousToken != "old-access-token" {
+			t.Fatalf("previous callback token = %q, want old-access-token", observation.previousToken)
+		}
+		if observation.callbackToken != "new-access-token" || observation.managerToken != "new-access-token" {
+			t.Fatalf("callback tokens = (%q, %q), want committed refreshed token", observation.callbackToken, observation.managerToken)
+		}
+		if !observation.selectionHeld {
+			t.Fatal("refreshed auth was selectable before its entitlement callback completed")
+		}
+	default:
+		t.Fatal("successful refresh did not invoke callback")
+	}
+	select {
+	case extra := <-observations:
+		t.Fatalf("callback invoked more than once: %+v", extra)
+	default:
+	}
+}
+
+func TestManager_RefreshAuthDoesNotNotifyCallbackOnFailure(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(authRefreshCallbackTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "xai"},
+		err:                           errors.New("refresh failed"),
+	})
+	auth := &Auth{
+		ID:       "refresh-callback-failure",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"access_token":  "old-access-token",
+			"refresh_token": "refresh-token",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	called := make(chan struct{}, 1)
+	manager.SetAuthRefreshCallback(func(context.Context, *Auth, *Auth) {
+		called <- struct{}{}
+	})
+	manager.refreshAuth(ctx, auth.ID)
+
+	select {
+	case <-called:
+		t.Fatal("failed refresh invoked callback")
+	default:
+	}
+}
+
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)

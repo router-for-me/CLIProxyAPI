@@ -1229,24 +1229,157 @@ func TestNormalizeXAIToolChoiceForTools_KeepsWhenToolsPresent(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorPrepareResponsesRequest_ChatWebSearchOptions(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	payload := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"Search current news"}],
+		"web_search_options":{
+			"search_context_size":"high",
+			"user_location":{"type":"approximate","approximate":{"city":"Shanghai","country":"CN"}}
+		}
+	}`)
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 || tools[0].Get("type").String() != "web_search" {
+		t.Fatalf("tools = %s, want one canonical web_search: %s", gjson.GetBytes(prepared.body, "tools").Raw, string(prepared.body))
+	}
+	for _, field := range []string{"search_context_size", "user_location"} {
+		if tools[0].Get(field).Exists() {
+			t.Fatalf("%s should be removed for xAI Build: %s", field, string(prepared.body))
+		}
+	}
+	if got := gjson.GetBytes(prepared.body, "tool_choice").String(); got != "required" {
+		t.Fatalf("tool_choice = %q, want required: %s", got, string(prepared.body))
+	}
+	if gjson.GetBytes(prepared.body, "web_search_options").Exists() {
+		t.Fatalf("Chat-only web_search_options leaked upstream: %s", string(prepared.body))
+	}
+	if !gjson.GetBytes(prepared.originalPayload, "web_search_options").IsObject() {
+		t.Fatalf("original payload lost web_search_options: %s", string(prepared.originalPayload))
+	}
+	if gjson.GetBytes(prepared.originalPayload, "tools").Exists() || gjson.GetBytes(prepared.originalPayload, "tool_choice").Exists() {
+		t.Fatalf("original payload was mutated: %s", string(prepared.originalPayload))
+	}
+}
+
+func TestXAIExecutorPrepareResponsesRequest_ChatWebSearchAliasIsNotDuplicated(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{})
+	payload := []byte(`{
+		"model":"grok-4.5",
+		"messages":[{"role":"user","content":"Search"}],
+		"tools":[{"type":"web_search_preview_2025_03_11"}],
+		"tool_choice":{"type":"web_search_2025_08_26"},
+		"web_search_options":{"search_context_size":"low"}
+	}`)
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 || tools[0].Get("type").String() != "web_search" {
+		t.Fatalf("tools = %s, want one canonical web_search: %s", gjson.GetBytes(prepared.body, "tools").Raw, string(prepared.body))
+	}
+	if got := gjson.GetBytes(prepared.body, "tool_choice").String(); got != "required" {
+		t.Fatalf("tool_choice = %q, want required: %s", got, string(prepared.body))
+	}
+}
+
+func TestNormalizeXAIChatWebSearchRequest_CanonicalizesAliasesWithoutOptions(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"web_search_preview_2025_03_11"}],"tool_choice":{"type":"web_search_2025_08_26"}}`)
+	out := normalizeXAIChatWebSearchRequest(body, []byte(`{"messages":[]}`))
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tool type = %q, want web_search: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice type = %q, want web_search: %s", got, string(out))
+	}
+}
+
 func TestNormalizeXAIToolChoiceForTools_WebSearchObjectBecomesRequired(t *testing.T) {
 	tests := []struct {
 		name       string
 		toolChoice string
+		want       string
 	}{
-		{name: "web search", toolChoice: `{"type":"web_search"}`},
-		{name: "preview alias", toolChoice: `{"type":"web_search_preview"}`},
-		{name: "single allowed web search", toolChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search"}]}`},
+		{name: "web search", toolChoice: `{"type":"web_search"}`, want: "required"},
+		{name: "preview alias", toolChoice: `{"type":"web_search_preview"}`, want: "required"},
+		{name: "single allowed web search", toolChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search"}]}`, want: "required"},
+		{name: "optional allowed web search", toolChoice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"}]}`, want: "auto"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := []byte(`{"model":"grok-4","tools":[{"type":"web_search"}],"tool_choice":` + tt.toolChoice + `,"input":"hi"}`)
 			out := normalizeXAIToolChoiceForTools(body)
-			if got := gjson.GetBytes(out, "tool_choice").String(); got != "required" {
-				t.Fatalf("tool_choice = %q, want required: %s", got, string(out))
+			if got := gjson.GetBytes(out, "tool_choice").String(); got != tt.want {
+				t.Fatalf("tool_choice = %q, want %s: %s", got, tt.want, string(out))
 			}
 		})
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_FiltersMixedToolsToSearchPermission(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolChoice string
+		wantMode   string
+	}{
+		{name: "direct search choice", toolChoice: `{"type":"web_search"}`, wantMode: "required"},
+		{name: "single allowed search", toolChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search"}]}`, wantMode: "required"},
+		{name: "optional allowed search", toolChoice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"}]}`, wantMode: "auto"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"grok-4","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}],"tool_choice":` + tt.toolChoice + `,"input":"hi"}`)
+			out := normalizeXAIToolChoiceForTools(body)
+			tools := gjson.GetBytes(out, "tools").Array()
+			if len(tools) != 1 || tools[0].Get("type").String() != "web_search" {
+				t.Fatalf("tools were not restricted to web_search: %s", string(out))
+			}
+			if got := gjson.GetBytes(out, "tool_choice").String(); got != tt.wantMode {
+				t.Fatalf("tool_choice = %q, want %s: %s", got, tt.wantMode, string(out))
+			}
+		})
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_DoesNotBroadenMissingSearchTool(t *testing.T) {
+	toolChoices := []string{
+		`{"type":"web_search"}`,
+		`{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search"}]}`,
+		`{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"}]}`,
+	}
+	for _, toolChoice := range toolChoices {
+		body := []byte(`{"model":"grok-4","tools":[{"type":"function","name":"lookup"}],"tool_choice":` + toolChoice + `,"input":"hi"}`)
+		out := normalizeXAIToolChoiceForTools(body)
+		if got := gjson.GetBytes(out, "tool_choice").Raw; got != toolChoice {
+			t.Fatalf("tool_choice changed from %s to %s", toolChoice, got)
+		}
+		if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+			t.Fatalf("tools length = %d, want 1: %s", got, string(out))
+		}
+	}
+}
+
+func TestNormalizeXAIToolChoiceForTools_FiltersAndCanonicalizesSearchAlias(t *testing.T) {
+	body := []byte(`{"model":"grok-4","tools":[{"type":"web_search_preview_2025_03_11"},{"type":"function","name":"lookup"}],"tool_choice":{"type":"web_search_preview"},"input":"hi"}`)
+	body = normalizeXAITools(body)
+	out := normalizeXAIToolChoiceForTools(body)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 1 || tools[0].Get("type").String() != "web_search" {
+		t.Fatalf("search alias was not canonicalized and isolated: %s", string(out))
 	}
 }
 
@@ -1254,6 +1387,7 @@ func TestNormalizeXAIToolChoiceForTools_LeavesOtherObjectsUntouched(t *testing.T
 	tests := []string{
 		`{"type":"function","name":"lookup"}`,
 		`{"type":"allowed_tools","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}]}`,
+		`{"type":"allowed_tools","mode":"future","tools":[{"type":"web_search"}]}`,
 	}
 	for _, toolChoice := range tests {
 		body := []byte(`{"model":"grok-4","tools":[{"type":"web_search"},{"type":"function","name":"lookup"}],"tool_choice":` + toolChoice + `,"input":"hi"}`)

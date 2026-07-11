@@ -748,8 +748,8 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		provider = strings.TrimSpace(existing.Provider)
 	}
-	GlobalModelRegistry().UnregisterClient(id)
 	s.coreManager.Remove(ctx, id)
+	GlobalModelRegistry().UnregisterClient(id)
 	if strings.EqualFold(provider, "codex") {
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "auth_removed")
 	}
@@ -2189,6 +2189,29 @@ func scopeXAIModelsForAuth(auth *coreauth.Auth, authKind string, models []*Model
 	return freeModels
 }
 
+func xaiUsesFreeOAuthModelScope(auth *coreauth.Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") ||
+		!strings.EqualFold(strings.TrimSpace(auth.AuthKind()), coreauth.AuthKindOAuth) {
+		return false
+	}
+	baseURL := ""
+	if auth.Attributes != nil {
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	if baseURL == "" && auth.Metadata != nil {
+		baseURL, _ = auth.Metadata["base_url"].(string)
+		baseURL = strings.TrimSpace(baseURL)
+	}
+	if baseURL != "" && !strings.EqualFold(strings.TrimRight(baseURL, "/"), strings.TrimRight(xaiauth.DefaultAPIBaseURL, "/")) {
+		return false
+	}
+	accessToken := ""
+	if auth.Metadata != nil {
+		accessToken, _ = auth.Metadata["access_token"].(string)
+	}
+	return !xaiauth.AccessTokenHasStandardAPITier(strings.TrimSpace(accessToken))
+}
+
 // refreshModelRegistrationForAuth re-applies the latest model registration for
 // one auth and reconciles any concurrent auth changes that race with the
 // refresh. Callers are expected to pre-filter provider membership.
@@ -2201,12 +2224,29 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 }
 
 func (s *Service) refreshModelRegistrationForAuthWithCache(current *coreauth.Auth, compatCache *openAICompatibilityRegistrationCache) bool {
+	return s.refreshModelRegistrationSnapshot(current, compatCache, true)
+}
+
+func (s *Service) handleAuthRefreshed(_ context.Context, previous, current *coreauth.Auth) {
+	if current == nil || !strings.EqualFold(strings.TrimSpace(current.Provider), "xai") {
+		return
+	}
+	if xaiUsesFreeOAuthModelScope(previous) == xaiUsesFreeOAuthModelScope(current) {
+		return
+	}
+	// Refresh only the entitlement-dependent model snapshot. Rebinding the xAI
+	// executor here would replace live execution sessions. Equal entitlement
+	// scopes are skipped so routine token rotation does not churn registry hooks.
+	s.refreshModelRegistrationSnapshot(current, nil, false)
+}
+
+func (s *Service) refreshModelRegistrationSnapshot(current *coreauth.Auth, compatCache *openAICompatibilityRegistrationCache, ensureExecutors bool) bool {
 	if s == nil || s.coreManager == nil || current == nil || current.ID == "" {
 		return false
 	}
 
 	ctx := context.Background()
-	if !current.Disabled {
+	if ensureExecutors && !current.Disabled {
 		s.ensureExecutorsForAuth(current)
 	}
 	s.registerModelsForAuthWithCache(ctx, current, compatCache)
@@ -2222,9 +2262,16 @@ func (s *Service) refreshModelRegistrationForAuthWithCache(current *coreauth.Aut
 	// Re-apply the latest auth snapshot so concurrent auth updates cannot leave
 	// stale model registrations behind. This may duplicate registration work when
 	// no auth fields changed, but keeps the refresh path simple and correct.
-	s.ensureExecutorsForAuth(latest)
+	if ensureExecutors {
+		s.ensureExecutorsForAuth(latest)
+	}
 	s.registerModelsForAuthWithCache(ctx, latest, compatCache)
 	s.coreManager.ReconcileRegistryModelStates(ctx, latest.ID)
+	if final, okFinal := s.latestAuthForModelRegistration(current.ID); !okFinal || final.Disabled {
+		GlobalModelRegistry().UnregisterClient(current.ID)
+		s.coreManager.RefreshSchedulerEntry(current.ID)
+		return false
+	}
 	s.coreManager.RefreshSchedulerEntry(current.ID)
 	return true
 }

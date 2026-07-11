@@ -283,6 +283,7 @@ func (b *Builder) Build() (*Service, error) {
 		pluginHost:     pluginHost,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
+	coreManager.SetAuthRefreshCallback(service.handleAuthRefreshed)
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
