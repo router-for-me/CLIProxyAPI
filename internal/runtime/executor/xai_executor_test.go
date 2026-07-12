@@ -1579,7 +1579,7 @@ func TestFilterXAIReasoningReplayItemsSkipsMatchingCachedTurn(t *testing.T) {
 	}
 }
 
-func TestFilterXAIReasoningReplayItemsKeepsNewCachedTurnWhenInputHasOlderReasoning(t *testing.T) {
+func TestFilterXAIReasoningReplayItemsSkipsAmbiguousCachedTurnWhenInputHasOlderReasoning(t *testing.T) {
 	oldEncryptedContent := testValidGrokEncryptedContentForSeed(10)
 	newEncryptedContent := testValidGrokEncryptedContentForSeed(12)
 	body := []byte(`{"input":[{"type":"reasoning","summary":[],"encrypted_content":""},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"older answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
@@ -1591,11 +1591,8 @@ func TestFilterXAIReasoningReplayItemsKeepsNewCachedTurnWhenInputHasOlderReasoni
 	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", newEncryptedContent)
 
 	filtered := filterXAIReasoningReplayItemsForInput(body, items)
-	if len(filtered) != 1 || gjson.GetBytes(filtered[0], "type").String() != "reasoning" {
-		t.Fatalf("filtered replay items = %q, want new reasoning only (input already has last assistant)", filtered)
-	}
-	if got := gjson.GetBytes(filtered[0], "encrypted_content").String(); got != newEncryptedContent {
-		t.Fatalf("filtered reasoning encrypted_content = %q, want new cached blob", got)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered replay items = %q, want none when cached assistant does not match history", filtered)
 	}
 }
 
@@ -1614,6 +1611,38 @@ func TestFilterXAIReasoningReplayItemsSkipsDuplicateAssistantMessage(t *testing.
 	}
 }
 
+func TestFilterXAIReasoningReplayItemsRecognizesRoleOnlyAssistantMessage(t *testing.T) {
+	encryptedContent := testValidGrokEncryptedContentForSeed(31)
+	body := []byte(`{"input":[{"role":"assistant","content":"first answer"},{"role":"user","content":"second"}]}`)
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
+
+	filtered := filterXAIReasoningReplayItemsForInput(body, items)
+	if len(filtered) != 1 || gjson.GetBytes(filtered[0], "type").String() != "reasoning" {
+		t.Fatalf("filtered replay items = %q, want reasoning only", filtered)
+	}
+	updated, ok := insertCodexReasoningReplayItems(body, filtered)
+	if !ok {
+		t.Fatal("insertCodexReasoningReplayItems failed")
+	}
+	input := gjson.GetBytes(updated, "input").Array()
+	if len(input) != 3 || input[0].Get("type").String() != "reasoning" || input[1].Get("role").String() != "assistant" {
+		t.Fatalf("unexpected role-only replay order: %s", updated)
+	}
+	assistantCount := 0
+	for _, item := range input {
+		if strings.EqualFold(item.Get("role").String(), "assistant") {
+			assistantCount++
+		}
+	}
+	if assistantCount != 1 {
+		t.Fatalf("assistant messages after replay = %d, want 1; body=%s", assistantCount, updated)
+	}
+}
+
 func TestFilterXAIReasoningReplayItemsDoesNotMatchOlderAssistantMessage(t *testing.T) {
 	encryptedContent := testValidGrokEncryptedContentForSeed(13)
 	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"different answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
@@ -1624,15 +1653,15 @@ func TestFilterXAIReasoningReplayItemsDoesNotMatchOlderAssistantMessage(t *testi
 	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
 
 	filtered := filterXAIReasoningReplayItemsForInput(body, items)
-	if len(filtered) != 1 || gjson.GetBytes(filtered[0], "type").String() != "reasoning" {
-		t.Fatalf("filtered replay items = %q, want reasoning only when a later assistant already exists", filtered)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered replay items = %q, want none when the last assistant differs from the cached turn", filtered)
 	}
 }
 
-// Scenario #3 (partial inject): client already has a last assistant whose text
-// drifts from the cached message. Injecting the cached message would produce
-// two assistants around the same turn. Expect reasoning-only inject.
-func TestFilterXAIReasoningReplayItemsSkipsMessageWhenLastAssistantTextDrifts(t *testing.T) {
+// Scenario #3: client already has a last assistant whose text drifts from the
+// cached message. The cache cannot safely determine whether this is a trimmed
+// older turn or a modified latest turn, so skip the entire cached batch.
+func TestFilterXAIReasoningReplayItemsSkipsAmbiguousTurnWhenLastAssistantTextDrifts(t *testing.T) {
 	encryptedContent := testValidGrokEncryptedContentForSeed(20)
 	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
 	items := [][]byte{
@@ -1642,26 +1671,8 @@ func TestFilterXAIReasoningReplayItemsSkipsMessageWhenLastAssistantTextDrifts(t 
 	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
 
 	filtered := filterXAIReasoningReplayItemsForInput(body, items)
-	if len(filtered) != 1 || gjson.GetBytes(filtered[0], "type").String() != "reasoning" {
-		t.Fatalf("filtered = %q, want reasoning only for drifted last assistant", filtered)
-	}
-
-	// Full insert path: must not create two assistant messages.
-	updated, ok := insertCodexReasoningReplayItems(body, filtered)
-	if !ok {
-		t.Fatal("insertCodexReasoningReplayItems failed")
-	}
-	assistantCount := 0
-	for _, item := range gjson.GetBytes(updated, "input").Array() {
-		if item.Get("type").String() == "message" && item.Get("role").String() == "assistant" {
-			assistantCount++
-		}
-	}
-	if assistantCount != 1 {
-		t.Fatalf("assistant messages after inject = %d, want 1; body=%s", assistantCount, updated)
-	}
-	if gjson.GetBytes(updated, "input.0.type").String() != "reasoning" {
-		t.Fatalf("expected reasoning inserted before last assistant; body=%s", updated)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered = %q, want no replay for ambiguous drifted assistant", filtered)
 	}
 }
 

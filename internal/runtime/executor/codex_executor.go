@@ -542,7 +542,7 @@ func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]
 	}
 	for index := len(inputItems) - 1; index >= 0; index-- {
 		inputItem := inputItems[index]
-		if strings.TrimSpace(inputItem.Get("type").String()) == "message" && strings.TrimSpace(inputItem.Get("role").String()) == "assistant" {
+		if role, ok := codexReplayMessageRole(inputItem); ok && role == "assistant" {
 			return index
 		}
 	}
@@ -611,15 +611,25 @@ func codexReplayOutputCallIDs(inputItems []gjson.Result) map[string]string {
 }
 
 func shouldInsertCodexReasoningReplayBefore(item gjson.Result) bool {
-	if strings.TrimSpace(item.Get("type").String()) != "message" {
+	role, ok := codexReplayMessageRole(item)
+	if !ok {
 		return true
 	}
-	switch strings.TrimSpace(item.Get("role").String()) {
+	switch role {
 	case "developer", "system":
 		return false
 	default:
 		return true
 	}
+}
+
+func codexReplayMessageRole(item gjson.Result) (string, bool) {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+	if role == "" || (itemType != "" && itemType != "message") {
+		return "", false
+	}
+	return role, true
 }
 
 func codexReplayToolCallKeys(item gjson.Result) []string {

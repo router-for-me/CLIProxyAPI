@@ -122,7 +122,14 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 	}
 
 	inputItems := input.Array()
-	_, hasLastAssistantMessage := xaiInputLastAssistantMessage(inputItems)
+	lastAssistantMessage, hasLastAssistantMessage := xaiInputLastAssistantMessage(inputItems)
+	cachedAssistantMessage, hasCachedAssistantMessage := xaiReplayAssistantMessage(items)
+	assistantMessageMatches := hasLastAssistantMessage && hasCachedAssistantMessage &&
+		xaiAssistantMessageContentEqual(lastAssistantMessage.Get("content"), cachedAssistantMessage.Get("content"))
+	ambiguousAssistantHistory := hasLastAssistantMessage && hasCachedAssistantMessage && !assistantMessageMatches
+	if ambiguousAssistantHistory {
+		return nil
+	}
 	existingCalls := make(map[string]bool)
 	existingOutputs := make(map[string]bool)
 	for _, inputItem := range inputItems {
@@ -149,11 +156,7 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 				continue
 			}
 		case "message":
-			// If the client already has any trailing assistant message, never inject
-			// another one. Equal content is a true duplicate; unequal content would
-			// create two adjacent assistants (partial-history / drift), which breaks
-			// turn pairing. Inject reasoning alone in that case.
-			if hasLastAssistantMessage {
+			if assistantMessageMatches {
 				continue
 			}
 		case "function_call", "custom_tool_call":
@@ -188,13 +191,73 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 func xaiInputLastAssistantMessage(inputItems []gjson.Result) (gjson.Result, bool) {
 	for i := len(inputItems) - 1; i >= 0; i-- {
 		inputItem := inputItems[i]
-		if strings.TrimSpace(inputItem.Get("type").String()) != "message" ||
-			!strings.EqualFold(strings.TrimSpace(inputItem.Get("role").String()), "assistant") {
+		itemType := strings.TrimSpace(inputItem.Get("type").String())
+		if (itemType != "" && itemType != "message") || !strings.EqualFold(strings.TrimSpace(inputItem.Get("role").String()), "assistant") {
 			continue
 		}
 		return inputItem, true
 	}
 	return gjson.Result{}, false
+}
+
+func xaiReplayAssistantMessage(items [][]byte) (gjson.Result, bool) {
+	for _, item := range items {
+		itemResult := gjson.ParseBytes(item)
+		if strings.TrimSpace(itemResult.Get("type").String()) == "message" &&
+			strings.EqualFold(strings.TrimSpace(itemResult.Get("role").String()), "assistant") {
+			return itemResult, true
+		}
+	}
+	return gjson.Result{}, false
+}
+
+type xaiAssistantMessagePart struct {
+	partType string
+	value    string
+}
+
+func xaiAssistantMessageContentEqual(left, right gjson.Result) bool {
+	leftParts, leftOK := xaiAssistantMessageParts(left)
+	rightParts, rightOK := xaiAssistantMessageParts(right)
+	if !leftOK || !rightOK || len(leftParts) != len(rightParts) {
+		return false
+	}
+	for i := range leftParts {
+		if leftParts[i] != rightParts[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func xaiAssistantMessageParts(content gjson.Result) ([]xaiAssistantMessagePart, bool) {
+	if content.Type == gjson.String {
+		return []xaiAssistantMessagePart{{partType: "output_text", value: content.String()}}, true
+	}
+	if !content.IsArray() {
+		return nil, false
+	}
+	parts := make([]xaiAssistantMessagePart, 0, len(content.Array()))
+	for _, part := range content.Array() {
+		partType := strings.TrimSpace(part.Get("type").String())
+		switch partType {
+		case "output_text":
+			text := part.Get("text")
+			if text.Type != gjson.String {
+				return nil, false
+			}
+			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: text.String()})
+		case "refusal":
+			refusal := part.Get("refusal")
+			if refusal.Type != gjson.String {
+				return nil, false
+			}
+			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: refusal.String()})
+		default:
+			return nil, false
+		}
+	}
+	return parts, len(parts) > 0
 }
 
 func cacheXAIReasoningReplayFromCompleted(ctx context.Context, scope xaiReasoningReplayScope, completedData []byte) {
