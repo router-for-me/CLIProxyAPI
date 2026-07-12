@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CLIProxyAPI — Provider Dashboard</title>
+  <link rel="stylesheet" href="/ui/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>CLIProxyAPI</h1>
+      <p class="subtitle">One endpoint for all your coding agents</p>
+    </header>
+
+    <main>
+      <section class="status" id="status">
+        <div class="card loading">
+          <p>Loading status…</p>
+        </div>
+      </section>
+
+      <section class="actions">
+        <button id="extract-auth" class="btn primary">Auto-detect local credentials</button>
+      </section>
+
+      <section class="models" id="models">
+        <h2>Models</h2>
+        <div class="model-list loading">Loading models…</div>
+      </section>
+    </main>
+
+    <footer>
+      <p>local endpoint: <code>http://localhost:8317</code></p>
+    </footer>
+  </div>
+  <script src="/ui/app.js"></script>
+</body>
+</html>
