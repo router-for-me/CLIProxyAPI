@@ -272,6 +272,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
 	return prepared, data, httpResp.Header.Clone(), nil
 }
 
@@ -1144,7 +1145,6 @@ func xaiMetadataString(meta map[string]any, key string) string {
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
-	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
 		if gjson.GetBytes(body, "reasoning.effort").Exists() {
 			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
@@ -1481,23 +1481,6 @@ func appendXAIReasoningSummary(previous json.RawMessage, currentSummary []gjson.
 		updated = updatedItem
 	}
 	return updated, true
-}
-
-func removeXAIEncryptedReasoningInclude(body []byte) []byte {
-	include := gjson.GetBytes(body, "include")
-	if !include.Exists() || !include.IsArray() {
-		return body
-	}
-	kept := make([]string, 0, len(include.Array()))
-	for _, item := range include.Array() {
-		value := strings.TrimSpace(item.String())
-		if value == "" || value == "reasoning.encrypted_content" {
-			continue
-		}
-		kept = append(kept, value)
-	}
-	body, _ = sjson.SetBytes(body, "include", kept)
-	return body
 }
 
 // xaiSupportsReasoningEffort reports whether the model accepts Responses API
