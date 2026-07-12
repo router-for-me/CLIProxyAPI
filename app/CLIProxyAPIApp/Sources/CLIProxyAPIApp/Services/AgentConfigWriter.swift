@@ -93,17 +93,14 @@ final class AgentConfigWriter {
             UserDefaults.standard.set(cleaned, forKey: "codexOriginalModel")
         }
 
-        // Build a model catalog JSON containing only the models exposed in CLIProxy.
-        let catalogPath = codexDir.appendingPathComponent("cli-proxy-model-catalog.json")
-        let slugs = try await buildCodexModelCatalog(at: catalogPath, baseURL: baseURL, apiKey: apiKey)
-
-        // Set a fixed model so Codex Desktop has something to use. The model
-        // picker will show it as "Custom" but requests will go to CLIProxy.
-        if let firstModel = slugs.first {
+        // Set a fixed model so Codex Desktop has a default to use. The model
+        // catalog is fetched from the CLIProxy /v1/models endpoint when
+        // model_catalog_json is not set.
+        let exposed = UserDefaults.standard.array(forKey: "exposedModelsCache") as? [String] ?? []
+        if let firstModel = exposed.first {
             replaceOrAppend(key: "model", value: firstModel)
         }
 
-        replaceOrAppend(key: "model_catalog_json", value: catalogPath.path)
         replaceOrAppend(key: "openai_base_url", value: baseURL)
         replaceOrAppend(key: "OPENAI_API_KEY", value: apiKey)
 
@@ -140,72 +137,6 @@ final class AgentConfigWriter {
         try? FileManager.default.removeItem(at: catalogPath)
 
         try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
-    }
-
-    private func buildCodexModelCatalog(at catalogURL: URL, baseURL: String, apiKey: String) async throws -> [String] {
-        let exposed = UserDefaults.standard.array(forKey: "exposedModelsCache") as? [String] ?? []
-
-        // If no models are exposed, query the runtime /v1/models endpoint.
-        let slugs: [String]
-        if exposed.isEmpty {
-            let url = URL(string: baseURL + "/models") ?? catalogURL.deletingLastPathComponent().appendingPathComponent("models")
-            var request = URLRequest(url: url)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            let (data, _) = try await URLSession.shared.data(for: request)
-            struct ModelsResponse: Codable {
-                let data: [ModelEntry]
-                struct ModelEntry: Codable {
-                    let id: String
-                }
-            }
-            let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
-            slugs = decoded.data.map { $0.id }
-        } else {
-            slugs = exposed
-        }
-
-        var models: [[String: Any]] = []
-        for slug in slugs {
-            let displayName = slug.split(separator: "/").last.map(String.init) ?? slug
-            models.append([
-                "slug": slug,
-                "display_name": displayName,
-                "description": "CLIProxy model \(slug)",
-                "shell_type": "shell_command",
-                "visibility": "list",
-                "supported_in_api": true,
-                "priority": 0,
-                "context_window": 128000,
-                "max_context_window": 128000,
-                "effective_context_window_percent": 90,
-                "input_modalities": ["text"],
-                "supports_parallel_tool_calls": true,
-                "supports_search_tool": true,
-                "supports_image_detail_original": false,
-                "supports_reasoning_summaries": false,
-                "support_verbosity": true,
-                "apply_patch_tool_type": "freeform",
-                "web_search_tool_type": "text",
-                "supported_reasoning_levels": [
-                    ["effort": "low", "description": "Fast"],
-                    ["effort": "medium", "description": "Balanced"],
-                    ["effort": "high", "description": "Deep"],
-                ],
-                "service_tiers": [
-                    ["id": "default", "name": "Standard", "description": "Standard"],
-                ],
-                "truncation_policy": [
-                    "mode": "tokens",
-                    "limit": 10000,
-                ],
-            ])
-        }
-
-        let catalog: [String: Any] = ["models": models]
-        let data = try JSONSerialization.data(withJSONObject: catalog, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: catalogURL, options: [.atomic])
-
-        return slugs
     }
 
     // MARK: - Cline
