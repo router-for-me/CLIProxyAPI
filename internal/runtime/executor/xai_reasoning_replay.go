@@ -292,3 +292,15 @@ func cacheXAIReasoningReplayFromCompleted(ctx context.Context, scope xaiReasonin
 		// Invalid args: nothing to store or clear.
 	}
 }
+
+func clearXAIReasoningReplayAfterCompaction(ctx context.Context, scope xaiReasoningReplayScope) {
+	if !scope.valid() {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errDelete := internalcache.DeleteXAIReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey); errDelete != nil {
+		log.Warnf("xai reasoning replay cache delete failed after successful compaction: %v", errDelete)
+	}
+}

@@ -337,6 +337,110 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorCompactClearsReplayBeforePostCompactTurn(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_compact","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "xai-token",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-compact-caller")
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+		Stream:       false,
+	}
+	compactEncryptedContent := testValidGrokEncryptedContentForSeed(41)
+	compactPayload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-session","input":[{"type":"compaction","encrypted_content":""},{"type":"message","role":"user","content":[{"type":"input_text","text":"compact"}]}]}`)
+	compactPayload, _ = sjson.SetBytes(compactPayload, "input.0.encrypted_content", compactEncryptedContent)
+	compactReq := cliproxyexecutor.Request{Model: "grok-4.3", Payload: compactPayload}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatOpenAIResponse, compactReq, opts, compactPayload)
+	if !scope.valid() {
+		t.Fatal("compact replay scope must be valid")
+	}
+	reasoning := []byte(`{"type":"reasoning","summary":[],"encrypted_content":""}`)
+	reasoning, _ = sjson.SetBytes(reasoning, "encrypted_content", testValidGrokEncryptedContentForSeed(42))
+	if !internalcache.CacheXAIReasoningReplayItems(scope.modelName, scope.sessionKey, [][]byte{
+		reasoning,
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pre-compact answer"}]}`),
+	}) {
+		t.Fatal("failed to seed xAI replay cache")
+	}
+
+	if _, err := exec.Execute(ctx, auth, compactReq, opts); err != nil {
+		t.Fatalf("Execute compact error: %v", err)
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey); ok {
+		t.Fatal("successful compact must clear the pre-compact replay batch")
+	}
+
+	postCompactPayload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-session","input":[{"type":"compaction","encrypted_content":""},{"type":"message","role":"user","content":[{"type":"input_text","text":"after compact"}]}]}`)
+	postCompactPayload, _ = sjson.SetBytes(postCompactPayload, "input.0.encrypted_content", compactEncryptedContent)
+	prepared, errPrepare := exec.prepareResponsesRequest(ctx, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: postCompactPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if errPrepare != nil {
+		t.Fatalf("prepare post-compact request: %v", errPrepare)
+	}
+	input := gjson.GetBytes(prepared.body, "input").Array()
+	if len(input) != 2 || input[0].Get("type").String() != "compaction" || input[1].Get("role").String() != "user" {
+		t.Fatalf("post-compact input contains stale replay state: %s", prepared.body)
+	}
+}
+
+func TestXAIExecutorCompactFailureRetainsReplay(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"compact failed"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "xai-token",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-compact-failure-caller")
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Alt: "responses/compact"}
+	payload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-failure-session","input":[{"type":"message","role":"user","content":"compact"}]}`)
+	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatOpenAIResponse, req, opts, payload)
+	reasoning := []byte(`{"type":"reasoning","summary":[],"encrypted_content":""}`)
+	reasoning, _ = sjson.SetBytes(reasoning, "encrypted_content", testValidGrokEncryptedContentForSeed(43))
+	if !internalcache.CacheXAIReasoningReplayItems(scope.modelName, scope.sessionKey, [][]byte{reasoning}) {
+		t.Fatal("failed to seed xAI replay cache")
+	}
+
+	if _, err := exec.Execute(ctx, auth, req, opts); err == nil {
+		t.Fatal("Execute compact error = nil, want upstream failure")
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey); !ok {
+		t.Fatal("failed compact must retain the previous replay batch")
+	}
+}
+
 func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing.T) {
 	var gotPath string
 	var gotAccept string
