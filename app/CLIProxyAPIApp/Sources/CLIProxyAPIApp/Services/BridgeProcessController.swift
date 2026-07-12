@@ -1,56 +1,6 @@
 import AppKit
 import Foundation
 
-enum BridgeStatus: Equatable, Sendable {
-    case stopped
-    case starting
-    case running
-    case unhealthy(String)
-    case failed(String)
-
-    var isRunning: Bool {
-        if case .running = self { return true }
-        return false
-    }
-
-    var isStarting: Bool {
-        if case .starting = self { return true }
-        return false
-    }
-
-    var isActive: Bool {
-        isRunning || isStarting
-    }
-
-    var title: String {
-        switch self {
-        case .stopped: return "Stopped"
-        case .starting: return "Starting…"
-        case .running: return "Running"
-        case .unhealthy(let msg): return "Unhealthy: \(msg)"
-        case .failed(let msg): return "Failed: \(msg)"
-        }
-    }
-
-    var symbolName: String {
-        switch self {
-        case .running: return "circle.fill"
-        case .starting: return "circle.dashed"
-        case .unhealthy, .failed: return "exclamationmark.triangle.fill"
-        case .stopped: return "circle"
-        }
-    }
-
-    var color: NSColor {
-        switch self {
-        case .running: return .systemGreen
-        case .starting: return .systemYellow
-        case .unhealthy, .failed: return .systemRed
-        case .stopped: return .systemGray
-        }
-    }
-}
-
 @MainActor
 @Observable
 final class BridgeProcessController {
@@ -64,30 +14,25 @@ final class BridgeProcessController {
     private var consecutiveHealthFailures = 0
     private let maxGracePeriodFailures = 5
 
-    func start(settings: SettingsStore) {
-        guard process == nil else {
-            NSLog("start called but process already exists")
-            return
-        }
+    var hasManagedProcess: Bool {
+        self.process != nil
+    }
 
-        status = .starting
-        NSLog("start bridge requested at path: \(settings.bridgePath)")
-        consecutiveHealthFailures = 0
+    func start(settings: BridgeSettingsStore) {
+        guard self.process == nil else { return }
+
+        let bridgeURL = URL(fileURLWithPath: settings.bridgePath)
+        let configURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/config.windsurf.yaml")
+
+        self.status = .starting
+        self.consecutiveHealthFailures = 0
+        self.lastLogLine = "Starting bridge..."
 
         let process = Process()
         let pipe = Pipe()
-        var arguments = ["--no-browser"]
-        var workingDirectory = URL(fileURLWithPath: (settings.bridgePath as NSString).deletingLastPathComponent)
-
-        let bundledConfig = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/config.windsurf.yaml")
-        if FileManager.default.fileExists(atPath: bundledConfig.path) {
-            arguments = ["--config", bundledConfig.path, "--no-browser"]
-            workingDirectory = URL(fileURLWithPath: (settings.bridgePath as NSString).deletingLastPathComponent)
-        }
-
-        process.executableURL = URL(fileURLWithPath: settings.bridgePath)
-        process.arguments = arguments
-        process.currentDirectoryURL = workingDirectory
+        process.executableURL = bridgeURL
+        process.arguments = ["--config", configURL.path, "--no-browser"]
+        process.currentDirectoryURL = bridgeURL.deletingLastPathComponent()
         process.standardOutput = pipe
         process.standardError = pipe
 
@@ -102,16 +47,21 @@ final class BridgeProcessController {
                   !line.isEmpty else {
                 return
             }
-            Task { @MainActor [weak self] in
+            Task { @MainActor in
                 self?.lastLogLine = line
             }
         }
 
         process.terminationHandler = { [weak self] terminatedProcess in
-            Task { @MainActor [weak self] in
+            Task { @MainActor in
                 guard let self, self.process === terminatedProcess else { return }
+
+                self.outputPipe?.fileHandleForReading.readabilityHandler = nil
+                self.outputPipe = nil
                 self.process = nil
                 self.healthTask?.cancel()
+                self.healthTask = nil
+                self.consecutiveHealthFailures = 0
                 if terminatedProcess.terminationStatus == 0 {
                     self.status = .stopped
                 } else {
@@ -124,29 +74,46 @@ final class BridgeProcessController {
             try process.run()
             self.process = process
             self.outputPipe = pipe
-            startHealthPolling(baseURL: settings.baseURL)
-            NSLog("Started bridge process at \(settings.bridgePath) with arguments \(arguments)")
+            self.startHealthPolling(baseURL: settings.baseURL)
         } catch {
-            status = .failed("Failed to start: \(error.localizedDescription)")
-            NSLog("Failed to start bridge: \(error)")
+            self.status = .failed(error.localizedDescription)
         }
     }
 
     func stop() {
-        guard let process else { return }
-        process.terminate()
+        self.healthTask?.cancel()
+        self.healthTask = nil
+        self.consecutiveHealthFailures = 0
+        if let process = self.process {
+            process.terminate()
+        }
         self.process = nil
-        healthTask?.cancel()
-        status = .stopped
+        self.outputPipe?.fileHandleForReading.readabilityHandler = nil
+        self.outputPipe = nil
+        self.status = .stopped
+        self.lastLogLine = "Bridge stopped."
     }
 
-    func restart(settings: SettingsStore) {
-        stop()
-        start(settings: settings)
+    func restart(settings: BridgeSettingsStore) {
+        self.stop()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            self.start(settings: settings)
+        }
+    }
+
+    func openEndpoint(settings: BridgeSettingsStore) {
+        NSWorkspace.shared.open(settings.baseURL.appendingPathComponent("v1/models"))
+    }
+
+    func openLogs() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(self.lastLogLine, forType: .string)
     }
 
     private func startHealthPolling(baseURL: URL) {
-        healthTask = Task { [weak self] in
+        self.healthTask?.cancel()
+        self.healthTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.checkHealth(baseURL: baseURL)
                 try? await Task.sleep(for: .seconds(2))
@@ -159,23 +126,23 @@ final class BridgeProcessController {
             let url = baseURL.appendingPathComponent("v1/models")
             var request = URLRequest(url: url)
             request.setValue("Bearer devin-test", forHTTPHeaderField: "Authorization")
-            let (data, response) = try await URLSession.shared.data(for: request)
-            lastHealthCheck = Date()
-            consecutiveHealthFailures = 0
+            let (_, response) = try await URLSession.shared.data(for: request)
+            self.lastHealthCheck = Date()
+            self.consecutiveHealthFailures = 0
             if let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) {
-                status = .running
+                self.status = .running
             } else {
-                status = .unhealthy("HTTP \(response.url?.absoluteString ?? "")")
-            }
-            if let body = String(data: data, encoding: .utf8), body.count > 0 {
-                lastLogLine = body
+                self.status = .unhealthy("Health check returned an unexpected response.")
             }
         } catch {
-            consecutiveHealthFailures += 1
-            if status == .starting, consecutiveHealthFailures < maxGracePeriodFailures {
+            guard self.process != nil else { return }
+            self.consecutiveHealthFailures += 1
+
+            if self.status == .starting, self.consecutiveHealthFailures < self.maxGracePeriodFailures {
                 return
             }
-            status = .unhealthy(error.localizedDescription)
+
+            self.status = .unhealthy(error.localizedDescription)
         }
     }
 }

@@ -1,18 +1,18 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Bindable var settings: SettingsStore
+    @Bindable var settings: BridgeSettingsStore
     @Bindable var bridge: BridgeProcessController
-    @Bindable var apiClient: APIClient
+    @Bindable var codexProvider: CodexProviderController
 
     var body: some View {
         TabView {
-            GeneralSettingsPane(settings: settings, bridge: bridge)
+            GeneralSettingsPane(settings: self.settings, bridge: self.bridge, codexProvider: self.codexProvider)
                 .tabItem {
                     Label("General", systemImage: "gearshape")
                 }
 
-            ModelsSettingsPane(settings: settings, apiClient: apiClient)
+            ModelsSettingsPane(settings: self.settings, bridge: self.bridge)
                 .tabItem {
                     Label("Models", systemImage: "list.bullet")
                 }
@@ -28,42 +28,41 @@ struct SettingsView: View {
 }
 
 struct GeneralSettingsPane: View {
-    @Bindable var settings: SettingsStore
+    @Bindable var settings: BridgeSettingsStore
     @Bindable var bridge: BridgeProcessController
+    @Bindable var codexProvider: CodexProviderController
+    @State private var selectedCodexProvider: CodexProviderMode = .openai
+    @State private var showAdvanced = false
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 16) {
-                SettingsSection(contentSpacing: 12) {
-                    Text("BRIDGE")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-
+                // Bridge status
+                SettingsSection(title: "Bridge Status") {
                     HStack(spacing: 10) {
-                        Image(systemName: bridge.status.symbolName)
-                            .foregroundStyle(Color(bridge.status.color))
+                        Image(systemName: self.bridge.status.symbolName)
+                            .foregroundStyle(self.bridge.status.isRunning ? .green : .secondary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(bridge.status.title)
+                            Text(self.bridge.status.title)
                                 .font(.body)
-                            Text(statusSubtitle)
+                            Text(self.statusSubtitle)
                                 .font(.footnote)
                                 .foregroundStyle(.tertiary)
                         }
                         Spacer()
-                        if bridge.status.isActive {
+                        if self.bridge.status.isActive {
                             Button("Restart") {
-                                bridge.restart(settings: settings)
+                                self.bridge.restart(settings: self.settings)
                             }
                             Button("Stop") {
-                                bridge.stop()
+                                self.bridge.stop()
                             }
                         } else {
                             Button("Start") {
-                                bridge.start(settings: settings)
+                                self.bridge.start(settings: self.settings)
                             }
                             Button("Stop") {
-                                bridge.stop()
+                                self.bridge.stop()
                             }
                             .disabled(true)
                         }
@@ -72,84 +71,115 @@ struct GeneralSettingsPane: View {
                     PreferenceToggleRow(
                         title: "Start bridge when app opens",
                         subtitle: "Launches the local OpenAI-compatible endpoint with the menu bar app.",
-                        binding: $settings.startBridgeOnLaunch)
+                        binding: self.$settings.startBridgeOnLaunch)
                 }
 
-                SettingsSection(contentSpacing: 12) {
-                    Text("ENDPOINT")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-
+                // Endpoint
+                SettingsSection(title: "Endpoint") {
                     SettingsRow(title: "Local URL", subtitle: "Point Codex or any OpenAI-compatible client at this URL.") {
-                        Text(settings.endpointString)
+                        Text(self.settings.endpointString)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+
+                    SettingsRow(title: "API Key", subtitle: "Use this key in the client.") {
+                        Text("devin-test")
                             .font(.system(.body, design: .monospaced))
                             .textSelection(.enabled)
                     }
                 }
 
-                SettingsSection(contentSpacing: 12) {
-                    Text("AUTH")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
+                // Codex provider
+                SettingsSection(title: "Codex Provider") {
+                    SettingsRow(title: "Backend", subtitle: "Switches the Codex desktop config and restarts Codex.") {
+                        Picker("Codex provider", selection: self.$selectedCodexProvider) {
+                            ForEach(CodexProviderMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 180)
+                    }
 
-                    SettingsRow(title: "Management secret", subtitle: "Secret key for the management endpoints.") {
-                        SecureField("Secret", text: $settings.managementSecret)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 200)
-                            .onChange(of: settings.managementSecret) { settings.save() }
+                    HStack(spacing: 10) {
+                        Button {
+                            if self.selectedCodexProvider == .devin, !self.bridge.status.isActive {
+                                self.bridge.start(settings: self.settings)
+                            }
+                            self.codexProvider.switchProvider(to: self.selectedCodexProvider, settings: self.settings)
+                        } label: {
+                            Text(self.codexProvider.isSwitching ? "Switching..." : "Apply and Restart Codex")
+                        }
+                        .disabled(self.codexProvider.isSwitching)
+
+                        Button("Refresh Status") {
+                            self.codexProvider.refreshStatus(settings: self.settings)
+                        }
+                        .disabled(self.codexProvider.isSwitching)
                     }
                 }
 
-                SettingsSection(contentSpacing: 12) {
-                    Text("SERVER")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
+                // Advanced
+                DisclosureGroup("Advanced", isExpanded: self.$showAdvanced) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        SettingsSection(title: "Server") {
+                            SettingsRow(title: "Port", subtitle: "Change only if the default conflicts with another service.") {
+                                TextField("Port", value: self.$settings.port, format: .number.grouping(.never))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 84)
+                            }
+                        }
 
-                    SettingsRow(title: "Port", subtitle: "Change only if the default conflicts with another service.") {
-                        TextField("Port", value: $settings.port, format: .number.grouping(.never))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 84)
-                            .onChange(of: settings.port) { settings.save() }
+                        SettingsSection(title: "Bridge Path") {
+                            SettingsRow(title: "Bridge path", subtitle: "Installed builds use the bundled bridge automatically.") {
+                                TextField("Bridge path", text: self.$settings.bridgePath)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 280)
+                            }
+
+                            Button {
+                                self.bridge.openEndpoint(settings: self.settings)
+                            } label: {
+                                Label("Open Health Check", systemImage: "safari")
+                            }
+                        }
+
+                        SettingsSection(title: "Last Log") {
+                            Text(self.bridge.lastLogLine)
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(4)
+                                .textSelection(.enabled)
+                        }
                     }
-
-                    SettingsRow(title: "Bridge path", subtitle: "Path to the cli-proxy-api binary.") {
-                        TextField("Bridge path", text: $settings.bridgePath)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 280)
-                            .onChange(of: settings.bridgePath) { settings.save() }
-                    }
-
-                    Text(bridge.lastLogLine)
-                        .font(.system(.footnote, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(4)
-                        .textSelection(.enabled)
+                    .padding(.top, 8)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
         }
+        .task {
+            self.codexProvider.refreshStatus(settings: self.settings)
+            self.selectedCodexProvider = self.codexProvider.selectedMode
+        }
+        .onChange(of: self.codexProvider.selectedMode) { _, newValue in
+            self.selectedCodexProvider = newValue
+        }
     }
 
     private var statusSubtitle: String {
-        if let date = bridge.lastHealthCheck {
+        if let date = self.bridge.lastHealthCheck {
             return "Last health check at \(Formatters.time.string(from: date))."
         }
-        return bridge.status.isActive ? "No health check yet." : ""
+        return self.bridge.status.detail ?? "No health check yet."
     }
 }
 
 struct AboutSettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsSection(contentSpacing: 8) {
-                Text("ABOUT")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
+            SettingsSection(title: "About") {
                 Text("CLIProxyAPI")
                     .font(.title3.weight(.semibold))
                 Text("A local menu bar controller for the OpenAI-compatible CLIProxyAPI endpoint.")
@@ -163,12 +193,4 @@ struct AboutSettingsPane: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 4)
     }
-}
-
-struct Formatters {
-    static let time: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.timeStyle = .medium
-        return formatter
-    }()
 }
