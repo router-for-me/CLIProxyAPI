@@ -861,6 +861,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	namespaceTools := collectXAINamespaceToolRefs(body)
 	body = normalizeXAITools(body)
+	body = normalizeXAINamespaceToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	var replayScope xaiReasoningReplayScope
 	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
@@ -1244,6 +1245,34 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 		body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
 	}
 	return body
+}
+
+// normalizeXAINamespaceToolChoice qualifies a forced namespaced function choice
+// using the same name sent in the flattened tools list. xAI does not accept the
+// Responses namespace field on tool_choice.
+func normalizeXAINamespaceToolChoice(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if !toolChoice.IsObject() || toolChoice.Get("type").String() != xaiFunctionToolType {
+		return body
+	}
+	namespaceName := strings.TrimSpace(toolChoice.Get("namespace").String())
+	toolName := strings.TrimSpace(toolChoice.Get("name").String())
+	qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+	if namespaceName == "" || qualifiedName == "" {
+		return body
+	}
+	updated, errSet := sjson.SetBytes(body, "tool_choice.name", qualifiedName)
+	if errSet != nil {
+		return body
+	}
+	updated, errDelete := sjson.DeleteBytes(updated, "tool_choice.namespace")
+	if errDelete != nil {
+		return body
+	}
+	return updated
 }
 
 func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bool) {

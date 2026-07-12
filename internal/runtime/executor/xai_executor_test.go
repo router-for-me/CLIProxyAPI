@@ -1136,6 +1136,44 @@ func TestNormalizeXAITools_QualifiesSameNamedNamespaceTools(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAINamespaceToolChoice(t *testing.T) {
+	body := []byte(`{
+		"tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}],
+		"tool_choice":{"type":"function","name":"search","namespace":"mcp__exa"}
+	}`)
+	out := normalizeXAITools(body)
+	out = normalizeXAINamespaceToolChoice(out)
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "mcp__exa__search" {
+		t.Fatalf("tools.0.name = %q, want mcp__exa__search; body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "mcp__exa__search" {
+		t.Fatalf("tool_choice.name = %q, want mcp__exa__search; body=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice.namespace").Exists() {
+		t.Fatalf("tool_choice.namespace should be removed for xAI upstream: %s", string(out))
+	}
+}
+
+func TestNormalizeXAINamespaceToolChoice_PreservesOtherChoices(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "automatic choice", body: []byte(`{"tool_choice":"auto"}`)},
+		{name: "top-level function", body: []byte(`{"tool_choice":{"type":"function","name":"search"}}`)},
+		{name: "non-function choice", body: []byte(`{"tool_choice":{"type":"web_search","name":"search","namespace":"mcp__exa"}}`)},
+		{name: "malformed payload", body: []byte(`{"tool_choice":{"type":"function"`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeXAINamespaceToolChoice(tt.body); !bytes.Equal(got, tt.body) {
+				t.Fatalf("payload changed: got=%q want=%q", got, tt.body)
+			}
+		})
+	}
+}
+
 func TestQualifyXAINamespaceToolNamePreservesQualifiedNames(t *testing.T) {
 	tests := []struct {
 		name      string
