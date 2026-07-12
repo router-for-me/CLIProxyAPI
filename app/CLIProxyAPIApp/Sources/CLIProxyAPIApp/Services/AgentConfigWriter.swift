@@ -93,24 +93,21 @@ final class AgentConfigWriter {
             UserDefaults.standard.set(cleaned, forKey: "codexOriginalModel")
         }
 
-        // Remove the fixed model so Codex uses the catalog model list.
-        lines = lines.filter { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return true }
-            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            return parts.count < 2 || parts[0] != "model"
-        }
-
         // Build a model catalog JSON containing only the models exposed in CLIProxy.
         let catalogPath = codexDir.appendingPathComponent("cli-proxy-model-catalog.json")
+        let slugs = try await buildCodexModelCatalog(at: catalogPath, baseURL: baseURL, apiKey: apiKey)
+
+        // Set a fixed model so Codex Desktop has something to use. The model
+        // picker will show it as "Custom" but requests will go to CLIProxy.
+        if let firstModel = slugs.first {
+            replaceOrAppend(key: "model", value: firstModel)
+        }
 
         replaceOrAppend(key: "model_catalog_json", value: catalogPath.path)
         replaceOrAppend(key: "openai_base_url", value: baseURL)
         replaceOrAppend(key: "OPENAI_API_KEY", value: apiKey)
 
         try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
-
-        try await buildCodexModelCatalog(at: catalogPath, baseURL: baseURL, apiKey: apiKey)
     }
 
     private func resetCodex() throws {
@@ -145,7 +142,7 @@ final class AgentConfigWriter {
         try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
     }
 
-    private func buildCodexModelCatalog(at catalogURL: URL, baseURL: String, apiKey: String) async throws {
+    private func buildCodexModelCatalog(at catalogURL: URL, baseURL: String, apiKey: String) async throws -> [String] {
         let exposed = UserDefaults.standard.array(forKey: "exposedModelsCache") as? [String] ?? []
 
         // If no models are exposed, query the runtime /v1/models endpoint.
@@ -207,6 +204,8 @@ final class AgentConfigWriter {
         let catalog: [String: Any] = ["models": models]
         let data = try JSONSerialization.data(withJSONObject: catalog, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: catalogURL, options: [.atomic])
+
+        return slugs
     }
 
     // MARK: - Cline
