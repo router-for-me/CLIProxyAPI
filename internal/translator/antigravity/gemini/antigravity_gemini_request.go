@@ -100,6 +100,8 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						rawJSON = []byte(renamed)
 					}
 				}
+				// Re-read after renames to pick up parametersJsonSchema changes.
+				declsResult = gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.%s", i, key))
 				deduped := util.DeduplicateFunctionDeclarations([]byte(declsResult.Raw))
 				var errSet error
 				rawJSON, errSet = sjson.SetRawBytes(rawJSON, fmt.Sprintf("request.tools.%d.%s", i, key), deduped)
