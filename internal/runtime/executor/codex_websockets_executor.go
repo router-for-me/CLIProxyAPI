@@ -1552,6 +1552,9 @@ func codexWebsocketInputLooksFullTranscript(input gjson.Result) bool {
 	if !input.IsArray() {
 		return false
 	}
+	if util.CodexInputHasLocalCompactionSummary(input) {
+		return true
+	}
 	for _, item := range input.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
 		case "compaction", "compaction_summary", "function_call", "custom_tool_call", "tool_search_call", "local_shell_call":
