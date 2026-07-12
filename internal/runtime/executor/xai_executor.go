@@ -131,6 +131,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
+	logXAIResolvedBaseURL(ctx, baseURL)
 
 	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
 	if err != nil {
@@ -220,6 +221,7 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
+	logXAIResolvedBaseURL(ctx, baseURL)
 
 	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
@@ -270,6 +272,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
 	return prepared, data, httpResp.Header.Clone(), nil
 }
 
@@ -470,6 +473,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
+	logXAIResolvedBaseURL(ctx, baseURL)
 	if endpointPath == "" {
 		endpointPath = xaiDefaultImageEndpointPath
 	}
@@ -515,6 +519,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
+	logXAIResolvedBaseURL(ctx, baseURL)
 
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
@@ -585,6 +590,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
+	logXAIResolvedBaseURL(ctx, baseURL)
 
 	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
 	if err != nil {
@@ -985,6 +991,23 @@ func xaiIsCLIChatProxyBaseURL(baseURL string) bool {
 	return xaiNormalizeBaseURL(baseURL) == xaiNormalizeBaseURL(xaiauth.CLIChatProxyBaseURL)
 }
 
+// xaiBaseURLSource classifies a resolved xAI base URL for logging.
+func xaiBaseURLSource(baseURL string) string {
+	switch {
+	case xaiIsDefaultAPIBaseURL(baseURL):
+		return "DefaultAPIBaseURL"
+	case xaiIsCLIChatProxyBaseURL(baseURL):
+		return "CLIChatProxyBaseURL"
+	default:
+		return "custom"
+	}
+}
+
+// logXAIResolvedBaseURL emits a console log for the resolved upstream base URL.
+func logXAIResolvedBaseURL(ctx context.Context, baseURL string) {
+	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", baseURL, xaiBaseURLSource(baseURL))
+}
+
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
 	applyXAICustomHeaders(r, auth)
@@ -1028,6 +1051,7 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
 		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
 		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
+		r.Header.Set("User-Agent", "xai-grok-workspace/"+xaiClientVersionValue)
 	}
 	applyXAICustomHeaders(r, auth)
 }
@@ -1121,7 +1145,6 @@ func xaiMetadataString(meta map[string]any, key string) string {
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
-	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
 		if gjson.GetBytes(body, "reasoning.effort").Exists() {
 			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
@@ -1458,23 +1481,6 @@ func appendXAIReasoningSummary(previous json.RawMessage, currentSummary []gjson.
 		updated = updatedItem
 	}
 	return updated, true
-}
-
-func removeXAIEncryptedReasoningInclude(body []byte) []byte {
-	include := gjson.GetBytes(body, "include")
-	if !include.Exists() || !include.IsArray() {
-		return body
-	}
-	kept := make([]string, 0, len(include.Array()))
-	for _, item := range include.Array() {
-		value := strings.TrimSpace(item.String())
-		if value == "" || value == "reasoning.encrypted_content" {
-			continue
-		}
-		kept = append(kept, value)
-	}
-	body, _ = sjson.SetBytes(body, "include", kept)
-	return body
 }
 
 // xaiSupportsReasoningEffort reports whether the model accepts Responses API

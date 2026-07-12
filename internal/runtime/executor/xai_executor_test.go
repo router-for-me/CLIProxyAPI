@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -23,6 +24,14 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func testContextWithAPIKey(apiKey string) context.Context {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Set("userApiKey", apiKey)
+	return context.WithValue(context.Background(), "gin", ginCtx)
+}
 
 func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	var gotPath string
@@ -159,10 +168,15 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	if !foundNamespaceCustom {
 		t.Fatalf("namespace custom tool was not moved to top-level tools; body=%s", string(gotBody))
 	}
+	foundEncryptedReasoningInclude := false
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
 		if include.String() == "reasoning.encrypted_content" {
-			t.Fatalf("xai request must not ask for encrypted reasoning content: %s", string(gotBody))
+			foundEncryptedReasoningInclude = true
+			break
 		}
+	}
+	if !foundEncryptedReasoningInclude {
+		t.Fatalf("xai request must preserve reasoning.encrypted_content include: %s", string(gotBody))
 	}
 }
 
@@ -320,6 +334,110 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestXAIExecutorCompactClearsReplayBeforePostCompactTurn(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_compact","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "xai-token",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-compact-caller")
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+		Stream:       false,
+	}
+	compactEncryptedContent := testValidGrokEncryptedContentForSeed(41)
+	compactPayload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-session","input":[{"type":"compaction","encrypted_content":""},{"type":"message","role":"user","content":[{"type":"input_text","text":"compact"}]}]}`)
+	compactPayload, _ = sjson.SetBytes(compactPayload, "input.0.encrypted_content", compactEncryptedContent)
+	compactReq := cliproxyexecutor.Request{Model: "grok-4.3", Payload: compactPayload}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatOpenAIResponse, compactReq, opts, compactPayload)
+	if !scope.valid() {
+		t.Fatal("compact replay scope must be valid")
+	}
+	reasoning := []byte(`{"type":"reasoning","summary":[],"encrypted_content":""}`)
+	reasoning, _ = sjson.SetBytes(reasoning, "encrypted_content", testValidGrokEncryptedContentForSeed(42))
+	if !internalcache.CacheXAIReasoningReplayItems(scope.modelName, scope.sessionKey, [][]byte{
+		reasoning,
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pre-compact answer"}]}`),
+	}) {
+		t.Fatal("failed to seed xAI replay cache")
+	}
+
+	if _, err := exec.Execute(ctx, auth, compactReq, opts); err != nil {
+		t.Fatalf("Execute compact error: %v", err)
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey); ok {
+		t.Fatal("successful compact must clear the pre-compact replay batch")
+	}
+
+	postCompactPayload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-session","input":[{"type":"compaction","encrypted_content":""},{"type":"message","role":"user","content":[{"type":"input_text","text":"after compact"}]}]}`)
+	postCompactPayload, _ = sjson.SetBytes(postCompactPayload, "input.0.encrypted_content", compactEncryptedContent)
+	prepared, errPrepare := exec.prepareResponsesRequest(ctx, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: postCompactPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if errPrepare != nil {
+		t.Fatalf("prepare post-compact request: %v", errPrepare)
+	}
+	input := gjson.GetBytes(prepared.body, "input").Array()
+	if len(input) != 2 || input[0].Get("type").String() != "compaction" || input[1].Get("role").String() != "user" {
+		t.Fatalf("post-compact input contains stale replay state: %s", prepared.body)
+	}
+}
+
+func TestXAIExecutorCompactFailureRetainsReplay(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"compact failed"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "xai-token",
+		},
+	}
+	ctx := testContextWithAPIKey("xai-compact-failure-caller")
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Alt: "responses/compact"}
+	payload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-failure-session","input":[{"type":"message","role":"user","content":"compact"}]}`)
+	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatOpenAIResponse, req, opts, payload)
+	reasoning := []byte(`{"type":"reasoning","summary":[],"encrypted_content":""}`)
+	reasoning, _ = sjson.SetBytes(reasoning, "encrypted_content", testValidGrokEncryptedContentForSeed(43))
+	if !internalcache.CacheXAIReasoningReplayItems(scope.modelName, scope.sessionKey, [][]byte{reasoning}) {
+		t.Fatal("failed to seed xAI replay cache")
+	}
+
+	if _, err := exec.Execute(ctx, auth, req, opts); err == nil {
+		t.Fatal("Execute compact error = nil, want upstream failure")
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey); !ok {
+		t.Fatal("failed compact must retain the previous replay batch")
 	}
 }
 
@@ -1420,8 +1538,9 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 		SourceFormat: sdktranslator.FormatClaude,
 		Stream:       false,
 	}
+	ctx := testContextWithAPIKey("xai-replay-caller")
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
 		Payload: []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-1\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
 	}, opts)
@@ -1429,7 +1548,7 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 		t.Fatalf("first Execute error: %v", err)
 	}
 
-	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err = executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
 		Payload: []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-1\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
 	}, opts)
@@ -1449,6 +1568,425 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 	}
 	if got := gjson.GetBytes(secondBody, "input.1.role").String(); got != "user" {
 		t.Fatalf("input.1.role = %q, want user; body=%s", got, string(secondBody))
+	}
+}
+
+func TestXAIExecutorResponsesSSEReplaysEncryptedReasoningAndAssistantMessage(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	encryptedContent := testValidGrokEncryptedContentForSeed(9)
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		bodies = append(bodies, body)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if len(bodies) == 1 {
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"` + encryptedContent + `"},"output_index":0}` + "\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"first answer"}]},"output_index":1}` + "\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","model":"grok-4.5","output":[]}}` + "\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","model":"grok-4.5","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-responses-sse-replay",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	}
+	firstPayload := []byte(`{"model":"grok-4.5","stream":true,"store":false,"prompt_cache_key":"codex-sse-session","include":["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}]}`)
+	secondPayload := []byte(`{"model":"grok-4.5","stream":true,"store":false,"prompt_cache_key":"codex-sse-session","include":["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+
+	streamedResponses := make([][]byte, 0, 2)
+	ctx := testContextWithAPIKey("codex-sse-api-key")
+	for _, payload := range [][]byte{firstPayload, secondPayload} {
+		result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "grok-4.5", Payload: payload}, opts)
+		if err != nil {
+			t.Fatalf("ExecuteStream error: %v", err)
+		}
+		var streamed bytes.Buffer
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error: %v", chunk.Err)
+			}
+			streamed.Write(chunk.Payload)
+		}
+		streamedResponses = append(streamedResponses, bytes.Clone(streamed.Bytes()))
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(bodies))
+	}
+	if includes := gjson.GetBytes(bodies[0], "include").Array(); len(includes) != 1 || includes[0].String() != "reasoning.encrypted_content" {
+		t.Fatalf("first request include was not preserved: %s", bodies[0])
+	}
+	var downstreamEncryptedContent string
+	for _, line := range bytes.Split(streamedResponses[0], []byte("\n")) {
+		if !bytes.HasPrefix(line, xaiDataTag) {
+			continue
+		}
+		eventData := bytes.TrimSpace(line[len(xaiDataTag):])
+		if gjson.GetBytes(eventData, "type").String() != "response.output_item.done" ||
+			gjson.GetBytes(eventData, "item.type").String() != "reasoning" {
+			continue
+		}
+		downstreamEncryptedContent = gjson.GetBytes(eventData, "item.encrypted_content").String()
+		break
+	}
+	if downstreamEncryptedContent != encryptedContent {
+		t.Fatalf("downstream encrypted_content = %q, want upstream Grok blob; stream=%s", downstreamEncryptedContent, streamedResponses[0])
+	}
+	if got := gjson.GetBytes(bodies[1], "input.0.type").String(); got != "reasoning" {
+		t.Fatalf("second input.0.type = %q, want reasoning; body=%s", got, bodies[1])
+	}
+	if got := gjson.GetBytes(bodies[1], "input.0.encrypted_content").String(); got != encryptedContent {
+		t.Fatalf("replayed encrypted_content = %q, want cached Grok blob; body=%s", got, bodies[1])
+	}
+	if got := gjson.GetBytes(bodies[1], "input.1.type").String(); got != "message" {
+		t.Fatalf("second input.1.type = %q, want assistant message; body=%s", got, bodies[1])
+	}
+	if got := gjson.GetBytes(bodies[1], "input.1.content.0.text").String(); got != "first answer" {
+		t.Fatalf("replayed assistant text = %q, want first answer; body=%s", got, bodies[1])
+	}
+	if got := gjson.GetBytes(bodies[1], "input.2.content.0.text").String(); got != "second" {
+		t.Fatalf("new user text = %q, want second; body=%s", got, bodies[1])
+	}
+}
+
+func TestFilterXAIReasoningReplayItemsSkipsMatchingCachedTurn(t *testing.T) {
+	encryptedContent := testValidGrokEncryptedContentForSeed(10)
+	body := []byte(`{"input":[{"type":"reasoning","summary":[],"encrypted_content":""},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+	body, _ = sjson.SetBytes(body, "input.0.encrypted_content", encryptedContent)
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
+
+	filtered := filterXAIReasoningReplayItemsForInput(body, items)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered replay items = %q, want none for client-provided history", filtered)
+	}
+}
+
+func TestFilterXAIReasoningReplayItemsSkipsAmbiguousCachedTurnWhenInputHasOlderReasoning(t *testing.T) {
+	oldEncryptedContent := testValidGrokEncryptedContentForSeed(10)
+	newEncryptedContent := testValidGrokEncryptedContentForSeed(12)
+	body := []byte(`{"input":[{"type":"reasoning","summary":[],"encrypted_content":""},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"older answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+	body, _ = sjson.SetBytes(body, "input.0.encrypted_content", oldEncryptedContent)
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"new answer"}]}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", newEncryptedContent)
+
+	filtered := filterXAIReasoningReplayItemsForInput(body, items)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered replay items = %q, want none when cached assistant does not match history", filtered)
+	}
+}
+
+func TestFilterXAIReasoningReplayItemsSkipsDuplicateAssistantMessage(t *testing.T) {
+	encryptedContent := testValidGrokEncryptedContentForSeed(11)
+	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
+
+	filtered := filterXAIReasoningReplayItemsForInput(body, items)
+	if len(filtered) != 1 || gjson.GetBytes(filtered[0], "type").String() != "reasoning" {
+		t.Fatalf("filtered replay items = %q, want reasoning only", filtered)
+	}
+}
+
+func TestFilterXAIReasoningReplayItemsRecognizesRoleOnlyAssistantMessage(t *testing.T) {
+	encryptedContent := testValidGrokEncryptedContentForSeed(31)
+	body := []byte(`{"input":[{"role":"assistant","content":"first answer"},{"role":"user","content":"second"}]}`)
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
+
+	filtered := filterXAIReasoningReplayItemsForInput(body, items)
+	if len(filtered) != 1 || gjson.GetBytes(filtered[0], "type").String() != "reasoning" {
+		t.Fatalf("filtered replay items = %q, want reasoning only", filtered)
+	}
+	updated, ok := insertCodexReasoningReplayItems(body, filtered)
+	if !ok {
+		t.Fatal("insertCodexReasoningReplayItems failed")
+	}
+	input := gjson.GetBytes(updated, "input").Array()
+	if len(input) != 3 || input[0].Get("type").String() != "reasoning" || input[1].Get("role").String() != "assistant" {
+		t.Fatalf("unexpected role-only replay order: %s", updated)
+	}
+	assistantCount := 0
+	for _, item := range input {
+		if strings.EqualFold(item.Get("role").String(), "assistant") {
+			assistantCount++
+		}
+	}
+	if assistantCount != 1 {
+		t.Fatalf("assistant messages after replay = %d, want 1; body=%s", assistantCount, updated)
+	}
+}
+
+func TestFilterXAIReasoningReplayItemsDoesNotMatchOlderAssistantMessage(t *testing.T) {
+	encryptedContent := testValidGrokEncryptedContentForSeed(13)
+	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"different answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
+
+	filtered := filterXAIReasoningReplayItemsForInput(body, items)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered replay items = %q, want none when the last assistant differs from the cached turn", filtered)
+	}
+}
+
+// Scenario #3: client already has a last assistant whose text drifts from the
+// cached message. The cache cannot safely determine whether this is a trimmed
+// older turn or a modified latest turn, so skip the entire cached batch.
+func TestFilterXAIReasoningReplayItemsSkipsAmbiguousTurnWhenLastAssistantTextDrifts(t *testing.T) {
+	encryptedContent := testValidGrokEncryptedContentForSeed(20)
+	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", encryptedContent)
+
+	filtered := filterXAIReasoningReplayItemsForInput(body, items)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered = %q, want no replay for ambiguous drifted assistant", filtered)
+	}
+}
+
+// Scenario #2: Claude multi-turn where the client resends older thinking signature
+// but drops the latest turn's signature. Cache holds the latest R(+M); upstream
+// must receive the latest encrypted blob, not only the older client-provided one.
+func TestXAIExecutorClaudeInjectsLatestCachedReasoningWhenHistoryHasOnlyOlderSignature(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	oldEncrypted := testValidGrokEncryptedContentForSeed(21)
+	latestEncrypted := testValidGrokEncryptedContentForSeed(22)
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if len(bodies) == 1 {
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_latest","type":"reasoning","summary":[],"encrypted_content":"` + latestEncrypted + `"},"output_index":0}` + "\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"latest answer"}]},"output_index":1}` + "\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","model":"grok-4.5","output":[]}}` + "\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","model":"grok-4.5","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:         "xai-auth-claude-missing-latest-sig",
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: false}
+	ctx := testContextWithAPIKey("claude-missing-sig-key")
+
+	// Turn 1: user only -> cache latest R+M
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","metadata":{"user_id":"{\"session_id\":\"claude-missing-latest\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+
+	// Turn 2 (actual failure shape): client keeps an OLDER thinking signature and the
+	// assistant text, but does not resend the latest encrypted/signature blob.
+	secondPayload := []byte(`{
+		"model":"grok-4.5",
+		"metadata":{"user_id":"{\"session_id\":\"claude-missing-latest\"}"},
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hello"}]},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"older summary","signature":""},
+				{"type":"text","text":"latest answer"}
+			]},
+			{"role":"user","content":[{"type":"text","text":"next"}]}
+		]
+	}`)
+	secondPayload, _ = sjson.SetBytes(secondPayload, "messages.1.content.0.signature", oldEncrypted)
+
+	_, err = executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: secondPayload,
+	}, opts)
+	if err != nil {
+		t.Fatalf("second Execute: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("upstream requests = %d, want 2", len(bodies))
+	}
+
+	// Upstream must include BOTH older client signature (as reasoning) and latest cached blob.
+	// At minimum the latest cached encrypted_content must be present for continuity.
+	second := bodies[1]
+	foundLatest := false
+	foundOld := false
+	assistantCount := 0
+	for _, item := range gjson.GetBytes(second, "input").Array() {
+		switch item.Get("type").String() {
+		case "reasoning":
+			enc := item.Get("encrypted_content").String()
+			if enc == latestEncrypted {
+				foundLatest = true
+			}
+			if enc == oldEncrypted {
+				foundOld = true
+			}
+		case "message":
+			if item.Get("role").String() == "assistant" {
+				assistantCount++
+			}
+		}
+	}
+	if !foundLatest {
+		t.Fatalf("latest cached encrypted_content missing from upstream body (broken Claude missing-signature scenario): %s", second)
+	}
+	if !foundOld {
+		t.Fatalf("older client signature/reasoning missing after translate: %s", second)
+	}
+	if assistantCount != 1 {
+		t.Fatalf("assistant messages = %d, want 1 (no partial double-message inject); body=%s", assistantCount, second)
+	}
+}
+
+func TestCacheXAIReasoningReplayFromCompletedClearsPreviousEntryWhenNoReplayableState(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	modelName := "grok-4.5"
+	sessionKey := "prompt-cache:clear-previous"
+	encryptedContent := testValidGrokEncryptedContentForSeed(14)
+	previousItems := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"previous answer"}]}`),
+	}
+	previousItems[0], _ = sjson.SetBytes(previousItems[0], "encrypted_content", encryptedContent)
+	if !internalcache.CacheXAIReasoningReplayItems(modelName, sessionKey, previousItems) {
+		t.Fatal("failed to seed xAI reasoning replay cache")
+	}
+
+	cacheXAIReasoningReplayFromCompleted(context.Background(), xaiReasoningReplayScope{
+		modelName:  modelName,
+		sessionKey: sessionKey,
+	}, []byte(`{"response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"message without reasoning"}]}]}}`))
+
+	if _, ok := internalcache.GetXAIReasoningReplayItems(modelName, sessionKey); ok {
+		t.Fatal("expected previous replay entry to be cleared after non-replayable completed output")
+	}
+}
+
+func TestXAIReasoningReplayScopeIsolatesOpenAIResponsePromptCacheKeyByAPIKey(t *testing.T) {
+	payload := []byte(`{"model":"grok-4.5","prompt_cache_key":"shared-session","input":[]}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+	req := cliproxyexecutor.Request{Model: "grok-4.5", Payload: payload}
+
+	scopeA := xaiReasoningReplayScopeFromRequest(testContextWithAPIKey("api-key-a"), sdktranslator.FormatOpenAIResponse, req, opts, payload)
+	scopeB := xaiReasoningReplayScopeFromRequest(testContextWithAPIKey("api-key-b"), sdktranslator.FormatOpenAIResponse, req, opts, payload)
+	if !scopeA.valid() || !scopeB.valid() {
+		t.Fatalf("scopes must be valid with caller api keys: A=%+v B=%+v", scopeA, scopeB)
+	}
+	if scopeA.sessionKey == scopeB.sessionKey {
+		t.Fatalf("session keys must differ across callers, both %q", scopeA.sessionKey)
+	}
+	if !strings.HasPrefix(scopeA.sessionKey, "caller:") || !strings.Contains(scopeA.sessionKey, "prompt-cache:shared-session") {
+		t.Fatalf("session key A = %q, want caller-isolated prompt-cache key", scopeA.sessionKey)
+	}
+
+	scopeNoKey := xaiReasoningReplayScopeFromRequest(context.Background(), sdktranslator.FormatOpenAIResponse, req, opts, payload)
+	if scopeNoKey.valid() {
+		t.Fatalf("OpenAI Responses without caller API key must disable replay: %+v", scopeNoKey)
+	}
+}
+
+func TestXAIReasoningReplayScopeDisablesClaudeWithoutAPIKey(t *testing.T) {
+	payload := []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"session_id\":\"shared-session\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+
+	scopeNoKey := xaiReasoningReplayScopeFromRequest(context.Background(), sdktranslator.FormatClaude, req, opts, payload)
+	if scopeNoKey.valid() {
+		t.Fatalf("Claude without caller API key must disable replay: %+v", scopeNoKey)
+	}
+
+	scopeWithKey := xaiReasoningReplayScopeFromRequest(testContextWithAPIKey("api-key-a"), sdktranslator.FormatClaude, req, opts, payload)
+	if !scopeWithKey.valid() {
+		t.Fatal("Claude with caller API key must enable replay")
+	}
+	if !strings.HasPrefix(scopeWithKey.sessionKey, "caller:") || !strings.Contains(scopeWithKey.sessionKey, "claude:shared-session") {
+		t.Fatalf("session key = %q, want caller-isolated Claude session key", scopeWithKey.sessionKey)
+	}
+}
+
+func TestXAIReasoningReplayScopeAllowsTrustedExecutionSessionWithoutAPIKey(t *testing.T) {
+	payload := []byte(`{"model":"grok-4.3","messages":[{"role":"user","content":"hello"}]}`)
+	scope := xaiReasoningReplayScopeFromRequest(context.Background(), sdktranslator.FormatClaude, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "trusted-session",
+		},
+	}, payload)
+	if !scope.valid() {
+		t.Fatal("trusted execution session must remain replayable without caller API key")
+	}
+	if scope.sessionKey != "execution:trusted-session" {
+		t.Fatalf("session key = %q, want execution:trusted-session", scope.sessionKey)
+	}
+}
+
+func TestXAIReasoningReplayScopeSkipsIncrementalWebsocketPreviousResponse(t *testing.T) {
+	scope := xaiReasoningReplayScopeFromRequest(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
+		sdktranslator.FormatOpenAIResponse,
+		cliproxyexecutor.Request{
+			Model:   "grok-4.5",
+			Payload: []byte(`{"model":"grok-4.5","previous_response_id":"resp_1","prompt_cache_key":"codex-ws-session","input":[]}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+		[]byte(`{"model":"grok-4.5","prompt_cache_key":"codex-ws-session","input":[]}`),
+	)
+	if scope.valid() {
+		t.Fatalf("incremental websocket request must not enable cache replay: %+v", scope)
 	}
 }
 
@@ -1479,6 +2017,47 @@ func TestApplyXAIReasoningReplayCacheFallsBackWhenReadFails(t *testing.T) {
 	}
 	if string(updated) != string(body) {
 		t.Fatalf("body changed on cache read error: %s", string(updated))
+	}
+}
+
+func TestXAIReasoningReplayCacheReplaysFunctionCallWithoutReasoning(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	const executionSessionID = "xai-tool-call-only"
+	cacheXAIReasoningReplayFromCompleted(context.Background(), xaiReasoningReplayScope{
+		modelName:  "grok-4.3",
+		sessionKey: "execution:" + executionSessionID,
+	}, []byte(`{"response":{"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"weather\"}"}]}}`))
+
+	body := []byte(`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"call lookup"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}]}`)
+	updated, scope, errReplay := applyXAIReasoningReplayCacheRequired(context.Background(), sdktranslator.FormatClaude, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: body,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: executionSessionID,
+		},
+	}, body)
+	if errReplay != nil {
+		t.Fatalf("applyXAIReasoningReplayCacheRequired() error = %v", errReplay)
+	}
+	if !scope.valid() {
+		t.Fatal("tool-call-only replay scope must remain valid")
+	}
+	input := gjson.GetBytes(updated, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("input length = %d, want 3; body=%s", len(input), updated)
+	}
+	wantTypes := []string{"message", "function_call", "function_call_output"}
+	for i, wantType := range wantTypes {
+		if got := input[i].Get("type").String(); got != wantType {
+			t.Fatalf("input.%d.type = %q, want %q; body=%s", i, got, wantType, updated)
+		}
+	}
+	if got := input[1].Get("call_id").String(); got != "call_1" {
+		t.Fatalf("replayed call_id = %q, want call_1; body=%s", got, updated)
 	}
 }
 
@@ -1519,8 +2098,9 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 		SourceFormat: sdktranslator.FormatClaude,
 		Stream:       false,
 	}
+	ctx := testContextWithAPIKey("xai-tool-replay-caller")
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model: "grok-4.3",
 		Payload: []byte(`{
 			"model":"grok-4.3",
@@ -1533,7 +2113,7 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 		t.Fatalf("first Execute error: %v", err)
 	}
 
-	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err = executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model: "grok-4.3",
 		Payload: []byte(`{
 			"model":"grok-4.3",
@@ -1570,6 +2150,28 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 	}
 	if got := gjson.GetBytes(secondBody, "input.3.call_id").String(); got != "call_1" {
 		t.Fatalf("input.3.call_id = %q, want call_1; body=%s", got, string(secondBody))
+	}
+}
+
+func TestXAIBaseURLSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{name: "default api", baseURL: xaiauth.DefaultAPIBaseURL, want: "DefaultAPIBaseURL"},
+		{name: "default api trailing slash", baseURL: xaiauth.DefaultAPIBaseURL + "/", want: "DefaultAPIBaseURL"},
+		{name: "cli chat proxy", baseURL: xaiauth.CLIChatProxyBaseURL, want: "CLIChatProxyBaseURL"},
+		{name: "cli chat proxy trailing slash", baseURL: xaiauth.CLIChatProxyBaseURL + "/", want: "CLIChatProxyBaseURL"},
+		{name: "custom", baseURL: "https://gateway.example.com/v1", want: "custom"},
+		{name: "empty treated as custom", baseURL: "", want: "custom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiBaseURLSource(tt.baseURL); got != tt.want {
+				t.Fatalf("xaiBaseURLSource(%q) = %q, want %q", tt.baseURL, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1733,6 +2335,9 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
 			t.Fatalf("%s = %q, want empty for official API", xaiClientVersionHeader, got)
 		}
+		if got := req.Header.Get("User-Agent"); got != "" {
+			t.Fatalf("User-Agent = %q, want empty for official API", got)
+		}
 	})
 
 	t.Run("OAuth defaults to cli chat proxy headers", func(t *testing.T) {
@@ -1757,6 +2362,9 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
 			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
 		}
+		if got := req.Header.Get("User-Agent"); got != "xai-grok-workspace/"+xaiClientVersionValue {
+			t.Fatalf("User-Agent = %q, want xai-grok-workspace/%s", got, xaiClientVersionValue)
+		}
 	})
 
 	t.Run("no cli headers on custom gateway with using_api false", func(t *testing.T) {
@@ -1774,6 +2382,9 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
 			t.Fatalf("%s = %q, want empty for custom gateway", xaiClientVersionHeader, got)
+		}
+		if got := req.Header.Get("User-Agent"); got != "" {
+			t.Fatalf("User-Agent = %q, want empty for custom gateway", got)
 		}
 	})
 
