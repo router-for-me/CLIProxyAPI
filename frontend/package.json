@@ -1,0 +1,16 @@
+{
+  "name": "cliproxy-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimalist dashboard for CLIProxyAPI",
+  "scripts": {
+    "dev": "vite --port 3000",
+    "build": "tsc && vite build",
+    "preview": "vite preview --port 3000"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}
