@@ -24,7 +24,7 @@ final class AgentConfigWriter {
     func applyCLIProxy(to app: AgentApp, baseURL: String, apiKey: String) async throws {
         switch app.id {
         case "codex":
-            try applyCodex(baseURL: baseURL, apiKey: apiKey)
+            try await applyCodex(baseURL: baseURL, apiKey: apiKey)
         case "cline":
             try applyCline(baseURL: baseURL, apiKey: apiKey)
         case "opencode":
@@ -57,7 +57,7 @@ final class AgentConfigWriter {
 
     // MARK: - Codex
 
-    private func applyCodex(baseURL: String, apiKey: String) throws {
+    private func applyCodex(baseURL: String, apiKey: String) async throws {
         let codexDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex")
         try? FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
         let configURL = codexDir.appendingPathComponent("config.toml")
@@ -94,13 +94,16 @@ final class AgentConfigWriter {
         }
 
         // Set a fixed model so Codex Desktop has a default to use. The model
-        // catalog is fetched from the CLIProxy /v1/models endpoint when
-        // model_catalog_json is not set.
+        // catalog comes from model_catalog_json.
         let exposed = UserDefaults.standard.array(forKey: "exposedModelsCache") as? [String] ?? []
         if let firstModel = exposed.first {
             replaceOrAppend(key: "model", value: firstModel)
         }
 
+        let catalogPath = codexDir.appendingPathComponent("cli-proxy-model-catalog.json")
+        try await buildCodexModelCatalog(at: catalogPath, baseURL: baseURL, apiKey: apiKey)
+
+        replaceOrAppend(key: "model_catalog_json", value: catalogPath.path)
         replaceOrAppend(key: "openai_base_url", value: baseURL)
         replaceOrAppend(key: "OPENAI_API_KEY", value: apiKey)
 
@@ -137,6 +140,17 @@ final class AgentConfigWriter {
         try? FileManager.default.removeItem(at: catalogPath)
 
         try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
+    }
+
+    private func buildCodexModelCatalog(at catalogURL: URL, baseURL: String, apiKey: String) async throws {
+        // Fetch the Codex-format model catalog from CLIProxy.
+        let url = URL(string: baseURL + "/models?client_version=1") ?? catalogURL.deletingLastPathComponent().appendingPathComponent("models")
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let (data, _) = try await URLSession.shared.data(for: request)
+
+        // Write the response directly so Codex can load it as model_catalog_json.
+        try data.write(to: catalogURL, options: [.atomic])
     }
 
     // MARK: - Cline
