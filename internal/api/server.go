@@ -809,6 +809,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
+		mgmt.GET("/exposed-models", s.mgmt.GetExposedModels)
+		mgmt.PUT("/exposed-models", s.mgmt.PutExposedModels)
+		mgmt.POST("/exposed-models", s.mgmt.PostExposedModels)
+		mgmt.GET("/subscriptions", s.mgmt.GetSubscriptions)
+
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)

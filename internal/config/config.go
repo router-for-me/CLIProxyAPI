@@ -817,6 +817,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize exposed models list.
+	cfg.ExposedModels = NormalizeExposedModels(cfg.ExposedModels)
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -1101,6 +1104,32 @@ func NormalizeHeaders(headers map[string]string) map[string]string {
 		return nil
 	}
 	return clean
+}
+
+// NormalizeExposedModels trims, lowercases, and deduplicates the exposed model list.
+// It preserves the order of first occurrences and drops empty entries.
+func NormalizeExposedModels(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	var out []string
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		key := strings.ToLower(m)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // NormalizeExcludedModels trims, lowercases, and deduplicates model exclusion patterns.

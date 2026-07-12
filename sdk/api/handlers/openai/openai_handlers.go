@@ -67,11 +67,26 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
+	// Filter by exposed models if configured
+	exposedSet := make(map[string]struct{})
+	if h.Cfg != nil && len(h.Cfg.ExposedModels) > 0 {
+		for _, m := range h.Cfg.ExposedModels {
+			exposedSet[m] = struct{}{}
+		}
+	}
+
 	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
+	filteredModels := make([]map[string]any, 0, len(allModels))
+	for _, model := range allModels {
+		id, _ := model["id"].(string)
+		if len(exposedSet) > 0 {
+			if _, ok := exposedSet[id]; !ok {
+				continue
+			}
+		}
+
 		filteredModel := map[string]any{
-			"id":     model["id"],
+			"id":     id,
 			"object": model["object"],
 		}
 
@@ -85,7 +100,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
-		filteredModels[i] = filteredModel
+		filteredModels = append(filteredModels, filteredModel)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
