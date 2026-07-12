@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,14 @@ const (
 	defaultAuthTable   = "auth_store"
 	defaultConfigKey   = "config"
 )
+
+// safeIdentifier matches only valid SQL identifier characters (letters, digits, underscores).
+var safeIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// quoteIdent returns a safely double-quoted SQL identifier, escaping embedded double quotes.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
 type PostgresStoreConfig struct {
@@ -52,11 +61,20 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 		return nil, fmt.Errorf("postgres store: DSN is required")
 	}
 	cfg.DSN = trimmedDSN
+	if cfg.Schema != "" && !safeIdentifier.MatchString(cfg.Schema) {
+		return nil, fmt.Errorf("postgres store: invalid schema name %q", cfg.Schema)
+	}
 	if cfg.ConfigTable == "" {
 		cfg.ConfigTable = defaultConfigTable
 	}
+	if !safeIdentifier.MatchString(cfg.ConfigTable) {
+		return nil, fmt.Errorf("postgres store: invalid config table name %q", cfg.ConfigTable)
+	}
 	if cfg.AuthTable == "" {
 		cfg.AuthTable = defaultAuthTable
+	}
+	if !safeIdentifier.MatchString(cfg.AuthTable) {
+		return nil, fmt.Errorf("postgres store: invalid auth table name %q", cfg.AuthTable)
 	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
