@@ -1050,6 +1050,7 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 	if xaiIsCLIChatProxyBaseURL(xaiChatBaseURL(auth)) {
 		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
 		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
+		r.Header.Set("User-Agent", "xai-grok-workspace/"+xaiClientVersionValue)
 	}
 	applyXAICustomHeaders(r, auth)
 }

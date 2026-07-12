@@ -1755,6 +1755,9 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
 			t.Fatalf("%s = %q, want empty for official API", xaiClientVersionHeader, got)
 		}
+		if got := req.Header.Get("User-Agent"); got != "" {
+			t.Fatalf("User-Agent = %q, want empty for official API", got)
+		}
 	})
 
 	t.Run("OAuth defaults to cli chat proxy headers", func(t *testing.T) {
@@ -1779,6 +1782,9 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
 			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
 		}
+		if got := req.Header.Get("User-Agent"); got != "xai-grok-workspace/"+xaiClientVersionValue {
+			t.Fatalf("User-Agent = %q, want xai-grok-workspace/%s", got, xaiClientVersionValue)
+		}
 	})
 
 	t.Run("no cli headers on custom gateway with using_api false", func(t *testing.T) {
@@ -1796,6 +1802,9 @@ func TestApplyXAIChatHeaders(t *testing.T) {
 		}
 		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
 			t.Fatalf("%s = %q, want empty for custom gateway", xaiClientVersionHeader, got)
+		}
+		if got := req.Header.Get("User-Agent"); got != "" {
+			t.Fatalf("User-Agent = %q, want empty for custom gateway", got)
 		}
 	})
 
