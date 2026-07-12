@@ -216,7 +216,7 @@ func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"
 	case "codex-auto-review":
-		delete(entry, "visibility")
+		entry["visibility"] = "list"
 	}
 }
 
