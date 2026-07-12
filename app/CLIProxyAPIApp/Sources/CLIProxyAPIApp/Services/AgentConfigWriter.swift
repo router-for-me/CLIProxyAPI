@@ -62,45 +62,8 @@ final class AgentConfigWriter {
         try? FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
         let configURL = codexDir.appendingPathComponent("config.toml")
 
-        var lines = (try? String(contentsOf: configURL, encoding: .utf8))?.components(separatedBy: .newlines) ?? []
-
-        NSLog("applyCodex called with baseURL=%@ apiKey=%@", baseURL, apiKey)
-
-        func replaceOrAppend(key: String, value: String) {
-            var found = false
-            for (index, line) in lines.enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
-                let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-                if parts.count == 2, parts[0] == key {
-                    lines[index] = "\(key) = \"\(value)\""
-                    found = true
-                    break
-                }
-            }
-            if !found {
-                lines.append("\(key) = \"\(value)\"")
-            }
-        }
-
-        // Save the current model so we can restore it on reset.
-        let originalModel = lines.first { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return false }
-            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            return parts.count == 2 && parts[0] == "model"
-        }
-        if let originalModel = originalModel, let value = originalModel.split(separator: "=", maxSplits: 1).last {
-            let cleaned = value.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            UserDefaults.standard.set(cleaned, forKey: "codexOriginalModel")
-        }
-
-        // Set a fixed model so Codex Desktop has a default to use. The model
-        // catalog comes from model_catalog_json.
-        let exposed = UserDefaults.standard.array(forKey: "exposedModelsCache") as? [String] ?? []
-        if let firstModel = exposed.first {
-            replaceOrAppend(key: "model", value: firstModel)
-        }
+        // Save the original config once so we can fully restore it later.
+        ensureCodexBackup(at: configURL)
 
         let catalogPath = codexDir.appendingPathComponent("cli-proxy-model-catalog.json")
         do {
@@ -111,55 +74,79 @@ final class AgentConfigWriter {
             throw error
         }
 
-        replaceOrAppend(key: "model_catalog_json", value: catalogPath.path)
-        replaceOrAppend(key: "openai_base_url", value: baseURL)
-        replaceOrAppend(key: "OPENAI_API_KEY", value: apiKey)
+        var editor = try CodexConfigEditor(url: configURL)
 
-        try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
+        let exposed = UserDefaults.standard.array(forKey: "exposedModelsCache") as? [String] ?? []
+        let firstModel = exposed.first ?? "devin/glm-5.2"
+
+        editor.setTopLevelString(key: "model_provider", value: "openai")
+        editor.setTopLevelString(key: "model", value: firstModel)
+        editor.setTopLevelString(key: "openai_base_url", value: baseURL)
+        editor.setTopLevelString(key: "OPENAI_API_KEY", value: apiKey)
+        editor.setTopLevelString(key: "model_catalog_json", value: catalogPath.path)
+
+        editor.setFeatureBool(key: "remote_compaction_v2", value: true)
+
+        editor.setProviderBlock(name: "devin-subscription", baseURL: baseURL, apiKey: apiKey)
+
+        try editor.write(to: configURL)
         NSLog("applyCodex: wrote config to %@", configURL.path)
     }
 
     private func resetCodex() throws {
         let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/config.toml")
         guard FileManager.default.fileExists(atPath: configURL.path) else { return }
-        var lines = try String(contentsOf: configURL, encoding: .utf8).components(separatedBy: .newlines)
 
-        let originalModel = UserDefaults.standard.string(forKey: "codexOriginalModel")
-        if let originalModel = originalModel, !originalModel.isEmpty {
-            let hasModel = lines.contains { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return false }
-                let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-                return parts.count == 2 && parts[0] == "model"
-            }
-            if !hasModel {
-                lines.append("model = \"\(originalModel)\"")
-            }
-            UserDefaults.standard.removeObject(forKey: "codexOriginalModel")
-        }
-
-        lines = lines.filter { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return true }
-            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            return parts.count < 2 || (parts[0] != "openai_base_url" && parts[0] != "OPENAI_API_KEY" && parts[0] != "model_catalog_json")
+        let backupURL = configURL.appendingPathExtension("cliproxy-backup")
+        if FileManager.default.fileExists(atPath: backupURL.path) {
+            try FileManager.default.removeItem(at: configURL)
+            try FileManager.default.copyItem(at: backupURL, to: configURL)
         }
 
         let catalogPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/cli-proxy-model-catalog.json")
         try? FileManager.default.removeItem(at: catalogPath)
 
-        try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
+        NSLog("resetCodex: restored config from %@", backupURL.path)
     }
 
     private func buildCodexModelCatalog(at catalogURL: URL, baseURL: String, apiKey: String) async throws {
-        // Fetch the Codex-format model catalog from CLIProxy.
-        let url = URL(string: baseURL + "/models?client_version=1") ?? catalogURL.deletingLastPathComponent().appendingPathComponent("models")
+        let openaiURL = URL(string: baseURL + "/models") ?? catalogURL.deletingLastPathComponent().appendingPathComponent("models")
+        let codexURL = URL(string: baseURL + "/models?client_version=1") ?? openaiURL
+
+        let openaiData = try await fetchJSON(url: openaiURL, apiKey: apiKey)
+        let codexData = try await fetchJSON(url: codexURL, apiKey: apiKey)
+
+        let openaiModels = openaiData["data"] as? [[String: Any]] ?? []
+        let codexModels = codexData["models"] as? [[String: Any]] ?? []
+
+        let catalog: [String: Any] = [
+            "object": "list",
+            "data": openaiModels,
+            "models": codexModels
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: catalog, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: catalogURL, options: [.atomic])
+    }
+
+    private func fetchJSON(url: URL, apiKey: String) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw AgentConfigError.fileReadError
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AgentConfigError.invalidFormat
+        }
+        return json
+    }
 
-        // Write the response directly so Codex can load it as model_catalog_json.
-        try data.write(to: catalogURL, options: [.atomic])
+    private func ensureCodexBackup(at configURL: URL) {
+        let backupURL = configURL.appendingPathExtension("cliproxy-backup")
+        guard !FileManager.default.fileExists(atPath: backupURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: configURL.path) else { return }
+        try? FileManager.default.copyItem(at: configURL, to: backupURL)
     }
 
     // MARK: - Cline
@@ -243,5 +230,132 @@ final class AgentConfigWriter {
             let configuration = NSWorkspace.OpenConfiguration()
             _ = try? await workspace.openApplication(at: url, configuration: configuration)
         }
+    }
+}
+
+// MARK: - Codex TOML Editor
+
+private struct CodexConfigEditor {
+    private var preamble: [String]
+    private var sections: [String: [String]]
+    private var sectionOrder: [String]
+
+    init(url: URL) throws {
+        let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let lines = content.components(separatedBy: .newlines)
+
+        var preamble: [String] = []
+        var sections: [String: [String]] = [:]
+        var sectionOrder: [String] = []
+        var currentSection: String? = nil
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                let header = trimmed
+                currentSection = header
+                if sections[header] == nil {
+                    sections[header] = []
+                    sectionOrder.append(header)
+                }
+                sections[header]?.append(line)
+            } else if let section = currentSection {
+                sections[section]?.append(line)
+            } else {
+                preamble.append(line)
+            }
+        }
+
+        self.preamble = preamble
+        self.sections = sections
+        self.sectionOrder = sectionOrder
+    }
+
+    mutating func setTopLevelString(key: String, value: String) {
+        var found = false
+        for (index, line) in preamble.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            if trimmed.hasPrefix("[") { continue }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            if parts.count == 2, parts[0] == key {
+                preamble[index] = "\(key) = \"\(value)\""
+                found = true
+                break
+            }
+        }
+        if !found {
+            preamble.append("\(key) = \"\(value)\"")
+        }
+    }
+
+    mutating func removeTopLevelKey(key: String) {
+        preamble.removeAll { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return false }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            return parts.count == 2 && parts[0] == key
+        }
+    }
+
+    mutating func setFeatureBool(key: String, value: Bool) {
+        let header = "[features]"
+        var body = sections[header] ?? [header]
+        if sections[header] == nil {
+            sections[header] = body
+            sectionOrder.append(header)
+        }
+
+        let valueText = value ? "true" : "false"
+        var found = false
+        for (index, line) in body.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#"), !trimmed.hasPrefix("[") else { continue }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            if parts.count == 2, parts[0] == key {
+                body[index] = "\(key) = \(valueText)"
+                found = true
+                break
+            }
+        }
+        if !found {
+            body.append("\(key) = \(valueText)")
+        }
+        sections[header] = body
+    }
+
+    mutating func setProviderBlock(name: String, baseURL: String, apiKey: String) {
+        let header = "[model_providers.\(name)]"
+        let body = [
+            header,
+            "name = \"\(name)\"",
+            "base_url = \"\(baseURL)\"",
+            "api_key = \"\(apiKey)\"",
+            "wire_api = \"responses\"",
+        ]
+
+        if sections[header] != nil {
+            sections[header] = body
+            return
+        }
+
+        sections[header] = body
+        // Place the provider block before the first [plugins] or [mcp_servers] section
+        // or at the end if neither exists.
+        if let firstPlugins = sectionOrder.firstIndex(where: { $0.hasPrefix("[plugins.") || $0 == "[mcp_servers]" || $0.hasPrefix("[mcp_servers.") }) {
+            sectionOrder.insert(header, at: firstPlugins)
+        } else {
+            sectionOrder.append(header)
+        }
+    }
+
+    func write(to url: URL) throws {
+        var output = preamble.joined(separator: "\n")
+        for header in sectionOrder {
+            if let body = sections[header] {
+                output += "\n" + body.joined(separator: "\n")
+            }
+        }
+        try output.write(to: url, atomically: true, encoding: .utf8)
     }
 }
