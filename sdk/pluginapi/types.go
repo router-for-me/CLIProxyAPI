@@ -614,7 +614,27 @@ type HostModelExecutionRequest struct {
 	Alt string `json:"alt"`
 }
 
+// HostModelError preserves upstream model execution error details for plugins.
+//
+// Body is best-effort. When the host only has an error string (not a raw upstream
+// response body), Body may contain that string and match Message.
+type HostModelError struct {
+	// StatusCode is the upstream model execution HTTP status code.
+	StatusCode int `json:"status_code"`
+	// Headers contains upstream error response headers when available.
+	Headers http.Header `json:"headers"`
+	// Body contains the upstream error response body when available.
+	// If the host only has a string error, Body may hold that string.
+	Body []byte `json:"body"`
+	// Message is a human-readable error message.
+	Message string `json:"message"`
+}
+
 // HostModelExecutionResponse describes a non-streaming host model execution response.
+//
+// Error contract: host.model.execute returns a successful RPC envelope even when
+// model execution fails. Callers must inspect Error (or StatusCode) rather than
+// relying only on the RPC-level error channel.
 type HostModelExecutionResponse struct {
 	// StatusCode is the model execution HTTP status code.
 	StatusCode int `json:"status_code"`
@@ -622,16 +642,27 @@ type HostModelExecutionResponse struct {
 	Headers http.Header `json:"headers"`
 	// Body contains the raw response body.
 	Body []byte `json:"body"`
+	// Error is set when model execution fails before a normal response is available.
+	// Prefer checking Error (or StatusCode >= 400) over the RPC error channel alone.
+	Error *HostModelError `json:"error,omitempty"`
 }
 
 // HostModelStreamResponse describes a streaming host model execution response.
+//
+// Error contract: host.model.execute_stream returns a successful RPC envelope
+// even when stream startup fails. Callers must inspect Error (or StatusCode)
+// rather than relying only on the RPC-level error channel.
 type HostModelStreamResponse struct {
 	// StatusCode is the model execution HTTP status code.
 	StatusCode int `json:"status_code"`
 	// Headers contains response headers.
 	Headers http.Header `json:"headers"`
 	// StreamID identifies the host-owned stream for later reads.
+	// Empty when Error is set and no stream was opened.
 	StreamID string `json:"stream_id"`
+	// Error is set when streaming fails before a stream is opened.
+	// Prefer checking Error (or StatusCode >= 400) over the RPC error channel alone.
+	Error *HostModelError `json:"error,omitempty"`
 }
 
 // HostModelStreamReadRequest asks the host to read the next model stream chunk.
@@ -641,11 +672,17 @@ type HostModelStreamReadRequest struct {
 }
 
 // HostModelStreamReadResponse returns one model stream chunk or terminal state.
+//
+// ErrorDetails carries structured stream errors when available. Error remains
+// the plain-string form for older callers.
 type HostModelStreamReadResponse struct {
 	// Payload contains the raw stream chunk bytes.
 	Payload []byte `json:"payload"`
 	// Error reports a stream error associated with this read.
 	Error string `json:"error"`
+	// ErrorDetails preserves structured stream error details when available.
+	// Prefer ErrorDetails when present; Error is the string fallback.
+	ErrorDetails *HostModelError `json:"error_details,omitempty"`
 	// Done reports whether the stream has ended.
 	Done bool `json:"done"`
 }
@@ -1002,6 +1039,12 @@ type RequestInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Reject, when true, aborts the request before it reaches the upstream.
+	// Interceptors use this to fail closed (for example, when a policy plugin
+	// cannot safely continue) instead of forwarding the original body.
+	Reject bool `json:"reject,omitempty"`
+	// RejectReason is an optional human-readable explanation surfaced to the caller.
+	RejectReason string `json:"reject_reason,omitempty"`
 }
 
 // ResponseInterceptRequest describes a successful non-streaming response.

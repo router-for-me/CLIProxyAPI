@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1562,8 +1563,15 @@ func TestInterceptorsSkipErrorsAndFusePanics(t *testing.T) {
 	)
 
 	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("body")})
-	if string(got.Body) != "body|success" {
-		t.Fatalf("body = %q, want body|success", got.Body)
+	// Plain errors fail open, while panics fail closed and stop the chain.
+	if string(got.Body) != "body" {
+		t.Fatalf("body = %q, want body", got.Body)
+	}
+	if !got.Reject {
+		t.Fatal("panic request interceptor did not set Reject")
+	}
+	if got.RejectReason != "request interceptor panic: panic" {
+		t.Fatalf("RejectReason = %q, want \"request interceptor panic: panic\"", got.RejectReason)
 	}
 	if !host.isPluginFused("panic") {
 		t.Fatal("panic plugin was not fused")
@@ -3392,4 +3400,74 @@ func (failingReadCloser) Read(p []byte) (int, error) {
 
 func (failingReadCloser) Close() error {
 	return nil
+}
+
+func TestInterceptRequestRejectAbortsChain(t *testing.T) {
+	downstreamCalled := false
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "reject",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					return pluginapi.RequestInterceptResponse{Reject: true, RejectReason: "policy denied"}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "downstream",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					downstreamCalled = true
+					return pluginapi.RequestInterceptResponse{Body: append(req.Body, []byte("|downstream")...)}, nil
+				}),
+			}},
+		},
+	)
+
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("body")})
+
+	if !got.Reject {
+		t.Fatal("expected Reject to propagate")
+	}
+	if got.RejectReason != "policy denied" {
+		t.Fatalf("RejectReason = %q, want %q", got.RejectReason, "policy denied")
+	}
+	if downstreamCalled {
+		t.Fatal("downstream interceptor ran after a rejection; chain was not aborted")
+	}
+}
+
+func TestRequestInterceptResponseRejectRoundTrip(t *testing.T) {
+	// The reject signal crosses the RPC boundary as JSON on pluginapi.RequestInterceptResponse.
+	original := pluginapi.RequestInterceptResponse{Reject: true, RejectReason: "policy denied"}
+
+	raw, errMarshal := json.Marshal(original)
+	if errMarshal != nil {
+		t.Fatalf("marshal RequestInterceptResponse: %v", errMarshal)
+	}
+	if !strings.Contains(string(raw), `"reject":true`) {
+		t.Fatalf("marshalled JSON missing reject field: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"reject_reason":"policy denied"`) {
+		t.Fatalf("marshalled JSON missing reject_reason field: %s", raw)
+	}
+
+	var decoded pluginapi.RequestInterceptResponse
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("unmarshal RequestInterceptResponse: %v", errUnmarshal)
+	}
+	if !decoded.Reject || decoded.RejectReason != "policy denied" {
+		t.Fatalf("round-trip lost reject fields: %+v", decoded)
+	}
+
+	// An empty rejection must omit both fields (omitempty) so unrelated responses stay unchanged.
+	empty, errEmpty := json.Marshal(pluginapi.RequestInterceptResponse{})
+	if errEmpty != nil {
+		t.Fatalf("marshal empty RequestInterceptResponse: %v", errEmpty)
+	}
+	if strings.Contains(string(empty), "reject") {
+		t.Fatalf("empty response should omit reject fields: %s", empty)
+	}
 }

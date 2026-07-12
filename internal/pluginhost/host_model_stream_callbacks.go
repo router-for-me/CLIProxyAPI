@@ -30,7 +30,7 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	stream, errMsg := executor.ExecuteModelStream(streamCtx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
 	if errMsg != nil {
 		cancel()
-		return nil, modelExecutionError(errMsg)
+		return marshalRPCResult(hostModelStreamErrorResponse(errMsg))
 	}
 	streamID := ""
 	if h.modelStreams != nil {
@@ -70,6 +70,7 @@ func (h *Host) callHostModelStreamRead(ctx context.Context, request []byte) ([]b
 	}
 	if chunk.Err != nil {
 		resp.Error = chunk.Err.Error()
+		resp.ErrorDetails = hostModelErrorFromError(chunk.Err)
 		resp.Done = true
 	}
 	return marshalRPCResult(resp)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -233,6 +234,49 @@ func TestHostStreamCallbacksEmitAndClose(t *testing.T) {
 	}
 }
 
+func TestHostStreamEmitPreservesStructuredError(t *testing.T) {
+	host := New()
+	streamID, chunks, cleanup := host.streams.open(context.Background())
+	defer cleanup()
+
+	upstreamBody := `{"error":{"message":"quota","code":"rate_limit"}}`
+	emitReq, errMarshal := json.Marshal(rpcStreamEmitRequest{
+		StreamID: streamID,
+		Error:    upstreamBody,
+		ErrorDetails: &pluginapi.HostModelError{
+			StatusCode: http.StatusTooManyRequests,
+			Headers:    http.Header{"Retry-After": []string{"5"}},
+			Body:       []byte(upstreamBody),
+			Message:    upstreamBody,
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal emit request: %v", errMarshal)
+	}
+	if _, errEmit := host.callFromPlugin(context.Background(), pluginabi.MethodHostStreamEmit, emitReq); errEmit != nil {
+		t.Fatalf("emit callback error = %v", errEmit)
+	}
+
+	chunk, ok := <-chunks
+	if !ok {
+		t.Fatal("stream closed before structured error chunk")
+	}
+	if len(chunk.Payload) != 0 || chunk.Err == nil {
+		t.Fatalf("chunk = %#v, want structured error without payload", chunk)
+	}
+	statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("chunk error status = %#v, want 429", chunk.Err)
+	}
+	headerErr, ok := chunk.Err.(interface{ Headers() http.Header })
+	if !ok || headerErr.Headers().Get("Retry-After") != "5" {
+		t.Fatalf("chunk error headers = %#v, want retry-after", chunk.Err)
+	}
+	if chunk.Err.Error() != upstreamBody {
+		t.Fatalf("chunk error body = %q, want upstream body", chunk.Err.Error())
+	}
+}
+
 func TestHostModelExecuteCallback(t *testing.T) {
 	host := New()
 	var got handlers.ModelExecutionRequest
@@ -290,6 +334,49 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 	if got.Alt != "raw" {
 		t.Fatalf("alt = %q, want raw", got.Alt)
+	}
+}
+
+func TestHostModelExecuteCallbackReturnsStructuredUpstreamError(t *testing.T) {
+	host := New()
+	upstreamBody := `{"error":{"message":"quota","code":"rate_limit"}}`
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			return handlers.ModelExecutionResponse{}, &interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      errors.New(upstreamBody),
+				Addon:      http.Header{"Retry-After": []string{"5"}},
+			}
+		},
+	})
+
+	rawReq, errMarshal := json.Marshal(pluginapi.HostModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         "model-1",
+		Body:          []byte(`{"request":true}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostModelExecutionResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if resp.StatusCode != http.StatusTooManyRequests ||
+		resp.Headers.Get("Retry-After") != "5" ||
+		string(resp.Body) != upstreamBody ||
+		resp.Error == nil ||
+		resp.Error.StatusCode != http.StatusTooManyRequests ||
+		resp.Error.Headers.Get("Retry-After") != "5" ||
+		string(resp.Error.Body) != upstreamBody ||
+		resp.Error.Message != upstreamBody {
+		t.Fatalf("response = %#v, want structured upstream error", resp)
 	}
 }
 
@@ -456,11 +543,14 @@ func TestHostModelStreamReadAfterCallbackCloseReturnsDone(t *testing.T) {
 func TestHostModelExecuteStreamStartupErrorCleansUp(t *testing.T) {
 	host := New()
 	ctxSeen := make(chan context.Context, 1)
+	upstreamBody := `{"error":{"message":"quota","code":"rate_limit"}}`
 	host.SetModelExecutor(&fakeHostModelExecutor{
 		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
 			ctxSeen <- ctx
 			return handlers.ModelExecutionStream{}, &interfaces.ErrorMessage{
-				StatusCode: http.StatusBadGateway,
+				StatusCode: http.StatusTooManyRequests,
+				Error:      errors.New(upstreamBody),
+				Addon:      http.Header{"Retry-After": []string{"5"}},
 			}
 		},
 	})
@@ -476,14 +566,22 @@ func TestHostModelExecuteStreamStartupErrorCleansUp(t *testing.T) {
 		t.Fatalf("marshal request: %v", errMarshal)
 	}
 	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
-	if errCall == nil {
-		t.Fatalf("execute stream callback error is nil, raw response = %q", rawResp)
+	if errCall != nil {
+		t.Fatalf("execute stream callback error = %v", errCall)
 	}
-	if rawResp != nil {
-		t.Fatalf("raw response = %q, want nil on startup error", rawResp)
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostModelStreamResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode stream response: %v", errDecode)
 	}
-	if !strings.Contains(errCall.Error(), "status 502") {
-		t.Fatalf("execute stream callback error = %v, want status 502", errCall)
+	if resp.StreamID != "" ||
+		resp.StatusCode != http.StatusTooManyRequests ||
+		resp.Headers.Get("Retry-After") != "5" ||
+		resp.Error == nil ||
+		resp.Error.StatusCode != http.StatusTooManyRequests ||
+		resp.Error.Headers.Get("Retry-After") != "5" ||
+		string(resp.Error.Body) != upstreamBody ||
+		resp.Error.Message != upstreamBody {
+		t.Fatalf("stream response = %#v, want structured startup error", resp)
 	}
 
 	var streamCtx context.Context
@@ -599,6 +697,7 @@ func TestHostModelStreamReadReturnsPayloadAndTerminalError(t *testing.T) {
 	chunks <- handlers.ModelExecutionChunk{Err: &handlers.ModelExecutionStreamError{
 		StatusCode: http.StatusBadGateway,
 		Message:    "terminal boom",
+		Headers:    http.Header{"Retry-After": []string{"5"}},
 	}}
 	host.SetModelExecutor(&fakeHostModelExecutor{
 		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
@@ -635,7 +734,14 @@ func TestHostModelStreamReadReturnsPayloadAndTerminalError(t *testing.T) {
 	if errDecode != nil {
 		t.Fatalf("decode terminal response: %v", errDecode)
 	}
-	if !terminal.Done || terminal.Error != "terminal boom" || len(terminal.Payload) != 0 {
+	if !terminal.Done ||
+		terminal.Error != "terminal boom" ||
+		len(terminal.Payload) != 0 ||
+		terminal.ErrorDetails == nil ||
+		terminal.ErrorDetails.StatusCode != http.StatusBadGateway ||
+		terminal.ErrorDetails.Headers.Get("Retry-After") != "5" ||
+		string(terminal.ErrorDetails.Body) != "terminal boom" ||
+		terminal.ErrorDetails.Message != "terminal boom" {
 		t.Fatalf("terminal read = %#v, want done terminal error", terminal)
 	}
 }

@@ -759,7 +759,11 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	newReq, newOpts, rejectErr := h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		return nil, nil, rejectErr
+	}
+	req, opts = newReq, newOpts
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -825,7 +829,11 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	newReq, newOpts, rejectErr := h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		return nil, nil, rejectErr
+	}
+	req, opts = newReq, newOpts
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -856,8 +864,16 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
 	}
 	req, opts := h.pluginExecutorRequest(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
-	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	newReq, newOpts, rejectErr := h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		return nil, nil, rejectErr
+	}
+	req, opts = newReq, newOpts
+	newReq, newOpts, rejectErr = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		return nil, nil, rejectErr
+	}
+	req, opts = newReq, newOpts
 	resp, errExecute := host.ExecutePluginExecutor(ctx, executorPluginID, req, opts)
 	if errExecute != nil {
 		return nil, nil, executionErrorMessage(errExecute)
@@ -874,8 +890,16 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
 	}
 	req, opts := h.pluginExecutorRequest(ctx, handlerType, handlerType, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
-	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	newReq, newOpts, rejectErr := h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		return nil, nil, rejectErr
+	}
+	req, opts = newReq, newOpts
+	newReq, newOpts, rejectErr = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, handlerType, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		return nil, nil, rejectErr
+	}
+	req, opts = newReq, newOpts
 	resp, errCount := host.CountPluginExecutor(ctx, executorPluginID, req, opts)
 	if errCount != nil {
 		return nil, nil, executionErrorMessage(errCount)
@@ -911,9 +935,9 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 	return req, opts
 }
 
-func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx context.Context, host PluginExecutorHost, executorPluginID, entryProtocol, originalRequestedModel string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options) {
+func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx context.Context, host PluginExecutorHost, executorPluginID, entryProtocol, originalRequestedModel string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
 	if !requestInterceptorsEnabled(h.interceptorHost()) {
-		return req, opts
+		return req, opts, nil
 	}
 	toFormat := sdktranslator.FromString(entryProtocol)
 	if resolver, ok := host.(pluginExecutorFormatResolver); ok && resolver != nil {
@@ -931,12 +955,19 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx co
 		Body:           cloneBytes(req.Payload),
 		Metadata:       opts.Metadata,
 	}, skipPluginID)
+	if resp.Reject {
+		// Keep original req/opts so partial interceptor mutations are not applied.
+		return req, opts, &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      fmt.Errorf("request rejected by plugin: %s", resp.RejectReason),
+		}
+	}
 	opts.Headers = mergeRequestInterceptorHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = cloneBytes(resp.Body)
 		opts.OriginalRequest = cloneBytes(resp.Body)
 	}
-	return req, opts
+	return req, opts, nil
 }
 
 func executionErrorMessage(err error) *interfaces.ErrorMessage {
@@ -976,8 +1007,22 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		return nil, nil, errChan
 	}
 	req, opts := h.pluginExecutorRequest(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, true, execOptions)
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
-	req, opts = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	newReq, newOpts, rejectErr := h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- rejectErr
+		close(errChan)
+		return nil, nil, errChan
+	}
+	req, opts = newReq, newOpts
+	newReq, newOpts, rejectErr = h.applyRequestInterceptorsAfterPluginExecutorRoute(ctx, host, executorPluginID, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- rejectErr
+		close(errChan)
+		return nil, nil, errChan
+	}
+	req, opts = newReq, newOpts
 	streamResult, errStream := host.ExecutePluginExecutorStream(ctx, executorPluginID, req, opts)
 	if errStream != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1160,7 +1205,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	newReq, newOpts, rejectErr := h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, req, opts, execOptions.SkipInterceptorPluginID)
+	if rejectErr != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- rejectErr
+		close(errChan)
+		return nil, nil, errChan
+	}
+	req, opts = newReq, newOpts
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -2045,10 +2097,10 @@ func interceptStreamChunk(ctx context.Context, host PluginInterceptorHost, req p
 	return host.InterceptStreamChunk(ctx, req)
 }
 
-func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context, handlerType, requestedModel string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options) {
+func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context, handlerType, requestedModel string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
 	host := h.interceptorHost()
 	if host == nil {
-		return req, opts
+		return req, opts, nil
 	}
 	resp := interceptRequestBeforeAuth(ctx, host, pluginapi.RequestInterceptRequest{
 		SourceFormat:   handlerType,
@@ -2059,12 +2111,18 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 		Body:           cloneBytes(req.Payload),
 		Metadata:       opts.Metadata,
 	}, skipPluginID)
+	if resp.Reject {
+		return req, opts, &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      fmt.Errorf("request rejected by plugin: %s", resp.RejectReason),
+		}
+	}
 	opts.Headers = finalInterceptorHeaders(opts.Headers, resp.Headers)
 	if len(resp.Body) > 0 {
 		req.Payload = cloneBytes(resp.Body)
 		opts.OriginalRequest = cloneBytes(resp.Body)
 	}
-	return req, opts
+	return req, opts, nil
 }
 
 func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCapture, skipPluginID string) coreexecutor.RequestAfterAuthInterceptor {
@@ -2099,6 +2157,8 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Headers:      resp.Headers,
 		Body:         resp.Body,
 		ClearHeaders: resp.ClearHeaders,
+		Reject:       resp.Reject,
+		RejectReason: resp.RejectReason,
 	}
 }
 
