@@ -24,7 +24,7 @@ final class AgentConfigWriter {
     func applyCLIProxy(to app: AgentApp, baseURL: String, apiKey: String) async throws {
         switch app.id {
         case "codex":
-            try await applyCodex(baseURL: baseURL, apiKey: apiKey)
+            try applyCodex(baseURL: baseURL, apiKey: apiKey)
         case "cline":
             try applyCline(baseURL: baseURL, apiKey: apiKey)
         case "opencode":
@@ -57,7 +57,7 @@ final class AgentConfigWriter {
 
     // MARK: - Codex
 
-    private func applyCodex(baseURL: String, apiKey: String) async throws {
+    private func applyCodex(baseURL: String, apiKey: String) throws {
         let codexDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex")
         try? FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
         let configURL = codexDir.appendingPathComponent("config.toml")
