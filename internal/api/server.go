@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -532,6 +533,7 @@ func (s *Server) setupRoutes() {
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		v1.POST("/alpha/search", s.codexAlphaSearch)
 	}
 
 	openaiV1 := s.engine.Group("/openai/v1")
@@ -619,6 +621,71 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+// codexAlphaSearch forwards the standalone search endpoint used by current
+// Codex clients. Unlike /responses, this payload is already in Codex search
+// format and must not pass through a protocol translator.
+func (s *Server) codexAlphaSearch(c *gin.Context) {
+	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth manager unavailable"})
+		return
+	}
+
+	var selected *auth.Auth
+	for _, candidate := range s.handlers.AuthManager.List() {
+		if candidate != nil && candidate.Provider == "codex" && !candidate.Disabled && !candidate.Unavailable {
+			selected = candidate
+			break
+		}
+	}
+	if selected == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "No available Codex OAuth credential"})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 16<<20))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read search request"})
+		return
+	}
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Accept", "application/json")
+	headers.Set("Originator", "codex_cli_rs")
+	for _, name := range []string{"Version", "User-Agent", "Session_id", "X-Client-Request-Id"} {
+		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
+			headers.Set(name, value)
+		}
+	}
+	if accountID, ok := selected.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+		headers.Set("Chatgpt-Account-Id", accountID)
+	}
+
+	req, err := s.handlers.AuthManager.NewHttpRequest(
+		c.Request.Context(), selected, http.MethodPost,
+		"https://chatgpt.com/backend-api/codex/alpha/search", body, headers,
+	)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	resp, err := s.handlers.AuthManager.HttpRequest(c.Request.Context(), selected, req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read Codex search response"})
+		return
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		c.Header("Content-Type", contentType)
+	}
+	c.Status(resp.StatusCode)
+	_, _ = c.Writer.Write(upstreamBody)
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
