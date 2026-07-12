@@ -25,12 +25,14 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 	}
 
 	models := buildOpenAICompatibilityConfigModels(compat)
-	if len(models) != 2 {
-		t.Fatalf("model count = %d, want 2", len(models))
+	if len(models) != 4 {
+		t.Fatalf("model count = %d, want 4", len(models))
 	}
 
 	var vision *ModelInfo
+	var originalVision *ModelInfo
 	var imageModel *ModelInfo
+	var originalImageModel *ModelInfo
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -38,8 +40,12 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 		switch model.ID {
 		case "mimo-v2.5-pro":
 			vision = model
+		case "upstream-vision":
+			originalVision = model
 		case "compat-image":
 			imageModel = model
+		case "upstream-image":
+			originalImageModel = model
 		}
 	}
 	if vision == nil {
@@ -47,6 +53,12 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 	}
 	if got := joinModalities(vision.SupportedInputModalities); got != "text,image" {
 		t.Fatalf("SupportedInputModalities = %q, want text,image", got)
+	}
+	if originalVision == nil {
+		t.Fatal("expected original vision model")
+	}
+	if got := joinModalities(originalVision.SupportedInputModalities); got != "text,image" {
+		t.Fatalf("original SupportedInputModalities = %q, want text,image", got)
 	}
 	if imageModel == nil {
 		t.Fatal("expected image model")
@@ -56,6 +68,15 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 	}
 	if len(imageModel.SupportedInputModalities) != 0 {
 		t.Fatalf("image model input modalities = %+v, want none", imageModel.SupportedInputModalities)
+	}
+	if originalImageModel == nil {
+		t.Fatal("expected original image model")
+	}
+	if originalImageModel.Type != registry.OpenAIImageModelType {
+		t.Fatalf("original image model type = %q, want %q", originalImageModel.Type, registry.OpenAIImageModelType)
+	}
+	if len(originalImageModel.SupportedInputModalities) != 0 {
+		t.Fatalf("original image model input modalities = %+v, want none", originalImageModel.SupportedInputModalities)
 	}
 }
 

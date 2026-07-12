@@ -1951,7 +1951,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildGeminiConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -1962,7 +1962,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildGeminiConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -1974,7 +1974,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildVertexCompatConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -1992,7 +1992,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildClaudeConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -2018,7 +2018,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildCodexConfigModels(entry)
 			}
 			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+				excluded = expandExcludedModelsForConfigAliases(entry.ExcludedModels, entry.Models)
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -2383,6 +2383,58 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 	return filtered
 }
 
+func expandExcludedModelsForConfigAliases[T modelEntry](excluded []string, models []T) []string {
+	if len(excluded) == 0 || len(models) == 0 {
+		return excluded
+	}
+	patterns := make([]string, 0, len(excluded))
+	seen := make(map[string]struct{}, len(excluded)+len(models)*2)
+	out := make([]string, 0, len(excluded)+len(models)*2)
+	add := func(model string) {
+		model = strings.ToLower(strings.TrimSpace(model))
+		if model == "" {
+			return
+		}
+		if _, exists := seen[model]; exists {
+			return
+		}
+		seen[model] = struct{}{}
+		out = append(out, model)
+	}
+	for _, item := range excluded {
+		trimmed := strings.ToLower(strings.TrimSpace(item))
+		if trimmed == "" {
+			continue
+		}
+		patterns = append(patterns, trimmed)
+		add(trimmed)
+	}
+	if len(patterns) == 0 {
+		return excluded
+	}
+	for i := range models {
+		name := strings.TrimSpace(models[i].GetName())
+		alias := strings.TrimSpace(models[i].GetAlias())
+		if name == "" || alias == "" || name == alias {
+			continue
+		}
+		nameKey := strings.ToLower(name)
+		aliasKey := strings.ToLower(alias)
+		matched := false
+		for _, pattern := range patterns {
+			if matchWildcard(pattern, nameKey) || matchWildcard(pattern, aliasKey) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			add(name)
+			add(alias)
+		}
+	}
+	return out
+}
+
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {
 	trimmedPrefix := strings.TrimSpace(prefix)
 	if trimmedPrefix == "" || len(models) == 0 {
@@ -2479,12 +2531,15 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		return nil
 	}
 	now := time.Now().Unix()
-	models := make([]*ModelInfo, 0, len(compat.Models))
+	models := make([]*ModelInfo, 0, len(compat.Models)*2)
+	seen := make(map[string]struct{}, len(compat.Models)*2)
 	for i := range compat.Models {
 		model := compat.Models[i]
-		modelID := strings.TrimSpace(model.Alias)
+		alias := strings.TrimSpace(model.Alias)
+		name := strings.TrimSpace(model.Name)
+		modelID := alias
 		if modelID == "" {
-			modelID = strings.TrimSpace(model.Name)
+			modelID = name
 		}
 		if modelID == "" {
 			continue
@@ -2499,7 +2554,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		inputModalities := normalizeCompatConfigModalities(model.InputModalities)
 		outputModalities := normalizeCompatConfigModalities(model.OutputModalities)
-		models = append(models, &ModelInfo{
+		info := &ModelInfo{
 			ID:                        modelID,
 			Object:                    "model",
 			Created:                   now,
@@ -2510,9 +2565,71 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			Thinking:                  thinking,
 			SupportedInputModalities:  inputModalities,
 			SupportedOutputModalities: outputModalities,
-		})
+		}
+		models = appendModelInfoIfUnique(models, info, seen)
+		if alias != "" && name != "" && alias != name {
+			original := configOriginalModelInfo(name, compat.Name, modelType, now, false, thinking)
+			if original != nil {
+				original.SupportedInputModalities = inputModalities
+				original.SupportedOutputModalities = outputModalities
+			}
+			models = appendModelInfoIfUnique(models, original, seen)
+		}
 	}
 	return models
+}
+
+func appendModelInfoIfUnique(models []*ModelInfo, info *ModelInfo, seen map[string]struct{}) []*ModelInfo {
+	if info == nil {
+		return models
+	}
+	modelID := strings.TrimSpace(info.ID)
+	if modelID == "" {
+		return models
+	}
+	key := modelID
+	if _, exists := seen[key]; exists {
+		return models
+	}
+	seen[key] = struct{}{}
+	info.ID = modelID
+	return append(models, info)
+}
+
+func configOriginalModelInfo(name, ownedBy, modelType string, created int64, userDefined bool, thinking *registry.ThinkingSupport) *ModelInfo {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if info := registry.LookupStaticModelInfo(name); info != nil {
+		info.ID = name
+		if info.Object == "" {
+			info.Object = "model"
+		}
+		if info.Created == 0 {
+			info.Created = created
+		}
+		info.OwnedBy = ownedBy
+		info.Type = modelType
+		if info.DisplayName == "" {
+			info.DisplayName = name
+		}
+		if thinking != nil {
+			info.Thinking = thinking
+		}
+		info.UserDefined = false
+		return info
+	}
+	return &ModelInfo{
+		ID:          name,
+		Object:      "model",
+		Created:     created,
+		OwnedBy:     ownedBy,
+		Type:        modelType,
+		DisplayName: name,
+		UserDefined: userDefined,
+		Thinking:    thinking,
+	}
 }
 
 func normalizeCompatConfigModalities(raw []string) []string {
@@ -2543,8 +2660,8 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		return nil
 	}
 	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(models))
-	seen := make(map[string]struct{}, len(models))
+	out := make([]*ModelInfo, 0, len(models)*2)
+	seen := make(map[string]struct{}, len(models)*2)
 	for i := range models {
 		model := models[i]
 		name := strings.TrimSpace(model.GetName())
@@ -2555,11 +2672,6 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		if alias == "" {
 			continue
 		}
-		key := strings.ToLower(alias)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
 		display := name
 		if display == "" {
 			display = alias
@@ -2578,7 +2690,10 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 				info.Thinking = upstream.Thinking
 			}
 		}
-		out = append(out, info)
+		out = appendModelInfoIfUnique(out, info, seen)
+		if name != "" && alias != name {
+			out = appendModelInfoIfUnique(out, configOriginalModelInfo(name, ownedBy, modelType, now, true, info.Thinking), seen)
+		}
 	}
 	return out
 }

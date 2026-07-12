@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -133,6 +134,255 @@ func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	}
 	if chatModel.Thinking == nil {
 		t.Fatal("expected chat model to keep default thinking support")
+	}
+}
+
+func TestRegisterModelsForAuth_ConfigAliasKeepsOriginalModelRoutable(t *testing.T) {
+	testCases := []struct {
+		name          string
+		service       *Service
+		auth          *coreauth.Auth
+		provider      string
+		originalModel string
+		aliasModel    string
+	}{
+		{
+			name: "codex api key",
+			service: &Service{cfg: &config.Config{
+				CodexKey: []internalconfig.CodexKey{{
+					APIKey:  "codex-key",
+					BaseURL: "https://example.com",
+					Models: []internalconfig.CodexModel{{
+						Name:  "gpt-5.4-mini",
+						Alias: "GPT-5.4 Mini",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-codex-alias-route",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind": "api_key",
+					"api_key":   "codex-key",
+					"base_url":  "https://example.com",
+				},
+			},
+			provider:      "codex",
+			originalModel: "gpt-5.4-mini",
+			aliasModel:    "GPT-5.4 Mini",
+		},
+		{
+			name: "openai compatibility",
+			service: &Service{cfg: &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{{
+					Name:    "compat",
+					BaseURL: "https://example.com/v1",
+					Models: []config.OpenAICompatibilityModel{{
+						Name:  "gpt-5.4-mini",
+						Alias: "GPT-5.4 Mini",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-openai-compat-alias-route",
+				Provider: "openai-compatibility",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind":    "api_key",
+					"compat_name":  "compat",
+					"provider_key": "compat",
+				},
+			},
+			provider:      "compat",
+			originalModel: "gpt-5.4-mini",
+			aliasModel:    "GPT-5.4 Mini",
+		},
+		{
+			name: "codex case-distinct alias",
+			service: &Service{cfg: &config.Config{
+				CodexKey: []internalconfig.CodexKey{{
+					APIKey:  "codex-case-key",
+					BaseURL: "https://example.com",
+					Models: []internalconfig.CodexModel{{
+						Name:  "gpt-5",
+						Alias: "GPT-5",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-codex-case-alias-route",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind": "api_key",
+					"api_key":   "codex-case-key",
+					"base_url":  "https://example.com",
+				},
+			},
+			provider:      "codex",
+			originalModel: "gpt-5",
+			aliasModel:    "GPT-5",
+		},
+		{
+			name: "openai compatibility case-distinct alias",
+			service: &Service{cfg: &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{{
+					Name:    "compat-case",
+					BaseURL: "https://example.com/v1",
+					Models: []config.OpenAICompatibilityModel{{
+						Name:  "gpt-5",
+						Alias: "GPT-5",
+					}},
+				}},
+			}},
+			auth: &coreauth.Auth{
+				ID:       "auth-openai-compat-case-alias-route",
+				Provider: "openai-compatibility",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"auth_kind":    "api_key",
+					"compat_name":  "compat-case",
+					"provider_key": "compat-case",
+				},
+			},
+			provider:      "compat-case",
+			originalModel: "gpt-5",
+			aliasModel:    "GPT-5",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			modelRegistry := internalregistry.GetGlobalRegistry()
+			modelRegistry.UnregisterClient(tt.auth.ID)
+			t.Cleanup(func() {
+				modelRegistry.UnregisterClient(tt.auth.ID)
+			})
+
+			tt.service.registerModelsForAuth(context.Background(), tt.auth)
+
+			if !providersContain(modelRegistry.GetModelProviders(tt.aliasModel), tt.provider) {
+				t.Fatalf("alias model %q providers = %v, want %q", tt.aliasModel, modelRegistry.GetModelProviders(tt.aliasModel), tt.provider)
+			}
+			if !providersContain(modelRegistry.GetModelProviders(tt.originalModel), tt.provider) {
+				t.Fatalf("original model %q providers = %v, want %q", tt.originalModel, modelRegistry.GetModelProviders(tt.originalModel), tt.provider)
+			}
+			if static := internalregistry.LookupStaticModelInfo(tt.originalModel); static != nil && static.ContextLength > 0 {
+				registered := clientModelByID(modelRegistry.GetModelsForClient(tt.auth.ID), tt.originalModel)
+				if registered == nil {
+					t.Fatalf("registered original model %q not found", tt.originalModel)
+				}
+				if registered.ContextLength != static.ContextLength {
+					t.Fatalf("original model %q context length = %d, want static %d", tt.originalModel, registered.ContextLength, static.ContextLength)
+				}
+				if registered.UserDefined {
+					t.Fatalf("original model %q should preserve static metadata instead of being marked user-defined", tt.originalModel)
+				}
+			}
+		})
+	}
+}
+
+func clientModelByID(models []*internalregistry.ModelInfo, id string) *internalregistry.ModelInfo {
+	for _, model := range models {
+		if model != nil && model.ID == id {
+			return model
+		}
+	}
+	return nil
+}
+
+func TestRegisterModelsForAuth_OpenAICompatibilityOriginalModelKeepsCompatThinking(t *testing.T) {
+	static := internalregistry.LookupStaticModelInfo("gemini-2.5-pro")
+	if static == nil {
+		t.Fatal("expected static gemini-2.5-pro metadata")
+	}
+	service := &Service{cfg: &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "compat-thinking",
+			BaseURL: "https://example.com/v1",
+			Models: []config.OpenAICompatibilityModel{{
+				Name:     "gemini-2.5-pro",
+				Alias:    "gemini-pro",
+				Thinking: &internalregistry.ThinkingSupport{Levels: []string{"low", "high"}},
+			}},
+		}},
+	}}
+	auth := &coreauth.Auth{
+		ID:       "auth-openai-compat-thinking-route",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":    "api_key",
+			"compat_name":  "compat-thinking",
+			"provider_key": "compat-thinking",
+		},
+	}
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	registered := clientModelByID(modelRegistry.GetModelsForClient(auth.ID), "gemini-2.5-pro")
+	if registered == nil {
+		t.Fatal("expected original model to be registered")
+	}
+	if static.ContextLength > 0 && registered.ContextLength != static.ContextLength {
+		t.Fatalf("context length = %d, want static %d", registered.ContextLength, static.ContextLength)
+	}
+	if registered.Thinking == nil || len(registered.Thinking.Levels) != 2 || registered.Thinking.Levels[0] != "low" || registered.Thinking.Levels[1] != "high" {
+		t.Fatalf("thinking = %+v, want compat levels [low high]", registered.Thinking)
+	}
+}
+
+func providersContain(providers []string, want string) bool {
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRegisterModelsForAuth_ConfigAliasExclusionBlocksOriginalModelPair(t *testing.T) {
+	service := &Service{cfg: &config.Config{
+		CodexKey: []internalconfig.CodexKey{{
+			APIKey:         "codex-excluded-key",
+			BaseURL:        "https://example.com",
+			ExcludedModels: []string{"my-gpt"},
+			Models: []internalconfig.CodexModel{{
+				Name:  "gpt-5",
+				Alias: "my-gpt",
+			}},
+		}},
+	}}
+	auth := &coreauth.Auth{
+		ID:       "auth-codex-alias-excluded-route",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "codex-excluded-key",
+			"base_url":  "https://example.com",
+		},
+	}
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	if providersContain(modelRegistry.GetModelProviders("my-gpt"), "codex") {
+		t.Fatalf("alias model remained routable after exclusion")
+	}
+	if providersContain(modelRegistry.GetModelProviders("gpt-5"), "codex") {
+		t.Fatalf("original model remained routable after alias exclusion")
 	}
 }
 
