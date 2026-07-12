@@ -1434,8 +1434,9 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 		SourceFormat: sdktranslator.FormatClaude,
 		Stream:       false,
 	}
+	ctx := testContextWithAPIKey("xai-replay-caller")
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
 		Payload: []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-1\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
 	}, opts)
@@ -1443,7 +1444,7 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 		t.Fatalf("first Execute error: %v", err)
 	}
 
-	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err = executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
 		Payload: []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"xai-session-1\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
 	}, opts)
@@ -1831,6 +1832,44 @@ func TestXAIReasoningReplayScopeIsolatesOpenAIResponsePromptCacheKeyByAPIKey(t *
 	}
 }
 
+func TestXAIReasoningReplayScopeDisablesClaudeWithoutAPIKey(t *testing.T) {
+	payload := []byte(`{"model":"grok-4.3","metadata":{"user_id":"{\"session_id\":\"shared-session\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+
+	scopeNoKey := xaiReasoningReplayScopeFromRequest(context.Background(), sdktranslator.FormatClaude, req, opts, payload)
+	if scopeNoKey.valid() {
+		t.Fatalf("Claude without caller API key must disable replay: %+v", scopeNoKey)
+	}
+
+	scopeWithKey := xaiReasoningReplayScopeFromRequest(testContextWithAPIKey("api-key-a"), sdktranslator.FormatClaude, req, opts, payload)
+	if !scopeWithKey.valid() {
+		t.Fatal("Claude with caller API key must enable replay")
+	}
+	if !strings.HasPrefix(scopeWithKey.sessionKey, "caller:") || !strings.Contains(scopeWithKey.sessionKey, "claude:shared-session") {
+		t.Fatalf("session key = %q, want caller-isolated Claude session key", scopeWithKey.sessionKey)
+	}
+}
+
+func TestXAIReasoningReplayScopeAllowsTrustedExecutionSessionWithoutAPIKey(t *testing.T) {
+	payload := []byte(`{"model":"grok-4.3","messages":[{"role":"user","content":"hello"}]}`)
+	scope := xaiReasoningReplayScopeFromRequest(context.Background(), sdktranslator.FormatClaude, cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "trusted-session",
+		},
+	}, payload)
+	if !scope.valid() {
+		t.Fatal("trusted execution session must remain replayable without caller API key")
+	}
+	if scope.sessionKey != "execution:trusted-session" {
+		t.Fatalf("session key = %q, want execution:trusted-session", scope.sessionKey)
+	}
+}
+
 func TestXAIReasoningReplayScopeSkipsIncrementalWebsocketPreviousResponse(t *testing.T) {
 	scope := xaiReasoningReplayScopeFromRequest(
 		cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
@@ -1955,8 +1994,9 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 		SourceFormat: sdktranslator.FormatClaude,
 		Stream:       false,
 	}
+	ctx := testContextWithAPIKey("xai-tool-replay-caller")
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model: "grok-4.3",
 		Payload: []byte(`{
 			"model":"grok-4.3",
@@ -1969,7 +2009,7 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 		t.Fatalf("first Execute error: %v", err)
 	}
 
-	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err = executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model: "grok-4.3",
 		Payload: []byte(`{
 			"model":"grok-4.3",

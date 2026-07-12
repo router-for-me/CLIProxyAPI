@@ -60,7 +60,7 @@ func xaiReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.
 		return xaiReasoningReplayScope{}
 	}
 	sessionKey := codexReasoningReplaySessionKey(ctx, from, req, opts, body)
-	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, from, sessionKey)
+	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	return xaiReasoningReplayScope{
 		modelName:  thinking.ParseSuffix(req.Model).ModelName,
 		sessionKey: sessionKey,
@@ -70,9 +70,9 @@ func xaiReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.
 // xaiReasoningReplayIsolateSessionKey namespaces client-controlled session keys
 // by the downstream CPA API key so two callers cannot share encrypted reasoning
 // or assistant text by reusing prompt_cache_key / window / session headers.
-// Trusted execution session keys keep their existing form. OpenAI Responses
-// without a caller API key is disabled rather than storing under a global key.
-func xaiReasoningReplayIsolateSessionKey(ctx context.Context, from sdktranslator.Format, sessionKey string) string {
+// Trusted execution session keys keep their existing form. Client-controlled
+// sessions without a caller API key are disabled rather than shared globally.
+func xaiReasoningReplayIsolateSessionKey(ctx context.Context, sessionKey string) string {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
 		return ""
@@ -82,10 +82,7 @@ func xaiReasoningReplayIsolateSessionKey(ctx context.Context, from sdktranslator
 	}
 	apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx))
 	if apiKey == "" {
-		if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
-			return ""
-		}
-		return sessionKey
+		return ""
 	}
 	sum := sha256.Sum256([]byte(apiKey))
 	return "caller:" + hex.EncodeToString(sum[:8]) + ":" + sessionKey
