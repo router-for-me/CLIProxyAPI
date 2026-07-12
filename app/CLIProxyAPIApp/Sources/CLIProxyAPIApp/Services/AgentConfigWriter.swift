@@ -25,16 +25,10 @@ final class AgentConfigWriter {
         switch app.id {
         case "codex":
             try applyCodex(baseURL: baseURL, apiKey: apiKey)
-        case "cursor":
-            try applyCursor(baseURL: baseURL, apiKey: apiKey)
-        case "windsurf":
-            try applyWindsurf(baseURL: baseURL, apiKey: apiKey)
-        case "claude":
-            try applyClaude(baseURL: baseURL, apiKey: apiKey)
-        case "devin":
-            try applyDevin(baseURL: baseURL, apiKey: apiKey)
         case "continue":
             try applyContinue(baseURL: baseURL, apiKey: apiKey)
+        case "cline":
+            try applyCline(baseURL: baseURL, apiKey: apiKey)
         case "opencode":
             try applyOpencode(baseURL: baseURL, apiKey: apiKey)
         default:
@@ -50,16 +44,10 @@ final class AgentConfigWriter {
         switch app.id {
         case "codex":
             try resetCodex()
-        case "cursor":
-            try resetCursor()
-        case "windsurf":
-            try resetWindsurf()
-        case "claude":
-            try resetClaude()
-        case "devin":
-            try resetDevin()
         case "continue":
             try resetContinue()
+        case "cline":
+            try resetCline()
         case "opencode":
             try resetOpencode()
         default:
@@ -116,74 +104,28 @@ final class AgentConfigWriter {
         try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - Cursor
+    // MARK: - Cline
 
-    private func applyCursor(baseURL: String, apiKey: String) throws {
+    private func applyCline(baseURL: String, apiKey: String) throws {
         let configURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/Cursor/User/settings.json")
+            .appendingPathComponent("Library/Application Support/Code/User/settings.json")
         var config = try readJSON(configURL)
-        config["openai.baseUrl"] = baseURL
-        config["openai.baseURL"] = baseURL
-        config["openai.apiKey"] = apiKey
+        config["cline.apiProvider"] = "openai-compatible"
+        config["cline.openAiCompatible.baseUrl"] = baseURL
+        config["cline.openAiCompatible.apiKey"] = apiKey
+        config["cline.openAiCompatible.modelId"] = "auto"
         try writeJSON(config, to: configURL)
     }
 
-    private func resetCursor() throws {
+    private func resetCline() throws {
         let configURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/Cursor/User/settings.json")
+            .appendingPathComponent("Library/Application Support/Code/User/settings.json")
         var config = try readJSON(configURL)
-        config.removeValue(forKey: "openai.baseUrl")
-        config.removeValue(forKey: "openai.baseURL")
-        config.removeValue(forKey: "openai.apiKey")
+        config.removeValue(forKey: "cline.apiProvider")
+        config.removeValue(forKey: "cline.openAiCompatible.baseUrl")
+        config.removeValue(forKey: "cline.openAiCompatible.apiKey")
+        config.removeValue(forKey: "cline.openAiCompatible.modelId")
         try writeJSON(config, to: configURL)
-    }
-
-    // MARK: - Windsurf
-
-    private func applyWindsurf(baseURL: String, apiKey: String) throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".windsurf/config.json")
-        var config = try readJSON(configURL)
-        config["ai.api_base"] = baseURL
-        config["ai.api_key"] = apiKey
-        try writeJSON(config, to: configURL)
-    }
-
-    private func resetWindsurf() throws {
-        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".windsurf/config.json")
-        var config = try readJSON(configURL)
-        config.removeValue(forKey: "ai.api_base")
-        config.removeValue(forKey: "ai.api_key")
-        try writeJSON(config, to: configURL)
-    }
-
-    // MARK: - Claude
-
-    private func applyClaude(baseURL: String, apiKey: String) throws {
-        let envDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude")
-        try? FileManager.default.createDirectory(at: envDir, withIntermediateDirectories: true)
-        let envURL = envDir.appendingPathComponent("cli-proxy.env")
-        let content = "ANTHROPIC_BASE_URL=\(baseURL)\nANTHROPIC_API_KEY=\(apiKey)\n"
-        try content.write(to: envURL, atomically: true, encoding: .utf8)
-    }
-
-    private func resetClaude() throws {
-        let envURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/cli-proxy.env")
-        try? FileManager.default.removeItem(at: envURL)
-    }
-
-    // MARK: - Devin
-
-    private func applyDevin(baseURL: String, apiKey: String) throws {
-        let envDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".devin")
-        try? FileManager.default.createDirectory(at: envDir, withIntermediateDirectories: true)
-        let envURL = envDir.appendingPathComponent("cli-proxy.env")
-        let content = "OPENAI_BASE_URL=\(baseURL)\nOPENAI_API_KEY=\(apiKey)\n"
-        try content.write(to: envURL, atomically: true, encoding: .utf8)
-    }
-
-    private func resetDevin() throws {
-        let envURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".devin/cli-proxy.env")
-        try? FileManager.default.removeItem(at: envURL)
     }
 
     // MARK: - Continue

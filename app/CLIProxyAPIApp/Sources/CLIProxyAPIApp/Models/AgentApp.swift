@@ -72,13 +72,11 @@ struct AgentApp: Identifiable, Hashable {
 
 extension AgentApp {
     static func discover() -> [AgentApp] {
+        // Only list agents where a full OpenAI-compatible base URL + model swap is supported.
         return [
             codex,
-            cursor,
-            claude,
-            windsurf,
-            devin,
             `continue`,
+            cline,
             opencode,
         ]
     }
@@ -153,81 +151,6 @@ extension AgentApp {
         )
     }
 
-    private static var cursor: AgentApp {
-        let path = findAppByBundleID("com.todesktop.230313mzl4w4u92") ?? findApp(named: "Cursor") ?? "/Applications/Cursor.app"
-        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.todesktop.230313mzl4w4u92").isEmpty
-        let installed = appInstalled(path) || running
-        return AgentApp(
-            id: "cursor",
-            name: "Cursor",
-            kind: .application,
-            bundleID: "com.todesktop.230313mzl4w4u92",
-            appPath: path,
-            cliPath: nil,
-            configPath: NSHomeDirectory() + "/Library/Application Support/Cursor/User/settings.json",
-            configType: .vscodeSettings,
-            defaultBaseURL: "http://localhost:8317/v1",
-            defaultAPIKey: "devin-test",
-            isInstalled: installed
-        )
-    }
-
-    private static var claude: AgentApp {
-        let appPath = findAppByBundleID("com.anthropic.claudefordesktop") ?? findApp(named: "Claude") ?? "/Applications/Claude.app"
-        let appInstalled = appInstalled(appPath)
-        let cliPath = resolveCLI("claude")
-        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop").isEmpty
-        return AgentApp(
-            id: "claude",
-            name: "Claude Code",
-            kind: cliPath != nil ? .cli : .application,
-            bundleID: "com.anthropic.claudefordesktop",
-            appPath: appPath,
-            cliPath: cliPath,
-            configPath: NSHomeDirectory() + "/.claude/CLIProxyAPI.env",
-            configType: .json,
-            defaultBaseURL: "http://localhost:8317/v1",
-            defaultAPIKey: "devin-test",
-            isInstalled: appInstalled || cliPath != nil || running
-        )
-    }
-
-    private static var windsurf: AgentApp {
-        let path = findAppByBundleID("com.exafunction.windsurf") ?? findApp(named: "Windsurf") ?? "/Applications/Windsurf.app"
-        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.exafunction.windsurf").isEmpty
-        let installed = appInstalled(path) || running
-        return AgentApp(
-            id: "windsurf",
-            name: "Windsurf",
-            kind: .application,
-            bundleID: "com.exafunction.windsurf",
-            appPath: path,
-            cliPath: nil,
-            configPath: NSHomeDirectory() + "/.windsurf/config.json",
-            configType: .json,
-            defaultBaseURL: "http://localhost:8317/v1",
-            defaultAPIKey: "devin-test",
-            isInstalled: installed
-        )
-    }
-
-    private static var devin: AgentApp {
-        let path = resolveCLI("devin")
-        return AgentApp(
-            id: "devin",
-            name: "Devin",
-            kind: .cli,
-            bundleID: nil,
-            appPath: nil,
-            cliPath: path,
-            configPath: NSHomeDirectory() + "/.devin/cli-proxy.env",
-            configType: .json,
-            defaultBaseURL: "http://localhost:8317/v1",
-            defaultAPIKey: "devin-test",
-            isInstalled: path != nil
-        )
-    }
-
     private static var `continue`: AgentApp {
         let path = resolveCLI("continue")
         let configYaml = NSHomeDirectory() + "/.continue/config.yaml"
@@ -245,6 +168,24 @@ extension AgentApp {
             defaultBaseURL: "http://localhost:8317/v1",
             defaultAPIKey: "devin-test",
             isInstalled: path != nil || FileManager.default.fileExists(atPath: configPath)
+        )
+    }
+
+    private static var cline: AgentApp {
+        let vscodePath = findAppByBundleID("com.microsoft.VSCode") ?? findApp(named: "Visual Studio Code") ?? "/Applications/Visual Studio Code.app"
+        let configURL = NSHomeDirectory() + "/Library/Application Support/Code/User/settings.json"
+        return AgentApp(
+            id: "cline",
+            name: "Cline",
+            kind: .application,
+            bundleID: "com.microsoft.VSCode",
+            appPath: vscodePath,
+            cliPath: nil,
+            configPath: configURL,
+            configType: .vscodeSettings,
+            defaultBaseURL: "http://localhost:8317/v1",
+            defaultAPIKey: "devin-test",
+            isInstalled: appInstalled(vscodePath) || FileManager.default.fileExists(atPath: configURL)
         )
     }
 
