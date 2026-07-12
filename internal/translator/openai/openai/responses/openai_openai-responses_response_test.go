@@ -861,3 +861,101 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 		t.Fatalf("non-stream output namespace = %q, want collaboration; response=%s", got, resp)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditionalNamespaceCustomToolCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{
+			"type":"additional_tools",
+			"tools":[{
+				"type":"namespace",
+				"name":"terminal",
+				"tools":[{"type":"custom","name":"exec"}]
+			}]
+		}]
+	}`)
+	chunks := []string{
+		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_exec","type":"function","function":{"name":"terminal__exec","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var added gjson.Result
+	var inputDone gjson.Result
+	var done gjson.Result
+	var completed gjson.Result
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_item.added":
+				added = data
+			case "response.custom_tool_call_input.done":
+				inputDone = data
+			case "response.output_item.done":
+				done = data
+			case "response.completed":
+				completed = data
+			case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+				t.Fatalf("unexpected function call event %q: %s", event, chunk)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		label string
+		got   gjson.Result
+		path  string
+	}{
+		{"added", added, "item"},
+		{"done", done, "item"},
+		{"completed", completed, "response.output.0"},
+	} {
+		if !tc.got.Exists() {
+			t.Fatalf("expected %s event", tc.label)
+		}
+		if got := tc.got.Get(tc.path + ".type").String(); got != "custom_tool_call" {
+			t.Fatalf("%s type = %q, want custom_tool_call", tc.label, got)
+		}
+		if got := tc.got.Get(tc.path + ".name").String(); got != "terminal__exec" {
+			t.Fatalf("%s name = %q, want terminal__exec", tc.label, got)
+		}
+	}
+	if got := inputDone.Get("input").String(); got != "pwd" {
+		t.Fatalf("custom input = %q, want pwd", got)
+	}
+	if got := done.Get("item.input").String(); got != "pwd" {
+		t.Fatalf("done input = %q, want pwd", got)
+	}
+	if got := completed.Get("response.output.0.input").String(); got != "pwd" {
+		t.Fatalf("completed input = %q, want pwd", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_RestoresAdditionalNamespaceCustomToolCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{
+			"type":"additional_tools",
+			"tools":[{
+				"type":"namespace",
+				"name":"terminal",
+				"tools":[{"type":"custom","name":"exec"}]
+			}]
+		}]
+	}`)
+	raw := []byte(`{"id":"chatcmpl_additional_namespace_custom_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_exec","type":"function","function":{"name":"terminal__exec","arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`)
+
+	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
+	data := gjson.ParseBytes(resp)
+	if got := data.Get("output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("output type = %q, want custom_tool_call; response=%s", got, resp)
+	}
+	if got := data.Get("output.0.name").String(); got != "terminal__exec" {
+		t.Fatalf("output name = %q, want terminal__exec; response=%s", got, resp)
+	}
+	if got := data.Get("output.0.input").String(); got != "pwd" {
+		t.Fatalf("output input = %q, want pwd; response=%s", got, resp)
+	}
+}

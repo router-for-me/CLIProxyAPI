@@ -17,7 +17,7 @@ func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 	case "namespace":
 		return convertResponsesNamespaceToolToOpenAIChat(tool)
 	case "custom":
-		if tJSON, ok := convertResponsesCustomToolToOpenAIChat(tool); ok {
+		if tJSON, ok := convertResponsesCustomToolToOpenAIChat(tool, ""); ok {
 			return [][]byte{tJSON}
 		}
 	default:
@@ -29,8 +29,11 @@ func convertResponsesToolToOpenAIChatTools(tool gjson.Result) [][]byte {
 // convertResponsesCustomToolToOpenAIChat maps a Responses freeform ("custom")
 // tool onto a Chat Completions function tool with a single freeform "input"
 // string, mirroring the function-based shape Codex uses for apply_patch.
-func convertResponsesCustomToolToOpenAIChat(tool gjson.Result) ([]byte, bool) {
-	name := responsesToolName(tool)
+func convertResponsesCustomToolToOpenAIChat(tool gjson.Result, overrideName string) ([]byte, bool) {
+	name := strings.TrimSpace(overrideName)
+	if name == "" {
+		name = responsesToolName(tool)
+	}
 	if name == "" {
 		return nil, false
 	}
@@ -53,8 +56,15 @@ func convertResponsesNamespaceToolToOpenAIChat(tool gjson.Result) [][]byte {
 	children.ForEach(func(_, child gjson.Result) bool {
 		childName := responsesToolName(child)
 		qualifiedName := qualifyResponsesNamespaceToolName(namespaceName, childName)
-		if tJSON, ok := convertResponsesFunctionToolToOpenAIChat(child, qualifiedName); ok {
-			out = append(out, tJSON)
+		switch strings.TrimSpace(child.Get("type").String()) {
+		case "", "function":
+			if tJSON, ok := convertResponsesFunctionToolToOpenAIChat(child, qualifiedName); ok {
+				out = append(out, tJSON)
+			}
+		case "custom":
+			if tJSON, ok := convertResponsesCustomToolToOpenAIChat(child, qualifiedName); ok {
+				out = append(out, tJSON)
+			}
 		}
 		return true
 	})
@@ -139,28 +149,37 @@ func responsesToolOutputText(output gjson.Result) string {
 
 // responsesCustomToolNames collects the names of freeform ("custom") tools
 // declared in the original Responses request, both in the top-level "tools"
-// field and in Codex Desktop "additional_tools" input items.
+// field and in Codex Desktop "additional_tools" input items. Namespace child
+// names use the qualified Chat Completions form.
 func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 	names := make(map[string]struct{})
-	collect := func(tools gjson.Result) {
+	var collect func(gjson.Result, string)
+	collect = func(tools gjson.Result, namespaceName string) {
 		if !tools.Exists() || !tools.IsArray() {
 			return
 		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if strings.TrimSpace(tool.Get("type").String()) == "custom" {
-				if name := responsesToolName(tool); name != "" {
+			switch strings.TrimSpace(tool.Get("type").String()) {
+			case "custom":
+				name := responsesToolName(tool)
+				if namespaceName != "" {
+					name = qualifyResponsesNamespaceToolName(namespaceName, name)
+				}
+				if name != "" {
 					names[name] = struct{}{}
 				}
+			case "namespace":
+				collect(tool.Get("tools"), strings.TrimSpace(tool.Get("name").String()))
 			}
 			return true
 		})
 	}
 	root := gjson.ParseBytes(requestRawJSON)
-	collect(root.Get("tools"))
+	collect(root.Get("tools"), "")
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			if item.Get("type").String() == "additional_tools" {
-				collect(item.Get("tools"))
+				collect(item.Get("tools"), "")
 			}
 			return true
 		})
@@ -169,18 +188,18 @@ func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 }
 
 func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
+	customToolNames := responsesCustomToolNames(requestRawJSON)
+	if len(customToolNames) != 1 {
+		return "", false
+	}
+
 	toolCount := 0
-	customToolName := ""
 	collect := func(tools gjson.Result) {
 		if !tools.Exists() || !tools.IsArray() {
 			return
 		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			convertedTools := convertResponsesToolToOpenAIChatTools(tool)
-			toolCount += len(convertedTools)
-			if len(convertedTools) == 1 && strings.TrimSpace(tool.Get("type").String()) == "custom" {
-				customToolName = responsesToolName(tool)
-			}
+			toolCount += len(convertResponsesToolToOpenAIChatTools(tool))
 			return true
 		})
 	}
@@ -195,7 +214,10 @@ func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
 			return true
 		})
 	}
-	return customToolName, toolCount == 1 && customToolName != ""
+	for name := range customToolNames {
+		return name, toolCount == 1
+	}
+	return "", false
 }
 
 // unwrapCustomToolInput extracts the freeform input from the {"input": "..."}
