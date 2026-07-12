@@ -33,6 +33,8 @@ final class AgentConfigWriter {
             try applyClaude(baseURL: baseURL, apiKey: apiKey)
         case "devin":
             try applyDevin(baseURL: baseURL, apiKey: apiKey)
+        case "continue":
+            try applyContinue(baseURL: baseURL, apiKey: apiKey)
         case "opencode":
             try applyOpencode(baseURL: baseURL, apiKey: apiKey)
         default:
@@ -56,6 +58,8 @@ final class AgentConfigWriter {
             try resetClaude()
         case "devin":
             try resetDevin()
+        case "continue":
+            try resetContinue()
         case "opencode":
             try resetOpencode()
         default:
@@ -179,6 +183,71 @@ final class AgentConfigWriter {
     private func resetDevin() throws {
         let envURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".devin/cli-proxy.env")
         try? FileManager.default.removeItem(at: envURL)
+    }
+
+    // MARK: - Continue
+
+    private func applyContinue(baseURL: String, apiKey: String) throws {
+        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.yaml")
+        let configYamlExists = FileManager.default.fileExists(atPath: configURL.path)
+        let configURLJson = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.json")
+
+        if configYamlExists {
+            var content = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+            var lines = content.components(separatedBy: .newlines)
+            let providerLines = [
+                "models:",
+                "  - name: CLIProxyAPI",
+                "    provider: openai",
+                "    model: auto",
+                "    apiBase: \(baseURL)",
+                "    apiKey: \(apiKey)",
+                "    defaultCompletionOptions:",
+                "      model: auto",
+                "",
+            ]
+            if content.contains("CLIProxyAPI") {
+                content = content.replacingOccurrences(of: #"apiBase:.*"#, with: "apiBase: \(baseURL)", options: .regularExpression)
+                content = content.replacingOccurrences(of: #"apiKey:.*"#, with: "apiKey: \(apiKey)", options: .regularExpression)
+            } else if let modelsIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "models:" }) {
+                lines.insert(contentsOf: providerLines, at: modelsIndex + 1)
+                content = lines.joined(separator: "\n")
+            } else {
+                content += "\n" + providerLines.joined(separator: "\n")
+            }
+            try content.write(to: configURL, atomically: true, encoding: .utf8)
+        } else {
+            var config = try readJSON(configURLJson)
+            var models = config["models"] as? [[String: Any]] ?? []
+            models.removeAll { ($0["name"] as? String) == "CLIProxyAPI" }
+            models.append([
+                "name": "CLIProxyAPI",
+                "provider": "openai",
+                "model": "auto",
+                "apiBase": baseURL,
+                "apiKey": apiKey,
+            ])
+            config["models"] = models
+            try writeJSON(config, to: configURLJson)
+        }
+    }
+
+    private func resetContinue() throws {
+        let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.yaml")
+        if FileManager.default.fileExists(atPath: configURL.path) {
+            var content = try String(contentsOf: configURL, encoding: .utf8)
+            content = content.components(separatedBy: .newlines)
+                .filter { !$0.contains("CLIProxyAPI") }
+                .joined(separator: "\n")
+            try content.write(to: configURL, atomically: true, encoding: .utf8)
+        } else {
+            let configURLJson = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.json")
+            var config = try readJSON(configURLJson)
+            var models = config["models"] as? [[String: Any]] ?? []
+            models.removeAll { ($0["name"] as? String) == "CLIProxyAPI" }
+            config["models"] = models
+            try writeJSON(config, to: configURLJson)
+        }
     }
 
     // MARK: - OpenCode

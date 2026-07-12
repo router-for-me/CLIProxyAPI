@@ -78,6 +78,7 @@ extension AgentApp {
             claude,
             windsurf,
             devin,
+            `continue`,
             opencode,
         ]
     }
@@ -224,6 +225,26 @@ extension AgentApp {
             defaultBaseURL: "http://localhost:8317/v1",
             defaultAPIKey: "devin-test",
             isInstalled: path != nil
+        )
+    }
+
+    private static var `continue`: AgentApp {
+        let path = resolveCLI("continue")
+        let configYaml = NSHomeDirectory() + "/.continue/config.yaml"
+        let configJson = NSHomeDirectory() + "/.continue/config.json"
+        let configPath = FileManager.default.fileExists(atPath: configYaml) ? configYaml : configJson
+        return AgentApp(
+            id: "continue",
+            name: "Continue",
+            kind: .cli,
+            bundleID: nil,
+            appPath: nil,
+            cliPath: path,
+            configPath: configPath,
+            configType: configPath.hasSuffix(".yaml") ? .yaml : .json,
+            defaultBaseURL: "http://localhost:8317/v1",
+            defaultAPIKey: "devin-test",
+            isInstalled: path != nil || FileManager.default.fileExists(atPath: configPath)
         )
     }
 
