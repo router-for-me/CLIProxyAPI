@@ -98,3 +98,69 @@ func TestResponsesWebsocketClearsPassthroughModelAfterNonPassthroughTurn(t *test
 		t.Fatalf("second upstream model = %s, want http-model after non-passthrough turn: %s", got, payloads[1])
 	}
 }
+
+func TestResponsesWebsocketClearsPinnedAuthBeforeNonPassthroughTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{active: true}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	authWebsocket := &coreauth.Auth{
+		ID:         "auth-model-switch-ws",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), authWebsocket); err != nil {
+		t.Fatalf("Register websocket auth: %v", err)
+	}
+	authHTTP := &coreauth.Auth{
+		ID:       "auth-model-switch-http",
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), authHTTP); err != nil {
+		t.Fatalf("Register HTTP auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authWebsocket.ID, authWebsocket.Provider, []*registry.ModelInfo{{ID: "passthrough-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authHTTP.ID, authHTTP.Provider, []*registry.ModelInfo{{ID: "http-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authWebsocket.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authHTTP.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	requests := [][]byte{
+		[]byte(`{"type":"response.create","model":"passthrough-model","input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`),
+		[]byte(`{"type":"response.create","model":"http-model","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`),
+	}
+	for i, request := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, request); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Fatalf("read websocket response %d: %v", i+1, errRead)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+			t.Fatalf("response %d type = %s, want %s: %s", i+1, got, wsEventTypeCompleted, payload)
+		}
+	}
+
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != authWebsocket.ID || got[1] != authHTTP.ID {
+		t.Fatalf("selected auth IDs = %v, want [%s %s]", got, authWebsocket.ID, authHTTP.ID)
+	}
+}

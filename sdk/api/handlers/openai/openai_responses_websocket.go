@@ -345,7 +345,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		stateLossReplayAttempted := false
 	retryCurrentPayloadAfterStateLoss:
-		requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+		explicitRequestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+		requestModelName := explicitRequestModelName
 		if requestModelName == "" {
 			requestModelName = passthroughModelName
 		}
@@ -369,6 +370,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		if forcePassthroughTranscriptReplay {
 			useUpstreamWebsocketPassthrough = false
+		}
+		if pinnedAuthID != "" && explicitRequestModelName != "" && explicitRequestModelName != passthroughModelName && !useUpstreamWebsocketPassthrough {
+			pinnedAuthID = ""
 		}
 		allowIncrementalInputWithPreviousResponseID := false
 		allowCompactionReplayBypass := false
