@@ -218,6 +218,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
+#         display-name: "Gemini Flash" # optional catalog display name
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
@@ -256,6 +257,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
+#         display-name: "Codex Latest" # optional catalog display name
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
@@ -277,6 +279,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
+#         display-name: "Claude Sonnet"      # optional catalog display name
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
 #     excluded-models:
 #       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
@@ -341,6 +344,7 @@ nonstream-keepalive-interval: 0
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2"               # The alias used in the API.
+#         display-name: "Kimi K2"         # optional catalog display name
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients
 #         output-modalities: [text]       # optional: declare output modalities when known
@@ -370,6 +374,7 @@ nonstream-keepalive-interval: 0
 #     models:                                     # optional: map aliases to upstream model names
 #       - name: "gemini-2.5-flash"                # upstream model name
 #         alias: "vertex-flash"                   # client-visible alias
+#         display-name: "Vertex Flash"            # optional catalog display name
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 #     excluded-models:                            # optional: models to exclude from listing

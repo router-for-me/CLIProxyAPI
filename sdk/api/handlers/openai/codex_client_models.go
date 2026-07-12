@@ -55,6 +55,7 @@ func buildCodexClientModels(models []map[string]any) []map[string]any {
 
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
+			applyCodexClientDisplayName(entry, model)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
 			result = append(result, entry)
@@ -153,6 +154,12 @@ func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any,
 	})
 
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
+}
+
+func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
+	if displayName := stringModelValue(model, "display_name"); displayName != "" {
+		entry["display_name"] = displayName
+	}
 }
 
 func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any) {

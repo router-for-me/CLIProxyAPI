@@ -51,13 +51,17 @@ type VertexCompatModel struct {
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
 
+	// DisplayName is the optional human-readable name shown in model catalogs.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
 
-func (m VertexCompatModel) GetName() string       { return m.Name }
-func (m VertexCompatModel) GetAlias() string      { return m.Alias }
-func (m VertexCompatModel) GetForceMapping() bool { return m.ForceMapping }
+func (m VertexCompatModel) GetName() string        { return m.Name }
+func (m VertexCompatModel) GetAlias() string       { return m.Alias }
+func (m VertexCompatModel) GetDisplayName() string { return m.DisplayName }
+func (m VertexCompatModel) GetForceMapping() bool  { return m.ForceMapping }
 
 // SanitizeVertexCompatKeys deduplicates and normalizes Vertex-compatible API key credentials.
 func (cfg *Config) SanitizeVertexCompatKeys() {
