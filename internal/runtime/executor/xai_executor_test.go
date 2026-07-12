@@ -1573,6 +1573,28 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 	}
 }
 
+func TestXAIBaseURLSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{name: "default api", baseURL: xaiauth.DefaultAPIBaseURL, want: "DefaultAPIBaseURL"},
+		{name: "default api trailing slash", baseURL: xaiauth.DefaultAPIBaseURL + "/", want: "DefaultAPIBaseURL"},
+		{name: "cli chat proxy", baseURL: xaiauth.CLIChatProxyBaseURL, want: "CLIChatProxyBaseURL"},
+		{name: "cli chat proxy trailing slash", baseURL: xaiauth.CLIChatProxyBaseURL + "/", want: "CLIChatProxyBaseURL"},
+		{name: "custom", baseURL: "https://gateway.example.com/v1", want: "custom"},
+		{name: "empty treated as custom", baseURL: "", want: "custom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiBaseURLSource(tt.baseURL); got != tt.want {
+				t.Fatalf("xaiBaseURLSource(%q) = %q, want %q", tt.baseURL, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestXAIChatBaseURL(t *testing.T) {
 	tests := []struct {
 		name string
