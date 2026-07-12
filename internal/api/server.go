@@ -35,6 +35,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -44,6 +45,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -632,23 +634,35 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		return
 	}
 
-	var selected *auth.Auth
-	for _, candidate := range s.handlers.AuthManager.List() {
-		if candidate != nil && candidate.Provider == "codex" && !candidate.Disabled && !candidate.Unavailable {
-			selected = candidate
-			break
-		}
-	}
-	if selected == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "No available Codex OAuth credential"})
-		return
-	}
-
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 16<<20))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read search request"})
 		return
 	}
+
+	var routing struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(body, &routing)
+
+	selectionHeaders := c.Request.Header.Clone()
+	if sessionID := strings.TrimSpace(routing.ID); sessionID != "" {
+		selectionHeaders.Set("X-Session-ID", sessionID)
+	}
+	selected, err := s.handlers.AuthManager.SelectAuth(c.Request.Context(), "codex", strings.TrimSpace(routing.Model), coreexecutor.Options{
+		Headers:         selectionHeaders,
+		OriginalRequest: body,
+	})
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if statusError, ok := err.(interface{ StatusCode() int }); ok && statusError.StatusCode() > 0 {
+			status = statusError.StatusCode()
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Accept", "application/json")
@@ -662,25 +676,54 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
 
+	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	const upstreamURL = "https://chatgpt.com/backend-api/codex/alpha/search"
 	req, err := s.handlers.AuthManager.NewHttpRequest(
-		c.Request.Context(), selected, http.MethodPost,
-		"https://chatgpt.com/backend-api/codex/alpha/search", body, headers,
+		ctx, selected, http.MethodPost, upstreamURL, body, headers,
 	)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	resp, err := s.handlers.AuthManager.HttpRequest(c.Request.Context(), selected, req)
+
+	var authID, authLabel, authType, authValue string
+	if selected != nil {
+		authID = selected.ID
+		authLabel = selected.Label
+		authType, authValue = selected.AccountInfo()
+	}
+	helpHeaders := req.Header.Clone()
+	helps.RecordAPIRequest(ctx, s.cfg, helps.UpstreamRequestLog{
+		URL:       upstreamURL,
+		Method:    http.MethodPost,
+		Headers:   helpHeaders,
+		Body:      body,
+		Provider:  "codex",
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	resp, err := s.handlers.AuthManager.HttpRequest(ctx, selected, req)
 	if err != nil {
+		helps.RecordAPIResponseError(ctx, s.cfg, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codex alpha search: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, s.cfg, resp.StatusCode, resp.Header.Clone())
 	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
+		helps.RecordAPIResponseError(ctx, s.cfg, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read Codex search response"})
 		return
 	}
+	helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		c.Header("Content-Type", contentType)
 	}

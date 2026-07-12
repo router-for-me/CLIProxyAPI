@@ -28,6 +28,7 @@ import (
 type codexSearchCaptureExecutor struct {
 	request *http.Request
 	body    []byte
+	authIDs []string
 }
 
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
@@ -54,8 +55,9 @@ func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.A
 	return nil
 }
 
-func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, req *http.Request) (*http.Response, error) {
+func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *auth.Auth, req *http.Request) (*http.Response, error) {
 	e.request = req.Clone(req.Context())
+	e.authIDs = append(e.authIDs, selected.ID)
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -183,6 +185,107 @@ func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	}
 	if got := rr.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("response Content-Type = %q", got)
+	}
+}
+
+func TestCodexAlphaSearchUsesRequestIDForSessionAffinity(t *testing.T) {
+	server := newTestServer(t)
+	server.handlers.AuthManager.SetSelector(auth.NewSessionAffinitySelector(&auth.RoundRobinSelector{}))
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	for _, id := range []string{"codex-auth-a", "codex-auth-b"} {
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "gpt-5.6-luna"}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(id)
+		})
+		credential := &auth.Auth{
+			ID:       id,
+			Provider: "codex",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{"access_token": id},
+		}
+		if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+			t.Fatalf("register Codex auth: %v", errRegister)
+		}
+	}
+
+	for _, payload := range []string{
+		`{"id":"session-a","model":"gpt-5.6-luna"}`,
+		`{"id":"session-b","model":"gpt-5.6-luna"}`,
+		`{"id":"session-a","model":"gpt-5.6-luna"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer test-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+	}
+
+	if got, want := len(executor.authIDs), 3; got != want {
+		t.Fatalf("selected auth count = %d, want %d", got, want)
+	}
+	if executor.authIDs[0] == executor.authIDs[1] {
+		t.Fatalf("different sessions selected the same auth %q", executor.authIDs[0])
+	}
+	if got, want := executor.authIDs[2], executor.authIDs[0]; got != want {
+		t.Fatalf("session-affinity auth = %q, want %q", got, want)
+	}
+}
+
+func TestCodexAlphaSearchRecordsRequestLog(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.RequestLog = true
+
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "codex-token", "account_id": "account-123"},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register Codex auth: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rr)
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	server.codexAlphaSearch(c)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	rawAPIRequest, okRequest := c.Get("API_REQUEST")
+	if !okRequest {
+		t.Fatal("API_REQUEST was not captured")
+	}
+	apiRequest, _ := rawAPIRequest.([]byte)
+	if !strings.Contains(string(apiRequest), "=== API REQUEST 1 ===") {
+		t.Fatalf("API_REQUEST missing request header section: %q", apiRequest)
+	}
+	if !strings.Contains(string(apiRequest), "https://chatgpt.com/backend-api/codex/alpha/search") {
+		t.Fatalf("API_REQUEST missing upstream URL: %q", apiRequest)
+	}
+	if !strings.Contains(string(apiRequest), `{"query":"GPT-5.6"}`) {
+		t.Fatalf("API_REQUEST missing body: %q", apiRequest)
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	if !okResponse {
+		t.Fatal("API_RESPONSE was not captured")
+	}
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !strings.Contains(string(apiResponse), "=== API RESPONSE 1 ===") {
+		t.Fatalf("API_RESPONSE missing response header section: %q", apiResponse)
+	}
+	if !strings.Contains(string(apiResponse), `{"results":[{"url":"https://example.com"}]}`) {
+		t.Fatalf("API_RESPONSE missing body: %q", apiResponse)
 	}
 }
 

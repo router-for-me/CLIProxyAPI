@@ -4594,6 +4594,16 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	return authCopy, executor, nil
 }
 
+// SelectAuth selects one credential through the configured scheduling strategy.
+// It does not execute or alter the selected credential's result state.
+func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	selected, _, errPick := m.pickNext(ctx, provider, model, opts, nil)
+	if errPick != nil {
+		return nil, errPick
+	}
+	return selected, nil
+}
+
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
