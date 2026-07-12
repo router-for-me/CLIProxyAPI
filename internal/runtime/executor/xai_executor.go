@@ -197,7 +197,6 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 				reporter.Publish(ctx, detail)
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			completedData = restoreXAINamespaceToolCalls(completedData, prepared.namespaceTools)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			var param any
@@ -683,7 +682,6 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 							reporter.Publish(ctx, detail)
 						}
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-						eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
 						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
 						normalizedEventName = gjson.GetBytes(eventData, "type").String()
@@ -862,7 +860,6 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	namespaceTools := collectXAINamespaceToolRefs(body)
-	body = normalizeXAIInputNamespaceToolCalls(body)
 	body = normalizeXAITools(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	var replayScope xaiReasoningReplayScope
@@ -870,6 +867,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	if err != nil {
 		return nil, err
 	}
+	body = normalizeXAIInputNamespaceToolCalls(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
@@ -1323,13 +1321,14 @@ func qualifyXAINamespaceToolName(namespaceName, toolName string) string {
 	if namespaceName == "" || toolName == "" || strings.HasPrefix(toolName, "mcp__") {
 		return toolName
 	}
-	if strings.HasPrefix(toolName, namespaceName) {
+	prefix := namespaceName
+	if !strings.HasSuffix(prefix, "__") {
+		prefix += "__"
+	}
+	if strings.HasPrefix(toolName, prefix) {
 		return toolName
 	}
-	if strings.HasSuffix(namespaceName, "__") {
-		return namespaceName + toolName
-	}
-	return namespaceName + "__" + toolName
+	return prefix + toolName
 }
 
 func collectXAINamespaceToolRefs(body []byte) map[string]xaiNamespaceToolRef {
@@ -1359,6 +1358,9 @@ func collectXAINamespaceToolRefs(body []byte) map[string]xaiNamespaceToolRef {
 }
 
 func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
 		return body
@@ -1375,14 +1377,21 @@ func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
 		}
 		namePath := fmt.Sprintf("input.%d.name", index)
 		namespacePath := fmt.Sprintf("input.%d.namespace", index)
-		body, _ = sjson.SetBytes(body, namePath, qualifiedName)
-		body, _ = sjson.DeleteBytes(body, namespacePath)
+		updated, errSet := sjson.SetBytes(body, namePath, qualifiedName)
+		if errSet != nil {
+			continue
+		}
+		updated, errDelete := sjson.DeleteBytes(updated, namespacePath)
+		if errDelete != nil {
+			continue
+		}
+		body = updated
 	}
 	return body
 }
 
 func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {
-	if len(refs) == 0 || len(data) == 0 {
+	if len(refs) == 0 || len(data) == 0 || !gjson.ValidBytes(data) {
 		return data
 	}
 	data = restoreXAINamespaceToolCallAtPath(data, "item", refs)
@@ -1404,9 +1413,15 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	if !ok {
 		return data
 	}
-	data, _ = sjson.SetBytes(data, path+".name", ref.name)
-	data, _ = sjson.SetBytes(data, path+".namespace", ref.namespace)
-	return data
+	updated, errSet := sjson.SetBytes(data, path+".name", ref.name)
+	if errSet != nil {
+		return data
+	}
+	updated, errSet = sjson.SetBytes(updated, path+".namespace", ref.namespace)
+	if errSet != nil {
+		return data
+	}
+	return updated
 }
 
 // xaiFunctionParametersNeedSimplification reports whether a function tool is

@@ -1147,6 +1147,7 @@ func TestQualifyXAINamespaceToolNamePreservesQualifiedNames(t *testing.T) {
 		{name: "prequalified MCP child", namespace: "mcp__exa", tool: "mcp__exa__search", want: "mcp__exa__search"},
 		{name: "prequalified generic child", namespace: "collaboration", tool: "collaboration__send_message", want: "collaboration__send_message"},
 		{name: "namespace with separator", namespace: "collaboration__", tool: "send_message", want: "collaboration__send_message"},
+		{name: "partial prefix is not qualified", namespace: "exa", tool: "example_tool", want: "exa__example_tool"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1261,6 +1262,17 @@ func TestRestoreXAINamespaceToolCalls(t *testing.T) {
 	}
 	if got := gjson.GetBytes(restoredCompleted, "response.output.0.namespace").String(); got != "mcp__exa" {
 		t.Fatalf("response.output.0.namespace = %q, want mcp__exa; event=%s", got, string(restoredCompleted))
+	}
+}
+
+func TestRestoreXAINamespaceToolCallsPreservesMalformedPayload(t *testing.T) {
+	data := []byte(`{"item":{"type":"function_call","name":"mcp__exa__web_search_exa"`)
+	refs := map[string]xaiNamespaceToolRef{
+		"mcp__exa__web_search_exa": {namespace: "mcp__exa", name: "web_search_exa"},
+	}
+
+	if got := restoreXAINamespaceToolCalls(data, refs); !bytes.Equal(got, data) {
+		t.Fatalf("malformed payload changed: got=%q want=%q", got, data)
 	}
 }
 
