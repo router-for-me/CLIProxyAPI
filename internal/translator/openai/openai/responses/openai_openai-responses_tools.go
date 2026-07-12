@@ -168,6 +168,36 @@ func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 	return names
 }
 
+func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
+	toolCount := 0
+	customToolName := ""
+	collect := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
+		}
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			convertedTools := convertResponsesToolToOpenAIChatTools(tool)
+			toolCount += len(convertedTools)
+			if len(convertedTools) == 1 && strings.TrimSpace(tool.Get("type").String()) == "custom" {
+				customToolName = responsesToolName(tool)
+			}
+			return true
+		})
+	}
+
+	root := gjson.ParseBytes(requestRawJSON)
+	collect(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				collect(item.Get("tools"))
+			}
+			return true
+		})
+	}
+	return customToolName, toolCount == 1 && customToolName != ""
+}
+
 // unwrapCustomToolInput extracts the freeform input from the {"input": "..."}
 // function-call arguments produced for a converted custom tool; it falls back
 // to the raw arguments when the wrapper is absent.
@@ -201,38 +231,49 @@ func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, quali
 		return "", ""
 	}
 
-	tools := gjson.GetBytes(requestRawJSON, "tools")
-	if !tools.Exists() || !tools.IsArray() {
-		return qualifiedName, ""
-	}
-
 	var bestNamespace string
 	var bestChild string
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if strings.TrimSpace(tool.Get("type").String()) != "namespace" {
-			return true
+	collect := func(tools gjson.Result) {
+		if !tools.Exists() || !tools.IsArray() {
+			return
 		}
-		namespaceName := strings.TrimSpace(tool.Get("name").String())
-		if namespaceName == "" {
-			return true
-		}
-		children := tool.Get("tools")
-		if !children.Exists() || !children.IsArray() {
-			return true
-		}
-		children.ForEach(func(_, child gjson.Result) bool {
-			childName := responsesToolName(child)
-			if childName == "" {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if strings.TrimSpace(tool.Get("type").String()) != "namespace" {
 				return true
 			}
-			if qualifyResponsesNamespaceToolName(namespaceName, childName) == qualifiedName {
-				bestNamespace = namespaceName
-				bestChild = childName
+			namespaceName := strings.TrimSpace(tool.Get("name").String())
+			if namespaceName == "" {
+				return true
+			}
+			children := tool.Get("tools")
+			if !children.Exists() || !children.IsArray() {
+				return true
+			}
+			children.ForEach(func(_, child gjson.Result) bool {
+				childName := responsesToolName(child)
+				if childName == "" {
+					return true
+				}
+				if qualifyResponsesNamespaceToolName(namespaceName, childName) == qualifiedName {
+					bestNamespace = namespaceName
+					bestChild = childName
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	root := gjson.ParseBytes(requestRawJSON)
+	collect(root.Get("tools"))
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() == "additional_tools" {
+				collect(item.Get("tools"))
 			}
 			return true
 		})
-		return true
-	})
+	}
 
 	if bestNamespace == "" || bestChild == "" {
 		return qualifiedName, ""
