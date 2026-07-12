@@ -188,6 +188,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
+		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -196,6 +197,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 				reporter.Publish(ctx, detail)
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+			completedData = restoreXAINamespaceToolCalls(completedData, prepared.namespaceTools)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			var param any
@@ -671,6 +673,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
 				for i, eventData := range eventDataList {
+					eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 					normalizedEventName := gjson.GetBytes(eventData, "type").String()
 					switch normalizedEventName {
 					case "response.output_item.done":
@@ -680,6 +683,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 							reporter.Publish(ctx, detail)
 						}
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+						eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
 						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
 						normalizedEventName = gjson.GetBytes(eventData, "type").String()
@@ -816,8 +820,14 @@ type xaiPreparedRequest struct {
 	to              sdktranslator.Format
 	originalPayload []byte
 	body            []byte
+	namespaceTools  map[string]xaiNamespaceToolRef
 	sessionID       string
 	replayScope     xaiReasoningReplayScope
+}
+
+type xaiNamespaceToolRef struct {
+	namespace string
+	name      string
 }
 
 func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
@@ -851,6 +861,8 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
+	namespaceTools := collectXAINamespaceToolRefs(body)
+	body = normalizeXAIInputNamespaceToolCalls(body)
 	body = normalizeXAITools(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	var replayScope xaiReasoningReplayScope
@@ -878,6 +890,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		to:              to,
 		originalPayload: originalPayload,
 		body:            body,
+		namespaceTools:  namespaceTools,
 		sessionID:       sessionID,
 		replayScope:     replayScope,
 	}, nil
@@ -1289,7 +1302,111 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		changed = true
 		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream hang", namespaceName, tool.Get("name").String())
 	}
+	if toolType == xaiFunctionToolType && strings.TrimSpace(namespaceName) != "" {
+		qualifiedName := qualifyXAINamespaceToolName(namespaceName, tool.Get("name").String())
+		if qualifiedName == "" {
+			return nil, false, false
+		}
+		updatedTool, errSet := sjson.SetBytes(raw, "name", qualifiedName)
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		changed = true
+	}
 	return raw, changed, true
+}
+
+func qualifyXAINamespaceToolName(namespaceName, toolName string) string {
+	namespaceName = strings.TrimSpace(namespaceName)
+	toolName = strings.TrimSpace(toolName)
+	if namespaceName == "" || toolName == "" || strings.HasPrefix(toolName, "mcp__") {
+		return toolName
+	}
+	if strings.HasPrefix(toolName, namespaceName) {
+		return toolName
+	}
+	if strings.HasSuffix(namespaceName, "__") {
+		return namespaceName + toolName
+	}
+	return namespaceName + "__" + toolName
+}
+
+func collectXAINamespaceToolRefs(body []byte) map[string]xaiNamespaceToolRef {
+	refs := make(map[string]xaiNamespaceToolRef)
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return refs
+	}
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() != xaiNamespaceToolType {
+			continue
+		}
+		namespaceName := strings.TrimSpace(tool.Get("name").String())
+		if namespaceName == "" {
+			continue
+		}
+		for _, nestedTool := range tool.Get("tools").Array() {
+			toolName := strings.TrimSpace(nestedTool.Get("name").String())
+			qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+			if qualifiedName == "" {
+				continue
+			}
+			refs[qualifiedName] = xaiNamespaceToolRef{namespace: namespaceName, name: toolName}
+		}
+	}
+	return refs
+}
+
+func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	for index, item := range input.Array() {
+		if item.Get("type").String() != "function_call" {
+			continue
+		}
+		namespaceName := strings.TrimSpace(item.Get("namespace").String())
+		toolName := strings.TrimSpace(item.Get("name").String())
+		qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+		if namespaceName == "" || qualifiedName == "" {
+			continue
+		}
+		namePath := fmt.Sprintf("input.%d.name", index)
+		namespacePath := fmt.Sprintf("input.%d.namespace", index)
+		body, _ = sjson.SetBytes(body, namePath, qualifiedName)
+		body, _ = sjson.DeleteBytes(body, namespacePath)
+	}
+	return body
+}
+
+func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {
+	if len(refs) == 0 || len(data) == 0 {
+		return data
+	}
+	data = restoreXAINamespaceToolCallAtPath(data, "item", refs)
+	output := gjson.GetBytes(data, "response.output")
+	if output.Exists() && output.IsArray() {
+		for index := range output.Array() {
+			data = restoreXAINamespaceToolCallAtPath(data, fmt.Sprintf("response.output.%d", index), refs)
+		}
+	}
+	return data
+}
+
+func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string]xaiNamespaceToolRef) []byte {
+	if gjson.GetBytes(data, path+".type").String() != "function_call" {
+		return data
+	}
+	qualifiedName := strings.TrimSpace(gjson.GetBytes(data, path+".name").String())
+	ref, ok := refs[qualifiedName]
+	if !ok {
+		return data
+	}
+	data, _ = sjson.SetBytes(data, path+".name", ref.name)
+	data, _ = sjson.SetBytes(data, path+".namespace", ref.namespace)
+	return data
 }
 
 // xaiFunctionParametersNeedSimplification reports whether a function tool is

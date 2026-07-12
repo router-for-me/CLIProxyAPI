@@ -121,6 +121,110 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 	}
 }
 
+func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		capturedPayload <- bytes.Clone(payload)
+
+		events := [][]byte{
+			[]byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"mcp__exa__web_search_exa","call_id":"call_1","arguments":"{}"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`),
+		}
+		for _, event := range events {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, event); errWrite != nil {
+				t.Errorf("write websocket event: %v", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model: "grok-4.3",
+		Payload: []byte(`{
+			"model":"grok-4.3",
+			"input":"use Exa",
+			"tools":[{
+				"type":"namespace",
+				"name":"mcp__exa",
+				"tools":[{"type":"function","name":"web_search_exa","parameters":{"type":"object"}}]
+			}]
+		}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case payload := <-capturedPayload:
+		tool := gjson.GetBytes(payload, "tools.0")
+		if got := tool.Get("name").String(); got != "mcp__exa__web_search_exa" {
+			t.Fatalf("upstream tool name = %q, want qualified name; payload=%s", got, payload)
+		}
+		if tool.Get("namespace").Exists() {
+			t.Fatalf("upstream tool should not contain namespace: %s", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+
+	var outputItemDone, completed gjson.Result
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		payload := gjson.ParseBytes(bytes.TrimSpace(chunk.Payload))
+		switch payload.Get("type").String() {
+		case "response.output_item.done":
+			outputItemDone = payload
+		case "response.completed":
+			completed = payload
+		}
+	}
+
+	for label, item := range map[string]gjson.Result{
+		"output_item.done": outputItemDone.Get("item"),
+		"completed":        completed.Get("response.output.0"),
+	} {
+		if got := item.Get("name").String(); got != "web_search_exa" {
+			t.Fatalf("%s name = %q, want child name; item=%s", label, got, item.Raw)
+		}
+		if got := item.Get("namespace").String(); got != "mcp__exa" {
+			t.Fatalf("%s namespace = %q, want mcp__exa; item=%s", label, got, item.Raw)
+		}
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamNormalizesReasoningTextEvents(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

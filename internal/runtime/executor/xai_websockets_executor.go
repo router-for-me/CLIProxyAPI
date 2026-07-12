@@ -637,6 +637,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			}
 
 			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
+				payload = restoreXAINamespaceToolCalls(payload, prepared.namespaceTools)
 				eventType := gjson.GetBytes(payload, "type").String()
 				isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
 				warmupCompletedPayload := []byte(nil)
@@ -654,6 +655,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 						reporter.Publish(ctx, detail)
 					}
 					payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+					payload = restoreXAINamespaceToolCalls(payload, prepared.namespaceTools)
 					payload = xaiNormalizeReasoningSummaryData(payload)
 					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {

@@ -139,9 +139,9 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "codex_app__automation_update":
 			foundAutomationUpdate = true
-		case "namespace_custom":
+		case "codex_app__namespace_custom":
 			foundNamespaceCustom = true
 		}
 		if toolType == "web_search" {
@@ -668,9 +668,9 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 			t.Fatalf("tools.%d.name = apply_patch, want removed; body=%s", i, string(gotBody))
 		}
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "codex_app__automation_update":
 			foundAutomationUpdate = true
-		case "namespace_custom":
+		case "codex_app__namespace_custom":
 			foundNamespaceCustom = true
 		}
 		if toolType == "web_search" {
@@ -1085,7 +1085,7 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 	foundExec := false
 	for _, tool := range tools.Array() {
 		switch tool.Get("name").String() {
-		case "automation_update":
+		case "codex_app__automation_update":
 			foundAuto = true
 			paramsRaw := tool.Get("parameters").Raw
 			if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) {
@@ -1112,6 +1112,48 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 	}
 	if !foundExec {
 		t.Fatalf("exec_command tool missing after normalize: %s", string(out))
+	}
+}
+
+func TestNormalizeXAITools_QualifiesSameNamedNamespaceTools(t *testing.T) {
+	body := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]},
+			{"type":"namespace","name":"mcp__docs","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}
+		]
+	}`)
+	out := normalizeXAITools(body)
+
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), string(out))
+	}
+	if got := tools[0].Get("name").String(); got != "mcp__exa__search" {
+		t.Fatalf("tools.0.name = %q, want mcp__exa__search; body=%s", got, string(out))
+	}
+	if got := tools[1].Get("name").String(); got != "mcp__docs__search" {
+		t.Fatalf("tools.1.name = %q, want mcp__docs__search; body=%s", got, string(out))
+	}
+}
+
+func TestQualifyXAINamespaceToolNamePreservesQualifiedNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace string
+		tool      string
+		want      string
+	}{
+		{name: "plain child", namespace: "mcp__exa", tool: "search", want: "mcp__exa__search"},
+		{name: "prequalified MCP child", namespace: "mcp__exa", tool: "mcp__exa__search", want: "mcp__exa__search"},
+		{name: "prequalified generic child", namespace: "collaboration", tool: "collaboration__send_message", want: "collaboration__send_message"},
+		{name: "namespace with separator", namespace: "collaboration__", tool: "send_message", want: "collaboration__send_message"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := qualifyXAINamespaceToolName(tt.namespace, tt.tool); got != tt.want {
+				t.Fatalf("qualifyXAINamespaceToolName(%q, %q) = %q, want %q", tt.namespace, tt.tool, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1181,6 +1223,44 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	safe := gjson.Parse(`{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)
 	if xaiFunctionParametersNeedSimplification(safe, "codex_app") {
 		t.Fatal("unrelated codex_app function should not need simplification")
+	}
+}
+
+func TestNormalizeXAIInputNamespaceToolCalls(t *testing.T) {
+	body := []byte(`{"input":[{"type":"function_call","name":"web_search_exa","namespace":"mcp__exa","call_id":"call_1","arguments":"{}"},{"type":"function_call","name":"plain_tool","call_id":"call_2","arguments":"{}"}]}`)
+	out := normalizeXAIInputNamespaceToolCalls(body)
+
+	if got := gjson.GetBytes(out, "input.0.name").String(); got != "mcp__exa__web_search_exa" {
+		t.Fatalf("input.0.name = %q, want qualified namespace name; body=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.0.namespace").Exists() {
+		t.Fatalf("input.0.namespace should be removed for xAI upstream: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.name").String(); got != "plain_tool" {
+		t.Fatalf("plain function call name changed to %q", got)
+	}
+}
+
+func TestRestoreXAINamespaceToolCalls(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"web_search_exa","parameters":{"type":"object"}}]}]}`)
+	refs := collectXAINamespaceToolRefs(request)
+
+	event := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"mcp__exa__web_search_exa","call_id":"call_1","arguments":"{}"}}`)
+	restoredEvent := restoreXAINamespaceToolCalls(event, refs)
+	if got := gjson.GetBytes(restoredEvent, "item.name").String(); got != "web_search_exa" {
+		t.Fatalf("item.name = %q, want child name; event=%s", got, string(restoredEvent))
+	}
+	if got := gjson.GetBytes(restoredEvent, "item.namespace").String(); got != "mcp__exa" {
+		t.Fatalf("item.namespace = %q, want mcp__exa; event=%s", got, string(restoredEvent))
+	}
+
+	completed := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","name":"mcp__exa__web_search_exa","call_id":"call_1","arguments":"{}"}]}}`)
+	restoredCompleted := restoreXAINamespaceToolCalls(completed, refs)
+	if got := gjson.GetBytes(restoredCompleted, "response.output.0.name").String(); got != "web_search_exa" {
+		t.Fatalf("response.output.0.name = %q, want child name; event=%s", got, string(restoredCompleted))
+	}
+	if got := gjson.GetBytes(restoredCompleted, "response.output.0.namespace").String(); got != "mcp__exa" {
+		t.Fatalf("response.output.0.namespace = %q, want mcp__exa; event=%s", got, string(restoredCompleted))
 	}
 }
 
