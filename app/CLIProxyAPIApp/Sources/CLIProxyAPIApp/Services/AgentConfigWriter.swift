@@ -78,30 +78,29 @@ final class AgentConfigWriter {
         try? FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
         let configURL = codexDir.appendingPathComponent("config.toml")
 
-        var lines: [String] = []
-        if let content = try? String(contentsOf: configURL, encoding: .utf8) {
-            lines = content.components(separatedBy: .newlines)
-        }
+        var lines = (try? String(contentsOf: configURL, encoding: .utf8))?.components(separatedBy: .newlines) ?? []
 
-        var dict = [String: String]()
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            if parts.count == 2 {
-                dict[parts[0]] = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        func replaceOrAppend(key: String, value: String) {
+            var found = false
+            for (index, line) in lines.enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+                let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.count == 2, parts[0] == key {
+                    lines[index] = "\(key) = \"\(value)\""
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                lines.append("\(key) = \"\(value)\"")
             }
         }
 
-        dict["openai_base_url"] = baseURL
-        dict["OPENAI_API_KEY"] = apiKey
+        replaceOrAppend(key: "openai_base_url", value: baseURL)
+        replaceOrAppend(key: "OPENAI_API_KEY", value: apiKey)
 
-        var output = "# CLIProxyAPI auto-generated config\n"
-        for (key, value) in dict.sorted(by: { $0.key < $1.key }) {
-            output += "\(key) = \"\(value)\"\n"
-        }
-
-        try output.write(to: configURL, atomically: true, encoding: .utf8)
+        try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
     }
 
     private func resetCodex() throws {
@@ -109,8 +108,10 @@ final class AgentConfigWriter {
         guard FileManager.default.fileExists(atPath: configURL.path) else { return }
         var lines = try String(contentsOf: configURL, encoding: .utf8).components(separatedBy: .newlines)
         lines = lines.filter { line in
-            let key = line.split(separator: "=", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) ?? ""
-            return key != "openai_base_url" && key != "OPENAI_API_KEY"
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return true }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            return parts.count < 2 || (parts[0] != "openai_base_url" && parts[0] != "OPENAI_API_KEY")
         }
         try lines.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
     }
@@ -194,26 +195,21 @@ final class AgentConfigWriter {
 
         if configYamlExists {
             var content = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
-            var lines = content.components(separatedBy: .newlines)
-            let providerLines = [
-                "models:",
-                "  - name: CLIProxyAPI",
-                "    provider: openai",
-                "    model: auto",
-                "    apiBase: \(baseURL)",
-                "    apiKey: \(apiKey)",
-                "    defaultCompletionOptions:",
-                "      model: auto",
-                "",
-            ]
+            let entry = """
+            models:
+              - name: CLIProxyAPI
+                provider: openai
+                model: auto
+                apiBase: \(baseURL)
+                apiKey: \(apiKey)
+            """
             if content.contains("CLIProxyAPI") {
                 content = content.replacingOccurrences(of: #"apiBase:.*"#, with: "apiBase: \(baseURL)", options: .regularExpression)
                 content = content.replacingOccurrences(of: #"apiKey:.*"#, with: "apiKey: \(apiKey)", options: .regularExpression)
-            } else if let modelsIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "models:" }) {
-                lines.insert(contentsOf: providerLines, at: modelsIndex + 1)
-                content = lines.joined(separator: "\n")
+            } else if content.contains("models:") {
+                content = content.replacingOccurrences(of: "models:", with: "models:\n  - name: CLIProxyAPI\n    provider: openai\n    model: auto\n    apiBase: \(baseURL)\n    apiKey: \(apiKey)", options: .literal, range: content.range(of: "models:"))
             } else {
-                content += "\n" + providerLines.joined(separator: "\n")
+                content += "\n" + entry
             }
             try content.write(to: configURL, atomically: true, encoding: .utf8)
         } else {
@@ -236,9 +232,10 @@ final class AgentConfigWriter {
         let configURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.yaml")
         if FileManager.default.fileExists(atPath: configURL.path) {
             var content = try String(contentsOf: configURL, encoding: .utf8)
-            content = content.components(separatedBy: .newlines)
-                .filter { !$0.contains("CLIProxyAPI") }
-                .joined(separator: "\n")
+            let pattern = #"\n?  - name: CLIProxyAPI\n(?:    .+\n?)*"#
+            if let range = content.range(of: pattern, options: .regularExpression) {
+                content.removeSubrange(range)
+            }
             try content.write(to: configURL, atomically: true, encoding: .utf8)
         } else {
             let configURLJson = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".continue/config.json")
