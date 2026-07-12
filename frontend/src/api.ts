@@ -38,10 +38,3 @@ export async function getModels(): Promise<ModelsResponse> {
 export async function extractAuth(): Promise<{ providers: string[] }> {
   return fetchApi('/v0/management/extract-auth', { method: 'POST' });
 }
-
-export async function chatCompletion(body: unknown) {
-  return fetchApi('/v1/chat/completions', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}

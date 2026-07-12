@@ -135,6 +135,34 @@ body {
   margin-bottom: 14px;
 }
 
+.detected {
+  margin-bottom: 32px;
+}
+
+.detected-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.detected-chip {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.empty {
+  color: var(--text-muted);
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
 .provider-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

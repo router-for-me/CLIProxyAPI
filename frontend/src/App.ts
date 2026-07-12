@@ -1,14 +1,15 @@
-import { getModels, extractAuth, chatCompletion, type ModelInfo } from './api.js';
+import { getModels, extractAuth, type ModelInfo } from './api.js';
 
 export class App {
   private root: HTMLElement;
   private models: ModelInfo[] = [];
   private providers: Set<string> = new Set();
+  private detectedProviders: string[] = [];
 
   constructor(root: HTMLElement) {
     this.root = root;
     this.render();
-    this.load();
+    this.bootstrap();
   }
 
   private render() {
@@ -36,18 +37,17 @@ export class App {
           </section>
 
           <section class="actions">
-            <button class="btn primary" id="extract-btn">Auto-detect local credentials</button>
-            <button class="btn" id="test-btn">Test devin/glm-5.2</button>
+            <button class="btn primary" id="extract-btn" disabled>Scanning local subscriptions…</button>
+          </section>
+
+          <section class="detected" id="detected-section" style="display:none">
+            <div class="section-title">Detected subscriptions</div>
+            <div class="detected-list" id="detected-list"></div>
           </section>
 
           <section class="models">
             <div class="section-title">Models</div>
-            <div class="provider-grid" id="provider-grid"></div>
-          </section>
-
-          <section class="test-output" id="test-output" style="display:none">
-            <div class="section-title">Test response</div>
-            <pre id="test-result"></pre>
+            <div class="provider-grid" id="provider-grid">Loading…</div>
           </section>
         </main>
 
@@ -57,8 +57,12 @@ export class App {
       </div>
     `;
 
-    this.root.querySelector('#extract-btn')?.addEventListener('click', () => this.handleExtract());
-    this.root.querySelector('#test-btn')?.addEventListener('click', () => this.handleTest());
+    this.root.querySelector('#extract-btn')?.addEventListener('click', () => this.handleExtract(true));
+  }
+
+  private async bootstrap() {
+    await this.handleExtract(false);
+    await this.load();
   }
 
   private async load() {
@@ -80,9 +84,30 @@ export class App {
     if (modelCount) modelCount.textContent = String(this.models.length);
   }
 
+  private renderDetected() {
+    const section = document.getElementById('detected-section');
+    const list = document.getElementById('detected-list');
+    if (!section || !list) return;
+
+    if (this.detectedProviders.length === 0) {
+      section.style.display = 'none';
+      return;
+    }
+
+    section.style.display = 'block';
+    list.innerHTML = this.detectedProviders
+      .map((p) => `<span class="detected-chip">${this.escape(p)}</span>`)
+      .join('');
+  }
+
   private renderProviders() {
     const grid = document.getElementById('provider-grid');
     if (!grid) return;
+
+    if (this.models.length === 0) {
+      grid.innerHTML = '<div class="empty">No models found. Run credential scan.</div>';
+      return;
+    }
 
     const byProvider: Record<string, ModelInfo[]> = {};
     for (const m of this.models) {
@@ -110,39 +135,26 @@ export class App {
       `).join('');
   }
 
-  private async handleExtract() {
+  private async handleExtract(isManual: boolean) {
     const btn = document.getElementById('extract-btn') as HTMLButtonElement;
-    if (!btn) return;
-    btn.disabled = true;
-    btn.textContent = 'Detecting…';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Scanning local subscriptions…';
+    }
     try {
       const data = await extractAuth();
-      alert(`Detected credentials: ${data.providers.join(', ') || 'none'}`);
-      await this.load();
+      this.detectedProviders = data.providers || [];
+      this.renderDetected();
+      if (isManual) {
+        await this.load();
+      }
     } catch (err) {
       this.showError(err instanceof Error ? err.message : String(err));
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Auto-detect local credentials';
-    }
-  }
-
-  private async handleTest() {
-    const output = document.getElementById('test-output');
-    const result = document.getElementById('test-result');
-    if (!output || !result) return;
-    output.style.display = 'block';
-    result.textContent = 'Loading…';
-    try {
-      const data = await chatCompletion({
-        model: 'devin/glm-5.2',
-        messages: [{ role: 'user', content: 'say hello' }],
-        stream: false,
-        max_tokens: 64,
-      });
-      result.textContent = JSON.stringify(data, null, 2);
-    } catch (err) {
-      result.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Rescan local subscriptions';
+      }
     }
   }
 
