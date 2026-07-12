@@ -118,6 +118,7 @@ final class AgentConfigWriter {
             .appendingPathComponent("Library/Application Support/Cursor/User/settings.json")
         var config = try readJSON(configURL)
         config["openai.baseUrl"] = baseURL
+        config["openai.baseURL"] = baseURL
         config["openai.apiKey"] = apiKey
         try writeJSON(config, to: configURL)
     }
@@ -127,6 +128,7 @@ final class AgentConfigWriter {
             .appendingPathComponent("Library/Application Support/Cursor/User/settings.json")
         var config = try readJSON(configURL)
         config.removeValue(forKey: "openai.baseUrl")
+        config.removeValue(forKey: "openai.baseURL")
         config.removeValue(forKey: "openai.apiKey")
         try writeJSON(config, to: configURL)
     }

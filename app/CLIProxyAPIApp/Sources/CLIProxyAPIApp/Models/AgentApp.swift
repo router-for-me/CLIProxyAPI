@@ -83,31 +83,66 @@ extension AgentApp {
     }
 
     private static func resolveCLI(_ name: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [name]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try? process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return path?.isEmpty == false ? path : nil
+        for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: shell)
+            process.arguments = ["-lc", "which \(name)"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            try? process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let path = path, !path.isEmpty, !path.contains("not found") {
+                return path
+            }
+        }
+        return nil
     }
 
     private static func appInstalled(_ path: String) -> Bool {
         FileManager.default.fileExists(atPath: path)
     }
 
+    private static func findApp(named: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        process.arguments = ["kMDItemDisplayName == '\(named).app'c"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try? process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        return output.components(separatedBy: .newlines).first { !$0.isEmpty }
+    }
+
+    private static func findAppByBundleID(_ bundleID: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        process.arguments = ["kMDItemCFBundleIdentifier == '\(bundleID)'"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try? process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        return output.components(separatedBy: .newlines).first { !$0.isEmpty }
+    }
+
     private static var codex: AgentApp {
-        let installed = appInstalled("/Applications/Codex.app")
+        let path = findAppByBundleID("com.openai.codex") ?? findApp(named: "Codex") ?? "/Applications/Codex.app"
+        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty
+        let installed = appInstalled(path) || running
         return AgentApp(
             id: "codex",
             name: "Codex",
             kind: .application,
             bundleID: "com.openai.codex",
-            appPath: "/Applications/Codex.app",
+            appPath: path,
             cliPath: nil,
             configPath: NSHomeDirectory() + "/.codex/config.toml",
             configType: .toml,
@@ -118,13 +153,15 @@ extension AgentApp {
     }
 
     private static var cursor: AgentApp {
-        let installed = appInstalled("/Applications/Cursor.app")
+        let path = findAppByBundleID("com.todesktop.230313mzl4w4u92") ?? findApp(named: "Cursor") ?? "/Applications/Cursor.app"
+        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.todesktop.230313mzl4w4u92").isEmpty
+        let installed = appInstalled(path) || running
         return AgentApp(
             id: "cursor",
             name: "Cursor",
             kind: .application,
             bundleID: "com.todesktop.230313mzl4w4u92",
-            appPath: "/Applications/Cursor.app",
+            appPath: path,
             cliPath: nil,
             configPath: NSHomeDirectory() + "/Library/Application Support/Cursor/User/settings.json",
             configType: .vscodeSettings,
@@ -135,31 +172,35 @@ extension AgentApp {
     }
 
     private static var claude: AgentApp {
-        let appInstalled = appInstalled("/Applications/Claude.app")
+        let appPath = findAppByBundleID("com.anthropic.claudefordesktop") ?? findApp(named: "Claude") ?? "/Applications/Claude.app"
+        let appInstalled = appInstalled(appPath)
         let cliPath = resolveCLI("claude")
+        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop").isEmpty
         return AgentApp(
             id: "claude",
             name: "Claude Code",
             kind: cliPath != nil ? .cli : .application,
             bundleID: "com.anthropic.claudefordesktop",
-            appPath: "/Applications/Claude.app",
+            appPath: appPath,
             cliPath: cliPath,
             configPath: NSHomeDirectory() + "/.claude/CLIProxyAPI.env",
             configType: .json,
             defaultBaseURL: "http://localhost:8317/v1",
             defaultAPIKey: "devin-test",
-            isInstalled: appInstalled || cliPath != nil
+            isInstalled: appInstalled || cliPath != nil || running
         )
     }
 
     private static var windsurf: AgentApp {
-        let installed = appInstalled("/Applications/Windsurf.app")
+        let path = findAppByBundleID("com.exafunction.windsurf") ?? findApp(named: "Windsurf") ?? "/Applications/Windsurf.app"
+        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.exafunction.windsurf").isEmpty
+        let installed = appInstalled(path) || running
         return AgentApp(
             id: "windsurf",
             name: "Windsurf",
             kind: .application,
             bundleID: "com.exafunction.windsurf",
-            appPath: "/Applications/Windsurf.app",
+            appPath: path,
             cliPath: nil,
             configPath: NSHomeDirectory() + "/.windsurf/config.json",
             configType: .json,
