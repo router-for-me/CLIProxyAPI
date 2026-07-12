@@ -13,11 +13,13 @@ struct CLIProxyAPIApp: App {
         }
         .menuBarExtraStyle(.menu)
 
-        Settings {
+        Window("Settings", id: "settings") {
             SettingsView(settings: appDelegate.settings, bridge: appDelegate.bridge, apiClient: appDelegate.apiClient)
                 .frame(width: 640, height: 600)
         }
         .windowResizability(.contentSize)
+        .windowStyle(.automatic)
+        .defaultPosition(.center)
     }
 }
 

@@ -156,7 +156,10 @@ final class BridgeProcessController {
 
     private func checkHealth(baseURL: URL) async {
         do {
-            let (data, response) = try await URLSession.shared.data(from: baseURL.appendingPathComponent("health"))
+            let url = baseURL.appendingPathComponent("v1/models")
+            var request = URLRequest(url: url)
+            request.setValue("Bearer devin-test", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.data(for: request)
             lastHealthCheck = Date()
             consecutiveHealthFailures = 0
             if let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) {

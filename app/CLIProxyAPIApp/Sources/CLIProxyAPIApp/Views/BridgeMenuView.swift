@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct BridgeMenuView: View {
-    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     @Bindable var settings: SettingsStore
     @Bindable var bridge: BridgeProcessController
@@ -72,8 +72,10 @@ struct BridgeMenuView: View {
         Divider()
 
         Button("Settings…") {
-            openSettings()
+            NSApp.setActivationPolicy(.regular)
+            openWindow(id: "settings")
             Self.activateSettingsWindow()
+            NSLog("openWindow settings triggered")
         }
 
         Button("Quit") {
@@ -84,12 +86,14 @@ struct BridgeMenuView: View {
 
     private static func activateSettingsWindow() {
         NSApp.activate(ignoringOtherApps: true)
-        DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows
-                .filter(\.isVisible)
-                .first?
-                .makeKeyAndOrderFront(nil)
+        for delay in [0.05, 0.1, 0.2, 0.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.windows
+                    .filter { $0.isVisible && $0.title != "" }
+                    .first?
+                    .makeKeyAndOrderFront(nil)
+            }
         }
     }
 }
